@@ -257,6 +257,17 @@ void multi_put_vector(uint8_t *const buf, const vms_vector &v)
 	PUT_INTEL_INT(&buf[8], lv.z);
 }
 
+/* Seed for the random velocity that `drop_powerup` gives a powerup
+ * created by MULTI_CREATE_POWERUP.  The sender and every receiver must
+ * derive the same seed, or each machine sends the powerup in a different
+ * direction and it comes to rest at a different position.  The position
+ * is already in the packet, so derive the seed from it.
+ */
+unsigned multi_create_powerup_seed(const vms_vector &pos)
+{
+	return static_cast<unsigned>(pos.x ^ pos.y ^ pos.z);
+}
+
 team_number multi_get_team_from_player(uint8_t team_vector, const playernum_t pnum)
 {
 	if (team_vector & (1 << pnum))
@@ -2249,7 +2260,14 @@ static void multi_do_create_powerup(fvmsegptridx &vmsegptridx, const playernum_t
 	const objnum_t objnum{GET_INTEL_SHORT(&buf[count])}; count += 2;
 	const auto new_pos = multi_get_vector(buf.subspan<1 + 1 + 1 + 2 + 2, 12>());
 	count+=sizeof(vms_vector);
+	/* Continue this client's own random sequence after the drop, so that
+	 * the seed from the packet does not make every receiver's later
+	 * random values identical.
+	 */
+	const unsigned resume_seed{(static_cast<unsigned>(d_rand()) << 15) ^ static_cast<unsigned>(d_rand())};
+	d_srand(multi_create_powerup_seed(new_pos));
 	const auto &&my_objnum{drop_powerup(LevelUniqueObjectState, LevelSharedSegmentState, LevelUniqueSegmentState, Vclip, powerup_type_t{powerup_type}, vmd_zero_vector, new_pos, segnum, true)};
+	d_srand(resume_seed);
 	if (my_objnum == object_none)
 		return;
 
