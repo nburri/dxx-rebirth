@@ -2260,8 +2260,14 @@ static void multi_do_create_powerup(fvmsegptridx &vmsegptridx, const playernum_t
 	const objnum_t objnum{GET_INTEL_SHORT(&buf[count])}; count += 2;
 	const auto new_pos = multi_get_vector(buf.subspan<1 + 1 + 1 + 2 + 2, 12>());
 	count+=sizeof(vms_vector);
+	/* Continue this client's own random sequence after the drop, so that
+	 * the seed from the packet does not make every receiver's later
+	 * random values identical.
+	 */
+	const unsigned resume_seed{(static_cast<unsigned>(d_rand()) << 15) ^ static_cast<unsigned>(d_rand())};
 	d_srand(multi_create_powerup_seed(new_pos));
 	const auto &&my_objnum{drop_powerup(LevelUniqueObjectState, LevelSharedSegmentState, LevelUniqueSegmentState, Vclip, powerup_type_t{powerup_type}, vmd_zero_vector, new_pos, segnum, true)};
+	d_srand(resume_seed);
 	if (my_objnum == object_none)
 		return;
 
