@@ -608,6 +608,7 @@ extern multi_macro_message_index multi_defining_message;
 
 vms_vector multi_get_vector(std::span<const uint8_t, 12> buf);
 void multi_put_vector(uint8_t *buf, const vms_vector &v);
+unsigned multi_create_powerup_seed(const vms_vector &pos);
 team_number multi_get_team_from_player(uint8_t, playernum_t pnum);
 
 }
