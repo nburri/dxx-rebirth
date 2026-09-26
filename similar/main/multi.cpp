@@ -1920,7 +1920,17 @@ static void multi_do_kill_host(object_array &Objects, const playernum_t pnum, co
 
 	if (multi_i_am_master())
 		return;
-	const auto killed = vcplayerptr(pnum)->objnum;
+	/* Only the host sends MULTI_KILL_HOST, both for its own deaths and to
+	 * relay a client's MULTI_KILL_CLIENT.  In the relayed case the sender is
+	 * the host, not the player who died, so take the victim from the
+	 * message.
+	 */
+	if (pnum != multi_who_is_master())
+		return;
+	const playernum_t killed_pnum{buf[1]};
+	if (killed_pnum >= N_players)
+		return;
+	const auto killed = vcplayerptr(killed_pnum)->objnum;
 	count += 1;
 	objnum_t killer{GET_INTEL_SHORT(&buf[count])};
 	if (killer > 0)
@@ -1940,6 +1950,11 @@ static void multi_do_kill_client(object_array &Objects, const playernum_t pnum, 
 	{
 		multi_command<multiplayer_command_t::MULTI_KILL_HOST> multibuf;
 		std::memcpy(std::next(multibuf.data()), std::next(buf.data()), 4);
+		/* Clients take the killed player from byte 1.  Use the sender,
+		 * which is what the host counts below, not the number the client
+		 * wrote.
+		 */
+		multibuf[1] = pnum;
 		multibuf[5] = Netgame.team_vector;
 		multibuf[6] = Bounty_target;
 		
@@ -2869,7 +2884,9 @@ void multi_send_kill(const vmobjptridx_t objnum)
 	{
 		new(&multibuf.c) multi_command<multiplayer_command_t::MULTI_KILL_CLIENT>();
 	}
-	/* Obsolete - reclaim player number field on next multiplayer protocol version bump */
+	/* The player who died.  Clients read it from MULTI_KILL_HOST, because
+	 * the host also relays other players' deaths in that message.
+	 */
 	multibuf.h[1] = Player_num;
 	multibuf.h[4] = remote_owner;
 	PUT_INTEL_SHORT(&multibuf.h[2], remote_objnum);
