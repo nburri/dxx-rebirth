@@ -6399,7 +6399,14 @@ void net_udp_send_extras ()
 
 	Network_sending_extras--;
 	if (!Network_sending_extras)
+	{
 		Player_joining_extras=-1;
+		/* The sync data does not include ThisLevelTime; the joining
+		 * player learns it only from MULTI_HEARTBEAT.  Send it in the
+		 * next frame instead of up to one second later.
+		 */
+		multi_schedule_heartbeat();
+	}
 }
 
 struct show_game_info_menu : std::array<newmenu_item, 2>, std::array<char, 512>, passive_newmenu

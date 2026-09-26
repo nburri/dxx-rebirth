@@ -1064,9 +1064,22 @@ static void multi_compute_kill(const d_robot_info_array &Robot_info, const imobj
 
 }
 
+namespace {
+
+/* Whole second of ThisLevelTime in which this player last sent
+ * MULTI_HEARTBEAT, or -1 to send it in the next frame.
+ */
+static int last_heartbeat_second = -1;
+
+}
+
+void multi_schedule_heartbeat()
+{
+	last_heartbeat_second = -1;
+}
+
 window_event_result multi_do_frame()
 {
-	static int last_heartbeat_second = -1;
 	static fix64 last_gmode_time = 0, last_inventory_time = 0, last_repo_time = 0;
 
 	if (!(Game_mode & GM_MULTI) || Newdemo_state == ND_STATE_PLAYBACK)
@@ -3545,6 +3558,10 @@ void multi_prep_level_player(void)
 	multi_consistency_error(1);
 
 	multi_sending_message.fill(msgsend_state::none);
+	/* ThisLevelTime restarts at 0, so send the heartbeat in the first frame
+	 * of the level even if the previous level ended in second 0.
+	 */
+	multi_schedule_heartbeat();
 	if (imulti_new_game)
 		for (uint_fast32_t i = 0; i != Players.size(); i++)
 			init_player_stats_new_ship(i);
@@ -4193,7 +4210,11 @@ void multi_send_heartbeat ()
 
 	multi_command<multiplayer_command_t::MULTI_HEARTBEAT> multibuf;
 	PUT_INTEL_INT(&multibuf[1], ThisLevelTime.count());
-	multi_send_data(multibuf, multiplayer_data_priority::_0);
+	/* The receiver overwrites its level time with this value, so send it at
+	 * once rather than up to 100ms late with the next regular mdata packet.
+	 * It is sent only once per second.
+	 */
+	multi_send_data(multibuf, multiplayer_data_priority::_1);
 }
 
 static void multi_do_heartbeat(const multiplayer_rspan<multiplayer_command_t::MULTI_HEARTBEAT> buf)

@@ -393,6 +393,10 @@ step per call and at most one step every 1/50 s, counting
 "Direct" means `send_data_direct` to the joining player only (4.5). The other
 messages are broadcast to everyone.
 
+After the last step, the host sends `MULTI_HEARTBEAT` in its next frame in
+time-limited games (`multi_schedule_heartbeat`), because the sync data does not
+contain the level time.
+
 #### 2.5.4 Other clients
 
 Other clients learn about the new player from `addplayer`
@@ -415,7 +419,7 @@ disconnected player came back when that player's relayed `pdata` arrives with
 | `game_info_lite` broadcast and tracker register (host) | Every 10 s | `do_protocol_frame` |
 | `MULTI_PLAYER_INV` (priority 0) | 3 times per second | `multi_do_frame`, `multi.cpp:1101` |
 | `MULTI_GMODE_UPDATE` (host, team or bounty games) | Every 2 s | `multi_do_frame` |
-| `MULTI_HEARTBEAT` | Once per second (each frame in which the whole-second value of `ThisLevelTime` changed; before this change, every frame), sent by the lowest-numbered connected player, only if there is a time limit | `multi_do_frame`, `multi.cpp:1082` |
+| `MULTI_HEARTBEAT` (priority 1) | Once per second (each frame in which the whole-second value of `ThisLevelTime` changed; before this change, every frame, with priority 0), sent by the lowest-numbered connected player, only if there is a time limit. Also in the first frame of a level (`multi_prep_level_player`), and in the frame after the host has sent the extras to a joining player (`net_udp_send_extras`), both through `multi_schedule_heartbeat`. | `multi_do_frame`, `multi.cpp:1095` |
 | Powerup respawn (`MultiLevelInv_Repopulate`) | Every 1/2 s, host only, non-coop | `multi.cpp:5544` |
 
 `do_protocol_frame` is called from `multi_do_frame` every game frame with
@@ -1044,7 +1048,7 @@ message.
 | 32 | `MULTI_HOSTAGE_DOOR` | 7 | 7 | 0 | host | Hit points of a blastable wall (rejoin) |
 | 33 | `MULTI_SAVE_GAME` | 26 | 26 | 2 | host | Save the game |
 | 34 | `MULTI_RESTORE_GAME` | 6 | 6 | 2 | host | Restore a saved game |
-| 35 | `MULTI_HEARTBEAT` | 5 | 5 | 0 | lowest-numbered connected player | Level time (time-limited games) |
+| 35 | `MULTI_HEARTBEAT` | 5 | 5 | 1 | lowest-numbered connected player | Level time (time-limited games) |
 | 36 | `MULTI_KILLGOALS` | 9 | 9 | 2 | host | Kill goal counters |
 | 37 | `MULTI_DO_BOUNTY` | 2 | 2 | 2 | host | Bounty target |
 | 38 | `MULTI_TYPING_STATE` | 3 | 3 | 2 | any | Chat typing indicator |
@@ -1335,7 +1339,10 @@ trigger number. The receiver rejects triggers whose originator is itself.
 
 **`MULTI_HEARTBEAT` (35), 5 bytes.** Bytes 1–4: `ThisLevelTime` (fix). The
 receiver overwrites its own level time, which it then keeps advancing by its
-own frame time (`GameProcessFrame`), so the message only corrects drift.
+own frame time (`GameProcessFrame`), so the message only corrects drift. It is
+sent with priority 1, so that the value is not up to 1/10 s old when it
+arrives. The sync data does not contain the level time, so a joining player
+learns it from the first heartbeat after the extras.
 
 **`MULTI_HOSTAGE_DOOR` (32), 7 bytes.** Bytes 1–2: wall number. Bytes 3–6:
 hit points (fix). The receiver damages the wall down to that value.

@@ -454,6 +454,7 @@ void multi_do_ping_frame();
 
 void multi_init_objects(void);
 window_event_result multi_do_frame();
+void multi_schedule_heartbeat();
 
 #ifdef DXX_BUILD_DESCENT
 namespace dsx {
