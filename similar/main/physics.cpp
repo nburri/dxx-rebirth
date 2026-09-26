@@ -26,6 +26,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <cmath>
 
 #include "joy.h"
 #include "dxxerror.h"
@@ -100,6 +101,7 @@ static void do_physics_align_object(object_base &obj)
 			: best_side->normals[0]
 	};
 
+	auto &levelling_remainder{obj.mtype.phys_info.angle_remainder.levelling};
 	if (labs(vm_vec_build_dot(desired_upvec, obj.orient.fvec)) < f1_0 / 2)
 	{
 		const auto temp_matrix{vm_vector_to_matrix_u(obj.orient.fvec, desired_upvec)};
@@ -108,9 +110,15 @@ static void do_physics_align_object(object_base &obj)
 		delta_ang += obj.mtype.phys_info.turnroll;
 
 		if (abs(delta_ang) > DAMP_ANG) {
-			const auto uncapped_roll_ang{fixmul(FrameTime, ROLL_RATE)};
+			/* Carry the fraction of the rate limit that does not fit in a
+			 * `fixang`, but only while the rate limit applies.
+			 */
+			auto remainder{levelling_remainder};
+			const fixang uncapped_roll_ang{fixmul_to_fixang_with_remainder(FrameTime, ROLL_RATE, remainder)};
+			const bool rate_limited{!(uncapped_roll_ang > abs(delta_ang))};
+			levelling_remainder = rate_limited ? remainder : 0;
 			const fixang roll_ang{
-				(uncapped_roll_ang > abs(delta_ang))
+				!rate_limited
 					? delta_ang
 					: (delta_ang < 0
 						? static_cast<fixang>(-uncapped_roll_ang)
@@ -123,22 +131,31 @@ static void do_physics_align_object(object_base &obj)
 					.h = fixang{0}
 				})};
 			obj.orient = vm_matrix_x_matrix(obj.orient, rotmat);
+			return;
 		}
 	}
+	levelling_remainder = 0;
 }
 
 [[nodiscard]]
 static fixang set_object_turnroll(object_base &obj, const fix frametime)
 {
 	const fixang desired_bank{multiply_with_clamp_to_fixang({-obj.mtype.phys_info.rotvel.y}, {TURNROLL_SCALE})};
+	auto &turnroll_remainder{obj.mtype.phys_info.angle_remainder.turnroll};
 	if (const fix delta_ang{desired_bank - obj.mtype.phys_info.turnroll})
 	{
-		const fixang raw_max_roll{multiply_with_clamp_to_fixang(ROLL_RATE, frametime)};
+		/* Carry the fraction of the rate limit that does not fit in a
+		 * `fixang`, but only while the rate limit applies.
+		 */
+		auto remainder{turnroll_remainder};
+		const fixang raw_max_roll{fixmul_to_fixang_with_remainder(ROLL_RATE, frametime, remainder)};
+		turnroll_remainder = (abs(delta_ang) > raw_max_roll) ? remainder : 0;
 		/* Casting to `fixang` is safe:
-		 * - `raw_max_roll` is a positive `fixang`, since `ROLL_RATE` is
-		 *   positive and `frametime` is positive, so `raw_max_roll` is in the
-		 *   range [`1`, `INT16_MAX`].
-		 * - `-raw_max_roll` is then in the range [`-INT16_MAX`, `-1`].
+		 * - `raw_max_roll` is a non-negative `fixang`, since `ROLL_RATE` is
+		 *   positive, `frametime` is positive and the remainder is
+		 *   non-negative, so `raw_max_roll` is in the range [`0`,
+		 *   `INT16_MAX`].
+		 * - `-raw_max_roll` is then in the range [`-INT16_MAX`, `0`].
 		 * - Therefore, [`-raw_max_roll`, `raw_max_roll`] is at worst
 		 *   [`-INT16_MAX`, `INT16_MAX`].
 		 * - `fixang` can represent all values in [`-INT16_MAX`, `INT16_MAX`],
@@ -150,6 +167,8 @@ static fixang set_object_turnroll(object_base &obj, const fix frametime)
 		static constexpr fix maxfixang{std::numeric_limits<fixang>::max()};
 		obj.mtype.phys_info.turnroll = {static_cast<fixang>(std::clamp<fix>(updated_turnroll, minfixang, maxfixang))};
 	}
+	else
+		turnroll_remainder = 0;
 	return obj.mtype.phys_info.turnroll;
 }
 
@@ -163,6 +182,137 @@ int Dont_move_ai_objects{0};
 #endif
 
 #define FT (f1_0/64)
+
+namespace {
+
+/* Thrust and drag used to be applied in whole steps of `FT` (1/64 s), and
+ * the rest of the frame was scaled linearly.  Every frame shorter than `FT`
+ * took only the linear path, so top speed and turn rate depended on the
+ * frame rate.  The reference behavior is that of the old code at a steady
+ * 200 fps (`FrameTime` = F1_0 / 200 = 327), the long-time default frame
+ * rate cap, where each frame did
+ *
+ *     v = (v + accel * k) * R
+ *     k = fixdiv(327, FT)
+ *     R = 1 - fixmul(k, drag)
+ *
+ * Applying that recurrence `n` times gives the closed form
+ *
+ *     v = v * R ** n + steady * (1 - R ** n)
+ *     steady = accel * k * R / (1 - R)
+ *
+ * which is also defined for fractional `n`.  Using it with
+ * `n = FrameTime / 327` gives the same result for any frame rate, such that
+ * N short frames are equivalent to one long frame, and reproduces the old
+ * code at 200 fps up to rounding.
+ */
+constexpr fix drag_reference_frametime{F1_0 / 200};
+/* `fixdiv(drag_reference_frametime, FT)`, which is exact */
+constexpr fix drag_reference_fraction_of_step{drag_reference_frametime * (F1_0 / FT)};
+static_assert(drag_reference_fraction_of_step == 20928);
+
+/* Frame rate independent description of the drag model for one drag
+ * value: over `n` reference frames, velocity decays by
+ * `exp(-decay_per_frame * n)` toward `accel * steady_state_per_accel`.
+ */
+struct drag_model
+{
+	double decay_per_frame;
+	double steady_state_per_accel;
+};
+
+[[nodiscard]]
+static drag_model build_drag_model(const fix drag)
+{
+	/* Compute these as the old code did at 200 fps, including its
+	 * truncation, so that 200 fps is unchanged.
+	 */
+	const fix reference_drag{fixmul(drag_reference_fraction_of_step, drag)};
+	constexpr double accel_per_frame{static_cast<double>(drag_reference_fraction_of_step) / F1_0};
+	if (reference_drag <= 0)
+		/* Drag too small to have any effect at the reference frame time:
+		 * no decay, and no steady state under thrust.
+		 */
+		return {0, 0};
+	const double drag_per_frame{static_cast<double>(reference_drag) / F1_0};
+	if (drag_per_frame < 1)
+	{
+		const double retained_per_frame{1 - drag_per_frame};
+		return {-std::log(retained_per_frame), accel_per_frame * retained_per_frame / drag_per_frame};
+	}
+	/* For a drag this high, the old code zeroed or negated the velocity
+	 * every frame, which cannot be made frame rate independent.  This is
+	 * only possible for rotational drag, which is 5/2 of the object's drag,
+	 * and only if that drag is 1.25 or more.  Use a continuous decay with
+	 * the same drag per reference frame instead.  It lets thrust act, with
+	 * a steady state of `accel * k / drag_per_frame`.
+	 */
+	return {drag_per_frame, accel_per_frame / drag_per_frame};
+}
+
+struct drag_integration
+{
+	double retained;	// fraction of the velocity that remains after the frame
+	double accel_gain;	// velocity gained per unit of per-step acceleration
+};
+
+[[nodiscard]]
+static drag_integration build_drag_integration(const fix drag, const fix frametime)
+{
+	const double frames{static_cast<double>(frametime) / drag_reference_frametime};
+	const auto model{build_drag_model(drag)};
+	if (!model.decay_per_frame)
+		return {1, frames * (static_cast<double>(drag_reference_fraction_of_step) / F1_0)};
+	const double retained{std::exp(-model.decay_per_frame * frames)};
+	return {retained, model.steady_state_per_accel * (1 - retained)};
+}
+
+/* Few distinct drag values are in use at a time, and `FrameTime` is the
+ * same for all objects in a frame, so cache the result of
+ * `build_drag_integration`.  This avoids calling `std::exp` and `std::log`
+ * for almost every object, and makes all objects with the same drag use
+ * the same factors.
+ */
+[[nodiscard]]
+static const drag_integration &get_drag_integration(const fix drag, const fix frametime)
+{
+	struct cache_entry
+	{
+		fix drag, frametime;
+		drag_integration integration;
+	};
+	static std::array<cache_entry, 32> cache{};
+	auto &e{cache[(static_cast<uint32_t>(drag) * UINT32_C(2654435761)) >> 27]};
+	if (e.drag != drag || e.frametime != frametime)
+		e = {drag, frametime, build_drag_integration(drag, frametime)};
+	return e.integration;
+}
+
+[[nodiscard]]
+static fix apply_drag_integration(const drag_integration &di, const fix v, const fix accel, int16_t &remainder)
+{
+	/* Carry the fractional part of the velocity to the next frame, instead
+	 * of rounding it away every frame.  That keeps the result independent
+	 * of how the time is split into frames: there is no rounding bias of
+	 * the top speed, no jitter at the steady state, and a coasting object
+	 * comes to rest (the exact velocity falls below one unit, which
+	 * truncates to zero) after the same time at any frame rate.
+	 */
+	constexpr double remainder_scale{32768};
+	const double exact{std::clamp<double>((v + remainder / remainder_scale) * di.retained + accel * di.accel_gain, std::numeric_limits<fix>::min(), std::numeric_limits<fix>::max())};
+	const double whole{std::trunc(exact)};
+	remainder = static_cast<int16_t>(std::clamp<double>(std::round((exact - whole) * remainder_scale), -INT16_MAX, INT16_MAX));
+	return static_cast<fix>(whole);
+}
+
+static void apply_drag_integration(const drag_integration &di, vms_vector &v, const vms_vector &accel, std::array<int16_t, 3> &remainder)
+{
+	v.x = apply_drag_integration(di, v.x, accel.x, remainder[0]);
+	v.y = apply_drag_integration(di, v.y, accel.y, remainder[1]);
+	v.z = apply_drag_integration(di, v.z, accel.z, remainder[2]);
+}
+
+}
 
 //	-----------------------------------------------------------------------------------------------------------
 // add rotational velocity & acceleration
@@ -178,37 +328,18 @@ static void do_physics_sim_rot(object_base &obj)
 	if (obj.mtype.phys_info.drag)
 	{
 		const fix drag{(obj.mtype.phys_info.drag * 5) / 2};
-		int count{FrameTime / FT};
-		const fix r{FrameTime % FT};
-		const fix k{fixdiv(r, FT)};
 
 		if (obj.mtype.phys_info.flags & PF_USES_THRUST)
 		{
 			const auto accel{vm_vec_copy_scale(obj.mtype.phys_info.rotthrust, fixdiv(f1_0, obj.mtype.phys_info.mass))};
-			while (count--) {
-				vm_vec_add2(obj.mtype.phys_info.rotvel, accel);
-				vm_vec_scale(obj.mtype.phys_info.rotvel, f1_0 - drag);
-			}
-
-			//do linear scale on remaining bit of time
-
-			vm_vec_scale_add2(obj.mtype.phys_info.rotvel, accel, k);
-			vm_vec_scale(obj.mtype.phys_info.rotvel, f1_0 - fixmul(k, drag));
+			apply_drag_integration(get_drag_integration(drag, FrameTime), obj.mtype.phys_info.rotvel, accel, obj.mtype.phys_info.velocity_remainder.rotvel);
 		}
 		else
 #if DXX_BUILD_DESCENT == 2
 			if (! (obj.mtype.phys_info.flags & PF_FREE_SPINNING))
 #endif
 		{
-			fix total_drag{F1_0};
-			while (count--)
-				total_drag = fixmul(total_drag,f1_0-drag);
-
-			//do linear scale on remaining bit of time
-
-			total_drag = fixmul(total_drag,f1_0-fixmul(k,drag));
-
-			vm_vec_scale(obj.mtype.phys_info.rotvel, total_drag);
+			apply_drag_integration(get_drag_integration(drag, FrameTime), obj.mtype.phys_info.rotvel, vms_vector{}, obj.mtype.phys_info.velocity_remainder.rotvel);
 		}
 
 	}
@@ -230,11 +361,17 @@ static void do_physics_sim_rot(object_base &obj)
 
 	const auto frametime{FrameTime};
 
+	/* Carry the part of each angle that does not fit in a `fixang` to the
+	 * next frame.  Otherwise, up to one `fixang` per axis would be lost every
+	 * frame, so slow rotations would be lost entirely, and more so at higher
+	 * frame rates.
+	 */
+	auto &rotation_remainder{obj.mtype.phys_info.angle_remainder.rotation};
 	obj.orient = vm_matrix_x_matrix(obj.orient, vm_angles_2_matrix(
 			vms_angvec{
-				.p = multiply_with_clamp_to_fixang(obj.mtype.phys_info.rotvel.x, frametime),
-				.b = multiply_with_clamp_to_fixang(obj.mtype.phys_info.rotvel.z, frametime),
-				.h = multiply_with_clamp_to_fixang(obj.mtype.phys_info.rotvel.y, frametime)
+				.p = fixmul_to_fixang_with_remainder(obj.mtype.phys_info.rotvel.x, frametime, rotation_remainder[0]),
+				.b = fixmul_to_fixang_with_remainder(obj.mtype.phys_info.rotvel.z, frametime, rotation_remainder[1]),
+				.h = fixmul_to_fixang_with_remainder(obj.mtype.phys_info.rotvel.y, frametime, rotation_remainder[2])
 			}));
 
 	//re-rotate object for bank caused by turn
@@ -347,41 +484,15 @@ window_event_result do_physics_sim(const d_robot_info_array &Robot_info, const v
 	//do thrust & drag
 	if (const fix drag{obj->mtype.phys_info.drag})
 	{
-		int count{FrameTime / FT};
-		const fix r{FrameTime % FT};
-		const fix k{fixdiv(r, FT)};
+		auto &di{get_drag_integration(drag, FrameTime)};
 
 		if (obj->mtype.phys_info.flags & PF_USES_THRUST) {
 
 			const auto accel{vm_vec_copy_scale(obj->mtype.phys_info.thrust,fixdiv(f1_0,obj->mtype.phys_info.mass))};
-			const bool have_accel{accel.x || accel.y || accel.z};
-
-			while (count--) {
-				if (have_accel)
-					vm_vec_add2(obj->mtype.phys_info.velocity,accel);
-
-				vm_vec_scale(obj->mtype.phys_info.velocity,f1_0-drag);
-			}
-
-			//do linear scale on remaining bit of time
-
-			vm_vec_scale_add2(obj->mtype.phys_info.velocity,accel,k);
-			if (drag)
-				vm_vec_scale(obj->mtype.phys_info.velocity,f1_0-fixmul(k,drag));
+			apply_drag_integration(di, obj->mtype.phys_info.velocity, accel, obj->mtype.phys_info.velocity_remainder.velocity);
 		}
-		else if (drag)
-		{
-			fix total_drag{F1_0};
-
-			while (count--)
-				total_drag = fixmul(total_drag,f1_0-drag);
-
-			//do linear scale on remaining bit of time
-
-			total_drag = fixmul(total_drag,f1_0-fixmul(k,drag));
-
-			vm_vec_scale(obj->mtype.phys_info.velocity,total_drag);
-		}
+		else
+			apply_drag_integration(di, obj->mtype.phys_info.velocity, vms_vector{}, obj->mtype.phys_info.velocity_remainder.velocity);
 	}
 
 	int count{0};
@@ -922,15 +1033,48 @@ void phys_apply_rot(object &obj, const vms_vector &force_vec)
 
 namespace dcx {
 
+namespace {
+
+/* Return the thrust per unit of velocity that holds a velocity steady under
+ * the drag integration in `do_physics_sim`, at any frame rate, or 0 if no
+ * thrust can hold a velocity steady.  The steady state of that integration
+ * is `accel * steady_state_per_accel`, where `accel` is computed from the
+ * thrust as `fixmul(thrust, fixdiv(F1_0, mass))`.
+ */
+[[nodiscard]]
+static double compute_thrust_per_velocity(const fix mass, const fix drag)
+{
+	if (drag <= 0 || mass <= 0)
+		return 0;
+	const double steady_state_per_accel{build_drag_model(drag).steady_state_per_accel};
+	const fix inverse_mass{fixdiv(F1_0, mass)};
+	if (!(steady_state_per_accel > 0) || inverse_mass <= 0)
+		return 0;
+	return F1_0 / (steady_state_per_accel * inverse_mass);
+}
+
+}
+
+fix compute_thrust_scale_holding_velocity(const fix mass, const fix drag)
+{
+	return static_cast<fix>(std::min<double>(std::round(F1_0 * compute_thrust_per_velocity(mass, drag)), std::numeric_limits<fix>::max()));
+}
+
 //this routine will set the thrust for an object to a value that will
-//(hopefully) maintain the object's current velocity
+//maintain the object's current velocity
 void set_thrust_from_velocity(object_base &obj)
 {
 	Assert(obj.movement_source == object::movement_type::physics);
 	auto &phys_info = obj.mtype.phys_info;
-	phys_info.thrust = vm_vec_copy_scale(phys_info.velocity,
-		fixmuldiv(phys_info.mass, phys_info.drag, F1_0 - phys_info.drag)
-	);
+	const double thrust_per_velocity{compute_thrust_per_velocity(phys_info.mass, phys_info.drag)};
+	const auto scale{[thrust_per_velocity](const fix v) {
+		return static_cast<fix>(std::clamp<double>(std::round(v * thrust_per_velocity), std::numeric_limits<fix>::min(), std::numeric_limits<fix>::max()));
+	}};
+	phys_info.thrust = {
+		.x = scale(phys_info.velocity.x),
+		.y = scale(phys_info.velocity.y),
+		.z = scale(phys_info.velocity.z),
+	};
 }
 
 }

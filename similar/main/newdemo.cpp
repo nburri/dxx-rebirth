@@ -4303,6 +4303,7 @@ void newdemo_start_playback(const char * filename)
 	PlayerCfg.Cockpit3DView = {};
 	DemoDoLeft = DemoDoRight = 0;
 	nd_playback_v_guided = 0;
+	Local_player_rate_dividers.reset();
 #endif
 	nd_playback_v_dead = nd_playback_v_rear = 0;
 	HUD_clear_messages();

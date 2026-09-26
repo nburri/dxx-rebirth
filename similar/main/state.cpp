@@ -584,6 +584,7 @@ static void state_object_rw_to_object(const object_rw *const obj_rw, object &obj
 			obj.mtype.phys_info.rotthrust.z = obj_rw->mtype.phys_info.rotthrust.z;
 			obj.mtype.phys_info.turnroll    = obj_rw->mtype.phys_info.turnroll;
 			obj.mtype.phys_info.flags       = obj_rw->mtype.phys_info.flags;
+			obj.mtype.phys_info.reset_remainders();
 			break;
 			
 		case object::movement_type::spinning:
@@ -2354,6 +2355,10 @@ int state_restore_all_sub(const d_level_shared_destructible_light_state &LevelSh
 			i = object_none;
 	}
 
+	/* The remainders of the per-frame divisions belong to the state of
+	 * the previous game, so discard them.
+	 */
+	Local_player_rate_dividers.reset();
 	if (version>=11) {
 		if (secret != secret_restore::survived)
 			Afterburner_charge = {PHYSFSX_readSXE32(fp, swap)};

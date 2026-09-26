@@ -48,6 +48,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 //physics vars rotvel, velocity
 
 #define AFTERBURNER_USE_SECS	3				//use up in 3 seconds
+#define AFTERBURNER_RECHARGE_SECS	8			//recharge in 8 seconds
 #define DROP_DELTA_TIME			(f1_0/15)	//drop 3 per second
 #endif
 
@@ -58,6 +59,9 @@ namespace dsx {
 
 #if DXX_BUILD_DESCENT == 2
 fix Afterburner_charge;
+local_player_rate_dividers Local_player_rate_dividers;
+static_assert(decltype(local_player_rate_dividers::afterburner_drain)::divisor == AFTERBURNER_USE_SECS);
+static_assert(decltype(local_player_rate_dividers::afterburner_recharge)::divisor == AFTERBURNER_RECHARGE_SECS);
 #endif
 
 void read_flying_controls(object &obj, control_info &Controls)
@@ -83,10 +87,21 @@ void read_flying_controls(object &obj, control_info &Controls)
 
 		obj.mtype.phys_info.rotthrust = {};
 
+		/* `Seismic_tremor_magnitude` is reset every frame and only
+		 * accumulates on frames where `d_tick_step` is set (see
+		 * `apply_seismic_effect`), so the tremor is applied at
+		 * `DESIGNATED_GAME_FPS`, independent of the frame rate.  Do not
+		 * scale it by `FrameTime`.
+		 */
 		const auto Seismic_tremor_magnitude = LevelUniqueSeismicState.Seismic_tremor_magnitude;
-		rotangs.p = Controls.pitch_time / 2 + Seismic_tremor_magnitude/64;
-		rotangs.b = Controls.bank_time / 2 + Seismic_tremor_magnitude/16;
-		rotangs.h = Controls.heading_time / 2 + Seismic_tremor_magnitude/64;
+		/* Halve the steering input, carrying the half angle unit that
+		 * `fixang` cannot represent to the next frame, so that small
+		 * inputs are not lost.
+		 */
+		auto &steering_remainder{gmobj.mtype.phys_info.angle_remainder.steering};
+		rotangs.p = fixmul_to_fixang_with_remainder(Controls.pitch_time, F1_0 / 2, steering_remainder[0]) + Seismic_tremor_magnitude/64;
+		rotangs.b = fixmul_to_fixang_with_remainder(Controls.bank_time, F1_0 / 2, steering_remainder[1]) + Seismic_tremor_magnitude/16;
+		rotangs.h = fixmul_to_fixang_with_remainder(Controls.heading_time, F1_0 / 2, steering_remainder[2]) + Seismic_tremor_magnitude/64;
 
 		const auto &&rotmat{vm_angles_2_matrix(rotangs)};
 		gmobj.orient = vm_matrix_x_matrix(gmobj.orient, rotmat);
@@ -123,10 +138,18 @@ void read_flying_controls(object &obj, control_info &Controls)
 	
 				old_count = (Afterburner_charge / (DROP_DELTA_TIME/AFTERBURNER_USE_SECS));
 
-				Afterburner_charge -= FrameTime/AFTERBURNER_USE_SECS;
+				/* Carry the remainder of the division into the next
+				 * frame, so that the drain rate does not depend on the
+				 * frame rate.  Discard it when the charge runs out.
+				 */
+				auto &afterburner_drain = Local_player_rate_dividers.afterburner_drain;
+				Afterburner_charge -= afterburner_drain.take(FrameTime);
 
-				if (Afterburner_charge < 0)
+				if (Afterburner_charge <= 0)
+				{
 					Afterburner_charge = 0;
+					afterburner_drain.reset();
+				}
 
 				new_count = (Afterburner_charge / (DROP_DELTA_TIME/AFTERBURNER_USE_SECS));
 
@@ -138,13 +161,22 @@ void read_flying_controls(object &obj, control_info &Controls)
 			fix cur_energy,charge_up;
 	
 			//charge up to full
-			charge_up = min(FrameTime/8,f1_0 - Afterburner_charge);	//recharge over 8 seconds
+			/* Carry the remainder of the division into the next frame,
+			 * so that the recharge rate does not depend on the frame
+			 * rate.  Discard it when the charge is limited by the
+			 * maximum or by the available energy.
+			 */
+			auto &afterburner_recharge = Local_player_rate_dividers.afterburner_recharge;
+			const fix wanted_charge_up{afterburner_recharge.take(FrameTime)};	//recharge over 8 seconds
+			charge_up = min(wanted_charge_up, f1_0 - Afterburner_charge);
 	
 			auto &energy = player_info.energy;
 			cur_energy = max(energy - i2f(10), 0);	//don't drop below 10
 
 			//maybe limit charge up by energy
 			charge_up = min(charge_up,cur_energy/10);
+			if (charge_up < wanted_charge_up)
+				afterburner_recharge.reset();
 	
 			Afterburner_charge += charge_up;
 	

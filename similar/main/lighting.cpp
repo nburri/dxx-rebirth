@@ -49,6 +49,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "weapon.h"
 #include "powerup.h"
 #include "fvi.h"
+#include "physics.h"
 #include "object.h"
 #include "robot.h"
 #include "multi.h"
@@ -71,7 +72,88 @@ using std::min;
 namespace dcx {
 namespace {
 
-static int use_fcd_lighting;
+/* Axis-aligned bounding box of a group of rendered vertices. */
+struct render_vertex_bounds
+{
+	vms_vector min, max;
+	void include(const vms_vector &v)
+	{
+		min.x = std::min(min.x, v.x);
+		min.y = std::min(min.y, v.y);
+		min.z = std::min(min.z, v.z);
+		max.x = std::max(max.x, v.x);
+		max.y = std::max(max.y, v.y);
+		max.z = std::max(max.z, v.z);
+	}
+};
+
+/* Number of consecutive entries of the render vertex list that share one
+ * bounding box.  Consecutive entries come from segments that are close in
+ * the render list, so they tend to be close in space.
+ */
+constexpr std::size_t render_vertex_block_size{16};
+constexpr std::size_t max_render_vertices{MAX_RENDER_SEGS * MAX_VERTICES_PER_SEGMENT};
+
+/* The vertices of all rendered segments, each listed once, with a copy of
+ * their positions (so that apply_light reads them sequentially) and the
+ * bounding boxes used to skip vertices that a light cannot reach.
+ */
+struct render_vertex_list
+{
+	unsigned n_render_vertices{0};
+	render_vertex_bounds all_bounds;
+	std::array<vertnum_t, max_render_vertices> vertices;
+	std::array<vms_vector, max_render_vertices> positions;
+	std::array<render_vertex_bounds, (max_render_vertices + render_vertex_block_size - 1) / render_vertex_block_size> block_bounds;
+};
+
+/* Same formula as vm_vec_mag_quick, applied to non-negative per-axis
+ * distances and evaluated in 64 bits so that it cannot overflow.  For
+ * inputs where vm_vec_mag_quick does not overflow, both return the same
+ * value.  The result never decreases when any input increases: each
+ * order statistic of (a, b, c) is monotonic in each input, and the
+ * formula is monotonic in each order statistic.
+ */
+static int64_t compute_quick_magnitude(int64_t a, int64_t b, int64_t c)
+{
+	if (a < b)
+		std::swap(a, b);
+	if (b < c)
+	{
+		std::swap(b, c);
+		if (a < b)
+			std::swap(a, b);
+	}
+	const int64_t bc{(b >> 2) + (c >> 3)};
+	return a + bc + (bc >> 1);
+}
+
+/* Lower bound of vm_vec_dist_quick(p, v) for every v inside b. */
+static int64_t quick_distance_lower_bound(const vms_vector &p, const render_vertex_bounds &b)
+{
+	const auto axis = [](const fix pc, const fix lo, const fix hi) -> int64_t {
+		if (pc < lo)
+			return int64_t{lo} - pc;
+		if (pc > hi)
+			return int64_t{pc} - hi;
+		return 0;
+	};
+	return compute_quick_magnitude(axis(p.x, b.min.x, b.max.x), axis(p.y, b.min.y, b.max.y), axis(p.z, b.min.z, b.max.z));
+}
+
+/* Upper bound of vm_vec_dist_quick(p, v) for every v inside b, assuming
+ * no overflow.  If the result is at most INT32_MAX, then no component of
+ * p - v and no intermediate value in vm_vec_mag_quick overflows, so
+ * vm_vec_dist_quick(p, v) is exact, non-negative and at least as large as
+ * quick_distance_lower_bound(p, b).
+ */
+static int64_t quick_distance_upper_bound(const vms_vector &p, const render_vertex_bounds &b)
+{
+	const auto axis = [](const fix pc, const fix lo, const fix hi) -> int64_t {
+		return std::max(std::abs(int64_t{pc} - lo), std::abs(int64_t{pc} - hi));
+	};
+	return compute_quick_magnitude(axis(p.x, b.min.x, b.max.x), axis(p.y, b.min.y, b.max.y), axis(p.z, b.min.z, b.max.z));
+}
 
 static void add_light_div(g3s_lrgb &d, const g3s_lrgb &light, const fix &scale)
 {
@@ -91,8 +173,7 @@ static void add_light_dot_square(g3s_lrgb &d, const g3s_lrgb &light, const fix &
 static fix compute_player_light_emission_intensity(const object_base &objp)
 {
 	auto &phys_info = objp.mtype.phys_info;
-	const auto drag = phys_info.drag;
-	const fix k = fixmuldiv(phys_info.mass, drag, (F1_0 - drag));
+	const fix k{compute_thrust_scale_holding_velocity(phys_info.mass, phys_info.drag)};
 	// smooth thrust value like set_thrust_from_velocity()
 	const auto sthrust{vm_vec_copy_scale(phys_info.velocity, k)};
 	return std::max(static_cast<fix>(vm_vec_mag_quick(sthrust) / 4), F2_0) + F0_5;
@@ -117,7 +198,7 @@ static fix compute_fireball_light_emission_intensity(const d_vclip_array &Vclip,
 namespace dsx {
 namespace {
 
-static void apply_light(fvmsegptridx &vmsegptridx, const g3s_lrgb obj_light_emission, const vcsegptridx_t obj_seg, const vms_vector &obj_pos, const unsigned n_render_vertices, std::array<vertnum_t, MAX_VERTICES> &render_vertices, const std::array<segnum_t, MAX_VERTICES> &vert_segnum_list, const icobjptridx_t objnum)
+static void apply_light(const g3s_lrgb obj_light_emission, const vcsegptridx_t obj_seg, const vms_vector &obj_pos, const render_vertex_list &rvl, const icobjptridx_t objnum)
 {
 	auto &LevelSharedVertexState = LevelSharedSegmentState.get_vertex_state();
 	auto &Vertices = LevelSharedVertexState.get_vertices();
@@ -181,55 +262,68 @@ static void apply_light(fvmsegptridx &vmsegptridx, const g3s_lrgb obj_light_emis
 					}
 			}
 #endif
-			range_for (const unsigned vv, xrange(n_render_vertices))
-			{
-				fix			dist;
-				int apply_light{0};
-
-				const auto vertnum = render_vertices[vv];
-				auto vsegnum = vert_segnum_list[vv];
-				auto &vertpos = *vcvertptr(vertnum);
-
-				if (use_fcd_lighting && abs(obji_64) > F1_0*32)
+			const auto n_render_vertices{rvl.n_render_vertices};
+			if (!n_render_vertices)
+				return;
+			const auto apply_light_to_vertices = [&](const unsigned vv_begin, const unsigned vv_end) {
+				for (unsigned vv{vv_begin}; vv != vv_end; ++vv)
 				{
-					dist = find_connected_distance(obj_pos, obj_seg, vertpos, vmsegptridx(vsegnum), n_render_vertices, wall_is_doorway_mask::fly_rendpast);
-					if (dist >= 0)
-						apply_light = 1;
-				}
-				else
-				{
-					dist = vm_vec_dist_quick(obj_pos, vertpos);
-					apply_light = 1;
-				}
+					const auto vertnum = rvl.vertices[vv];
+					auto &vertpos = rvl.positions[vv];
+					fix dist = vm_vec_dist_quick(obj_pos, vertpos);
 
-				if (apply_light && ((dist >> headlight_shift) < abs(obji_64))) {
+					if ((dist >> headlight_shift) < abs(obji_64)) {
 
-					if (dist < MIN_LIGHT_DIST)
-						dist = MIN_LIGHT_DIST;
+						if (dist < MIN_LIGHT_DIST)
+							dist = MIN_LIGHT_DIST;
 
-					if (headlight_shift && objnum)
-					{
-						fix dot;
-						// MK, Optimization note: You compute distance about 15 lines up, this is partially redundant
-						const auto vec_to_point = vm_vec_normalized_quick(vm_vec_build_sub(vertpos, obj_pos));
-						dot = vm_vec_build_dot(vec_to_point, objnum->orient.fvec);
-						if (dot < F1_0/2)
+						if (headlight_shift && objnum)
 						{
-							// Do the normal thing, but darken around headlight.
-							add_light_div(Dynamic_light[vertnum], obj_light_emission, fixmul(HEADLIGHT_SCALE, dist));
+							fix dot;
+							// MK, Optimization note: You compute distance about 15 lines up, this is partially redundant
+							const auto vec_to_point = vm_vec_normalized_quick(vm_vec_build_sub(vertpos, obj_pos));
+							dot = vm_vec_build_dot(vec_to_point, objnum->orient.fvec);
+							if (dot < F1_0/2)
+							{
+								// Do the normal thing, but darken around headlight.
+								add_light_div(Dynamic_light[vertnum], obj_light_emission, fixmul(HEADLIGHT_SCALE, dist));
+							}
+							else
+							{
+								if (!(Game_mode & GM_MULTI) || dist < max_headlight_dist)
+								{
+									add_light_dot_square(Dynamic_light[vertnum], obj_light_emission, dot);
+								}
+							}
 						}
 						else
 						{
-							if (!(Game_mode & GM_MULTI) || dist < max_headlight_dist)
-							{
-								add_light_dot_square(Dynamic_light[vertnum], obj_light_emission, dot);
-							}
+							add_light_div(Dynamic_light[vertnum], obj_light_emission, dist);
 						}
 					}
-					else
-					{
-						add_light_div(Dynamic_light[vertnum], obj_light_emission, dist);
-					}
+				}
+			};
+			/* A vertex receives light only if
+			 * (vm_vec_dist_quick(obj_pos, vertex) >> headlight_shift) < light_reach.
+			 * If that fails for a lower bound of the distance of all
+			 * vertices in a box, it fails for every vertex in that box, so
+			 * those vertices can be skipped without changing any result.
+			 * This is valid only if vm_vec_dist_quick cannot overflow for
+			 * any rendered vertex; otherwise, process all of them.
+			 */
+			const fix light_reach{abs(obji_64)};
+			const auto out_of_reach = [&obj_pos, headlight_shift, light_reach](const render_vertex_bounds &b) {
+				return (quick_distance_lower_bound(obj_pos, b) >> headlight_shift) >= light_reach;
+			};
+			if (quick_distance_upper_bound(obj_pos, rvl.all_bounds) > INT32_MAX)
+				apply_light_to_vertices(0, n_render_vertices);
+			else if (!out_of_reach(rvl.all_bounds))
+			{
+				for (unsigned vv_begin{0}; vv_begin < n_render_vertices; vv_begin += render_vertex_block_size)
+				{
+					if (out_of_reach(rvl.block_bounds[vv_begin / render_vertex_block_size]))
+						continue;
+					apply_light_to_vertices(vv_begin, std::min<unsigned>(vv_begin + render_vertex_block_size, n_render_vertices));
 				}
 			}
 		}
@@ -241,7 +335,7 @@ static void apply_light(fvmsegptridx &vmsegptridx, const g3s_lrgb obj_light_emis
 namespace {
 
 // ----------------------------------------------------------------------------------------------
-static void cast_muzzle_flash_light(fvmsegptridx &vmsegptridx, int n_render_vertices, std::array<vertnum_t, MAX_VERTICES> &render_vertices, const std::array<segnum_t, MAX_VERTICES> &vert_segnum_list)
+static void cast_muzzle_flash_light(const render_vertex_list &rvl)
 {
 	static constexpr fix FLASH_LEN_FIXED_SECONDS{F1_0 / 3};
 	static constexpr fix FLASH_SCALE{3 * F1_0 / FLASH_LEN_FIXED_SECONDS};
@@ -259,7 +353,7 @@ static void cast_muzzle_flash_light(fvmsegptridx &vmsegptridx, int n_render_vert
 			{
 				g3s_lrgb ml;
 				ml.r = ml.g = ml.b = ((FLASH_LEN_FIXED_SECONDS - time_since_flash) * FLASH_SCALE);
-				apply_light(vmsegptridx, ml, vmsegptridx(i.segnum), i.pos, n_render_vertices, render_vertices, vert_segnum_list, object_none);
+				apply_light(ml, vcsegptridx(i.segnum), i.pos, rvl, object_none);
 			}
 			else
 			{
@@ -513,8 +607,6 @@ void set_dynamic_light(const d_robot_info_array &Robot_info, render_state_t &rst
 {
 	auto &Objects = LevelUniqueObjectState.Objects;
 	auto &vcobjptridx = Objects.vcptridx;
-	std::array<vertnum_t, MAX_VERTICES> render_vertices;
-	std::array<segnum_t, MAX_VERTICES> vert_segnum_list;
 	static fix light_time; 
 
 #if DXX_BUILD_DESCENT == 2
@@ -530,7 +622,9 @@ void set_dynamic_light(const d_robot_info_array &Robot_info, render_state_t &rst
 
 	//	Create list of vertices that need to be looked at for setting of ambient light.
 	auto &Dynamic_light = LevelUniqueLightState.Dynamic_light;
-	uint_fast32_t n_render_vertices{0};
+	auto &vcvertptr = LevelSharedSegmentState.get_vertex_state().get_vertices().vcptr;
+	render_vertex_list rvl;
+	auto &n_render_vertices = rvl.n_render_vertices;
 	range_for (const auto segnum, partial_const_range(rstate.Render_list, rstate.N_render_segs))
 	{
 		if (segnum != segment_none) {
@@ -541,8 +635,8 @@ void set_dynamic_light(const d_robot_info_array &Robot_info, render_state_t &rst
 				if (!b)
 				{
 					b = true;
-					render_vertices[n_render_vertices] = vnum;
-					vert_segnum_list[n_render_vertices] = segnum;
+					rvl.vertices[n_render_vertices] = vnum;
+					rvl.positions[n_render_vertices] = *vcvertptr(vnum);
 					n_render_vertices++;
 					Dynamic_light[vnum] = {};
 				}
@@ -550,7 +644,22 @@ void set_dynamic_light(const d_robot_info_array &Robot_info, render_state_t &rst
 		}
 	}
 
-	cast_muzzle_flash_light(vmsegptridx, n_render_vertices, render_vertices, vert_segnum_list);
+	if (n_render_vertices)
+	{
+		rvl.all_bounds = {rvl.positions[0], rvl.positions[0]};
+		for (unsigned vv_begin{0}; vv_begin < n_render_vertices; vv_begin += render_vertex_block_size)
+		{
+			const unsigned vv_end{std::min<unsigned>(vv_begin + render_vertex_block_size, n_render_vertices)};
+			auto &b = rvl.block_bounds[vv_begin / render_vertex_block_size];
+			b = {rvl.positions[vv_begin], rvl.positions[vv_begin]};
+			for (unsigned vv{vv_begin + 1}; vv != vv_end; ++vv)
+				b.include(rvl.positions[vv]);
+			rvl.all_bounds.include(b.min);
+			rvl.all_bounds.include(b.max);
+		}
+	}
+
+	cast_muzzle_flash_light(rvl);
 
 	range_for (const auto &&obj, vcobjptridx)
 	{
@@ -560,7 +669,7 @@ void set_dynamic_light(const d_robot_info_array &Robot_info, render_state_t &rst
 		const auto &&obj_light_emission = compute_light_emission(Robot_info, LevelUniqueLightState, Vclip, obj);
 
 		if (((obj_light_emission.r+obj_light_emission.g+obj_light_emission.b)/3) > 0)
-			apply_light(vmsegptridx, obj_light_emission, vcsegptridx(objp.segnum), objp.pos, n_render_vertices, render_vertices, vert_segnum_list, obj);
+			apply_light(obj_light_emission, vcsegptridx(objp.segnum), objp.pos, rvl, obj);
 	}
 }
 

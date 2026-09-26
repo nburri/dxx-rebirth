@@ -1297,6 +1297,8 @@ void extract_quaternionpos(fvmobjptr &vmobjptr, fvmsegptr &vmsegptr, const vmobj
 	objp->pos = qpp.pos;
 	objp->mtype.phys_info.velocity = qpp.vel;
 	objp->mtype.phys_info.rotvel = qpp.rotvel;
+	/* The remainders belong to the replaced orientation and velocities */
+	objp->mtype.phys_info.reset_remainders();
 
 	const auto segnum{qpp.segment};
 	Assert(segnum <= Highest_segment_index);

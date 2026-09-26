@@ -1667,7 +1667,7 @@ window_event_result newmenu::event_handler(const d_event &event)
 			return newmenu_key_command(event, this);
 		case event_type::idle:
 			if (!(Game_mode & GM_MULTI) || !Game_wind || !Game_wind->is_visible())
-				timer_delay2(CGameArg.SysMaxFPS);
+				timer_delay2(MENU_MAXIMUM_FPS);
 			break;
 		case event_type::window_draw:
 			return newmenu_draw(this);
@@ -2205,7 +2205,7 @@ window_event_result listbox::event_handler(const d_event &event)
 			return listbox_key_command(event, this);
 		case event_type::idle:
 			if (!(+(Game_mode & GM_MULTI) && Game_wind))
-				timer_delay2(CGameArg.SysMaxFPS);
+				timer_delay2(MENU_MAXIMUM_FPS);
 			return window_event_result::ignored;
 		case event_type::window_draw:
 			return listbox_draw(this);

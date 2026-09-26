@@ -84,6 +84,14 @@ enum class volatile_wall_result : int8_t
 #if DXX_BUILD_DESCENT == 2
 	water,
 #endif
+	/* The wall is volatile (or water), but it was touched less than
+	 * DESIGNATED_GAME_FRAMETIME ago, so no damage or kick was applied.
+	 * The player is still in contact with the wall.
+	 */
+	lava_rate_limited,
+#if DXX_BUILD_DESCENT == 2
+	water_rate_limited,
+#endif
 };
 #if DXX_BUILD_DESCENT == 2
 window_event_result do_final_boss_frame(void);
