@@ -862,6 +862,14 @@ int gr_init()
 	g_pRebirthSDLMainWindow = SDLWindow;
 	if (!SDL_GL_CreateContext(SDLWindow))
 		Error("Failed to create SDL GL context: %s", SDL_GetError());
+	/* The swap interval is a property of the current context.
+	 * gr_set_attributes() ran before the context existed, so its
+	 * SDL_GL_SetSwapInterval had no effect, and the driver's default
+	 * (often VSync on) applied until the options menu called
+	 * gr_set_attributes() again.  Apply the configured VSync setting now.
+	 */
+	if (SDL_GL_SetSwapInterval(CGameCfg.VSync ? 1 : 0) < 0)
+		con_printf(CON_URGENT, "DXX-Rebirth: OpenGL: failed to %s VSync: %s", CGameCfg.VSync ? "enable" : "disable", SDL_GetError());
 	if (const auto window_icon = SDL_LoadBMP(DXX_SDL_WINDOW_ICON_BITMAP))
 		SDL_SetWindowIcon(SDLWindow, window_icon);
 #endif
