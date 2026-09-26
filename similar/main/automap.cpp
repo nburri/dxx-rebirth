@@ -1054,8 +1054,10 @@ static void draw_automap(fvcobjptr &vcobjptr, automap &am, fix eye = 0)
 	}
 
 	// ogl is fast enough that the automap can read the input too fast and you start to turn really slow.  So delay a bit (and free up some cpu :)
-	// Limit the automap to MENU_MAXIMUM_FPS, like the old loop which slept about 3 ms per pass.
-	const auto bound{std::max<fix>(timer_get_frame_bound(), F1_0 / MENU_MAXIMUM_FPS)};
+	// When the automap pauses the game, limit it to MENU_MAXIMUM_FPS, like the old loop which slept about 3 ms per pass.
+	// Otherwise (multiplayer), the game keeps running and shares this wait, so keep the game frame rate.
+	const auto frame_bound{timer_get_frame_bound()};
+	const auto bound{am.pause_game ? std::max<fix>(frame_bound, F1_0 / MENU_MAXIMUM_FPS) : frame_bound};
 	am.t2 = timer_wait_frame(am.t1 + bound);
 	if (am.pause_game)
 	{
