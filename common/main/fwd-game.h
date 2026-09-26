@@ -41,6 +41,14 @@ constexpr std::integral_constant<int, 5> NDL{};       // Number of difficulty le
 constexpr std::integral_constant<unsigned, 30> DESIGNATED_GAME_FPS{};	// assuming the original intended Framerate was 30
 constexpr std::integral_constant<int, F1_0 / DESIGNATED_GAME_FPS> DESIGNATED_GAME_FRAMETIME;
 
+/* The frame rate for which frame rate dependent tuning (such as the mouse
+ * sensitivity) was calibrated: 200 FPS, the former default frame rate cap.
+ * Code that must behave above this rate as it did at this rate can use
+ * the frame time as a lower bound.
+ */
+constexpr std::integral_constant<unsigned, 200> HIGH_FPS_REFERENCE_FPS{};
+constexpr std::integral_constant<int, F1_0 / HIGH_FPS_REFERENCE_FPS> HIGH_FPS_REFERENCE_FRAMETIME{};
+
 #ifdef NDEBUG
 constexpr auto MINIMUM_FPS = DESIGNATED_GAME_FPS;
 constexpr std::integral_constant<unsigned, 200> MAXIMUM_FPS{};
