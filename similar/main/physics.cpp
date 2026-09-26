@@ -100,6 +100,7 @@ static void do_physics_align_object(object_base &obj)
 			: best_side->normals[0]
 	};
 
+	auto &levelling_remainder{obj.mtype.phys_info.angle_remainder.levelling};
 	if (labs(vm_vec_build_dot(desired_upvec, obj.orient.fvec)) < f1_0 / 2)
 	{
 		const auto temp_matrix{vm_vector_to_matrix_u(obj.orient.fvec, desired_upvec)};
@@ -108,9 +109,15 @@ static void do_physics_align_object(object_base &obj)
 		delta_ang += obj.mtype.phys_info.turnroll;
 
 		if (abs(delta_ang) > DAMP_ANG) {
-			const auto uncapped_roll_ang{fixmul(FrameTime, ROLL_RATE)};
+			/* Carry the fraction of the rate limit that does not fit in a
+			 * `fixang`, but only while the rate limit applies.
+			 */
+			auto remainder{levelling_remainder};
+			const fixang uncapped_roll_ang{fixmul_to_fixang_with_remainder(FrameTime, ROLL_RATE, remainder)};
+			const bool rate_limited{!(uncapped_roll_ang > abs(delta_ang))};
+			levelling_remainder = rate_limited ? remainder : 0;
 			const fixang roll_ang{
-				(uncapped_roll_ang > abs(delta_ang))
+				!rate_limited
 					? delta_ang
 					: (delta_ang < 0
 						? static_cast<fixang>(-uncapped_roll_ang)
@@ -123,22 +130,31 @@ static void do_physics_align_object(object_base &obj)
 					.h = fixang{0}
 				})};
 			obj.orient = vm_matrix_x_matrix(obj.orient, rotmat);
+			return;
 		}
 	}
+	levelling_remainder = 0;
 }
 
 [[nodiscard]]
 static fixang set_object_turnroll(object_base &obj, const fix frametime)
 {
 	const fixang desired_bank{multiply_with_clamp_to_fixang({-obj.mtype.phys_info.rotvel.y}, {TURNROLL_SCALE})};
+	auto &turnroll_remainder{obj.mtype.phys_info.angle_remainder.turnroll};
 	if (const fix delta_ang{desired_bank - obj.mtype.phys_info.turnroll})
 	{
-		const fixang raw_max_roll{multiply_with_clamp_to_fixang(ROLL_RATE, frametime)};
+		/* Carry the fraction of the rate limit that does not fit in a
+		 * `fixang`, but only while the rate limit applies.
+		 */
+		auto remainder{turnroll_remainder};
+		const fixang raw_max_roll{fixmul_to_fixang_with_remainder(ROLL_RATE, frametime, remainder)};
+		turnroll_remainder = (abs(delta_ang) > raw_max_roll) ? remainder : 0;
 		/* Casting to `fixang` is safe:
-		 * - `raw_max_roll` is a positive `fixang`, since `ROLL_RATE` is
-		 *   positive and `frametime` is positive, so `raw_max_roll` is in the
-		 *   range [`1`, `INT16_MAX`].
-		 * - `-raw_max_roll` is then in the range [`-INT16_MAX`, `-1`].
+		 * - `raw_max_roll` is a non-negative `fixang`, since `ROLL_RATE` is
+		 *   positive, `frametime` is positive and the remainder is
+		 *   non-negative, so `raw_max_roll` is in the range [`0`,
+		 *   `INT16_MAX`].
+		 * - `-raw_max_roll` is then in the range [`-INT16_MAX`, `0`].
 		 * - Therefore, [`-raw_max_roll`, `raw_max_roll`] is at worst
 		 *   [`-INT16_MAX`, `INT16_MAX`].
 		 * - `fixang` can represent all values in [`-INT16_MAX`, `INT16_MAX`],
@@ -150,6 +166,8 @@ static fixang set_object_turnroll(object_base &obj, const fix frametime)
 		static constexpr fix maxfixang{std::numeric_limits<fixang>::max()};
 		obj.mtype.phys_info.turnroll = {static_cast<fixang>(std::clamp<fix>(updated_turnroll, minfixang, maxfixang))};
 	}
+	else
+		turnroll_remainder = 0;
 	return obj.mtype.phys_info.turnroll;
 }
 
@@ -230,11 +248,17 @@ static void do_physics_sim_rot(object_base &obj)
 
 	const auto frametime{FrameTime};
 
+	/* Carry the part of each angle that does not fit in a `fixang` to the
+	 * next frame.  Otherwise, up to one `fixang` per axis would be lost every
+	 * frame, so slow rotations would be lost entirely, and more so at higher
+	 * frame rates.
+	 */
+	auto &rotation_remainder{obj.mtype.phys_info.angle_remainder.rotation};
 	obj.orient = vm_matrix_x_matrix(obj.orient, vm_angles_2_matrix(
 			vms_angvec{
-				.p = multiply_with_clamp_to_fixang(obj.mtype.phys_info.rotvel.x, frametime),
-				.b = multiply_with_clamp_to_fixang(obj.mtype.phys_info.rotvel.z, frametime),
-				.h = multiply_with_clamp_to_fixang(obj.mtype.phys_info.rotvel.y, frametime)
+				.p = fixmul_to_fixang_with_remainder(obj.mtype.phys_info.rotvel.x, frametime, rotation_remainder[0]),
+				.b = fixmul_to_fixang_with_remainder(obj.mtype.phys_info.rotvel.z, frametime, rotation_remainder[1]),
+				.h = fixmul_to_fixang_with_remainder(obj.mtype.phys_info.rotvel.y, frametime, rotation_remainder[2])
 			}));
 
 	//re-rotate object for bank caused by turn
