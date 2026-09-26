@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <cassert>
 #include <cstdint>
 #include <optional>
 #include <stdlib.h>
@@ -187,6 +188,39 @@ fixang fix_atan2 (fix cos, fix sin);
 
 [[nodiscard]]
 std::optional<int32_t> checkmuldiv(fix a, fix b, fix divisor);
+
+/* Divide a time (or any other per-frame amount) by a constant, carrying
+ * the remainder of the division into the next call.  Integer division
+ * of FrameTime discards up to Divisor - 1 fix units per frame, so the
+ * loss grows with the frame rate.  With the carry, the sum of the
+ * results is exact on average, regardless of how the time is split into
+ * frames.  The amount must not be negative.
+ *
+ * The remainder is always less than Divisor fix units, so a stale
+ * remainder has a negligible effect.  Users call reset() when the result
+ * is capped or clamped, or the resource that it feeds is empty or full,
+ * and when the owning state is reinitialized, but this is best effort:
+ * not every change of the resource resets the remainder.
+ */
+template <fix Divisor>
+struct fix_rate_divider
+{
+	static_assert(Divisor > 0);
+	static constexpr fix divisor{Divisor};
+	fix remainder{};
+	[[nodiscard]]
+	fix take(const fix amount)
+	{
+		assert(amount >= 0);
+		const fix total{amount + remainder};
+		remainder = total % Divisor;
+		return total / Divisor;
+	}
+	void reset()
+	{
+		remainder = 0;
+	}
+};
 
 extern const std::array<uint8_t, 256> guess_table;
 extern const std::array<int16_t, 256> sincos_table;

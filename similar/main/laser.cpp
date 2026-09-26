@@ -61,6 +61,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "d_underlying_value.h"
 #include "partial_range.h"
 #include "homing.h"
+#include "controls.h"
 
 namespace {
 #ifdef NEWHOMER
@@ -547,6 +548,7 @@ static bool create_omega_blobs(d_level_unique_object_state &LevelUniqueObjectSta
 
 #define	MIN_OMEGA_CHARGE	(MAX_OMEGA_CHARGE/8)
 #define	OMEGA_CHARGE_SCALE	4			//	FrameTime / OMEGA_CHARGE_SCALE added to Omega_charge every frame.
+static_assert(decltype(local_player_rate_dividers::omega_charge)::divisor == OMEGA_CHARGE_SCALE);
 
 fix get_omega_energy_consumption(const fix delta_charge)
 {
@@ -563,14 +565,24 @@ void omega_charge_frame(player_info &player_info)
 {
 	if (!(player_info.primary_weapon_flags & HAS_PRIMARY_FLAG(primary_weapon_index::omega)))
 		return;
+	auto &omega_charge_divider = Local_player_rate_dividers.omega_charge;
 	auto &Omega_charge = player_info.Omega_charge;
 	if (Omega_charge >= MAX_OMEGA_CHARGE)
+	{
+		omega_charge_divider.reset();
 		return;
+	}
 
 	if (Player_dead_state != player_dead_state::no)
 		return;
 
 	//	Don't charge while firing. Wait 1/3 second after firing before recharging
+	/* On the frame where the delay expires, only charge for the part of
+	 * the frame after the delay expired.  Otherwise, the whole frame is
+	 * charged, which gives up to FrameTime / OMEGA_CHARGE_SCALE extra
+	 * charge per shot, more at low frame rates.
+	 */
+	fix charge_time{FrameTime};
 	auto &Omega_recharge_delay = player_info.Omega_recharge_delay;
 	if (Omega_recharge_delay)
 	{
@@ -579,19 +591,40 @@ void omega_charge_frame(player_info &player_info)
 			Omega_recharge_delay -= FrameTime;
 			return;
 		}
+		charge_time -= Omega_recharge_delay;
 		Omega_recharge_delay = 0;
 	}
 
 	if (auto &energy = player_info.energy)
 	{
+		/* Carry the remainder of the division by OMEGA_CHARGE_SCALE into the
+		 * next frame.  Without the carry, up to OMEGA_CHARGE_SCALE - 1 fix
+		 * units are discarded every frame.  The loss is relative to
+		 * FrameTime, so it grows with the frame rate: at 500 fps
+		 * (FrameTime=131), the recharge was 2.3% slower than intended.
+		 * The remainder is discarded when the charge is full or the
+		 * energy is empty.  The energy consumption is derived from the
+		 * charge actually gained, so it follows automatically.
+		 */
 		const auto old_omega_charge{Omega_charge};
-		Omega_charge += FrameTime/OMEGA_CHARGE_SCALE;
-		if (Omega_charge > MAX_OMEGA_CHARGE)
+		Omega_charge += omega_charge_divider.take(charge_time);
+		if (Omega_charge >= MAX_OMEGA_CHARGE)
+		{
 			Omega_charge = MAX_OMEGA_CHARGE;
+			omega_charge_divider.reset();
+		}
 
 		const auto energy_used{get_omega_energy_consumption(Omega_charge - old_omega_charge)};
-		energy = (energy > energy_used) ? energy - energy_used : 0;
+		if (energy > energy_used)
+			energy -= energy_used;
+		else
+		{
+			energy = 0;
+			omega_charge_divider.reset();
+		}
 	}
+	else
+		omega_charge_divider.reset();
 }
 
 namespace {
@@ -673,7 +706,13 @@ static void do_omega_stuff(fvmsegptridx &vmsegptridx, const vmobjptridx_t parent
 			Omega_charge -= OMEGA_BASE_TIME;
 		else
 			Omega_charge = 0;
-		pl_info->Omega_recharge_delay = F1_0 / 3;
+		/* omega_charge_frame runs later in the same frame (after
+		 * FireLaser in GameProcessFrame) and subtracts this frame's
+		 * FrameTime from the delay, although that time passed before
+		 * the shot.  Add FrameTime, so that the recharge starts exactly
+		 * 1/3 second after the shot at any frame rate.
+		 */
+		pl_info->Omega_recharge_delay = F1_0 / 3 + FrameTime;
 	}
 }
 

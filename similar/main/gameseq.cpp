@@ -655,6 +655,7 @@ static void init_player_stats_level(player &plr, object &plrobj, const secret_re
 #if DXX_BUILD_DESCENT == 2
 	Controls.state.afterburner = 0;
 	Last_afterburner_state = 0;
+	Local_player_rate_dividers.reset();
 
 	digi_kill_sound_linked_to_object(vcobjptridx(plr.objnum));
 #endif
@@ -760,6 +761,7 @@ void init_player_stats_new_ship(const playernum_t pnum)
 		auto &Secondary_last_was_super = player_info.Secondary_last_was_super;
 		Secondary_last_was_super = {};
 		Afterburner_charge = GrantedItems.has_afterburner() ? F1_0 : 0;
+		Local_player_rate_dividers.reset();
 		Controls.state.afterburner = 0;
 		Last_afterburner_state = 0;
 		Missile_viewer = nullptr; //reset missile camera if out there

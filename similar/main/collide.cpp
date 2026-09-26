@@ -132,6 +132,12 @@ static int check_collision_delayfunc_exec()
 }
 
 static fix64 Last_volatile_scrape_time;
+/* Last_volatile_scrape_time is also updated by water contacts, which do
+ * no damage.  Track the last time that volatile wall damage was applied
+ * separately, so that only volatile wall contacts count as continuous
+ * contact for the damage calculation.
+ */
+static fix64 Last_volatile_damage_time;
 static fix64 Last_volatile_scrape_sound_time;
 
 template <typename T, std::size_t V>
@@ -515,23 +521,74 @@ volatile_wall_result check_volatile_wall(const vmobjptridx_t obj, const unique_s
 		if (get_player_id(obj) == Player_num)
 #endif
 		{
-			if (!((GameTime64 > Last_volatile_scrape_time + DESIGNATED_GAME_FRAMETIME) || (GameTime64 < Last_volatile_scrape_time)))
-				return volatile_wall_result::none;
+			const fix64 elapsed_time{GameTime64 - Last_volatile_scrape_time};
+			if (!(elapsed_time > DESIGNATED_GAME_FRAMETIME || elapsed_time < 0))
+				return
+#if DXX_BUILD_DESCENT == 2
+					(d <= 0)
+					? volatile_wall_result::water_rate_limited
+					:
+#endif
+					volatile_wall_result::lava_rate_limited;
 			Last_volatile_scrape_time = {GameTime64};
 
 #if DXX_BUILD_DESCENT == 2
 			if (d > 0)
 #endif
 			{
-				fix damage = fixmul(d,((FrameTime>DESIGNATED_GAME_FRAMETIME)?FrameTime:DESIGNATED_GAME_FRAMETIME));
+				/* Damage is applied at most once per
+				 * DESIGNATED_GAME_FRAMETIME, on the first frame after
+				 * that interval has passed.  During continuous contact,
+				 * the interval between two applications is therefore
+				 * rounded up to whole frames, so it is between
+				 * DESIGNATED_GAME_FRAMETIME and DESIGNATED_GAME_FRAMETIME
+				 * + FrameTime.  Scale the damage by the time that
+				 * actually elapsed since the previous damage, so that the
+				 * damage per second is the same at any frame rate.
+				 *
+				 * Scraping bumps the ship away from the wall, so the
+				 * contact is intermittent, and the first contact after
+				 * the interval may come a few frames late.  Accept up to
+				 * one additional DESIGNATED_GAME_FRAMETIME as continuous
+				 * contact, so that intermittent scraping still gets the
+				 * exact rate.  This limits a single application to the
+				 * damage for 2 * DESIGNATED_GAME_FRAMETIME + FrameTime.
+				 *
+				 * If more time than that elapsed, the player was not in
+				 * contact.  If less than DESIGNATED_GAME_FRAMETIME
+				 * elapsed (which cannot happen during contact, because of
+				 * the gate above), the timer went backward, or the
+				 * timestamp is left over from a previous level or game.
+				 * In these cases, apply the damage for one designated
+				 * frame, or for the current frame if that is longer, as
+				 * before.
+				 */
+				const fix64 damage_elapsed_time{GameTime64 - Last_volatile_damage_time};
+				Last_volatile_damage_time = {GameTime64};
+				const fix nominal_damage_time{std::max<fix>(FrameTime, DESIGNATED_GAME_FRAMETIME)};
+				const fix damage_time{
+					(damage_elapsed_time > DESIGNATED_GAME_FRAMETIME && damage_elapsed_time <= 2 * DESIGNATED_GAME_FRAMETIME + FrameTime)
+					? static_cast<fix>(damage_elapsed_time)
+					: nominal_damage_time
+				};
+				fix damage = fixmul(d, damage_time);
+				/* The palette flash is applied with the same frequency as
+				 * before, so keep its intensity based on the damage of
+				 * one nominal application.  Otherwise, the flash would
+				 * depend on the frame rate.
+				 */
+				fix flash_damage = fixmul(d, nominal_damage_time);
 
 #if DXX_BUILD_DESCENT == 2
 				if (GameUniqueState.Difficulty_level == Difficulty_level_type::_0)
+				{
 					damage /= 2;
+					flash_damage /= 2;
+				}
 #endif
 
 				apply_damage_to_player(obj, obj, damage, apply_damage_player::always);
-				PALETTE_FLASH_ADD(f2i(damage*4), 0, 0);	//flash red
+				PALETTE_FLASH_ADD(f2i(flash_damage*4), 0, 0);	//flash red
 			}
 
 			obj->mtype.phys_info.rotvel.x = (d_rand() - 16384)/2;
@@ -559,7 +616,14 @@ bool scrape_player_on_wall(const vmobjptridx_t obj, const vmsegptridx_t hitseg, 
 		return false;
 
 	const auto type = check_volatile_wall(obj, hitseg->unique_segment::sides[hitside]);
-	if (type != volatile_wall_result::none)
+	/* On rate limited frames, treat the wall as an ordinary wall, as
+	 * before: no sound and no bump.
+	 */
+	if (type == volatile_wall_result::lava
+#if DXX_BUILD_DESCENT == 2
+		|| type == volatile_wall_result::water
+#endif
+		)
 	{
 		if ((GameTime64 > Last_volatile_scrape_sound_time + F1_0/4) || (GameTime64 < Last_volatile_scrape_sound_time)) {
 			Last_volatile_scrape_sound_time = {GameTime64};

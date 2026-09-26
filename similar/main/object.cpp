@@ -2118,13 +2118,20 @@ static window_event_result object_move_one(const d_level_shared_robot_info_state
 					if (wall_num != wall_none && vcwallptr(wall_num)->type == WALL_ILLUSION)
 					{
 						const auto type = check_volatile_wall(obj, segp->unique_segment::sides[sidenum]);
+						/* A rate limited result means that the player is
+						 * still under the fall, but damage was applied
+						 * less than DESIGNATED_GAME_FRAMETIME ago.  Keep
+						 * the sound playing in that case.  Otherwise,
+						 * at high frame rates, the sound would be killed
+						 * and restarted every DESIGNATED_GAME_FRAMETIME.
+						 */
 						if (type != volatile_wall_result::none)
 						{
 							under_lavafall = 1;
 							if (!playing)
 							{
 								playing = 1;
-								const auto sound = (type == volatile_wall_result::lava) ? sound_effect::SOUND_LAVAFALL_HISS : sound_effect::SOUND_SHIP_IN_WATERFALL;
+								const auto sound = (type == volatile_wall_result::lava || type == volatile_wall_result::lava_rate_limited) ? sound_effect::SOUND_LAVAFALL_HISS : sound_effect::SOUND_SHIP_IN_WATERFALL;
 								digi_link_sound_to_object3(sound, obj, 1, F1_0, sound_stack::allow_stacking, vm_distance{i2f(256)}, -1, -1);
 								break;
 							}

@@ -37,6 +37,27 @@ void read_flying_controls(object &obj, control_info &Controls);
 #include "maths.h"
 namespace dsx {
 extern fix Afterburner_charge;
+
+/* Remainders of the per-frame divisions of FrameTime for the local
+ * player's ship.  They only exist for the local player, so player_info,
+ * savegames and the network protocol are unchanged.  reset() is called
+ * where the local ship is (re)initialized: new ship, level start,
+ * savegame load and demo playback start.  Each remainder is less than
+ * its divisor in fix units, so resets elsewhere are not needed.
+ */
+struct local_player_rate_dividers
+{
+	fix_rate_divider<4> omega_charge;			// OMEGA_CHARGE_SCALE
+	fix_rate_divider<3> afterburner_drain;		// AFTERBURNER_USE_SECS
+	fix_rate_divider<8> afterburner_recharge;	// AFTERBURNER_RECHARGE_SECS
+	fix_rate_divider<8> headlight_drain;		// FrameTime*3/8
+	void reset()
+	{
+		*this = {};
+	}
+};
+
+extern local_player_rate_dividers Local_player_rate_dividers;
 }
 #endif
 #endif
