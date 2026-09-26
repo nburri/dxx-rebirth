@@ -87,10 +87,21 @@ void read_flying_controls(object &obj, control_info &Controls)
 
 		obj.mtype.phys_info.rotthrust = {};
 
+		/* `Seismic_tremor_magnitude` is reset every frame and only
+		 * accumulates on frames where `d_tick_step` is set (see
+		 * `apply_seismic_effect`), so the tremor is applied at
+		 * `DESIGNATED_GAME_FPS`, independent of the frame rate.  Do not
+		 * scale it by `FrameTime`.
+		 */
 		const auto Seismic_tremor_magnitude = LevelUniqueSeismicState.Seismic_tremor_magnitude;
-		rotangs.p = Controls.pitch_time / 2 + Seismic_tremor_magnitude/64;
-		rotangs.b = Controls.bank_time / 2 + Seismic_tremor_magnitude/16;
-		rotangs.h = Controls.heading_time / 2 + Seismic_tremor_magnitude/64;
+		/* Halve the steering input, carrying the half angle unit that
+		 * `fixang` cannot represent to the next frame, so that small
+		 * inputs are not lost.
+		 */
+		auto &steering_remainder{gmobj.mtype.phys_info.angle_remainder.steering};
+		rotangs.p = fixmul_to_fixang_with_remainder(Controls.pitch_time, F1_0 / 2, steering_remainder[0]) + Seismic_tremor_magnitude/64;
+		rotangs.b = fixmul_to_fixang_with_remainder(Controls.bank_time, F1_0 / 2, steering_remainder[1]) + Seismic_tremor_magnitude/16;
+		rotangs.h = fixmul_to_fixang_with_remainder(Controls.heading_time, F1_0 / 2, steering_remainder[2]) + Seismic_tremor_magnitude/64;
 
 		const auto &&rotmat{vm_angles_2_matrix(rotangs)};
 		gmobj.orient = vm_matrix_x_matrix(gmobj.orient, rotmat);

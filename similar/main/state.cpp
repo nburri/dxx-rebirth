@@ -584,6 +584,7 @@ static void state_object_rw_to_object(const object_rw *const obj_rw, object &obj
 			obj.mtype.phys_info.rotthrust.z = obj_rw->mtype.phys_info.rotthrust.z;
 			obj.mtype.phys_info.turnroll    = obj_rw->mtype.phys_info.turnroll;
 			obj.mtype.phys_info.flags       = obj_rw->mtype.phys_info.flags;
+			obj.mtype.phys_info.reset_remainders();
 			break;
 			
 		case object::movement_type::spinning:

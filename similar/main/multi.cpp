@@ -2474,6 +2474,7 @@ void multi_reset_player_object(object &objp)
 	objp.mtype.phys_info.rotvel = {};
 	objp.mtype.phys_info.rotthrust = {};
 	objp.mtype.phys_info.turnroll = 0;
+	objp.mtype.phys_info.reset_remainders();
 	objp.mtype.phys_info.mass = Player_ship->mass;
 	objp.mtype.phys_info.drag = Player_ship->drag;
 	if (objp.type == object_type::OBJ_PLAYER)
@@ -6301,6 +6302,7 @@ void multi_object_rw_to_object(const object_rw *const obj_rw, object &obj)
 			obj.mtype.phys_info.rotthrust  = build_native_endian_vector_from_little_endian(obj_rw->mtype.phys_info.rotthrust);
 			obj.mtype.phys_info.turnroll    = INTEL_INT(obj_rw->mtype.phys_info.turnroll);
 			obj.mtype.phys_info.flags       = INTEL_INT(obj_rw->mtype.phys_info.flags);
+			obj.mtype.phys_info.reset_remainders();
 			break;
 			
 		case object::movement_type::spinning:

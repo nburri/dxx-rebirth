@@ -969,6 +969,7 @@ void reset_player_object(object_base &ConsoleObject)
 	ConsoleObject.mtype.phys_info.rotvel = {};
 	ConsoleObject.mtype.phys_info.rotthrust = {};
 	ConsoleObject.mtype.phys_info.turnroll = 0;
+	ConsoleObject.mtype.phys_info.reset_remainders();
 	ConsoleObject.mtype.phys_info.mass = Player_ship->mass;
 	ConsoleObject.mtype.phys_info.drag = Player_ship->drag;
 	ConsoleObject.mtype.phys_info.flags =
