@@ -432,7 +432,7 @@ static void read_object(const vmobjptr_t obj, const NamedPHYSFS_File f, int vers
 
 			obj->mtype.phys_info.turnroll	= PHYSFSX_readFixAng(f);
 			obj->mtype.phys_info.flags		= PHYSFSX_readSLE16(f);
-			obj->mtype.phys_info.angle_remainder = {};
+			obj->mtype.phys_info.reset_remainders();
 
 			break;
 

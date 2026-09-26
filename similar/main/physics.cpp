@@ -289,24 +289,27 @@ static const drag_integration &get_drag_integration(const fix drag, const fix fr
 }
 
 [[nodiscard]]
-static fix apply_drag_integration(const drag_integration &di, const fix v, const fix accel)
+static fix apply_drag_integration(const drag_integration &di, const fix v, const fix accel, int16_t &remainder)
 {
-	const double exact{v * di.retained + accel * di.accel_gain};
-	auto result{static_cast<fix>(std::clamp<double>(std::round(exact), std::numeric_limits<fix>::min(), std::numeric_limits<fix>::max()))};
-	/* Round to nearest to avoid a bias of the top speed, but always make
-	 * progress toward the exact result, so that a coasting object comes to
-	 * rest instead of keeping a tiny velocity forever.
+	/* Carry the fractional part of the velocity to the next frame, instead
+	 * of rounding it away every frame.  That keeps the result independent
+	 * of how the time is split into frames: there is no rounding bias of
+	 * the top speed, no jitter at the steady state, and a coasting object
+	 * comes to rest (the exact velocity falls below one unit, which
+	 * truncates to zero) after the same time at any frame rate.
 	 */
-	if (result == v && exact != v)
-		result += (exact < v) ? -1 : 1;
-	return result;
+	constexpr double remainder_scale{32768};
+	const double exact{std::clamp<double>((v + remainder / remainder_scale) * di.retained + accel * di.accel_gain, std::numeric_limits<fix>::min(), std::numeric_limits<fix>::max())};
+	const double whole{std::trunc(exact)};
+	remainder = static_cast<int16_t>(std::clamp<double>(std::round((exact - whole) * remainder_scale), -INT16_MAX, INT16_MAX));
+	return static_cast<fix>(whole);
 }
 
-static void apply_drag_integration(const drag_integration &di, vms_vector &v, const vms_vector &accel)
+static void apply_drag_integration(const drag_integration &di, vms_vector &v, const vms_vector &accel, std::array<int16_t, 3> &remainder)
 {
-	v.x = apply_drag_integration(di, v.x, accel.x);
-	v.y = apply_drag_integration(di, v.y, accel.y);
-	v.z = apply_drag_integration(di, v.z, accel.z);
+	v.x = apply_drag_integration(di, v.x, accel.x, remainder[0]);
+	v.y = apply_drag_integration(di, v.y, accel.y, remainder[1]);
+	v.z = apply_drag_integration(di, v.z, accel.z, remainder[2]);
 }
 
 }
@@ -329,14 +332,14 @@ static void do_physics_sim_rot(object_base &obj)
 		if (obj.mtype.phys_info.flags & PF_USES_THRUST)
 		{
 			const auto accel{vm_vec_copy_scale(obj.mtype.phys_info.rotthrust, fixdiv(f1_0, obj.mtype.phys_info.mass))};
-			apply_drag_integration(get_drag_integration(drag, FrameTime), obj.mtype.phys_info.rotvel, accel);
+			apply_drag_integration(get_drag_integration(drag, FrameTime), obj.mtype.phys_info.rotvel, accel, obj.mtype.phys_info.velocity_remainder.rotvel);
 		}
 		else
 #if DXX_BUILD_DESCENT == 2
 			if (! (obj.mtype.phys_info.flags & PF_FREE_SPINNING))
 #endif
 		{
-			apply_drag_integration(get_drag_integration(drag, FrameTime), obj.mtype.phys_info.rotvel, vms_vector{});
+			apply_drag_integration(get_drag_integration(drag, FrameTime), obj.mtype.phys_info.rotvel, vms_vector{}, obj.mtype.phys_info.velocity_remainder.rotvel);
 		}
 
 	}
@@ -486,10 +489,10 @@ window_event_result do_physics_sim(const d_robot_info_array &Robot_info, const v
 		if (obj->mtype.phys_info.flags & PF_USES_THRUST) {
 
 			const auto accel{vm_vec_copy_scale(obj->mtype.phys_info.thrust,fixdiv(f1_0,obj->mtype.phys_info.mass))};
-			apply_drag_integration(di, obj->mtype.phys_info.velocity, accel);
+			apply_drag_integration(di, obj->mtype.phys_info.velocity, accel, obj->mtype.phys_info.velocity_remainder.velocity);
 		}
 		else
-			apply_drag_integration(di, obj->mtype.phys_info.velocity, vms_vector{});
+			apply_drag_integration(di, obj->mtype.phys_info.velocity, vms_vector{}, obj->mtype.phys_info.velocity_remainder.velocity);
 	}
 
 	int count{0};

@@ -34,6 +34,18 @@ struct physics_angle_remainder
 	uint16_t levelling;	// rate limit of automatic levelling
 };
 
+/* Fractional parts, in units of 1/32768 of a `fix`, of the velocity and
+ * rotational velocity, as computed by the drag and thrust integration.
+ * Each has the sign of the exact velocity it belongs to, so that the
+ * stored `fix` is the exact velocity truncated toward zero.  Runtime-only,
+ * like `physics_angle_remainder`.
+ */
+struct physics_velocity_remainder
+{
+	std::array<int16_t, 3> velocity;
+	std::array<int16_t, 3> rotvel;
+};
+
 /* Return `fixmul(a, b)` as a `fixang`, carrying the fractional part of the
  * product from one call to the next in `remainder`, so that the sum of the
  * returned angles differs from the exact sum of the products by less than
@@ -62,6 +74,15 @@ struct physics_info : prohibit_void_ptr<>
 	fixang      turnroll;   // rotation caused by turn banking
 	uint16_t    flags;      // misc physics flags
 	physics_angle_remainder angle_remainder;	// runtime only, see above
+	physics_velocity_remainder velocity_remainder;	// runtime only, see above
+	/* Call this when the orientation or velocities are replaced from
+	 * outside the simulation, such as when an object is loaded or received.
+	 */
+	void reset_remainders()
+	{
+		angle_remainder = {};
+		velocity_remainder = {};
+	}
 };
 
 struct physics_info_rw
