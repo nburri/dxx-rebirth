@@ -71,8 +71,6 @@ using std::min;
 namespace dcx {
 namespace {
 
-static int use_fcd_lighting;
-
 static void add_light_div(g3s_lrgb &d, const g3s_lrgb &light, const fix &scale)
 {
 	d.r += fixdiv(light.r, scale);
@@ -117,7 +115,7 @@ static fix compute_fireball_light_emission_intensity(const d_vclip_array &Vclip,
 namespace dsx {
 namespace {
 
-static void apply_light(fvmsegptridx &vmsegptridx, const g3s_lrgb obj_light_emission, const vcsegptridx_t obj_seg, const vms_vector &obj_pos, const unsigned n_render_vertices, std::array<vertnum_t, MAX_VERTICES> &render_vertices, const std::array<segnum_t, MAX_VERTICES> &vert_segnum_list, const icobjptridx_t objnum)
+static void apply_light(const g3s_lrgb obj_light_emission, const vcsegptridx_t obj_seg, const vms_vector &obj_pos, const unsigned n_render_vertices, const std::array<vertnum_t, MAX_VERTICES> &render_vertices, const icobjptridx_t objnum)
 {
 	auto &LevelSharedVertexState = LevelSharedSegmentState.get_vertex_state();
 	auto &Vertices = LevelSharedVertexState.get_vertices();
@@ -183,26 +181,11 @@ static void apply_light(fvmsegptridx &vmsegptridx, const g3s_lrgb obj_light_emis
 #endif
 			range_for (const unsigned vv, xrange(n_render_vertices))
 			{
-				fix			dist;
-				int apply_light{0};
-
 				const auto vertnum = render_vertices[vv];
-				auto vsegnum = vert_segnum_list[vv];
 				auto &vertpos = *vcvertptr(vertnum);
+				fix dist = vm_vec_dist_quick(obj_pos, vertpos);
 
-				if (use_fcd_lighting && abs(obji_64) > F1_0*32)
-				{
-					dist = find_connected_distance(obj_pos, obj_seg, vertpos, vmsegptridx(vsegnum), n_render_vertices, wall_is_doorway_mask::fly_rendpast);
-					if (dist >= 0)
-						apply_light = 1;
-				}
-				else
-				{
-					dist = vm_vec_dist_quick(obj_pos, vertpos);
-					apply_light = 1;
-				}
-
-				if (apply_light && ((dist >> headlight_shift) < abs(obji_64))) {
+				if ((dist >> headlight_shift) < abs(obji_64)) {
 
 					if (dist < MIN_LIGHT_DIST)
 						dist = MIN_LIGHT_DIST;
@@ -241,7 +224,7 @@ static void apply_light(fvmsegptridx &vmsegptridx, const g3s_lrgb obj_light_emis
 namespace {
 
 // ----------------------------------------------------------------------------------------------
-static void cast_muzzle_flash_light(fvmsegptridx &vmsegptridx, int n_render_vertices, std::array<vertnum_t, MAX_VERTICES> &render_vertices, const std::array<segnum_t, MAX_VERTICES> &vert_segnum_list)
+static void cast_muzzle_flash_light(const unsigned n_render_vertices, const std::array<vertnum_t, MAX_VERTICES> &render_vertices)
 {
 	static constexpr fix FLASH_LEN_FIXED_SECONDS{F1_0 / 3};
 	static constexpr fix FLASH_SCALE{3 * F1_0 / FLASH_LEN_FIXED_SECONDS};
@@ -259,7 +242,7 @@ static void cast_muzzle_flash_light(fvmsegptridx &vmsegptridx, int n_render_vert
 			{
 				g3s_lrgb ml;
 				ml.r = ml.g = ml.b = ((FLASH_LEN_FIXED_SECONDS - time_since_flash) * FLASH_SCALE);
-				apply_light(vmsegptridx, ml, vmsegptridx(i.segnum), i.pos, n_render_vertices, render_vertices, vert_segnum_list, object_none);
+				apply_light(ml, vcsegptridx(i.segnum), i.pos, n_render_vertices, render_vertices, object_none);
 			}
 			else
 			{
@@ -514,7 +497,6 @@ void set_dynamic_light(const d_robot_info_array &Robot_info, render_state_t &rst
 	auto &Objects = LevelUniqueObjectState.Objects;
 	auto &vcobjptridx = Objects.vcptridx;
 	std::array<vertnum_t, MAX_VERTICES> render_vertices;
-	std::array<segnum_t, MAX_VERTICES> vert_segnum_list;
 	static fix light_time; 
 
 #if DXX_BUILD_DESCENT == 2
@@ -542,7 +524,6 @@ void set_dynamic_light(const d_robot_info_array &Robot_info, render_state_t &rst
 				{
 					b = true;
 					render_vertices[n_render_vertices] = vnum;
-					vert_segnum_list[n_render_vertices] = segnum;
 					n_render_vertices++;
 					Dynamic_light[vnum] = {};
 				}
@@ -550,7 +531,7 @@ void set_dynamic_light(const d_robot_info_array &Robot_info, render_state_t &rst
 		}
 	}
 
-	cast_muzzle_flash_light(vmsegptridx, n_render_vertices, render_vertices, vert_segnum_list);
+	cast_muzzle_flash_light(n_render_vertices, render_vertices);
 
 	range_for (const auto &&obj, vcobjptridx)
 	{
@@ -560,7 +541,7 @@ void set_dynamic_light(const d_robot_info_array &Robot_info, render_state_t &rst
 		const auto &&obj_light_emission = compute_light_emission(Robot_info, LevelUniqueLightState, Vclip, obj);
 
 		if (((obj_light_emission.r+obj_light_emission.g+obj_light_emission.b)/3) > 0)
-			apply_light(vmsegptridx, obj_light_emission, vcsegptridx(objp.segnum), objp.pos, n_render_vertices, render_vertices, vert_segnum_list, obj);
+			apply_light(obj_light_emission, vcsegptridx(objp.segnum), objp.pos, n_render_vertices, render_vertices, obj);
 	}
 }
 
