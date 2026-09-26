@@ -4018,6 +4018,48 @@ void multi_send_guided_info(const object_base &miss, const char done)
 	multi_serialize_write(multiplayer_data_priority::_0, gi);
 }
 
+void multi_send_guided_frame(const object_base &miss)
+{
+	/* Called each frame while the local player steers a guided missile.
+	 * The receiver (multi_do_guided) warps its copy of the missile to the
+	 * received position and velocity, then moves it by physics until the
+	 * next update, the same as for ship positions.  Sending once per frame
+	 * only adds redundant updates at high frame rates, so pace the updates
+	 * to the position packet rate (Netgame.PacketsPerSec) instead.  A new
+	 * missile is reported immediately.  The final state is sent by
+	 * release_local_guided_missile and obj_delete.
+	 */
+	static object_signature_t last_signature;
+	static fix64 next_send_time;
+	const fix64 interval{F1_0 / std::clamp<unsigned>(Netgame.PacketsPerSec, MIN_PPS, MAX_PPS)};
+	const fix64 now{GameTime64};
+	/* Restart the pacing for a new missile, or if the game time went
+	 * backward (new level).
+	 */
+	if (miss.signature != last_signature || now < next_send_time - interval)
+	{
+		last_signature = miss.signature;
+		next_send_time = now;
+	}
+	if (now < next_send_time)
+		return;
+	next_send_time += interval;
+	/* If the frame rate is below the packet rate, do not try to catch up
+	 * with a burst of updates.
+	 */
+	if (next_send_time <= now)
+		next_send_time = now + interval;
+	multi_guided_info gi;
+	gi.pnum = static_cast<uint8_t>(Player_num);
+	gi.release = 0;
+	gi.sp = create_shortpos_little(LevelSharedSegmentState, miss);
+	/* Send the update now, rather than waiting up to 100ms for the next
+	 * regular mdata packet, so that remote players see the missile steer at
+	 * the full paced rate.
+	 */
+	multi_serialize_write(multiplayer_data_priority::_1, gi);
+}
+
 namespace {
 
 static void multi_do_guided(d_level_unique_object_state &LevelUniqueObjectState, const playernum_t pnum, const multiplayer_rspan<multiplayer_command_t::MULTI_GUIDED> buf)

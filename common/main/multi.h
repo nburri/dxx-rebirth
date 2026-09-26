@@ -496,6 +496,7 @@ struct marker_message_text_t;
 void multi_send_drop_marker(unsigned player, const vms_vector &position, player_marker_index messagenum, const marker_message_text_t &text);
 void multi_send_markers();
 void multi_send_guided_info (const object_base &miss, char);
+void multi_send_guided_frame(const object_base &miss);
 void multi_send_orb_bonus(playernum_t pnum, uint8_t);
 void multi_send_got_orb(playernum_t pnum);
 void multi_send_effect_blowup(vcsegidx_t segnum, sidenum_t side, const vms_vector &pnt);
@@ -954,6 +955,10 @@ namespace dsx {
 #if DXX_BUILD_DESCENT == 2
 
 static inline void multi_send_guided_info(const object_base &, char)
+{
+}
+
+static inline void multi_send_guided_frame(const object_base &)
 {
 }
 

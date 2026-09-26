@@ -406,6 +406,7 @@ disconnected player came back when that player's relayed `pdata` arrives with
 |---|---|---|
 | `pdata` (own ship) | `F1_0 / Netgame.PacketsPerSec` (default 30, allowed 5–40: `MIN_PPS` / `MAX_PPS`, `multi.h:155`). Also forced by `multi_send_fire` (at most 20/s) and by `multi_send_effect_blowup`. | `do_protocol_frame`, `net_udp.cpp:5426` |
 | D2 thief position (`MULTI_ROBOT_POSITION`) | Same tick as `pdata` | `multi_send_thief_frame`, `multibot.cpp:445` |
+| D2 `MULTI_GUIDED` position (priority 1) | While the player steers a guided missile: at once for a new missile, then every `F1_0 / Netgame.PacketsPerSec` of game time. The final position is also sent (priority 0) when the missile is released, just before the release message, and when it is deleted. Before this pacing, the position was sent every frame. | `multi_send_guided_frame` (called from `read_flying_controls`), `release_local_guided_missile`, `obj_delete` |
 | Robot frame and MDATA flush (unreliable) | Every 1/10 s | `net_udp.cpp:5435` |
 | Reliable queue processing | Every protocol frame | `net_udp_noloss_process_queue` |
 | `ping` (host to clients) | Every second | `net_udp_ping_frame` |
@@ -1051,7 +1052,7 @@ message.
 | 44 | `MULTI_VULWPN_AMMO_ADJ` | 6 | 6 | 2 | any | Remaining ammo in a vulcan/gauss powerup |
 | 45 | `MULTI_PLAYER_INV` | 21 | 15 | 0 (periodic), 1 (extras) | any | Sender's inventory |
 | 46 | `MULTI_MARKER` | 55 | – | 2 | any | Marker dropped |
-| 47 | `MULTI_GUIDED` | 26 | – | 0 | any | Guided missile position or release |
+| 47 | `MULTI_GUIDED` | 26 | – | 1 (paced position), 0 (final position, release) | any | Guided missile position or release |
 | 48 | `MULTI_STOLEN_ITEMS` | 11 | – | 2 | host | Thief's stolen items (rejoin) |
 | 49 | `MULTI_WALL_STATUS` | 6 | – | direct | host | Wall state (rejoin) |
 | 50 | `MULTI_SEISMIC` | 5 | – | 2 | any | Earthshaker disturbance duration |
@@ -1347,7 +1348,7 @@ D2 only:
 | `MULTI_SEISMIC` (50) | 1–4 duration (fix) |
 | `MULTI_EFFECT_BLOWUP` (62) | 1 player number (ignored), 2–3 segment, 4 side, 5–16 hit point |
 | `MULTI_MARKER` (46) | 1 player number (ignored by the receiver), 2 marker index, 3–14 position, 15–54 text (40) |
-| `MULTI_GUIDED` (47) | serialized: 1 player number (ignored), 2 release flag, 3–25 `shortpos` (`bytemat[9]`, `xo`, `yo`, `zo`, `segment`, `velx`, `vely`, `velz`, 16-bit each) |
+| `MULTI_GUIDED` (47) | serialized: 1 player number (ignored), 2 release flag, 3–25 `shortpos` (`bytemat[9]`, `xo`, `yo`, `zo`, `segment`, `velx`, `vely`, `velz`, 16-bit each). The receiver warps its copy of the sender's active guided missile to the `shortpos` and lets physics move it until the next update. With the release flag set, it ignores the `shortpos` and only releases the missile (`multi_do_guided`). |
 | `MULTI_STOLEN_ITEMS` (48) | 1–10 powerup ids |
 | `MULTI_DROP_BLOB` (54) | 1 player number (ignored) |
 | `MULTI_SOUND_FUNCTION` (55) | 1 player number (ignored), 2 function (0 = stop, 3 = start afterburner loop), 3 sound |
