@@ -1950,6 +1950,11 @@ static void multi_do_kill_client(object_array &Objects, const playernum_t pnum, 
 	{
 		multi_command<multiplayer_command_t::MULTI_KILL_HOST> multibuf;
 		std::memcpy(std::next(multibuf.data()), std::next(buf.data()), 4);
+		/* Clients take the killed player from byte 1.  Use the sender,
+		 * which is what the host counts below, not the number the client
+		 * wrote.
+		 */
+		multibuf[1] = pnum;
 		multibuf[5] = Netgame.team_vector;
 		multibuf[6] = Bounty_target;
 		

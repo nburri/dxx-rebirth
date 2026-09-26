@@ -1155,7 +1155,7 @@ originator's ship, using the seed, and maps it to (object number, originator).
 
 | Offset | Size | Field |
 |---|---|---|
-| 1 | 1 | Killed player number (`KILL_HOST`: used by clients; `KILL_CLIENT`: ignored, the host uses the sender) |
+| 1 | 1 | Killed player number. `KILL_CLIENT`: not used; the host takes the sender as the killed player. `KILL_HOST`: set by the host (to the sender of a relayed `KILL_CLIENT`) and used by clients |
 | 2 | 2 | Killer's remote object number (`0xffff` if none) |
 | 4 | 1 | Killer's owner (`-1` if none) |
 | 5 | 1 | `KILL_HOST` only: `Netgame.team_vector` |
@@ -1165,8 +1165,8 @@ Flow:
 
 - A **client** that dies sends `KILL_CLIENT` directly to the host and does not
   count the kill yet.
-- The host's `multi_do_kill_client` copies bytes 1–4 into a new `KILL_HOST`,
-  adds the team vector and bounty target, broadcasts it with priority 2, and
+- The host's `multi_do_kill_client` copies bytes 2–4 into a new `KILL_HOST`,
+  sets byte 1 to the sender, adds the team vector and bounty target, broadcasts it with priority 2, and
   computes the kill locally with killed = the client.
 - When the **host** dies, it computes the kill and broadcasts `KILL_HOST`
   itself.
