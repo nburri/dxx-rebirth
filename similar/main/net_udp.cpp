@@ -35,6 +35,7 @@
 #include "game.h"
 #include "gauges.h"
 #include "multi.h"
+#include "remote_smoothing.h"
 #include "palette.h"
 #include "powerup.h"
 #include "menu.h"
@@ -6097,7 +6098,12 @@ void net_udp_read_pdata_packet(UDP_frame_info *pd)
 	if (vcplayerptr(Player_num)->connected == player_connection_status::disconnected || vcplayerptr(Player_num)->connected == player_connection_status::waiting)
                 return;
 	//------------ Read the player's ship's object info ----------------------
+	/* Remember where the ship is drawn before the snap, so that the snap
+	 * can be hidden visually.  This does not affect the object state.
+	 */
+	const auto smoothing{remote_smoothing_begin_update(TheirPlayernum, TheirObj)};
 	extract_quaternionpos(Objects.vmptr, vmsegptr, TheirObj, pd->qpp);
+	remote_smoothing_end_update(TheirPlayernum, TheirObj, smoothing);
 	if (TheirObj->movement_source == object::movement_type::physics)
 		set_thrust_from_velocity(TheirObj);
 }

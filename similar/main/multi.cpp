@@ -68,6 +68,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "text.h"
 #include "kmatrix.h"
 #include "multibot.h"
+#include "remote_smoothing.h"
 #include "gameseq.h"
 #include "physics.h"
 #include "switch.h"
@@ -1774,7 +1775,13 @@ static void multi_do_position(object_array &Objects, const playernum_t pnum, con
 	count += 12;
 	qpp.rotvel = multi_get_vector(buf.subspan<9 + 12 + 2 + 12, 12>());
 	count += 12;
+	/* MULTI_POSITION is sent before drops, deres and quit, so it is an
+	 * ordinary position update and is smoothed like PDATA.  The respawn
+	 * case arrives while the object is still a ghost and therefore snaps.
+	 */
+	const auto smoothing{remote_smoothing_begin_update(pnum, obj)};
 	extract_quaternionpos(Objects.vmptr, vmsegptr, obj, qpp);
+	remote_smoothing_end_update(pnum, obj, smoothing);
 
 	if (obj->movement_source == object::movement_type::physics)
 		set_thrust_from_velocity(obj);
@@ -2496,6 +2503,11 @@ void multi_reset_player_object(object &objp)
 		objp.render_type = render_type::RT_NONE;
 	//reset textures for this, if not player 0
 	multi_reset_object_texture (objp);
+	/* Called on death, respawn and level start: drop any visual error
+	 * left over from the previous life.  The object ID is the player
+	 * number for both players and ghosts.
+	 */
+	remote_smoothing_reset((get_player_id)(objp));
 }
 
 namespace {

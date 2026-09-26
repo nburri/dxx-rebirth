@@ -66,6 +66,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "weapon.h"
 #include "gauges.h"
 #include "multi.h"
+#include "remote_smoothing.h"
 #include "text.h"
 #include "piggy.h"
 #include "switch.h"
@@ -828,7 +829,14 @@ void render_object(grs_canvas &canvas, const d_level_unique_light_state &LevelUn
 				gr_settransblend(canvas, gr_fade_level{10}, gr_blend::additive_a);
 			}
 #endif
-			draw_polygon_object(canvas, LevelUniqueLightState, obj);
+			{
+				/* Draw remote player ships at their smoothed position
+				 * and orientation.  The authoritative values are
+				 * restored when the guard goes out of scope.
+				 */
+				const remote_smoothing_render_guard smoothing{obj};
+				draw_polygon_object(canvas, LevelUniqueLightState, obj);
+			}
 
 			if (obj->type == object_type::OBJ_ROBOT) //"warn" robot if being shot at
 				set_robot_location_info(obj);

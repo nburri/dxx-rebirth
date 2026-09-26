@@ -836,6 +836,22 @@ This is the 46-byte `quaternionpos` encoding (`object.h:225`) built with
   the host's address (client).
 - `pdata` is never acknowledged. It is also the only packet type that keeps
   `LastPacketTime` fresh during play (2.7).
+- `pdata` has no sequence number or timestamp. The receiver applies every packet
+  in arrival order, so a packet that UDP reorders behind a newer one moves the
+  ship back to the older state until the next packet arrives. The receiver
+  cannot detect this from the existing fields.
+- The receiver applies the packet to the object at once: position, orientation,
+  velocity, rotational velocity and segment. Physics, collisions and hit
+  detection use this state. Only the drawing is smoothed
+  (`remote_smoothing.cpp`). The receiver stores the difference between the
+  position and orientation at which the ship was drawn and the new state.
+  The ship and its HUD name label are drawn with this difference added, and
+  the difference decays with a time constant of 75 ms. The receiver snaps
+  instead of smoothing if the position difference is more than 20 units, the
+  forward or up axis differs by more than 60°, or the new segment is not the
+  old segment or a neighbour of it. The difference is also cleared when the
+  player dies, respawns or a level starts, and it is never used during demo
+  playback. `MULTI_POSITION` (5.3) is smoothed in the same way.
 
 ### 4.2 MDATA: game message transport
 
@@ -1080,7 +1096,8 @@ read the byte.
 #### Movement
 
 **`MULTI_POSITION` (0), 47 bytes.** `multi_send_position` (`multi.cpp:2815`),
-`multi_do_position` (`multi.cpp:1753`). Applies to the originator's ship.
+`multi_do_position` (`multi.cpp:1753`). Applies to the originator's ship. As
+for `pdata`, only the drawing of the ship is smoothed (4.1).
 
 | Offset | Size | Field |
 |---|---|---|
