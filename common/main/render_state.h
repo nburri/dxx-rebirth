@@ -8,7 +8,13 @@
 #include "objnum.h"
 #include <array>
 
-constexpr std::integral_constant<unsigned, 500> MAX_RENDER_SEGS{};
+/* Maximum number of segments drawn in one frame.  build_segment_list stops
+ * collecting visible segments at this count, so segments beyond it are not
+ * drawn at all.  The former limit of 500 was too small for the large rooms
+ * of some custom levels: walls beyond the limit were missing or flickered,
+ * depending on which segments made it into the list in a given frame.
+ */
+constexpr std::integral_constant<unsigned, 3000> MAX_RENDER_SEGS{};
 
 struct rect
 {
