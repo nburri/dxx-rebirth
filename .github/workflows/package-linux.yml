@@ -15,6 +15,10 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+          # Full history and tags, so that `git describe` can put the tag and
+          # commit into the version shown in the game (for example
+          # "v0.61-nb1-3-g95b4859ba123").
+          fetch-depth: 0
 
       - name: Install Dependencies
         run: >
@@ -44,6 +48,11 @@ jobs:
           --output contrib/gamecontrollerdb.txt
           https://raw.githubusercontent.com/gabomdq/SDL_GameControllerDB/master/gamecontrollerdb.txt
           || true
+
+      - name: Keep the updated gamecontrollerdb.txt out of the version
+        # Otherwise `git describe` sees the downloaded file as a local change
+        # and marks the version with "*".
+        run: git update-index --assume-unchanged contrib/gamecontrollerdb.txt
 
       - name: Configure and Build
         run: >
