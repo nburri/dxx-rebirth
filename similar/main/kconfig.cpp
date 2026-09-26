@@ -1671,8 +1671,6 @@ namespace dsx {
 
 void kconfig_read_controls(control_info &Controls, const d_event &event, int automap_flag)
 {
-	static fix64 mouse_delta_time = 0;
-
 #ifndef NDEBUG
 	// --- Don't do anything if in debug mode ---
 	if ( keyd_pressed[KEY_DELETE] )
@@ -1822,19 +1820,11 @@ void kconfig_read_controls(control_info &Controls, const d_event &event, int aut
 				}
 			}
 			else
-			{
 				Controls.pending_mouse_delta.update(event_mouse_get_delta(event));
-				mouse_delta_time = timer_query() + DESIGNATED_GAME_FRAMETIME;
-			}
 			break;
 		}
 		case event_type::idle:
 		default:
-			if (!PlayerCfg.MouseFlightSim && mouse_delta_time < timer_query())
-			{
-				Controls.mouse_axis[0] = Controls.mouse_axis[1] = Controls.mouse_axis[2] = 0;
-				mouse_delta_time = timer_query() + DESIGNATED_GAME_FRAMETIME;
-			}
 			break;
 	}
 }
@@ -1843,16 +1833,33 @@ void kconfig_end_loop(control_info &Controls, const fix frametime)
 {
 	static constexpr unsigned FREE_PITCH_FACTOR{1};
 	static constexpr unsigned LOCKED_PITCH_FACTOR{2};
+	/* Relative mouse motion is a displacement, not a rate: the counts
+	 * reported during a frame must produce the same amount of turning
+	 * no matter how long the frame was.  The *_time controls are later
+	 * divided by the frame time (read_flying_controls), so scaling the
+	 * counts by the actual frame time would make the turn per count
+	 * proportional to the frame time.  Scale them by a fixed reference
+	 * frame time instead.  The reference is 200 FPS, the former default
+	 * frame rate cap, so that existing sensitivity and overrun settings
+	 * behave exactly as before at that rate.
+	 */
+	static constexpr fix MOUSE_REFERENCE_FRAMETIME{F1_0 / 200};
 	if (const auto delta = Controls.pending_mouse_delta.consume())
 	{
 		for (auto &&[raw_mouse_axis, d] : zip(Controls.raw_mouse_axis, *delta))
 			raw_mouse_axis = static_cast<fix>(std::clamp(d,
 				static_cast<int64_t>(std::numeric_limits<fix>::min()),
 				static_cast<int64_t>(std::numeric_limits<fix>::max())));
-		Controls.mouse_axis[0] = (Controls.raw_mouse_axis[0] * frametime) / 8;
-		Controls.mouse_axis[1] = (Controls.raw_mouse_axis[1] * frametime) / 8;
-		Controls.mouse_axis[2] = (Controls.raw_mouse_axis[2] * frametime);
+		Controls.mouse_axis[0] = (Controls.raw_mouse_axis[0] * MOUSE_REFERENCE_FRAMETIME) / 8;
+		Controls.mouse_axis[1] = (Controls.raw_mouse_axis[1] * MOUSE_REFERENCE_FRAMETIME) / 8;
+		Controls.mouse_axis[2] = (Controls.raw_mouse_axis[2] * MOUSE_REFERENCE_FRAMETIME);
 	}
+	else if (!PlayerCfg.MouseFlightSim)
+		/* No motion was reported during this frame, so the mouse must
+		 * not contribute anything.  Flight sim mode is position based
+		 * and keeps its value until the next motion event.
+		 */
+		Controls.mouse_axis = {};
 #if DXX_MAX_AXES_PER_JOYSTICK
 	std::array<fix, JOY_MAX_AXES> joy_axis{};
 	for (auto &&[i, o, raw_joy_axis] : enumerate(zip(joy_axis, Controls.raw_joy_axis)))
@@ -2031,18 +2038,20 @@ void kconfig_end_loop(control_info &Controls, const fix frametime)
 	}
 
 	//----------- Clamp values between -FrameTime and FrameTime
-	clamp_kconfig_control_with_overrun(Controls.vertical_thrust_time, frametime, Controls.excess_vertical_thrust_time, frametime * PlayerCfg.MouseOverrun[player_config_mouse_index::slide_ud]);
-	clamp_kconfig_control_with_overrun(Controls.sideways_thrust_time, frametime, Controls.excess_sideways_thrust_time, frametime * PlayerCfg.MouseOverrun[player_config_mouse_index::slide_lr]);
-	clamp_kconfig_control_with_overrun(Controls.forward_thrust_time, frametime, Controls.excess_forward_thrust_time, frametime * PlayerCfg.MouseOverrun[player_config_mouse_index::throttle]);
+	// The overrun buffer holds full-thrust time, so its bound is a
+	// duration (MouseOverrun reference frames), not a number of frames.
+	clamp_kconfig_control_with_overrun(Controls.vertical_thrust_time, frametime, Controls.excess_vertical_thrust_time, MOUSE_REFERENCE_FRAMETIME * PlayerCfg.MouseOverrun[player_config_mouse_index::slide_ud]);
+	clamp_kconfig_control_with_overrun(Controls.sideways_thrust_time, frametime, Controls.excess_sideways_thrust_time, MOUSE_REFERENCE_FRAMETIME * PlayerCfg.MouseOverrun[player_config_mouse_index::slide_lr]);
+	clamp_kconfig_control_with_overrun(Controls.forward_thrust_time, frametime, Controls.excess_forward_thrust_time, MOUSE_REFERENCE_FRAMETIME * PlayerCfg.MouseOverrun[player_config_mouse_index::throttle]);
 	if (!allow_uncapped_turning())
 	{
 		auto pitch_frametime = frametime / LOCKED_PITCH_FACTOR;
 		if(release_pitch_lock()) {
 			pitch_frametime = frametime / FREE_PITCH_FACTOR;
 		}
-		clamp_kconfig_control_with_overrun(Controls.pitch_time, pitch_frametime, Controls.excess_pitch_time, frametime * PlayerCfg.MouseOverrun[player_config_mouse_index::pitch_ud]);
-		clamp_kconfig_control_with_overrun(Controls.heading_time, frametime, Controls.excess_heading_time, frametime * PlayerCfg.MouseOverrun[player_config_mouse_index::turn_lr]);
-		clamp_kconfig_control_with_overrun(Controls.bank_time, frametime, Controls.excess_bank_time, frametime * PlayerCfg.MouseOverrun[player_config_mouse_index::bank_lr]);
+		clamp_kconfig_control_with_overrun(Controls.pitch_time, pitch_frametime, Controls.excess_pitch_time, MOUSE_REFERENCE_FRAMETIME * PlayerCfg.MouseOverrun[player_config_mouse_index::pitch_ud]);
+		clamp_kconfig_control_with_overrun(Controls.heading_time, frametime, Controls.excess_heading_time, MOUSE_REFERENCE_FRAMETIME * PlayerCfg.MouseOverrun[player_config_mouse_index::turn_lr]);
+		clamp_kconfig_control_with_overrun(Controls.bank_time, frametime, Controls.excess_bank_time, MOUSE_REFERENCE_FRAMETIME * PlayerCfg.MouseOverrun[player_config_mouse_index::bank_lr]);
 	}
 }
 
