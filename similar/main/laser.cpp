@@ -706,7 +706,13 @@ static void do_omega_stuff(fvmsegptridx &vmsegptridx, const vmobjptridx_t parent
 			Omega_charge -= OMEGA_BASE_TIME;
 		else
 			Omega_charge = 0;
-		pl_info->Omega_recharge_delay = F1_0 / 3;
+		/* omega_charge_frame runs later in the same frame (after
+		 * FireLaser in GameProcessFrame) and subtracts this frame's
+		 * FrameTime from the delay, although that time passed before
+		 * the shot.  Add FrameTime, so that the recharge starts exactly
+		 * 1/3 second after the shot at any frame rate.
+		 */
+		pl_info->Omega_recharge_delay = F1_0 / 3 + FrameTime;
 	}
 }
 
