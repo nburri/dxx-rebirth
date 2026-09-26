@@ -43,7 +43,7 @@ Terminology:
   - Clients send PDATA and MDATA to `Netgame.players[0]` only
     (`net_udp_send_pdata`, `net_udp_send_mdata`).
   - `send_data_direct` refuses to send from a client to anyone except the host
-    (`Error("Client sent direct data to non-Host ...")`, `net_udp.cpp:5764`).
+    (`Error("Client sent direct data to non-Host ...")`, `net_udp.cpp:5837`).
   - The host forwards each client's PDATA and MDATA to all other clients
     (`net_udp_process_pdata`, `net_udp_process_mdata`). For MDATA the host keeps
     the original sender's player number in the packet header, so receivers see
@@ -191,7 +191,7 @@ info if the reactor is destroyed or fewer than 30 seconds of play time remain.
 2. The host answers each valid request with `game_info_lite`, at most 8 times
    per second across all requesters (`last_lite_req_time`, `net_udp.cpp:3419`).
 3. While a game runs, the host broadcasts `game_info_lite` every 10 seconds
-   (`do_protocol_frame`, `net_udp.cpp:5501`). The host also broadcasts it
+   (`do_protocol_frame`, `net_udp.cpp:5523`). The host also broadcasts it
    when the game starts, when the player list changes during `starting`, and
    when the host leaves (with `numplayers = 0`).
 4. The client keeps entries in `Active_udp_games`. An entry is matched by game
@@ -374,7 +374,7 @@ that player arrives (`net_udp_read_pdata_packet`), the host resends the `sync`
 every second (`net_udp_resend_sync_due_to_packet_loss`, called from
 `do_protocol_frame`).
 
-Then the host sends "extras" (`net_udp_send_extras`, `net_udp.cpp:6378`), one
+Then the host sends "extras" (`net_udp_send_extras`, `net_udp.cpp:6400`), one
 step per call and at most one step every 1/50 s, counting
 `Network_sending_extras` down:
 
@@ -408,10 +408,10 @@ disconnected player came back when that player's relayed `pdata` arrives with
 
 | What | Interval | Where |
 |---|---|---|
-| `pdata` (own ship) | `F1_0 / Netgame.PacketsPerSec` (default 30, allowed 5–40: `MIN_PPS` / `MAX_PPS`, `multi.h:155`). The schedule advances by one interval per send (restarting from the current time after a forced send, or when it is still one or more intervals behind after advancing, so that a backlog after a long frame is not caught up with packets in consecutive frames), so the average rate matches `PacketsPerSec` at any frame rate at or above it; before, it was reset to the send time, and at 60 fps 30 pps gave only 20 packets per second. Also forced by `multi_send_fire` (at most 20/s) and by `multi_send_effect_blowup`. | `do_protocol_frame`, `net_udp.cpp:5440` |
+| `pdata` (own ship) | `F1_0 / Netgame.PacketsPerSec` (default 30, allowed 5–40: `MIN_PPS` / `MAX_PPS`, `multi.h:155`). The schedule advances by one interval per send (restarting from the current time after a forced send, or when it is still one or more intervals behind after advancing, so that a backlog after a long frame is not caught up with packets in consecutive frames), so the average rate matches `PacketsPerSec` at any frame rate at or above it; before, it was reset to the send time, and at 60 fps 30 pps gave only 20 packets per second. Also forced by `multi_send_fire` (at most 20/s) and by `multi_send_effect_blowup`. | `do_protocol_frame`, `net_udp.cpp:5480` |
 | D2 thief position (`MULTI_ROBOT_POSITION`) | Same tick as `pdata` | `multi_send_thief_frame`, `multibot.cpp:445` |
-| D2 `MULTI_GUIDED` position | Same tick as `pdata`, but not when the tick is forced (`multi_send_fire` forces it before it queues `MULTI_FIRE`, so an update of a new missile would arrive before its fire message and move the sender's previous missile on the receiver), while the local player has an active guided missile and `Network_status` is `playing`. It is queued with priority 0 and sent at once in the same mdata packet as the thief position (priority 1), or flushed on its own (`net_udp_send_mdata`) if there is none. The final position is also sent when the missile is released (priority 0, immediately followed by the release message with priority 1, so both go out at once in one packet), and at priority 1 when the missile is removed in play (marked `OF_SHOULD_BE_DEAD`, `Network_status` `playing`; not by `clear_transient_objects` at a level change). Before this pacing, the position was sent every frame (priority 0) from `read_flying_controls`. | `multi_send_guided_frame` (called from `do_protocol_frame`), `multi_send_guided_release` (from `release_local_guided_missile`), `multi_send_guided_final_position` (from `obj_delete`) |
-| Robot frame and MDATA flush (unreliable) | Every 1/10 s | `net_udp.cpp:5479` |
+| D2 `MULTI_GUIDED` position | Every `F1_0 / Netgame.PacketsPerSec`, on its own schedule (advanced like the `pdata` one, but not restarted by forced sends, which can keep the `pdata` tick from coming while the player fires), while the local player has an active guided missile and `Network_status` is `playing`. Never sent from a forced `do_protocol_frame` call: `multi_send_fire` forces one before it queues `MULTI_FIRE`, so an update of a new missile would arrive before its fire message and move the sender's previous missile on the receiver. It is queued with priority 0 and sent at once, in the same mdata packet as the thief position (priority 1) if the `pdata` tick is in the same frame, or on its own (`net_udp_send_mdata`). The final position is also sent when the missile is released (priority 0, immediately followed by the release message with priority 1, so both go out at once in one packet), and at priority 1 when the missile is removed in play (marked `OF_SHOULD_BE_DEAD`, `Network_status` `playing`; not by `clear_transient_objects` at a level change). Before this pacing, the position was sent every frame (priority 0) from `read_flying_controls`. | `multi_send_guided_frame` (called from `do_protocol_frame`), `multi_send_guided_release` (from `release_local_guided_missile`), `multi_send_guided_final_position` (from `obj_delete`) |
+| Robot frame and MDATA flush (unreliable) | Every 1/10 s | `net_udp.cpp:5501` |
 | Reliable queue processing | Every protocol frame | `net_udp_noloss_process_queue` |
 | `ping` (host to clients) | Every second, host only (before this change, clients also sent it to their entries for players 1–7, whose addresses a client does not know, and every receiver discarded it) | `net_udp_ping_frame` |
 | Player timeout check | Every second (only when `listen` is set) | `net_udp_timeout_check` |
@@ -853,7 +853,7 @@ Game messages (section 5) are appended to a send buffer, `UDP_MData.mbuf`
 (`net_udp.cpp:5337`). If the new message does not fit, the buffer is first sent
 unreliably.
 
-`net_udp_send_mdata` (`net_udp.cpp:5803`) wraps the buffer:
+`net_udp_send_mdata` (`net_udp.cpp:5876`) wraps the buffer:
 
 | Offset | Size | Field |
 |---|---|---|
@@ -865,7 +865,7 @@ unreliably.
 Behaviour:
 
 - The host sends to every `playing` client. A client sends to the host.
-- On receive (`net_udp_process_mdata`, `net_udp.cpp:5858`):
+- On receive (`net_udp_process_mdata`, `net_udp.cpp:5931`):
   - The packet is dropped if the player number is ≥ `MAX_PLAYERS` or if the
     packet is longer than `sizeof(UDP_mdata_info)`.
   - The source address must match: on the host, the address of the slot in
@@ -899,7 +899,7 @@ priority 0, so that the second copy goes out with the next reliable message
 
 ### 4.4 Reliable delivery ("packet loss prevention", `mdata_pneedack`)
 
-Code: `net_udp.cpp:5547-5797`. It is enabled when `Netgame.PacketLossPrevention`
+Code: `net_udp.cpp:5569-5819`. It is enabled when `Netgame.PacketLossPrevention`
 is set (default 1, `net_udp.cpp:4463`).
 
 State:
@@ -921,7 +921,7 @@ Sending (`net_udp_noloss_add_queue_pkt`):
 - For each recipient that must acknowledge, the current `pkt_num_tosend` is
   recorded and then incremented.
 
-Receiving (`net_udp_noloss_validate_mdata`, `net_udp.cpp:5556`):
+Receiving (`net_udp_noloss_validate_mdata`, `net_udp.cpp:5629`):
 
 - The source address must be the expected peer.
 - If `pkt_num == pkt_num_torecv`, the receiver sends an ACK, stores the number
@@ -944,7 +944,7 @@ Receiving (`net_udp_noloss_validate_mdata`, `net_udp.cpp:5556`):
 `net_udp_noloss_got_ack` marks the queue entry whose originator and
 per-recipient `pkt_num` match.
 
-Resend and timeout (`net_udp_noloss_process_queue`, `net_udp.cpp:5651`), run
+Resend and timeout (`net_udp_noloss_process_queue`, `net_udp.cpp:5724`), run
 every protocol frame:
 
 - Recipients that are not `playing`, the local player, and (on clients)
@@ -969,7 +969,7 @@ every protocol frame:
 
 ### 4.5 Direct messages
 
-`dispatch_table::send_data_direct` (`net_udp.cpp:5755`) sends a single message
+`dispatch_table::send_data_direct` (`net_udp.cpp:5828`) sends a single message
 to one player at once, without the send buffer:
 
 - Layout: the MDATA header plus one message.
