@@ -66,6 +66,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "weapon.h"
 #include "gauges.h"
 #include "multi.h"
+#include "remote_smoothing.h"
 #include "text.h"
 #include "piggy.h"
 #include "switch.h"
@@ -331,7 +332,7 @@ void draw_object_tmap_rod(grs_canvas &canvas, const d_level_unique_light_state *
 namespace {
 
 //do special cloaked render
-static void draw_cloaked_object(grs_canvas &canvas, const object_base &obj, const g3s_lrgb light, glow_values_t glow, const fix64 cloak_start_time, const fix total_cloaked_time, const fix Cloak_fadein_duration, const fix Cloak_fadeout_duration)
+static void draw_cloaked_object(grs_canvas &canvas, const object_base &obj, const vms_vector &pos, const vms_matrix &orient, const g3s_lrgb light, glow_values_t glow, const fix64 cloak_start_time, const fix total_cloaked_time, const fix Cloak_fadein_duration, const fix Cloak_fadeout_duration)
 {
 	fix light_scale=F1_0;
 	int cloak_value{0};
@@ -408,8 +409,8 @@ static void draw_cloaked_object(grs_canvas &canvas, const object_base &obj, cons
 	auto &Polygon_models = LevelSharedPolygonModelState.Polygon_models;
 	if (fading) {
 		glow[0] = fixmul(glow[0],light_scale);
-		draw_polygon_model(Polygon_models, canvas, draw_tmap, obj.pos,
-				   obj.orient,
+		draw_polygon_model(Polygon_models, canvas, draw_tmap, pos,
+				   orient,
 				   obj.rtype.pobj_info.anim_angles,
 				   obj.rtype.pobj_info.model_num.dsx, obj.rtype.pobj_info.subobj_flags,
 				   g3s_lrgb{
@@ -423,8 +424,8 @@ static void draw_cloaked_object(grs_canvas &canvas, const object_base &obj, cons
 	else {
 		gr_settransblend(canvas, static_cast<gr_fade_level>(cloak_value), gr_blend::normal);
 		//use special flat drawer
-		draw_polygon_model(Polygon_models, canvas, draw_tmap_flat, obj.pos,
-				   obj.orient,
+		draw_polygon_model(Polygon_models, canvas, draw_tmap_flat, pos,
+				   orient,
 				   obj.rtype.pobj_info.anim_angles,
 				   obj.rtype.pobj_info.model_num.dsx, obj.rtype.pobj_info.subobj_flags,
 				   light,
@@ -436,7 +437,11 @@ static void draw_cloaked_object(grs_canvas &canvas, const object_base &obj, cons
 }
 
 //draw an object which renders as a polygon model
-static void draw_polygon_object(grs_canvas &canvas, const d_level_unique_light_state &LevelUniqueLightState, const vcobjptridx_t obj)
+//pos and orient are where to draw it.  They are obj->pos and obj->orient,
+//except for remote player ships, which are drawn at their smoothed pose
+//(see remote_smoothing.h).  Lighting still uses obj->segnum, so pos must be
+//inside that segment.
+static void draw_polygon_object(grs_canvas &canvas, const d_level_unique_light_state &LevelUniqueLightState, const vcobjptridx_t obj, const vms_vector &pos, const vms_matrix &orient)
 {
 	auto &BossUniqueState = LevelUniqueObjectState.BossState;
 	auto &Robot_info = LevelSharedRobotInfoState.Robot_info;
@@ -524,8 +529,8 @@ static void draw_polygon_object(grs_canvas &canvas, const d_level_unique_light_s
 
 		//fill whole array, in case simple model needs more
 		bm_ptrs.fill(Textures[tmap_override]);
-		draw_polygon_model(Polygon_models, canvas, draw_tmap, obj->pos,
-				   obj->orient,
+		draw_polygon_model(Polygon_models, canvas, draw_tmap, pos,
+				   orient,
 				   obj->rtype.pobj_info.anim_angles,
 				   obj->rtype.pobj_info.model_num.dsx,
 				   obj->rtype.pobj_info.subobj_flags,
@@ -593,10 +598,10 @@ static void draw_polygon_object(grs_canvas &canvas, const d_level_unique_light_s
 			if (is_weapon_with_inner_model != polygon_model_index::None)
 			{
 				gr_settransblend(canvas, GR_FADE_OFF, gr_blend::additive_a);
-				draw_simple_model = static_cast<fix>(vm_vec_dist_quick(Viewer->pos, obj->pos)) < Simple_model_threshhold_scale * F1_0*2;
+				draw_simple_model = static_cast<fix>(vm_vec_dist_quick(Viewer->pos, pos)) < Simple_model_threshhold_scale * F1_0*2;
 				if (draw_simple_model)
-					draw_polygon_model(Polygon_models, canvas, draw_tmap, obj->pos,
-							   obj->orient,
+					draw_polygon_model(Polygon_models, canvas, draw_tmap, pos,
+							   orient,
 							   obj->rtype.pobj_info.anim_angles,
 							   is_weapon_with_inner_model,
 							   obj->rtype.pobj_info.subobj_flags,
@@ -604,8 +609,8 @@ static void draw_polygon_object(grs_canvas &canvas, const d_level_unique_light_s
 							   &engine_glow_value,
 							   alt_textures);
 			}
-			draw_polygon_model(Polygon_models, canvas, draw_tmap, obj->pos,
-					   obj->orient,
+			draw_polygon_model(Polygon_models, canvas, draw_tmap, pos,
+					   orient,
 					   obj->rtype.pobj_info.anim_angles,obj->rtype.pobj_info.model_num.dsx,
 					   obj->rtype.pobj_info.subobj_flags,
 					   light,
@@ -618,8 +623,8 @@ static void draw_polygon_object(grs_canvas &canvas, const d_level_unique_light_s
 				{
 				gr_settransblend(canvas, GR_FADE_OFF, gr_blend::additive_a);
 				if (draw_simple_model)
-					draw_polygon_model(Polygon_models, canvas, draw_tmap, obj->pos,
-							   obj->orient,
+					draw_polygon_model(Polygon_models, canvas, draw_tmap, pos,
+							   orient,
 							   obj->rtype.pobj_info.anim_angles,
 							   is_weapon_with_inner_model,
 							   obj->rtype.pobj_info.subobj_flags,
@@ -631,7 +636,7 @@ static void draw_polygon_object(grs_canvas &canvas, const d_level_unique_light_s
 			}
 			return;
 		}
-		draw_cloaked_object(canvas, obj, light, engine_glow_value, cloak_duration.first, cloak_duration.second, cloak_fade.first, cloak_fade.second);
+		draw_cloaked_object(canvas, obj, pos, orient, light, engine_glow_value, cloak_duration.first, cloak_duration.second, cloak_fade.first, cloak_fade.second);
 	}
 }
 
@@ -828,7 +833,13 @@ void render_object(grs_canvas &canvas, const d_level_unique_light_state &LevelUn
 				gr_settransblend(canvas, gr_fade_level{10}, gr_blend::additive_a);
 			}
 #endif
-			draw_polygon_object(canvas, LevelUniqueLightState, obj);
+			{
+				/* Remote player ships are drawn at their smoothed pose.
+				 * For every other object, this is obj->pos / obj->orient.
+				 */
+				const auto pose{remote_smoothing_render_pose(obj)};
+				draw_polygon_object(canvas, LevelUniqueLightState, obj, pose.pos, pose.orient);
+			}
 
 			if (obj->type == object_type::OBJ_ROBOT) //"warn" robot if being shot at
 				set_robot_location_info(obj);

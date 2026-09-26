@@ -5354,6 +5354,7 @@ class DXXProgram(DXXCommon):
 'similar/main/player.cpp',
 'similar/main/polyobj.cpp',
 'similar/main/powerup.cpp',
+'similar/main/remote_smoothing.cpp',
 'similar/main/render.cpp',
 'similar/main/robot.cpp',
 'similar/main/scores.cpp',
