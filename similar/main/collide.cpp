@@ -1991,6 +1991,17 @@ void drop_player_eggs(const vmobjptridx_t playerobj)
 		}
 		auto &player_info = playerobj->ctype.player_info;
 		auto &plr_laser_level = player_info.laser_level;
+		/* The granted lasers and vulcan ammo are subtracted below to decide
+		 * what to drop, then restored.  The player's own machine sends
+		 * these values in MULTI_PLAYER_DERES after calling this function,
+		 * and every receiver calls this function on them again.  If the
+		 * subtraction were kept, receivers would subtract the grant a
+		 * second time and drop fewer items than the dying player's
+		 * machine.  The granted flags do not need to be restored, since
+		 * clearing them twice has no further effect.
+		 */
+		const auto original_laser_level{plr_laser_level};
+		const auto original_vulcan_ammo{player_info.vulcan_ammo};
 		if (const auto GrantedItems{+(Game_mode & GM_MULTI) ? (d_srand(5483L), Netgame.SpawnGrantedItems) : netgrant_flag::None})
 		{
 			if (const auto granted_laser_level = map_granted_flags_to_laser_level(GrantedItems); granted_laser_level != laser_level::_1)
@@ -2171,6 +2182,8 @@ void drop_player_eggs(const vmobjptridx_t playerobj)
 			call_object_create_egg(playerobj, powerup_type_t::POW_SHIELD_BOOST);
 			call_object_create_egg(playerobj, powerup_type_t::POW_ENERGY);
 		}
+		plr_laser_level = original_laser_level;
+		player_info.vulcan_ammo = original_vulcan_ammo;
 	}
 }
 
