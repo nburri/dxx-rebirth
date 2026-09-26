@@ -1644,11 +1644,19 @@ static void adjust_mouse_axis_field(fix &time, fix &mouse_time, const std::array
  * carried into the following frames, up to `mouse_carry_bound`, so that
  * the clamp limits only the rate of a mouse movement, not its total.
  * Whatever remains is subject to the user's overrun setting as before.
+ *
+ * The earlier carry is treated as spent at the full rate (`bound` per
+ * frame) whether or not the clamp had room for it, so that it expires
+ * within `mouse_carry_bound` of full-rate time even while another
+ * input keeps the control saturated.
  */
 static void clamp_kconfig_control_with_overrun(fix &value, const fix &bound, fix &excess, const fix &ebound, fix &mouse_carry, const fix mouse_time, const fix mouse_carry_bound)
 {
 	/* Assume no integer overflow here */
-	const auto mouse_value{mouse_time + mouse_carry};
+	const auto unspent_carry{mouse_carry > 0
+		? std::max<fix>(mouse_carry - bound, 0)
+		: std::min<fix>(mouse_carry + bound, 0)};
+	const auto mouse_value{mouse_time + unspent_carry};
 	value += excess + mouse_carry;
 	const auto ivalue{value};
 	clamp_symmetric_value(value, bound);
@@ -1948,7 +1956,12 @@ void kconfig_end_loop(control_info &Controls, const fix frametime)
 		adjust_mouse_axis_field(Controls.pitch_time, mouse_time.pitch_time, Controls.mouse_axis, kcm_mouse[dxx_kconfig_ui_kc_mouse_pitch_ud].value, kcm_mouse[dxx_kconfig_ui_kc_mouse_invert_pitch].value, PlayerCfg.MouseSens[player_config_mouse_index::pitch_ud]);
 #endif
 	}
-	else Controls.pitch_time = 0;
+	else
+	{
+		Controls.pitch_time = 0;
+		// Pitch is disabled; do not apply a pending mouse carry later.
+		Controls.mouse_carry.pitch_time = 0;
+	}
 
 
 	//----------- Read vertical_thrust_time -----------------
@@ -1996,7 +2009,12 @@ void kconfig_end_loop(control_info &Controls, const fix frametime)
 		adjust_mouse_axis_field(Controls.heading_time, mouse_time.heading_time, Controls.mouse_axis, kcm_mouse[dxx_kconfig_ui_kc_mouse_turn].value, !kcm_mouse[dxx_kconfig_ui_kc_mouse_invert_turn].value, PlayerCfg.MouseSens[player_config_mouse_index::turn_lr]);
 #endif
 	}
-	else Controls.heading_time = 0;
+	else
+	{
+		Controls.heading_time = 0;
+		// Turning is disabled; do not apply a pending mouse carry later.
+		Controls.mouse_carry.heading_time = 0;
+	}
 
 	//----------- Read sideways_thrust_time -----------------
 	if ( Controls.state.slide_on )
