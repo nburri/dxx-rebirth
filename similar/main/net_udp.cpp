@@ -1095,6 +1095,21 @@ static int udp_open_socket(RAIIsocket &sock, int port)
 #if DXX_USE_IPv6
 	sAddr.sin6.sin6_port = htons (port); // short, network byte order
 	sAddr.sin6.sin6_addr = IN6ADDR_ANY_INIT; // automatically fill with my IP
+	{
+		/* Accept and send IPv4 traffic on the IPv6 socket, using
+		 * IPv4-mapped addresses (::ffff:a.b.c.d), which udp_dns_filladdr
+		 * produces for IPv4 hosts.  Linux defaults to this, but Windows
+		 * defaults to IPV6_V6ONLY=1, which made IPv4 hosts unreachable
+		 * ("No response by host") and IPv4 clients unable to reach a
+		 * Windows host.
+		 */
+		int v6only{0};
+#ifdef _WIN32
+		setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY, reinterpret_cast<const char *>(&v6only), sizeof(v6only));
+#else
+		setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only));
+#endif
+	}
 #else
 	sAddr.sin.sin_port = htons (port); // short, network byte order
 	sAddr.sin.sin_addr.s_addr = INADDR_ANY; // automatically fill with my IP
