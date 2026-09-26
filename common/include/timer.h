@@ -29,6 +29,16 @@ static inline void timer_delay(fix seconds)
 	timer_delay_ms(f2i(seconds * 1000));
 }
 void timer_delay_bound(unsigned bound);
+/* Wait until the game timer reaches `deadline`, and return the timer
+ * value.  Used by the frame limiters of the game and the automap.
+ * While waiting, keep multiplayer packets flowing.
+ */
+fix64 timer_wait_frame(fix64 deadline);
+/* Return the minimum time between two frames of the game or the
+ * automap.
+ */
+[[nodiscard]]
+fix timer_get_frame_bound();
 static inline void timer_delay2(int fps)
 {
 	timer_delay_bound(1000u / fps);

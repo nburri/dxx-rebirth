@@ -646,28 +646,21 @@ void calc_frame_time()
 {
 	fix last_frametime = FrameTime;
 
-	const auto vsync{CGameCfg.VSync};
-	const auto bound = f1_0 / (likely(vsync) ? MAXIMUM_FPS : CGameArg.SysMaxFPS);
-	const auto may_sleep = !CGameArg.SysNoNiceFPS && !vsync;
-	const auto multiplayer{+(Game_mode & GM_MULTI)};
-	for (;;)
-	{
-		const auto timer_value = timer_update();
-		FrameTime = timer_value - last_timer_value;
-		if (FrameTime > 0 && timer_value - sync_timer_value >= bound)
-		{
-			last_timer_value = timer_value;
+	const auto bound{timer_get_frame_bound()};
+	fix64 timer_value;
+	/* Also wait until the timer advanced, so that FrameTime is
+	 * positive.  multi_do_frame() may reset the timer values while
+	 * waiting, so check them again after the wait.
+	 */
+	do {
+		timer_value = timer_wait_frame(std::max(sync_timer_value + bound, last_timer_value + 1));
+	} while (!(timer_value > last_timer_value && timer_value >= sync_timer_value + bound));
+	FrameTime = timer_value - last_timer_value;
+	last_timer_value = timer_value;
 
-			sync_timer_value += bound;
-			if (sync_timer_value + bound < timer_value) {
-				sync_timer_value = timer_value;
-			}
-			break;
-		}
-		if (multiplayer)
-			multi_do_frame(); // during long wait, keep packets flowing
-		if (may_sleep)
-			timer_delay_ms(1);
+	sync_timer_value += bound;
+	if (sync_timer_value + bound < timer_value) {
+		sync_timer_value = timer_value;
 	}
 
 	if ( cheats.turbo )
