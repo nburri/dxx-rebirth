@@ -132,6 +132,12 @@ static int check_collision_delayfunc_exec()
 }
 
 static fix64 Last_volatile_scrape_time;
+/* Last_volatile_scrape_time is also updated by water contacts, which do
+ * no damage.  Track the last time that volatile wall damage was applied
+ * separately, so that only volatile wall contacts count as continuous
+ * contact for the damage calculation.
+ */
+static fix64 Last_volatile_damage_time;
 static fix64 Last_volatile_scrape_sound_time;
 
 template <typename T, std::size_t V>
@@ -531,28 +537,40 @@ volatile_wall_result check_volatile_wall(const vmobjptridx_t obj, const unique_s
 				 * rounded up to whole frames, so it is between
 				 * DESIGNATED_GAME_FRAMETIME and DESIGNATED_GAME_FRAMETIME
 				 * + FrameTime.  Scale the damage by the time that
-				 * actually elapsed, so that the damage per second is the
-				 * same at any frame rate.
+				 * actually elapsed since the previous damage, so that the
+				 * damage per second is the same at any frame rate.
 				 *
 				 * If more time than that elapsed, or the timer went
 				 * backward, the player was not in contact on the previous
 				 * frame.  Apply the damage for one designated frame, or
 				 * for the current frame if that is longer, as before.
 				 */
+				const fix64 damage_elapsed_time{GameTime64 - Last_volatile_damage_time};
+				Last_volatile_damage_time = {GameTime64};
+				const fix nominal_damage_time{std::max<fix>(FrameTime, DESIGNATED_GAME_FRAMETIME)};
 				const fix damage_time{
-					(elapsed_time < 0 || elapsed_time > DESIGNATED_GAME_FRAMETIME + FrameTime)
-					? std::max<fix>(FrameTime, DESIGNATED_GAME_FRAMETIME)
-					: static_cast<fix>(elapsed_time)
+					(damage_elapsed_time < 0 || damage_elapsed_time > DESIGNATED_GAME_FRAMETIME + FrameTime)
+					? nominal_damage_time
+					: static_cast<fix>(damage_elapsed_time)
 				};
 				fix damage = fixmul(d, damage_time);
+				/* The palette flash is applied with the same frequency as
+				 * before, so keep its intensity based on the damage of
+				 * one nominal application.  Otherwise, the flash would
+				 * depend on the frame rate.
+				 */
+				fix flash_damage = fixmul(d, nominal_damage_time);
 
 #if DXX_BUILD_DESCENT == 2
 				if (GameUniqueState.Difficulty_level == Difficulty_level_type::_0)
+				{
 					damage /= 2;
+					flash_damage /= 2;
+				}
 #endif
 
 				apply_damage_to_player(obj, obj, damage, apply_damage_player::always);
-				PALETTE_FLASH_ADD(f2i(damage*4), 0, 0);	//flash red
+				PALETTE_FLASH_ADD(f2i(flash_damage*4), 0, 0);	//flash red
 			}
 
 			obj->mtype.phys_info.rotvel.x = (d_rand() - 16384)/2;
