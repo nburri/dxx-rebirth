@@ -297,6 +297,7 @@ struct player_hit_afterburner_powerup : player_hit_basic_sound_powerup<15, 15, 1
 		void pickup(player_flags &powerup_flags) const
 		{
 			Afterburner_charge = f1_0;
+			Local_player_rate_dividers.reset();
 			base_type::template pickup<player_flag>(powerup_flags);
 		}
 };

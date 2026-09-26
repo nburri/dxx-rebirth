@@ -61,6 +61,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "d_underlying_value.h"
 #include "partial_range.h"
 #include "homing.h"
+#include "controls.h"
 
 namespace {
 #ifdef NEWHOMER
@@ -547,6 +548,7 @@ static bool create_omega_blobs(d_level_unique_object_state &LevelUniqueObjectSta
 
 #define	MIN_OMEGA_CHARGE	(MAX_OMEGA_CHARGE/8)
 #define	OMEGA_CHARGE_SCALE	4			//	FrameTime / OMEGA_CHARGE_SCALE added to Omega_charge every frame.
+static_assert(decltype(local_player_rate_dividers::omega_charge)::divisor == OMEGA_CHARGE_SCALE);
 
 fix get_omega_energy_consumption(const fix delta_charge)
 {
@@ -563,9 +565,13 @@ void omega_charge_frame(player_info &player_info)
 {
 	if (!(player_info.primary_weapon_flags & HAS_PRIMARY_FLAG(primary_weapon_index::omega)))
 		return;
+	auto &omega_charge_divider = Local_player_rate_dividers.omega_charge;
 	auto &Omega_charge = player_info.Omega_charge;
 	if (Omega_charge >= MAX_OMEGA_CHARGE)
+	{
+		omega_charge_divider.reset();
 		return;
+	}
 
 	if (Player_dead_state != player_dead_state::no)
 		return;
@@ -589,24 +595,29 @@ void omega_charge_frame(player_info &player_info)
 		 * units are discarded every frame.  The loss is relative to
 		 * FrameTime, so it grows with the frame rate: at 500 fps
 		 * (FrameTime=131), the recharge was 2.3% slower than intended.
-		 * This function only runs for the local player, so a single
-		 * remainder is sufficient.  The energy consumption is derived from
-		 * the charge actually gained, so it follows automatically.
+		 * The remainder is discarded when the charge is full or the
+		 * energy is empty.  The energy consumption is derived from the
+		 * charge actually gained, so it follows automatically.
 		 */
-		static fix Omega_charge_remainder;
-		const auto charge_time{FrameTime + Omega_charge_remainder};
-		Omega_charge_remainder = charge_time % OMEGA_CHARGE_SCALE;
 		const auto old_omega_charge{Omega_charge};
-		Omega_charge += charge_time / OMEGA_CHARGE_SCALE;
-		if (Omega_charge > MAX_OMEGA_CHARGE)
+		Omega_charge += omega_charge_divider.take(FrameTime);
+		if (Omega_charge >= MAX_OMEGA_CHARGE)
 		{
 			Omega_charge = MAX_OMEGA_CHARGE;
-			Omega_charge_remainder = 0;
+			omega_charge_divider.reset();
 		}
 
 		const auto energy_used{get_omega_energy_consumption(Omega_charge - old_omega_charge)};
-		energy = (energy > energy_used) ? energy - energy_used : 0;
+		if (energy > energy_used)
+			energy -= energy_used;
+		else
+		{
+			energy = 0;
+			omega_charge_divider.reset();
+		}
 	}
+	else
+		omega_charge_divider.reset();
 }
 
 namespace {

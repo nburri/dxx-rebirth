@@ -2354,6 +2354,10 @@ int state_restore_all_sub(const d_level_shared_destructible_light_state &LevelSh
 			i = object_none;
 	}
 
+	/* The remainders of the per-frame divisions belong to the state of
+	 * the previous game, so discard them.
+	 */
+	Local_player_rate_dividers.reset();
 	if (version>=11) {
 		if (secret != secret_restore::survived)
 			Afterburner_charge = {PHYSFSX_readSXE32(fp, swap)};

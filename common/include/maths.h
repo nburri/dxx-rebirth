@@ -188,6 +188,36 @@ fixang fix_atan2 (fix cos, fix sin);
 [[nodiscard]]
 std::optional<int32_t> checkmuldiv(fix a, fix b, fix divisor);
 
+/* Divide a time (or any other per-frame amount) by a constant, carrying
+ * the remainder of the division into the next call.  Integer division
+ * of FrameTime discards up to Divisor - 1 fix units per frame, so the
+ * loss grows with the frame rate.  With the carry, the sum of the
+ * results is exact on average, regardless of how the time is split into
+ * frames.
+ *
+ * Users should call reset() whenever the result is capped or clamped, or
+ * the resource that it feeds is empty or full, so that a stale remainder
+ * is not carried into an unrelated interval.
+ */
+template <fix Divisor>
+struct fix_rate_divider
+{
+	static_assert(Divisor > 0);
+	static constexpr fix divisor{Divisor};
+	fix remainder{};
+	[[nodiscard]]
+	fix take(const fix amount)
+	{
+		const fix total{amount + remainder};
+		remainder = total % Divisor;
+		return total / Divisor;
+	}
+	void reset()
+	{
+		remainder = 0;
+	}
+};
+
 extern const std::array<uint8_t, 256> guess_table;
 extern const std::array<int16_t, 256> sincos_table;
 extern const std::array<ushort, 258> asin_table;
