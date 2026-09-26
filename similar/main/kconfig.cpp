@@ -1680,8 +1680,6 @@ void kconfig_read_controls(control_info &Controls, const d_event &event, int aut
 	}
 #endif
 
-	const auto frametime{FrameTime};
-
 	switch (event.type)
 	{
 		case event_type::key_command:
@@ -1805,18 +1803,15 @@ void kconfig_read_controls(control_info &Controls, const d_event &event, int aut
 				break;
 			if (PlayerCfg.MouseFlightSim)
 			{
+				/* Flight sim mode is position based: accumulate the
+				 * position here and convert it to a rate for the
+				 * current frame in kconfig_end_loop.
+				 */
 				const auto ax{event_mouse_get_delta(event)};
-				for (uint_fast32_t i = 0; i <= 2; i++)
+				for (auto &&[raw_mouse_axis, d] : zip(Controls.raw_mouse_axis, ax))
 				{
-					int mouse_null_value = (i==2?16:PlayerCfg.MouseFSDead*8);
-					Controls.raw_mouse_axis[i] += ax[i];
-					clamp_symmetric_value(Controls.raw_mouse_axis[i], MOUSEFS_DELTA_RANGE);
-					if (Controls.raw_mouse_axis[i] > mouse_null_value) 
-						Controls.mouse_axis[i] = (((Controls.raw_mouse_axis[i] - mouse_null_value) * MOUSEFS_DELTA_RANGE) / (MOUSEFS_DELTA_RANGE - mouse_null_value) * frametime) / MOUSEFS_DELTA_RANGE;
-					else if (Controls.raw_mouse_axis[i] < -mouse_null_value)
-						Controls.mouse_axis[i] = (((Controls.raw_mouse_axis[i] + mouse_null_value) * MOUSEFS_DELTA_RANGE) / (MOUSEFS_DELTA_RANGE - mouse_null_value) * frametime) / MOUSEFS_DELTA_RANGE;
-					else
-						Controls.mouse_axis[i] = 0;
+					raw_mouse_axis += d;
+					clamp_symmetric_value(raw_mouse_axis, MOUSEFS_DELTA_RANGE);
 				}
 			}
 			else
@@ -1846,7 +1841,28 @@ void kconfig_end_loop(control_info &Controls, const fix frametime)
 	 * rate rises.
 	 */
 	const fix mouse_reference_frametime{std::max<fix>(frametime, HIGH_FPS_REFERENCE_FRAMETIME)};
-	if (const auto delta = Controls.pending_mouse_delta.consume())
+	if (!(PlayerCfg.ControlType & CONTROL_USING_MOUSE))
+		Controls.mouse_axis = {};
+	else if (PlayerCfg.MouseFlightSim)
+	{
+		/* Flight sim mode is position based: the deflection is a rate,
+		 * like a joystick axis, so scale it by the time of the frame
+		 * that uses it.  Compute it every frame, so that a mouse held
+		 * still keeps turning at the same rate when the frame rate
+		 * changes.
+		 */
+		for (auto &&[i, mouse_axis, raw_mouse_axis] : enumerate(zip(Controls.mouse_axis, Controls.raw_mouse_axis)))
+		{
+			const int mouse_null_value = (i == 2 ? 16 : PlayerCfg.MouseFSDead * 8);
+			if (raw_mouse_axis > mouse_null_value)
+				mouse_axis = (((raw_mouse_axis - mouse_null_value) * MOUSEFS_DELTA_RANGE) / (MOUSEFS_DELTA_RANGE - mouse_null_value) * frametime) / MOUSEFS_DELTA_RANGE;
+			else if (raw_mouse_axis < -mouse_null_value)
+				mouse_axis = (((raw_mouse_axis + mouse_null_value) * MOUSEFS_DELTA_RANGE) / (MOUSEFS_DELTA_RANGE - mouse_null_value) * frametime) / MOUSEFS_DELTA_RANGE;
+			else
+				mouse_axis = 0;
+		}
+	}
+	else if (const auto delta = Controls.pending_mouse_delta.consume())
 	{
 		for (auto &&[raw_mouse_axis, d] : zip(Controls.raw_mouse_axis, *delta))
 			raw_mouse_axis = static_cast<fix>(std::clamp(d,
@@ -1856,10 +1872,9 @@ void kconfig_end_loop(control_info &Controls, const fix frametime)
 		Controls.mouse_axis[1] = (Controls.raw_mouse_axis[1] * mouse_reference_frametime) / 8;
 		Controls.mouse_axis[2] = (Controls.raw_mouse_axis[2] * mouse_reference_frametime);
 	}
-	else if (!PlayerCfg.MouseFlightSim)
+	else
 		/* No motion was reported during this frame, so the mouse must
-		 * not contribute anything.  Flight sim mode is position based
-		 * and keeps its value until the next motion event.
+		 * not contribute anything.
 		 */
 		Controls.mouse_axis = {};
 #if DXX_MAX_AXES_PER_JOYSTICK
