@@ -4637,7 +4637,10 @@ static void multi_do_drop_flag(const playernum_t pnum, const multiplayer_rspan<m
 	auto &vmobjptr = Objects.vmptr;
 	const auto powerup_id = static_cast<powerup_type_t>(buf[1]);
 	const objnum_t remote_objnum{GET_INTEL_SHORT(&buf[2])};
-	const auto seed{GET_INTEL_INT<int32_t>(&buf[6])};
+	/* multi_send_drop_flag writes the seed right after the object number.
+	 * Unlike MULTI_DROP_WEAPON, there is no ammo field before it.
+	 */
+	const auto seed{GET_INTEL_INT<int32_t>(&buf[4])};
 
 	auto &plrobj{*vmobjptr(vcplayerptr(pnum)->objnum)};
 

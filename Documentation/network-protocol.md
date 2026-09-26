@@ -1389,7 +1389,7 @@ Robot control (`multibot.cpp`):
 | `MULTI_GMODE_UPDATE` (39), 3 | 1 `team_vector`, 2 `Bounty_target` | Host only, every 2 s in team or bounty games. A new team vector re-colors ships. |
 | `MULTI_CAPTURE_BONUS` (56, D2), 2 | 1 player number (ignored) | +5 team kills and kills for the originator |
 | `MULTI_GOT_FLAG` (57, D2), 2 | 1 player number (ignored) | Sets `has_team_flag` on the originator. Followed by `MULTI_FLAGS`. |
-| `MULTI_DROP_FLAG` (58, D2), 8 | sender: 1 powerup id, 2–3 sender's object number, 4–7 seed. **The receiver reads the seed at 6–9** (see section 8). | Used for CTF flags and hoard orbs; `spit_powerup` with the seed |
+| `MULTI_DROP_FLAG` (58, D2), 8 | 1 powerup id, 2–3 sender's object number, 4–7 seed. (Before the fix in section 8, item 5, receivers read the seed at 6–9.) | Used for CTF flags and hoard orbs; `spit_powerup` with the seed |
 | `MULTI_ORB_BONUS` (60, D2), 3 | 1 player number (ignored), 2 orb count | Bonus `n(n+1)/2` |
 | `MULTI_GOT_ORB` (61, D2), 2 | 1 player number (ignored) | |
 
@@ -1541,14 +1541,13 @@ by reading the current code.
      extras (`multi_send_markers`): `multi_do_drop_marker` uses `pnum` = host
      for the marker slot (`multi.cpp:2375`).
 
-5. **`MULTI_DROP_FLAG` send and receive layouts disagree.**
-   `multi_send_drop_flag` writes the seed at offset 4
-   (`multi.cpp:4618-4631`). `multi_do_drop_flag` reads it at offset 6
-   (`multi.cpp:4640`). That read covers the last 2 bytes of the message and 2
-   bytes beyond its 8-byte length. Receivers therefore use a different seed in
-   `spit_powerup` than the sender, and the dropped flag or orb moves
-   differently on each machine. `MULTI_DROP_WEAPON`, which has a 2-byte ammo
-   field before the seed, does use offset 6 on both sides.
+5. **Fixed: `MULTI_DROP_FLAG` send and receive layouts disagreed.**
+   `multi_send_drop_flag` writes the seed at offset 4. `multi_do_drop_flag`
+   used to read it at offset 6, which covered the last 2 bytes of the message
+   and 2 bytes beyond its 8-byte length. Receivers therefore used a different
+   seed in `spit_powerup` than the sender, and a dropped flag or orb moved
+   differently on each machine. The receiver now reads offset 4. The wire
+   format is unchanged, so this also works with unpatched senders.
 
 6. **The D1/D2 request identifier is not checked.** The overload that compares
    `UDP_REQ_ID` (`net_udp.cpp:2631`) has no callers. `net_udp_process_packet`
