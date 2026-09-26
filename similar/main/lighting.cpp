@@ -49,6 +49,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "weapon.h"
 #include "powerup.h"
 #include "fvi.h"
+#include "physics.h"
 #include "object.h"
 #include "robot.h"
 #include "multi.h"
@@ -91,8 +92,7 @@ static void add_light_dot_square(g3s_lrgb &d, const g3s_lrgb &light, const fix &
 static fix compute_player_light_emission_intensity(const object_base &objp)
 {
 	auto &phys_info = objp.mtype.phys_info;
-	const auto drag = phys_info.drag;
-	const fix k = fixmuldiv(phys_info.mass, drag, (F1_0 - drag));
+	const fix k{compute_thrust_scale_holding_velocity(phys_info.mass, phys_info.drag)};
 	// smooth thrust value like set_thrust_from_velocity()
 	const auto sthrust{vm_vec_copy_scale(phys_info.velocity, k)};
 	return std::max(static_cast<fix>(vm_vec_mag_quick(sthrust) / 4), F2_0) + F0_5;

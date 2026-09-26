@@ -1033,15 +1033,48 @@ void phys_apply_rot(object &obj, const vms_vector &force_vec)
 
 namespace dcx {
 
+namespace {
+
+/* Return the thrust per unit of velocity that holds a velocity steady under
+ * the drag integration in `do_physics_sim`, at any frame rate, or 0 if no
+ * thrust can hold a velocity steady.  The steady state of that integration
+ * is `accel * steady_state_per_accel`, where `accel` is computed from the
+ * thrust as `fixmul(thrust, fixdiv(F1_0, mass))`.
+ */
+[[nodiscard]]
+static double compute_thrust_per_velocity(const fix mass, const fix drag)
+{
+	if (drag <= 0 || mass <= 0)
+		return 0;
+	const double steady_state_per_accel{build_drag_model(drag).steady_state_per_accel};
+	const fix inverse_mass{fixdiv(F1_0, mass)};
+	if (!(steady_state_per_accel > 0) || inverse_mass <= 0)
+		return 0;
+	return F1_0 / (steady_state_per_accel * inverse_mass);
+}
+
+}
+
+fix compute_thrust_scale_holding_velocity(const fix mass, const fix drag)
+{
+	return static_cast<fix>(std::min<double>(std::round(F1_0 * compute_thrust_per_velocity(mass, drag)), std::numeric_limits<fix>::max()));
+}
+
 //this routine will set the thrust for an object to a value that will
-//(hopefully) maintain the object's current velocity
+//maintain the object's current velocity
 void set_thrust_from_velocity(object_base &obj)
 {
 	Assert(obj.movement_source == object::movement_type::physics);
 	auto &phys_info = obj.mtype.phys_info;
-	phys_info.thrust = vm_vec_copy_scale(phys_info.velocity,
-		fixmuldiv(phys_info.mass, phys_info.drag, F1_0 - phys_info.drag)
-	);
+	const double thrust_per_velocity{compute_thrust_per_velocity(phys_info.mass, phys_info.drag)};
+	const auto scale{[thrust_per_velocity](const fix v) {
+		return static_cast<fix>(std::clamp<double>(std::round(v * thrust_per_velocity), std::numeric_limits<fix>::min(), std::numeric_limits<fix>::max()));
+	}};
+	phys_info.thrust = {
+		.x = scale(phys_info.velocity.x),
+		.y = scale(phys_info.velocity.y),
+		.z = scale(phys_info.velocity.z),
+	};
 }
 
 }
