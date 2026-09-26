@@ -97,6 +97,7 @@
 		1404A1EF1A92852D00843F81 /* playsave.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 14F8AB0C1A2D6320003AA93A /* playsave.cpp */; };
 		1404A1F01A92852D00843F81 /* polyobj.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 14F8AB0D1A2D6320003AA93A /* polyobj.cpp */; };
 		1404A1F11A92852D00843F81 /* powerup.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 14F8AB0E1A2D6320003AA93A /* powerup.cpp */; };
+		5A1E5A0100000000000000A1 /* remote_smoothing.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 5A1E5A0100000000000000A2 /* remote_smoothing.cpp */; };
 		1404A1F21A92852D00843F81 /* render.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 14F8AB0F1A2D6320003AA93A /* render.cpp */; };
 		1404A1F31A92852D00843F81 /* robot.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 14F8AB101A2D6320003AA93A /* robot.cpp */; };
 		1404A1F41A92852D00843F81 /* scores.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 14F8AB111A2D6320003AA93A /* scores.cpp */; };
@@ -401,6 +402,7 @@
 		14F8A9DF1A2D6320003AA93A /* playsave.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = playsave.h; sourceTree = "<group>"; };
 		14F8A9E01A2D6320003AA93A /* polyobj.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = polyobj.h; sourceTree = "<group>"; };
 		14F8A9E11A2D6320003AA93A /* powerup.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = powerup.h; sourceTree = "<group>"; };
+		5A1E5A0100000000000000A3 /* remote_smoothing.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = remote_smoothing.h; sourceTree = "<group>"; };
 		14F8A9E21A2D6320003AA93A /* render.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = render.h; sourceTree = "<group>"; };
 		14F8A9E31A2D6320003AA93A /* render_state.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = render_state.h; sourceTree = "<group>"; };
 		14F8A9E41A2D6320003AA93A /* robot.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = robot.h; sourceTree = "<group>"; };
@@ -639,6 +641,7 @@
 		14F8AB0C1A2D6320003AA93A /* playsave.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = playsave.cpp; sourceTree = "<group>"; };
 		14F8AB0D1A2D6320003AA93A /* polyobj.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = polyobj.cpp; sourceTree = "<group>"; };
 		14F8AB0E1A2D6320003AA93A /* powerup.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = powerup.cpp; sourceTree = "<group>"; };
+		5A1E5A0100000000000000A2 /* remote_smoothing.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = remote_smoothing.cpp; sourceTree = "<group>"; };
 		14F8AB0F1A2D6320003AA93A /* render.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = render.cpp; sourceTree = "<group>"; };
 		14F8AB101A2D6320003AA93A /* robot.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = robot.cpp; sourceTree = "<group>"; };
 		14F8AB111A2D6320003AA93A /* scores.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = scores.cpp; sourceTree = "<group>"; };
@@ -1056,6 +1059,7 @@
 				14F8A9DF1A2D6320003AA93A /* playsave.h */,
 				14F8A9E01A2D6320003AA93A /* polyobj.h */,
 				14F8A9E11A2D6320003AA93A /* powerup.h */,
+				5A1E5A0100000000000000A3 /* remote_smoothing.h */,
 				14F8A9E31A2D6320003AA93A /* render_state.h */,
 				14F8A9E21A2D6320003AA93A /* render.h */,
 				14F8A9E41A2D6320003AA93A /* robot.h */,
@@ -1577,6 +1581,7 @@
 				14F8AB0C1A2D6320003AA93A /* playsave.cpp */,
 				14F8AB0D1A2D6320003AA93A /* polyobj.cpp */,
 				14F8AB0E1A2D6320003AA93A /* powerup.cpp */,
+				5A1E5A0100000000000000A2 /* remote_smoothing.cpp */,
 				14F8AB0F1A2D6320003AA93A /* render.cpp */,
 				14F8AB101A2D6320003AA93A /* robot.cpp */,
 				14F8AB111A2D6320003AA93A /* scores.cpp */,
@@ -1925,6 +1930,7 @@
 				1404A1EF1A92852D00843F81 /* playsave.cpp in Sources */,
 				1404A1F01A92852D00843F81 /* polyobj.cpp in Sources */,
 				1404A1F11A92852D00843F81 /* powerup.cpp in Sources */,
+				5A1E5A0100000000000000A1 /* remote_smoothing.cpp in Sources */,
 				1404A1F21A92852D00843F81 /* render.cpp in Sources */,
 				1404A1F31A92852D00843F81 /* robot.cpp in Sources */,
 				1404A1F41A92852D00843F81 /* scores.cpp in Sources */,
