@@ -1066,7 +1066,7 @@ static void multi_compute_kill(const d_robot_info_array &Robot_info, const imobj
 
 window_event_result multi_do_frame()
 {
-	static d_time_fix lasttime;
+	static int last_heartbeat_second = -1;
 	static fix64 last_gmode_time = 0, last_inventory_time = 0, last_repo_time = 0;
 
 	if (!(Game_mode & GM_MULTI) || Newdemo_state == ND_STATE_PLAYBACK)
@@ -1075,7 +1075,11 @@ window_event_result multi_do_frame()
 		return window_event_result::ignored;
 	}
 
-	if (+(Game_mode & GM_NETWORK) && Netgame.PlayTimeAllowed.count() && lasttime != ThisLevelTime)
+	/* The receiver only uses the heartbeat to correct its own level time,
+	 * which it advances every frame.  Send it when the second changes, not
+	 * every frame, so that the rate does not scale with the frame rate.
+	 */
+	if (const auto this_level_second{f2i(ThisLevelTime.count())}; +(Game_mode & GM_NETWORK) && Netgame.PlayTimeAllowed.count() && last_heartbeat_second != this_level_second)
 	{
 		for (unsigned i = 0; i < N_players; ++i)
 			if (vcplayerptr(i)->connected != player_connection_status::disconnected)
@@ -1083,7 +1087,7 @@ window_event_result multi_do_frame()
 				if (i==Player_num)
 				{
 					multi_send_heartbeat();
-					lasttime = ThisLevelTime;
+					last_heartbeat_second = this_level_second;
 				}
 				break;
 			}

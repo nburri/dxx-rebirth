@@ -415,7 +415,7 @@ disconnected player came back when that player's relayed `pdata` arrives with
 | `game_info_lite` broadcast and tracker register (host) | Every 10 s | `do_protocol_frame` |
 | `MULTI_PLAYER_INV` (priority 0) | 3 times per second | `multi_do_frame`, `multi.cpp:1101` |
 | `MULTI_GMODE_UPDATE` (host, team or bounty games) | Every 2 s | `multi_do_frame` |
-| `MULTI_HEARTBEAT` | Every frame in which `ThisLevelTime` changed, sent by the lowest-numbered connected player, only if there is a time limit | `multi_do_frame`, `multi.cpp:1078` |
+| `MULTI_HEARTBEAT` | Once per second (each frame in which the whole-second value of `ThisLevelTime` changed; before this change, every frame), sent by the lowest-numbered connected player, only if there is a time limit | `multi_do_frame`, `multi.cpp:1082` |
 | Powerup respawn (`MultiLevelInv_Repopulate`) | Every 1/2 s, host only, non-coop | `multi.cpp:5544` |
 
 `do_protocol_frame` is called from `multi_do_frame` every game frame with
@@ -1330,7 +1330,8 @@ trigger number. The receiver rejects triggers whose originator is itself.
 | 3 | 1 | Player who destroyed it |
 
 **`MULTI_HEARTBEAT` (35), 5 bytes.** Bytes 1–4: `ThisLevelTime` (fix). The
-receiver overwrites its own level time.
+receiver overwrites its own level time, which it then keeps advancing by its
+own frame time (`GameProcessFrame`), so the message only corrects drift.
 
 **`MULTI_HOSTAGE_DOOR` (32), 7 bytes.** Bytes 1–2: wall number. Bytes 3–6:
 hit points (fix). The receiver damages the wall down to that value.
