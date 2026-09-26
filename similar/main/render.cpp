@@ -81,7 +81,7 @@ using std::max;
 
 // (former) "detail level" values
 #if DXX_USE_OGL
-int Render_depth = MAX_RENDER_SEGS; //how many segments deep to render
+int Render_depth = MAX_SEGMENTS; //how many segments deep to render
 #else
 int Render_depth{20}; //how many segments deep to render
 unsigned Max_linear_depth{50}; // Deepest segment at which linear interpolation will be used.
@@ -1383,6 +1383,14 @@ static void build_segment_list(render_state_t &rstate, const vms_vector &Viewer_
 	auto &vcvertptr = Vertices.vcptr;
 	auto &Walls = LevelUniqueWallSubsystemState.Walls;
 	auto &vcwallptr = Walls.vcptr;
+	/* Number of list entries not yet processed.  Each pass rescans the
+	 * whole list, since a segment whose window was expanded is marked for
+	 * reprocessing.  Once nothing is left to process, no later pass would
+	 * change anything, so the loop stops instead of scanning the list
+	 * again up to Render_depth times per frame.  The start segment is the
+	 * first unprocessed entry.
+	 */
+	unsigned unprocessed{1};
 	for (l=0;l<Render_depth;l++) {
 		for (scnt=0;scnt < ecnt;scnt++) {
 			auto segnum = rstate.Render_list[scnt];
@@ -1399,6 +1407,7 @@ static void build_segment_list(render_state_t &rstate, const vms_vector &Viewer_
 			const auto &check_w = srsm.render_window;
 
 			processed = true;
+			-- unprocessed;
 
 			const auto &&seg = vcsegptridx(segnum);
 			const auto uor = rotate_list(vcvertptr, seg->verts).uor & clipping_code::behind;
@@ -1495,8 +1504,11 @@ static void build_segment_list(render_state_t &rstate, const vms_vector &Viewer_
 
 									{
 										//no_render_flag[lcnt] = 1;
-										rstate.render_seg_map[ch].processed = false;		//force reprocess
-										rstate.Render_list[lcnt] = segment_none;
+										if (auto &reprocess = rstate.render_seg_map[ch].processed; reprocess)
+										{
+											reprocess = false;		//force reprocess
+											++ unprocessed;
+										}
 										old_w = nw;		//get updated window
 										goto no_add;
 									}
@@ -1511,7 +1523,7 @@ static void build_segment_list(render_state_t &rstate, const vms_vector &Viewer_
 								chrsm.render_window = nw;
 							}
 							lcnt++;
-							if (lcnt >= MAX_RENDER_SEGS) {goto done_list;}
+							++ unprocessed;
 							visited[ch] = 1;
 no_add:
 	;
@@ -1524,9 +1536,13 @@ no_add:
 
 		scnt = ecnt;
 		ecnt = lcnt;
+		/* Stop as soon as no entry is left to process, instead of running a
+		 * confirming pass over the whole list.
+		 */
+		if (!unprocessed)
+			break;
 
 	}
-done_list:
 
 	first_terminal_seg = scnt;
 	rstate.N_render_segs = lcnt;
