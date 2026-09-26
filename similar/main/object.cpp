@@ -1417,11 +1417,13 @@ void obj_delete(d_level_unique_object_state &LevelUniqueObjectState, segment_arr
 			LevelUniqueObjectState.Guided_missile.clear_player_active_guided_missile(pnum);
 			if (pnum == Player_num)
 			{
-				/* Position updates are paced by multi_send_guided_frame,
-				 * so send the final position of the missile.
+				/* Position updates are paced, so send the final position
+				 * of the missile if it was removed in play
+				 * (obj_delete_all_that_should_be_dead), but not when it is
+				 * removed by clear_transient_objects at a level change.
 				 */
-				if (+(Game_mode & GM_MULTI) && Newdemo_state != ND_STATE_PLAYBACK)
-					multi_send_guided_info(obj, 0);
+				if (+(Game_mode & GM_MULTI) && Newdemo_state != ND_STATE_PLAYBACK && (obj->flags & OF_SHOULD_BE_DEAD))
+					multi_send_guided_final_position(obj);
 				if (!PlayerCfg.GuidedInBigWindow)
 					do_cockpit_window_view(gauge_inset_window_view::secondary, weapon_box_user::post_missile_static);
 				if (Newdemo_state == ND_STATE_RECORDING)

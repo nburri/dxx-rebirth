@@ -4030,13 +4030,41 @@ shortpos create_shortpos_little(const d_level_shared_segment_state &LevelSharedS
 
 }
 
-void multi_send_guided_info(const object_base &miss, const char done)
+namespace {
+
+static void multi_send_guided_info(const object_base &miss, const uint8_t release, const multiplayer_data_priority priority)
 {
 	multi_guided_info gi;
 	gi.pnum = static_cast<uint8_t>(Player_num);
-	gi.release = done;
+	gi.release = release;
 	gi.sp = create_shortpos_little(LevelSharedSegmentState, miss);
-	multi_serialize_write(multiplayer_data_priority::_0, gi);
+	multi_serialize_write(priority, gi);
+}
+
+}
+
+void multi_send_guided_release(const object_base &miss)
+{
+	/* Position updates are paced by multi_send_guided_frame, and the
+	 * receiver ignores the position in a release message, so send the
+	 * final position before the release.  The release flushes both at
+	 * once, like the paced updates, so that the receiver does not get the
+	 * final position after it moved the missile past that position.
+	 */
+	multi_send_guided_info(miss, 0, multiplayer_data_priority::_0);
+	multi_send_guided_info(miss, 1, multiplayer_data_priority::_1);
+}
+
+void multi_send_guided_final_position(const object_base &miss)
+{
+	/* Called when the local player's active guided missile is removed in
+	 * play.  Position updates are paced by multi_send_guided_frame, so send
+	 * the final position, at once like the paced updates.  Do not send
+	 * anything when the level is being torn down.
+	 */
+	if (Network_status != network_state::playing)
+		return;
+	multi_send_guided_info(miss, 0, multiplayer_data_priority::_1);
 }
 
 void multi_send_guided_frame(const object_base &miss)
@@ -4048,7 +4076,7 @@ void multi_send_guided_frame(const object_base &miss)
 	 * only adds redundant updates at high frame rates, so pace the updates
 	 * to the position packet rate (Netgame.PacketsPerSec) instead.  A new
 	 * missile is reported immediately.  The final state is sent by
-	 * release_local_guided_missile and obj_delete.
+	 * multi_send_guided_release and multi_send_guided_final_position.
 	 */
 	static object_signature_t last_signature;
 	static fix64 next_send_time;
@@ -4070,15 +4098,11 @@ void multi_send_guided_frame(const object_base &miss)
 	 */
 	if (next_send_time <= now)
 		next_send_time = now + interval;
-	multi_guided_info gi;
-	gi.pnum = static_cast<uint8_t>(Player_num);
-	gi.release = 0;
-	gi.sp = create_shortpos_little(LevelSharedSegmentState, miss);
 	/* Send the update now, rather than waiting up to 100ms for the next
 	 * regular mdata packet, so that remote players see the missile steer at
 	 * the full paced rate.
 	 */
-	multi_serialize_write(multiplayer_data_priority::_1, gi);
+	multi_send_guided_info(miss, 0, multiplayer_data_priority::_1);
 }
 
 namespace {
