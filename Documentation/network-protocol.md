@@ -805,8 +805,8 @@ user (`udp_tracker_verify_ack_timeout`).
 
 ### 4.1 PDATA: ship position
 
-`net_udp_send_pdata` (`net_udp.cpp:5923`). `net_udp_process_pdata` /
-`net_udp_read_pdata_packet` (`net_udp.cpp:5968`, `6025`).
+`net_udp_send_pdata` (`net_udp.cpp:5939`). `net_udp_process_pdata` /
+`net_udp_read_pdata_packet` (`net_udp.cpp:5984`, `6041`).
 
 | Offset | Size | Field |
 |---|---|---|
@@ -846,7 +846,9 @@ This is the 46-byte `quaternionpos` encoding (`object.h:225`) built with
   (`remote_smoothing.cpp`). The receiver stores the difference between the
   position and orientation at which the ship was drawn and the new state.
   The ship and its HUD name label are drawn with this difference added, and
-  the difference decays with a time constant of 75 ms. The receiver snaps
+  the difference decays with a time constant of 75 ms. The drawn position is
+  kept inside the object's segment, because the object is drawn and lit from
+  that segment. The receiver snaps
   instead of smoothing if the position difference is more than 20 units, the
   forward or up axis differs by more than 60°, or the new segment is not the
   old segment or a neighbour of it. The difference is also cleared when the
@@ -1095,8 +1097,8 @@ read the byte.
 
 #### Movement
 
-**`MULTI_POSITION` (0), 47 bytes.** `multi_send_position` (`multi.cpp:2815`),
-`multi_do_position` (`multi.cpp:1753`). Applies to the originator's ship. As
+**`MULTI_POSITION` (0), 47 bytes.** `multi_send_position` (`multi.cpp:2842`),
+`multi_do_position` (`multi.cpp:1754`). Applies to the originator's ship. As
 for `pdata`, only the drawing of the ship is smoothed (4.1).
 
 | Offset | Size | Field |

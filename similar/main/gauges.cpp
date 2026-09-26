@@ -3714,7 +3714,7 @@ void show_HUD_names(const d_robot_info_array &Robot_info, grs_canvas &canvas, co
 			/* Label the ship where it is drawn, not where it is
 			 * authoritatively, so the label does not jerk.
 			 */
-			auto player_point = g3_rotate_point(remote_smoothing_render_pos(objp));
+			auto player_point = g3_rotate_point(remote_smoothing_render_pose(objp).pos);
 			if (player_point.p3_codes == clipping_code::None) //on screen
 			{
 				g3_project_point(player_point);

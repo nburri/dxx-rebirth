@@ -17,7 +17,9 @@
  * state: when an update is applied, the difference between where the
  * ship was being drawn and where it now is ("visual error") is recorded,
  * and when the ship is drawn, that error is added back and decays
- * exponentially towards zero.  Only drawing uses the smoothed values.
+ * exponentially towards zero.  Only drawing uses the smoothed values,
+ * which are passed to the drawing code; the object itself is never
+ * modified.
  * Physics, collisions, hit detection, sounds and network sends keep using
  * obj->pos / obj->orient unchanged.
  */
@@ -33,13 +35,19 @@
 #ifdef DXX_BUILD_DESCENT
 namespace dsx {
 
+/* Where to draw an object. */
+struct remote_smoothing_pose
+{
+	vms_vector pos;
+	vms_matrix orient;
+};
+
 /* Snapshot of a remote player's drawn state, taken immediately before
  * an authoritative update overwrites the object.
  */
 struct remote_smoothing_pre_update
 {
-	vms_vector rendered_pos;
-	vms_matrix rendered_orient;
+	remote_smoothing_pose rendered;
 	segnum_t segnum;
 	/* False if the object was not in a state where smoothing applies
 	 * (for example, it was a ghost).  In that case, the update snaps.
@@ -65,28 +73,13 @@ remote_smoothing_pre_update remote_smoothing_begin_update(playernum_t pnum, vcob
  */
 void remote_smoothing_end_update(playernum_t pnum, vcobjptridx_t obj, const remote_smoothing_pre_update &pre);
 
-/* Position at which the object should be drawn.  For anything other than
- * a smoothed remote player ship, this is obj->pos.
+/* Pose at which the object should be drawn.  For anything other than a
+ * smoothed remote player ship, this is obj->pos / obj->orient.  The
+ * returned position always lies inside obj->segnum, so the segment-based
+ * render lists, draw order and lighting stay consistent with it.
  */
 [[nodiscard]]
-vms_vector remote_smoothing_render_pos(vcobjptridx_t obj);
-
-/* Temporarily replace obj->pos / obj->orient with the smoothed values for
- * the lifetime of this guard, then restore the authoritative values.  Use
- * this only around pure drawing code.
- */
-class remote_smoothing_render_guard
-{
-	object &obj;
-	vms_vector saved_pos;
-	vms_matrix saved_orient;
-	bool active;
-public:
-	explicit remote_smoothing_render_guard(vmobjptridx_t obj);
-	remote_smoothing_render_guard(const remote_smoothing_render_guard &) = delete;
-	remote_smoothing_render_guard &operator=(const remote_smoothing_render_guard &) = delete;
-	~remote_smoothing_render_guard();
-};
+remote_smoothing_pose remote_smoothing_render_pose(vcobjptridx_t obj);
 
 }
 #endif

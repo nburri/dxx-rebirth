@@ -21,12 +21,17 @@
  * ship is drawn, so it is independent of the frame rate and needs no
  * per-frame bookkeeping.
  *
+ * The object is drawn from the object list of its authoritative segment,
+ * and lit from that segment.  To keep that consistent, the smoothed
+ * position is clamped so that it never leaves obj->segnum.
+ *
  */
 
-#include <algorithm>
 #include <cmath>
+#include <optional>
 #include "remote_smoothing.h"
 #include "game.h"
+#include "gameseg.h"
 #include "object.h"
 #include "player.h"
 #include "segment.h"
@@ -121,26 +126,55 @@ fix remote_smoothing_weight(const remote_smoothing_state &s)
 	return static_cast<fix>(F1_0 * std::exp(-static_cast<double>(dt) / static_cast<double>(remote_smoothing_time_constant)));
 }
 
-/* Map a vector from the local frame of m to world space. */
-vms_vector remote_smoothing_local_to_world(const vms_matrix &m, const vms_vector &l)
+/* Steps of the bisection that clamps the smoothed position into the
+ * object's segment.  Six steps resolve the offset to 1/64 of its length,
+ * which is at most 0.3 units for the largest admitted error.
+ */
+constexpr unsigned remote_smoothing_clamp_steps{6};
+
+bool remote_smoothing_point_in_segment(fvcvertptr &vcvertptr, const shared_segment &seg, const vms_vector &p)
 {
-	auto v{vm_vec_copy_scale(m.rvec, l.x)};
-	vm_vec_scale_add2(v, m.uvec, l.y);
-	vm_vec_scale_add2(v, m.fvec, l.z);
-	return v;
+	return get_seg_masks(vcvertptr, p, seg, 0).centermask == sidemask_t{};
 }
 
-vms_vector remote_smoothing_pos(const vms_vector &pos, const remote_smoothing_state &s, const fix w)
+/* Return pos + offset, shortened as little as necessary so that it stays
+ * inside the segment of obj.  The segment is convex enough that the
+ * points along the offset are inside up to some fraction and outside
+ * beyond it, so a bisection finds the largest usable fraction.  pos
+ * itself is the authoritative position, which is the fallback.
+ */
+vms_vector remote_smoothing_clamp_to_segment(const vcobjptridx_t obj, const vms_vector &offset)
 {
-	return vm_vec_scale_add(pos, s.pos_error, w);
+	auto &vcvertptr = LevelSharedSegmentState.get_vertex_state().get_vertices().vcptr;
+	const shared_segment &seg = *vcsegptr(obj->segnum);
+	const auto &pos = obj->pos;
+	if (const auto p{vm_vec_build_add(pos, offset)}; remote_smoothing_point_in_segment(vcvertptr, seg, p))
+		return p;
+	fix inside{0}, outside{F1_0};
+	for (unsigned i = remote_smoothing_clamp_steps; i--;)
+	{
+		const fix mid{(inside + outside) / 2};
+		if (remote_smoothing_point_in_segment(vcvertptr, seg, vm_vec_scale_add(pos, offset, mid)))
+			inside = mid;
+		else
+			outside = mid;
+	}
+	return vm_vec_scale_add(pos, offset, inside);
 }
 
-vms_matrix remote_smoothing_orient(const vms_matrix &m, const remote_smoothing_state &s, const fix w)
+/* The smoothed pose of remote player pnum, or nothing if there is no
+ * remaining error.  The caller must have checked that obj is eligible.
+ */
+std::optional<remote_smoothing_pose> remote_smoothing_smoothed_pose(const playernum_t pnum, const vcobjptridx_t obj)
 {
-	/* Blend the local error axes towards the identity axes, then
-	 * re-orthonormalize.  For the small angles admitted by
-	 * remote_smoothing_min_axis_dot, this is a good approximation of a
-	 * spherical interpolation.
+	auto &s = remote_smoothing_states[pnum];
+	const auto w{remote_smoothing_weight(s)};
+	if (!w)
+		return std::nullopt;
+	/* Blend the local error axes towards the identity axes, then map them
+	 * to world space and re-orthonormalize.  For the small angles
+	 * admitted by remote_smoothing_min_axis_dot, this is a good
+	 * approximation of a spherical interpolation.
 	 */
 	const fix rest{F1_0 - w};
 	const vms_vector lf{
@@ -153,15 +187,19 @@ vms_matrix remote_smoothing_orient(const vms_matrix &m, const remote_smoothing_s
 		.y = fixmul(s.local_uvec.y, w) + rest,
 		.z = fixmul(s.local_uvec.z, w),
 	};
-	return vm_vector_to_matrix_u(remote_smoothing_local_to_world(m, lf), remote_smoothing_local_to_world(m, lu));
+	const auto local_to_world{vm_transposed_matrix(obj->orient)};
+	return remote_smoothing_pose{
+		.pos = remote_smoothing_clamp_to_segment(obj, vm_vec_copy_scale(s.pos_error, w)),
+		.orient = vm_vector_to_matrix_u(vm_vec_build_rotated(lf, local_to_world), vm_vec_build_rotated(lu, local_to_world)),
+	};
 }
 
-bool remote_smoothing_segments_adjacent(const vcobjptridx_t obj, const segnum_t old_segnum)
+remote_smoothing_pose remote_smoothing_authoritative_pose(const object_base &obj)
 {
-	if (old_segnum == obj->segnum)
-		return true;
-	auto &children = vcsegptr(obj->segnum)->children;
-	return std::ranges::find(children, old_segnum) != children.end();
+	return {
+		.pos = obj.pos,
+		.orient = obj.orient,
+	};
 }
 
 }
@@ -174,22 +212,13 @@ void remote_smoothing_reset(const playernum_t pnum)
 
 remote_smoothing_pre_update remote_smoothing_begin_update(const playernum_t pnum, const vcobjptridx_t obj)
 {
-	remote_smoothing_pre_update pre{
-		.rendered_pos = obj->pos,
-		.rendered_orient = obj->orient,
+	const bool valid{remote_smoothing_enabled() && remote_smoothing_eligible(pnum, obj)};
+	const auto smoothed{valid ? remote_smoothing_smoothed_pose(pnum, obj) : std::nullopt};
+	return {
+		.rendered = smoothed ? *smoothed : remote_smoothing_authoritative_pose(obj),
 		.segnum = obj->segnum,
-		.valid = remote_smoothing_enabled() && remote_smoothing_eligible(pnum, obj),
+		.valid = valid,
 	};
-	if (pre.valid)
-	{
-		auto &s = remote_smoothing_states[pnum];
-		if (const auto w{remote_smoothing_weight(s)})
-		{
-			pre.rendered_pos = remote_smoothing_pos(obj->pos, s, w);
-			pre.rendered_orient = remote_smoothing_orient(obj->orient, s, w);
-		}
-	}
-	return pre;
 }
 
 void remote_smoothing_end_update(const playernum_t pnum, const vcobjptridx_t obj, const remote_smoothing_pre_update &pre)
@@ -197,21 +226,22 @@ void remote_smoothing_end_update(const playernum_t pnum, const vcobjptridx_t obj
 	if (pnum >= MAX_PLAYERS)
 		return;
 	auto &s = remote_smoothing_states[pnum];
-	/* Snap unless every check below passes. */
+	/* Snap unless every check below passes.  pre.valid implies that
+	 * smoothing was enabled.
+	 */
 	s.active = false;
-	if (!pre.valid || !remote_smoothing_enabled() || !remote_smoothing_eligible(pnum, obj))
+	if (!pre.valid || !remote_smoothing_eligible(pnum, obj))
 		return;
 	/* Only smooth across the same or a directly connected segment.
-	 * Anything else is a jump (or the ship would be drawn through a
-	 * wall).
+	 * Anything else is a jump.
 	 */
-	if (!remote_smoothing_segments_adjacent(obj, pre.segnum))
+	if (pre.segnum != obj->segnum && find_connect_side(pre.segnum, *vcsegptr(obj->segnum)) == side_none)
 		return;
-	const auto pos_error{vm_vec_build_sub(pre.rendered_pos, obj->pos)};
+	const auto pos_error{vm_vec_build_sub(pre.rendered.pos, obj->pos)};
 	if (vm_vec_mag_quick(pos_error) > remote_smoothing_max_pos_error)
 		return;
-	const auto local_fvec{vm_vec_build_rotated(pre.rendered_orient.fvec, obj->orient)};
-	const auto local_uvec{vm_vec_build_rotated(pre.rendered_orient.uvec, obj->orient)};
+	const auto local_fvec{vm_vec_build_rotated(pre.rendered.orient.fvec, obj->orient)};
+	const auto local_uvec{vm_vec_build_rotated(pre.rendered.orient.uvec, obj->orient)};
 	if (local_fvec.z < remote_smoothing_min_axis_dot || local_uvec.y < remote_smoothing_min_axis_dot)
 		return;
 	s.pos_error = pos_error;
@@ -221,37 +251,12 @@ void remote_smoothing_end_update(const playernum_t pnum, const vcobjptridx_t obj
 	s.active = true;
 }
 
-vms_vector remote_smoothing_render_pos(const vcobjptridx_t obj)
+remote_smoothing_pose remote_smoothing_render_pose(const vcobjptridx_t obj)
 {
-	const auto pnum{remote_smoothing_player_for_render(obj)};
-	if (pnum >= MAX_PLAYERS)
-		return obj->pos;
-	auto &s = remote_smoothing_states[pnum];
-	const auto w{remote_smoothing_weight(s)};
-	return w ? remote_smoothing_pos(obj->pos, s, w) : obj->pos;
-}
-
-remote_smoothing_render_guard::remote_smoothing_render_guard(const vmobjptridx_t o) :
-	obj(*o), saved_pos(o->pos), saved_orient(o->orient), active(false)
-{
-	const auto pnum{remote_smoothing_player_for_render(o)};
-	if (pnum >= MAX_PLAYERS)
-		return;
-	auto &s = remote_smoothing_states[pnum];
-	const auto w{remote_smoothing_weight(s)};
-	if (!w)
-		return;
-	obj.pos = remote_smoothing_pos(saved_pos, s, w);
-	obj.orient = remote_smoothing_orient(saved_orient, s, w);
-	active = true;
-}
-
-remote_smoothing_render_guard::~remote_smoothing_render_guard()
-{
-	if (!active)
-		return;
-	obj.pos = saved_pos;
-	obj.orient = saved_orient;
+	if (const auto pnum{remote_smoothing_player_for_render(obj)}; pnum < MAX_PLAYERS)
+		if (const auto smoothed{remote_smoothing_smoothed_pose(pnum, obj)})
+			return *smoothed;
+	return remote_smoothing_authoritative_pose(obj);
 }
 
 }
