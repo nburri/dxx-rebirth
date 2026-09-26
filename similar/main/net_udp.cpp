@@ -5449,8 +5449,14 @@ void dispatch_table::do_protocol_frame(int force, int listen) const
 		 * or more intervals behind (a long frame, or the first send), or if
 		 * this send was forced, restart it from now instead.
 		 */
-		if (force || (last_pdata_time += pdata_interval) + 2 * pdata_interval <= time)
+		if (force)
 			last_pdata_time = time;
+		else
+		{
+			last_pdata_time += pdata_interval;
+			if (last_pdata_time + 2 * pdata_interval <= time)
+				last_pdata_time = time;
+		}
 		net_udp_send_pdata();
 #if DXX_BUILD_DESCENT == 2
                 multi_send_thief_frame();
