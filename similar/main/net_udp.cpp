@@ -5438,9 +5438,19 @@ void dispatch_table::do_protocol_frame(int force, int listen) const
 		WaitForRefuseAnswer=0;
 
 	// Send positional update either in the regular PPS interval OR if forced
-	if (force || (Netgame.PacketsPerSec && time >= (last_pdata_time + (F1_0 / Netgame.PacketsPerSec))))
+	if (const fix64 pdata_interval{Netgame.PacketsPerSec ? F1_0 / Netgame.PacketsPerSec : 0}; force || (pdata_interval && time >= (last_pdata_time + pdata_interval)))
 	{
-		last_pdata_time = time;
+		/* Advance the schedule by one interval, instead of setting it to
+		 * `time`, so that the delay between the scheduled time and the frame
+		 * in which the send happens does not accumulate and lower the rate
+		 * below PacketsPerSec (at 60 fps, 30 pps used to give only 20 pps).
+		 * At most one packet is sent per frame, so a small backlog is caught
+		 * up by sending in consecutive frames.  If the schedule is still two
+		 * or more intervals behind (a long frame, or the first send), or if
+		 * this send was forced, restart it from now instead.
+		 */
+		if (force || (last_pdata_time += pdata_interval) + 2 * pdata_interval <= time)
+			last_pdata_time = time;
 		net_udp_send_pdata();
 #if DXX_BUILD_DESCENT == 2
                 multi_send_thief_frame();

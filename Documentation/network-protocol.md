@@ -404,10 +404,10 @@ disconnected player came back when that player's relayed `pdata` arrives with
 
 | What | Interval | Where |
 |---|---|---|
-| `pdata` (own ship) | `F1_0 / Netgame.PacketsPerSec` (default 30, allowed 5–40: `MIN_PPS` / `MAX_PPS`, `multi.h:155`). Also forced by `multi_send_fire` (at most 20/s) and by `multi_send_effect_blowup`. | `do_protocol_frame`, `net_udp.cpp:5426` |
+| `pdata` (own ship) | `F1_0 / Netgame.PacketsPerSec` (default 30, allowed 5–40: `MIN_PPS` / `MAX_PPS`, `multi.h:155`). The schedule advances by one interval per send (restarting from the current time after a forced send or when two or more intervals behind), so the average rate matches `PacketsPerSec` at any frame rate; before, it was reset to the send time, and at 60 fps 30 pps gave only 20 packets per second. Also forced by `multi_send_fire` (at most 20/s) and by `multi_send_effect_blowup`. | `do_protocol_frame`, `net_udp.cpp:5440` |
 | D2 thief position (`MULTI_ROBOT_POSITION`) | Same tick as `pdata` | `multi_send_thief_frame`, `multibot.cpp:445` |
 | D2 `MULTI_GUIDED` position (priority 1) | While the player steers a guided missile: at once for a new missile, then every `F1_0 / Netgame.PacketsPerSec` of game time. The final position is also sent (priority 0) when the missile is released, just before the release message, and when it is deleted. Before this pacing, the position was sent every frame. | `multi_send_guided_frame` (called from `read_flying_controls`), `release_local_guided_missile`, `obj_delete` |
-| Robot frame and MDATA flush (unreliable) | Every 1/10 s | `net_udp.cpp:5435` |
+| Robot frame and MDATA flush (unreliable) | Every 1/10 s | `net_udp.cpp:5460` |
 | Reliable queue processing | Every protocol frame | `net_udp_noloss_process_queue` |
 | `ping` (host to clients) | Every second | `net_udp_ping_frame` |
 | Player timeout check | Every second (only when `listen` is set) | `net_udp_timeout_check` |
