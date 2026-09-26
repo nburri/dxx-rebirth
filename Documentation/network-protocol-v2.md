@@ -1671,3 +1671,19 @@ set to a final value at stage 7.
    stage (the code is `similar/`, so most of it comes for free) but play-test
    only D2X until stage 5; or drop D1X multiplayer from the fork.
    Recommendation: keep it compiling, play-test D2X only.
+
+## 10. Decisions (2026-09-26)
+
+The maintainer decided the open questions of section 9 as follows:
+
+1. **Tick rate:** 60 Hz default, host setting 30/60/120. A per-client
+   divisor may follow if play-tests show a need.
+2. **Shields and energy:** host-granted like every other pickup.
+3. **Robot games:** deferred to after the first v2 release; robot anarchy
+   and cooperative modes are greyed out in the game setup.
+4. **Triggers:** one round trip of latency is accepted; doors open locally
+   at once.
+5. **Positions:** exact 12-byte `fix` triples first; measure before
+   considering a compact encoding.
+6. **D1X:** dropped from this branch. `experimental-netcode` builds and
+   releases D2X-Rebirth only; the D1X build is disabled in its CI.
