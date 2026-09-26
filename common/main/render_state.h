@@ -7,14 +7,8 @@
 #include "fwd-robot.h"
 #include "objnum.h"
 #include <array>
+#include <limits>
 
-/* Maximum number of segments drawn in one frame.  build_segment_list stops
- * collecting visible segments at this count, so segments beyond it are not
- * drawn at all.  The former limit of 500 was too small for the large rooms
- * of some custom levels: walls beyond the limit were missing or flickered,
- * depending on which segments made it into the list in a given frame.
- */
-constexpr std::integral_constant<unsigned, 3000> MAX_RENDER_SEGS{};
 
 struct rect
 {
@@ -37,8 +31,14 @@ struct render_state_t
 		rect render_window;
 	};
 	unsigned N_render_segs{0};
-	std::array<segnum_t, MAX_RENDER_SEGS> Render_list;
+	/* Every segment is added to the list at most once (render_pos), so the
+	 * list can hold all segments of a level and never has to stop early.
+	 * The former limit of 500 was too small for the large rooms of some
+	 * custom levels: walls beyond it were missing or flickered.
+	 */
+	std::array<segnum_t, MAX_SEGMENTS> Render_list;
 	std::array<short, MAX_SEGMENTS> render_pos;	//where in render_list does this segment appear?
+	static_assert(MAX_SEGMENTS <= std::numeric_limits<short>::max(), "render_pos must be able to hold every list position");
 	std::unordered_map<segnum_t, per_segment_state_t> render_seg_map;
 };
 
