@@ -282,6 +282,10 @@ public:
 	rng &random;
 	sim_link link;
 	std::array<sim_peer, 2> peers;
+	/* Each peer ticks this much after the simulation tick, so that the
+	 * two are not phase-aligned (they never are in reality).
+	 */
+	std::array<net_clock, 2> phase{};
 	net_clock now{};
 	std::uint32_t tick_count{};
 
@@ -305,16 +309,17 @@ public:
 		for (unsigned i{}; i != 2; ++i)
 		{
 			auto &p{peers[i]};
-			link.deliver(i, now, [&](const datagram &d, const net_clock at) { p.receive(d, at); });
+			const auto peer_now{now + phase[i]};
+			link.deliver(i, peer_now, [&](const datagram &d, const net_clock at) { p.receive(d, at); });
 			if (act)
 				act(i);
 			for (;;)
 			{
-				const auto packet{p.conn.build_outgoing(p.clock(now))};
+				const auto packet{p.conn.build_outgoing(p.clock(peer_now))};
 				if (packet.empty())
 					break;
 				CHECK(packet.size() >= NET_V2_HEADER_SIZE && packet.size() <= NET_V2_MAX_PACKET);
-				link.send(i, packet, now);
+				link.send(i, packet, peer_now);
 			}
 		}
 	}
@@ -484,8 +489,6 @@ void test_lossy(const std::uint64_t seed)
 		CHECK(!states.empty());
 		CHECK(std::ranges::adjacent_find(states, std::greater_equal<>{}) == states.end());
 		CHECK_MSG(states.back() == final_tick, "last state " + std::to_string(states.back()) + " vs tick " + std::to_string(final_tick));
-		const auto latest{w.peers[i].conn.latest_received(i == 0 ? chunk_type::input : chunk_type::state)};
-		CHECK(latest.has_value() && net_get_le32(latest->data()) == final_tick);
 	}
 	/* Events: each at most once, most of them arrive. */
 	auto events{w.peers[1].events_seen};
@@ -693,6 +696,180 @@ void test_timeouts(const std::uint64_t seed)
 		CHECK(s.in_flight == 0);
 		std::printf("    idle: %llu keepalives in 10 s, still connected\n", static_cast<unsigned long long>(keepalives));
 	}
+}
+
+/* Review findings: one case each. */
+
+/* 1. One packet never selects more than the 256-message window, even
+ * when nothing is in flight yet.
+ */
+void test_window_in_one_packet()
+{
+	begin("window bound within one packet");
+	connection a{host_side, 0};
+	connection b{client_side, 0};
+	for (unsigned i{}; i != 300; ++i)
+		CHECK(a.enqueue_reliable(static_cast<std::uint8_t>(i), {}) == enqueue_result::ok);
+	const auto p1{a.build_outgoing(TICK)};
+	CHECK(!p1.empty());
+	CHECK_MSG(a.stats().in_flight == NET_V2_MAX_IN_FLIGHT, "in flight " + std::to_string(a.stats().in_flight));
+	const auto r1{b.on_receive(p1, TICK + 1)};
+	CHECK(r1.status == receive_status::accepted);
+	CHECK(r1.reliable.size() == NET_V2_MAX_IN_FLIGHT);
+	/* The rest waits for acks, not for the next packet. */
+	CHECK(a.build_outgoing(TICK).empty());
+	const auto ack{b.build_outgoing(2 * TICK)};
+	CHECK(a.on_receive(ack, 2 * TICK).status == receive_status::accepted);
+	const auto p2{a.build_outgoing(3 * TICK)};
+	const auto r2{b.on_receive(p2, 3 * TICK + 1)};
+	CHECK(r2.status == receive_status::accepted);
+	CHECK(r2.reliable.size() == 300 - NET_V2_MAX_IN_FLIGHT);
+	for (std::size_t i{}; i != r2.reliable.size(); ++i)
+		CHECK(r2.reliable[i].type == static_cast<std::uint8_t>(NET_V2_MAX_IN_FLIGHT + i));
+	std::printf("    300 queued messages: first packet carries %u, receiver accepts, rest follows after the ack\n", NET_V2_MAX_IN_FLIGHT);
+}
+
+/* 2. A backlog drains at no more than max_packets_per_tick per tick. */
+void test_packets_per_tick(const std::uint64_t seed)
+{
+	begin("packets per tick");
+	rng r{seed};
+	sim_world w{r, link_params{.latency = net_milliseconds(30)}};
+	w.run(6, [&](const unsigned i) { w.set_state(i); });
+	datagram big(NET_V2_MAX_MESSAGE);
+	for (unsigned k{}; k != 90; ++k)
+	{
+		big[0] = static_cast<std::uint8_t>(k);
+		CHECK(w.peers[0].conn.enqueue_reliable(9, big) == enqueue_result::ok);
+		w.peers[0].sent.push_back({.type = 9, .payload = big});
+	}
+	CHECK(w.peers[0].conn.stats().queue_bytes == 90 * NET_V2_MAX_MESSAGE);
+	std::uint64_t max_per_tick{}, ticks_with_two{};
+	auto before{w.peers[0].conn.stats().packets_sent};
+	w.run(120, [&](const unsigned i) {
+		w.set_state(i);
+		if (i == 1)
+		{
+			const auto now_sent{w.peers[0].conn.stats().packets_sent};
+			max_per_tick = std::max(max_per_tick, now_sent - before);
+			if (now_sent - before == 2)
+				++ticks_with_two;
+			before = now_sent;
+		}
+	});
+	check_delivery(w, 0);
+	CHECK_MSG(max_per_tick == NET_V2_DEFAULT_MAX_PACKETS_PER_TICK, "max packets in one tick " + std::to_string(max_per_tick));
+	CHECK_MSG(ticks_with_two >= 40, "ticks with two packets " + std::to_string(ticks_with_two));
+	std::printf("    90 KiB backlog: at most %llu packets per tick, %llu ticks used the second packet\n",
+		static_cast<unsigned long long>(max_per_tick), static_cast<unsigned long long>(ticks_with_two));
+}
+
+/* 3. Peers that tick with an arbitrary phase offset on a jitter-free,
+ * lossless link never retransmit: the RTO covers the ack hold.
+ */
+void test_unaligned_peers(const std::uint64_t seed)
+{
+	begin("unaligned peers, no spurious RTO resends");
+	rng r{seed};
+	for (unsigned round{}; round != 6; ++round)
+	{
+		sim_world w{r, link_params{.latency = net_milliseconds(round == 0 ? 1 : 20 * round)}};
+		w.phase = {{static_cast<net_clock>(r.below(TICK)), static_cast<net_clock>(r.below(TICK))}};
+		w.run(300, [&](const unsigned i) {
+			w.set_state(i);
+			for (unsigned k{}; k != 2 && w.peers[i].sent.size() < 500; ++k)
+				w.enqueue_random_message(i, 60);
+		});
+		for (unsigned i{}; i != 2; ++i)
+		{
+			check_delivery(w, i);
+			const auto s{w.peers[i].conn.stats()};
+			CHECK_MSG(s.message_resends == 0, "round " + std::to_string(round) + (i ? " client" : " host") + " resends " + std::to_string(s.message_resends) + " (rto " + std::to_string(s.resends_by_rto) + ")");
+			CHECK(s.rto >= s.srtt + w.peers[i].conn.config().tick_period);
+		}
+		std::printf("    phases %.1f/%.1f ms, latency %.0f ms: 0 resends, srtt %.1f ms, rto %.1f ms\n",
+			to_ms(w.phase[0]), to_ms(w.phase[1]), to_ms(w.link.params.latency), to_ms(w.peers[0].conn.stats().srtt), to_ms(w.peers[0].conn.stats().rto));
+	}
+}
+
+/* 4. With every ack blacked out, packets are still counted lost once
+ * their log slot is reused, so the loss estimate rises toward 1.
+ */
+void test_ack_blackout_loss(const std::uint64_t seed)
+{
+	begin("loss estimate under an ack blackout");
+	rng r{seed};
+	sim_world w{r, link_params{.latency = net_milliseconds(30)}};
+	w.run(30, [&](const unsigned i) { w.set_state(i); });
+	CHECK(w.peers[0].conn.stats().loss_estimate < 0.01);
+	w.link.mangle[0] = [](datagram &d) {
+		if (d.size() >= NET_V2_HEADER_SIZE)
+			std::fill(d.begin() + 14, d.begin() + 24, 0);
+	};
+	w.run(500, [&](const unsigned i) { w.set_state(i); });
+	const auto s{w.peers[0].conn.stats()};
+	print_stats("host", s);
+	CHECK(s.state == connection_state::connected);
+	CHECK_MSG(s.packets_lost > 200, "packets lost " + std::to_string(s.packets_lost));
+	CHECK_MSG(s.loss_estimate > 0.9, "loss estimate " + std::to_string(s.loss_estimate));
+	std::printf("    500 unacked packets: %llu counted lost, loss estimate %.3f\n", static_cast<unsigned long long>(s.packets_lost), s.loss_estimate);
+}
+
+/* 5. A build time earlier than the receive stamp gives echo_delay 0, not
+ * a wrapped value, and the peer's RTT sample stays sane.
+ */
+void test_echo_delay_clamp()
+{
+	begin("echo_delay clamp");
+	connection a{host_side, 0};
+	connection b{client_side, 0};
+	const std::array<std::uint8_t, 4> x{{1, 2, 3, 4}};
+	b.set_unreliable_state(chunk_type::input, x);
+	const auto pb{b.build_outgoing(500)};
+	CHECK(a.on_receive(pb, 1000).status == receive_status::accepted);
+	a.set_unreliable_state(chunk_type::state, x);
+	const auto pa{a.build_outgoing(900)};
+	const auto h{*packet_header::read(pa)};
+	CHECK(h.echo_time == 500);
+	CHECK_MSG(h.echo_delay == 0, "echo_delay " + std::to_string(h.echo_delay));
+	CHECK(b.on_receive(pa, 1700).status == receive_status::accepted);
+	const auto s{b.stats()};
+	CHECK(s.rtt_valid);
+	CHECK_MSG(s.srtt == 1200, "srtt " + std::to_string(s.srtt));
+	std::printf("    build 100 units before the receive stamp: echo_delay 0, peer RTT sample %lld units\n", static_cast<long long>(s.srtt));
+}
+
+/* 6. Every unreliable chunk of a packet is delivered; latest-wins applies
+ * across packets only.
+ */
+void test_unreliable_chunks_per_packet()
+{
+	begin("unreliable chunks per packet");
+	connection a{host_side, 0};
+	connection b{client_side, 0};
+	const std::array<std::uint8_t, 3> part0{{0, 0, 0}}, part1{{1, 1, 1}}, later{{2, 2, 2}}, event{{9, 9, 9}};
+	a.set_unreliable_state(chunk_type::state, part0);
+	CHECK(a.send_unreliable(chunk_type::state, part1));
+	const auto p1{a.build_outgoing(TICK)};
+	const auto r1{b.on_receive(p1, TICK + 1)};
+	CHECK(r1.status == receive_status::accepted);
+	CHECK_MSG(r1.unreliable.size() == 2, "chunks delivered " + std::to_string(r1.unreliable.size()));
+	CHECK(r1.unreliable[0].type == chunk_type::state && std::ranges::equal(r1.unreliable[0].payload, part0));
+	CHECK(r1.unreliable[1].type == chunk_type::state && std::ranges::equal(r1.unreliable[1].payload, part1));
+	/* Two more packets, delivered in reverse: the older state is dropped,
+	 * but its event still arrives.
+	 */
+	a.set_unreliable_state(chunk_type::state, part1);
+	CHECK(a.send_unreliable(chunk_type::event_u, event));
+	const datagram p2{[&] { const auto p{a.build_outgoing(2 * TICK)}; return datagram{p.begin(), p.end()}; }()};
+	a.set_unreliable_state(chunk_type::state, later);
+	const datagram p3{[&] { const auto p{a.build_outgoing(3 * TICK)}; return datagram{p.begin(), p.end()}; }()};
+	const auto r3{b.on_receive(p3, 3 * TICK + 1)};
+	CHECK(r3.status == receive_status::accepted && r3.unreliable.size() == 1 && std::ranges::equal(r3.unreliable[0].payload, later));
+	const auto r2{b.on_receive(p2, 3 * TICK + 2)};
+	CHECK(r2.status == receive_status::accepted);
+	CHECK_MSG(r2.unreliable.size() == 1 && r2.unreliable[0].type == chunk_type::event_u, "reordered packet delivered " + std::to_string(r2.unreliable.size()) + " chunks");
+	std::printf("    two STATE chunks in one packet both delivered; an older packet's STATE dropped, its EVENT_U kept\n");
 }
 
 /* Replay and reorder window (§3.7 step 6) */
@@ -999,6 +1176,12 @@ int main(const int argc, char **const argv)
 	test_bounds(seed);
 	test_timeouts(seed);
 	test_replay(seed);
+	test_window_in_one_packet();
+	test_packets_per_tick(seed);
+	test_unaligned_peers(seed);
+	test_ack_blackout_loss(seed);
+	test_echo_delay_clamp();
+	test_unreliable_chunks_per_packet();
 	test_fuzz(seed);
 	test_clock(seed);
 	std::printf("all tests passed\n");

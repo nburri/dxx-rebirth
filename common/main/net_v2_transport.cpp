@@ -75,7 +75,7 @@ net_clock rtt_estimator::rto() const
 {
 	if (!m_valid)
 		return NET_V2_RTO_MAX;
-	return std::clamp(m_srtt + 4 * m_rttvar, NET_V2_RTO_MIN, NET_V2_RTO_MAX);
+	return std::clamp(m_srtt + std::max(4 * m_rttvar, m_tick_period) + m_tick_period, NET_V2_RTO_MIN, NET_V2_RTO_MAX);
 }
 
 /* clock_sync (§2.2) */
@@ -140,7 +140,9 @@ connection::connection(const connection_config &config, const net_clock now) :
 	m_config{config},
 	/* Make the first build_outgoing produce a packet at once. */
 	m_last_sent{now - NET_V2_KEEPALIVE_INTERVAL},
-	m_last_heard{now}
+	m_tick_start{now - config.tick_period},
+	m_last_heard{now},
+	m_rtt{config.tick_period}
 {
 }
 
@@ -218,14 +220,13 @@ bool connection::send_unreliable(const chunk_type type, const std::span<const st
 
 bool connection::window_allows(const out_msg &m) const
 {
-	/* The peer's window starts at its next expected sequence, which is
-	 * at or after our oldest unacked message; staying within 256 of that
-	 * is therefore always safe.
+	/* The queue head is the oldest message that is unacked or unsent
+	 * (acked heads are popped).  The peer's window starts at its next
+	 * expected sequence, which is at or after that, so staying within
+	 * 256 of the head is always safe, and it also bounds what one packet
+	 * can select when nothing is in flight yet.
 	 */
-	const auto &front{m_messages.front()};
-	if (!front.sent)
-		return true;
-	return seq_diff(m.seq, front.seq) < static_cast<std::int16_t>(NET_V2_RECV_WINDOW);
+	return seq_diff(m.seq, m_messages.front().seq) < static_cast<std::int16_t>(NET_V2_RECV_WINDOW);
 }
 
 bool connection::any_message_due() const
@@ -294,18 +295,30 @@ std::span<const std::uint8_t> connection::build_outgoing(const net_clock now)
 	update(now);
 	if (m_state == connection_state::closed)
 		return {};
+	/* §3.6: at most max_packets_per_tick per tick.  Calls within half a
+	 * tick period of the first packet of a tick belong to that tick.
+	 */
+	if (now - m_tick_start >= m_config.tick_period / 2)
+	{
+		m_tick_start = now;
+		m_tick_packets = 0;
+	}
+	if (m_tick_packets >= m_config.max_packets_per_tick)
+		return {};
 	const bool header_due{m_pending_state.has_value() || !m_pending_events.empty() || m_ack_owed || now - m_last_sent >= NET_V2_KEEPALIVE_INTERVAL};
 	if (!header_due && !any_message_due())
 		return {};
 
 	/* Select the reliable messages: resends first, then new ones, each
-	 * only if it fits, stopping at the first that does not (§3.4).
+	 * only if it fits, stopping at the first that does not (§3.4).  The
+	 * selection is recorded as runs of consecutive sequences, one
+	 * RELIABLE chunk each, so that the budget and the layout agree.
 	 */
 	const std::size_t state_size{m_pending_state ? chunk_wire_size(m_pending_state->payload.size()) : 0};
 	std::size_t budget{NET_V2_MAX_PACKET - NET_V2_HEADER_SIZE - state_size};
 	std::size_t resend_bytes{};
-	unsigned run_count{};
-	std::vector<out_msg *> carried;
+	m_carried.clear();
+	m_runs.clear();
 	const auto try_add{[&](out_msg &m, const bool is_resend) {
 		const auto msg_size{message_wire_size(m.payload.size())};
 		/* The resend budget is cumulative; the first resent message of a
@@ -314,15 +327,18 @@ std::span<const std::uint8_t> connection::build_outgoing(const net_clock now)
 		 */
 		if (is_resend && resend_bytes != 0 && resend_bytes + msg_size > NET_V2_RESEND_BUDGET)
 			return false;
-		const bool new_run{carried.empty() || seq_diff(m.seq, carried.back()->seq) != 1 || run_count == NET_V2_MAX_RUN_COUNT};
+		const bool new_run{m_runs.empty() || seq_diff(m.seq, m_carried.back()->seq) != 1 || m_runs.back().count == NET_V2_MAX_RUN_COUNT};
 		const auto cost{msg_size + (new_run ? NET_V2_CHUNK_HEADER_SIZE + NET_V2_RELIABLE_RUN_HEADER_SIZE : 0)};
 		if (cost > budget)
 			return false;
 		budget -= cost;
 		if (is_resend)
 			resend_bytes += msg_size;
-		run_count = new_run ? 1 : run_count + 1;
-		carried.push_back(&m);
+		if (new_run)
+			m_runs.push_back({.first = m_carried.size(), .count = 1});
+		else
+			++m_runs.back().count;
+		m_carried.push_back(&m);
 		return true;
 	}};
 	for (auto &m : m_messages)
@@ -341,8 +357,7 @@ std::span<const std::uint8_t> connection::build_outgoing(const net_clock now)
 		if (!window_allows(m) || !try_add(m, false))
 			break;
 	}
-
-	if (!header_due && carried.empty())
+	if (!header_due && m_carried.empty())
 		/* Something is due but did not fit this time; never emit an
 		 * empty packet for it, or the caller's send loop would not end.
 		 */
@@ -354,22 +369,20 @@ std::span<const std::uint8_t> connection::build_outgoing(const net_clock now)
 	const auto seq{next_local_seq()};
 	bool clean{true};
 	auto &log{m_packet_log[seq % NET_V2_RECV_WINDOW]};
+	if (log.valid && !log.acked && !log.lost)
+		/* 256 packets later and never acked: lost. */
+		resolve_packet(log, false);
 	log.msg_seqs.clear();
-	for (std::size_t i{}; i != carried.size();)
+	for (const auto &run : m_runs)
 	{
-		/* One RELIABLE chunk per run of consecutive sequence numbers. */
-		const auto start{i};
-		while (i + 1 != carried.size() && seq_diff(carried[i + 1]->seq, carried[i]->seq) == 1 && i + 1 - start < NET_V2_MAX_RUN_COUNT)
-			++i;
-		++i;
 		const auto chunk_at{pos};
 		pos += NET_V2_CHUNK_HEADER_SIZE;
-		net_put_le16(buf + pos, carried[start]->seq);
-		buf[pos + 2] = static_cast<std::uint8_t>(i - start);
+		net_put_le16(buf + pos, m_carried[run.first]->seq);
+		buf[pos + 2] = static_cast<std::uint8_t>(run.count);
 		pos += NET_V2_RELIABLE_RUN_HEADER_SIZE;
-		for (auto j{start}; j != i; ++j)
+		for (auto j{run.first}; j != run.first + run.count; ++j)
 		{
-			auto &m{*carried[j]};
+			auto &m{*m_carried[j]};
 			buf[pos] = m.type;
 			net_put_le16(buf + pos + 1, static_cast<std::uint16_t>(m.payload.size()));
 			pos += NET_V2_MESSAGE_HEADER_SIZE;
@@ -421,7 +434,7 @@ std::span<const std::uint8_t> connection::build_outgoing(const net_clock now)
 	h.session_id = m_config.session_id;
 	h.peer_token = m_config.peer_token;
 	h.player_id = m_config.local_player_id;
-	if (!carried.empty())
+	if (!m_carried.empty())
 		h.flags |= static_cast<std::uint8_t>(packet_flag::has_reliable);
 	if (pos == NET_V2_HEADER_SIZE)
 		h.flags |= static_cast<std::uint8_t>(packet_flag::keepalive);
@@ -432,8 +445,11 @@ std::span<const std::uint8_t> connection::build_outgoing(const net_clock now)
 		h.ack = m_highest_seen;
 		h.ack_bits = m_ack_bits;
 		h.echo_time = m_last_recv_send_time;
-		const auto delay{now - m_last_recv_local_time};
-		h.echo_delay = delay >= NET_V2_ECHO_DELAY_SATURATED ? NET_V2_ECHO_DELAY_SATURATED : static_cast<std::uint16_t>(delay);
+		/* A caller whose build time is behind its receive time (clock
+		 * read before the socket) must not wrap into a huge delay.
+		 */
+		const auto delay{std::clamp<net_clock>(now - m_last_recv_local_time, 0, NET_V2_ECHO_DELAY_SATURATED)};
+		h.echo_delay = static_cast<std::uint16_t>(delay);
 	}
 	h.write(buf);
 
@@ -444,6 +460,7 @@ std::span<const std::uint8_t> connection::build_outgoing(const net_clock now)
 	log.seq = seq;
 	log.sent_at = now;
 	m_last_sent = now;
+	++m_tick_packets;
 	m_ack_owed = false;
 	++m_stats.packets_sent;
 	return {buf, pos};
@@ -568,12 +585,16 @@ bool connection::count_protocol_error(const net_clock now)
 
 /* §3.7 step 8: every chunk must fit, every reliable message must fit its
  * chunk and its sequence must be inside the receive window, the flags
- * must describe the content.  Nothing is applied here.
+ * must describe the content.  Nothing is applied here; the parsed
+ * records are kept for deliver_reliable / deliver_unreliable.
  */
-bool connection::validate_chunks(const std::span<const std::uint8_t> payload, const std::uint8_t flags, std::vector<parsed_chunk> &chunks) const
+bool connection::validate_chunks(const std::span<const std::uint8_t> payload, const std::uint8_t flags)
 {
+	m_parsed_messages.clear();
+	m_parsed_chunks.clear();
 	std::size_t pos{};
 	unsigned reliable_chunks{};
+	unsigned chunks{};
 	while (pos != payload.size())
 	{
 		if (payload.size() - pos < NET_V2_CHUNK_HEADER_SIZE)
@@ -584,6 +605,7 @@ bool connection::validate_chunks(const std::span<const std::uint8_t> payload, co
 			return false;
 		const std::span<const std::uint8_t> body{payload.data() + pos, ch.length};
 		pos += ch.length;
+		++chunks;
 		const auto type{static_cast<chunk_type>(ch.type)};
 		switch (type)
 		{
@@ -600,16 +622,18 @@ bool connection::validate_chunks(const std::span<const std::uint8_t> payload, co
 				{
 					if (body.size() - at < NET_V2_MESSAGE_HEADER_SIZE)
 						return false;
+					const auto msg_type{body[at]};
 					const auto len{net_get_le16(body.data() + at + 1)};
 					at += NET_V2_MESSAGE_HEADER_SIZE;
 					if (len > NET_V2_MAX_MESSAGE || len > body.size() - at)
 						return false;
-					at += len;
 					if (seq_diff(seq, m_next_expected) >= static_cast<std::int16_t>(NET_V2_RECV_WINDOW))
 						/* Beyond the window: a conforming sender never
 						 * does this (§3.4).
 						 */
 						return false;
+					m_parsed_messages.push_back({.seq = seq, .type = msg_type, .payload = body.subspan(at, len)});
+					at += len;
 				}
 				if (at != body.size())
 					return false;
@@ -622,6 +646,7 @@ bool connection::validate_chunks(const std::span<const std::uint8_t> payload, co
 				/* Opaque to the transport; record sizes are checked by
 				 * the consumer (stage 2).
 				 */
+				m_parsed_chunks.push_back({.type = type, .payload = body});
 				break;
 			case chunk_type::session:
 				/* Only valid with flags.UNCONNECTED, which never reaches
@@ -631,38 +656,31 @@ bool connection::validate_chunks(const std::span<const std::uint8_t> payload, co
 			default:
 				return false;
 		}
-		chunks.push_back({.type = type, .payload = body});
 	}
 	const bool has_reliable{(flags & static_cast<std::uint8_t>(packet_flag::has_reliable)) != 0};
 	const bool keepalive{(flags & static_cast<std::uint8_t>(packet_flag::keepalive)) != 0};
 	if (has_reliable != (reliable_chunks != 0))
 		return false;
-	if (keepalive != chunks.empty())
+	if (keepalive != (chunks == 0))
 		return false;
 	return true;
 }
 
-void connection::deliver_reliable_run(const std::span<const std::uint8_t> run, receive_report &report)
+void connection::deliver_reliable(receive_report &report)
 {
-	auto seq{net_get_le16(run.data())};
-	const unsigned count{run[2]};
-	std::size_t at{NET_V2_RELIABLE_RUN_HEADER_SIZE};
-	for (unsigned i{}; i != count; ++i, ++seq)
+	if (m_parsed_messages.empty())
+		return;
+	for (const auto &pm : m_parsed_messages)
 	{
-		const auto type{run[at]};
-		const auto len{net_get_le16(run.data() + at + 1)};
-		at += NET_V2_MESSAGE_HEADER_SIZE;
-		const std::span<const std::uint8_t> body{run.data() + at, len};
-		at += len;
-		if (seq_diff(seq, m_next_expected) < 0)
+		if (seq_diff(pm.seq, m_next_expected) < 0)
 			/* Already delivered. */
 			continue;
-		auto &slot{m_recv_window[seq % NET_V2_RECV_WINDOW]};
+		auto &slot{m_recv_window[pm.seq % NET_V2_RECV_WINDOW]};
 		if (slot.filled)
 			continue;
 		slot.filled = true;
-		slot.type = type;
-		slot.payload.assign(body.begin(), body.end());
+		slot.type = pm.type;
+		slot.payload.assign(pm.payload.begin(), pm.payload.end());
 		++m_recv_window_pending;
 	}
 	for (;;)
@@ -680,19 +698,24 @@ void connection::deliver_reliable_run(const std::span<const std::uint8_t> run, r
 	m_ack_owed = true;
 }
 
-void connection::deliver_unreliable(const parsed_chunk &chunk, const std::uint16_t packet_seq, receive_report &report)
+void connection::deliver_unreliable(const std::uint16_t packet_seq, receive_report &report)
 {
-	if (is_latest_wins(chunk.type))
+	for (const auto &c : m_parsed_chunks)
 	{
-		auto &latest{m_latest_unreliable[latest_index(chunk.type)]};
-		if (latest.valid && seq_diff(packet_seq, latest.packet_seq) <= 0)
-			/* Older than what we already have: reordered, drop. */
-			return;
-		latest.valid = true;
-		latest.packet_seq = packet_seq;
-		latest.payload.assign(chunk.payload.begin(), chunk.payload.end());
+		if (is_latest_wins(c.type))
+		{
+			auto &latest{m_latest_packet[latest_index(c.type)]};
+			if (latest.valid && seq_diff(packet_seq, latest.seq) < 0)
+				/* From a packet older than one already applied:
+				 * reordered, drop.  Chunks of the same packet are all
+				 * delivered.
+				 */
+				continue;
+			latest.valid = true;
+			latest.seq = packet_seq;
+		}
+		report.unreliable.push_back({.type = c.type, .payload = {c.payload.begin(), c.payload.end()}});
 	}
-	report.unreliable.push_back({.type = chunk.type, .payload = {chunk.payload.begin(), chunk.payload.end()}});
 }
 
 receive_report connection::on_receive(const std::span<const std::uint8_t> datagram, const net_clock now)
@@ -772,8 +795,7 @@ receive_report connection::on_receive(const std::span<const std::uint8_t> datagr
 		}
 	}
 	/* Step 8: walk the chunks; step 9: apply */
-	std::vector<parsed_chunk> chunks;
-	const bool well_formed{validate_chunks(datagram.subspan(NET_V2_HEADER_SIZE), h.flags, chunks)};
+	const bool well_formed{validate_chunks(datagram.subspan(NET_V2_HEADER_SIZE), h.flags)};
 	process_acks(h.ack, h.ack_bits, now, !echo_sample);
 	if (!well_formed)
 	{
@@ -786,13 +808,8 @@ receive_report connection::on_receive(const std::span<const std::uint8_t> datagr
 			close_with(close_reason::protocol_error);
 		return report;
 	}
-	for (const auto &c : chunks)
-	{
-		if (c.type == chunk_type::reliable)
-			deliver_reliable_run(c.payload, report);
-		else
-			deliver_unreliable(c, h.seq, report);
-	}
+	deliver_reliable(report);
+	deliver_unreliable(h.seq, report);
 	report.status = receive_status::accepted;
 	return report;
 }
@@ -816,16 +833,6 @@ connection_stats connection::stats() const
 	s.clock_offset_target = m_clock.target();
 	s.last_heard = m_last_heard;
 	return s;
-}
-
-std::optional<std::span<const std::uint8_t>> connection::latest_received(const chunk_type type) const
-{
-	if (!is_latest_wins(type))
-		return std::nullopt;
-	const auto &latest{m_latest_unreliable[latest_index(type)]};
-	if (!latest.valid)
-		return std::nullopt;
-	return std::span<const std::uint8_t>{latest.payload};
 }
 
 }

@@ -56,12 +56,23 @@ namespace net_v2 {
  */
 constexpr std::size_t NET_V2_EVENT_QUEUE_MAX{64};
 
+/* Section 2.3: the default network tick, 60 Hz. */
+constexpr net_clock NET_V2_DEFAULT_TICK_PERIOD{net_seconds(1) / 60};
+
+/* Section 3.6: packets per tick per connection. */
+constexpr unsigned NET_V2_DEFAULT_MAX_PACKETS_PER_TICK{2};
+
 struct connection_config
 {
 	std::uint32_t session_id{};
 	std::uint32_t peer_token{};
 	std::uint8_t local_player_id{NET_V2_PLAYER_ID_NONE};
 	std::uint8_t remote_player_id{NET_V2_PLAYER_ID_NONE};
+	/* The period at which build_outgoing is called.  It bounds the
+	 * packets per tick and pads the RTO for the peer's ack hold time.
+	 */
+	net_clock tick_period{NET_V2_DEFAULT_TICK_PERIOD};
+	unsigned max_packets_per_tick{NET_V2_DEFAULT_MAX_PACKETS_PER_TICK};
 };
 
 enum class connection_state : std::uint8_t
@@ -106,8 +117,7 @@ enum class receive_status : std::uint8_t
 	/* Header applied, every chunk delivered. */
 	accepted,
 	/* Header applied (acks, RTT, last_heard), but a chunk was malformed:
-	 * nothing from the first bad chunk on was delivered and a protocol
-	 * error was counted.
+	 * nothing was delivered and a protocol error was counted.
 	 */
 	malformed_chunk,
 	bad_length,
@@ -143,8 +153,10 @@ struct receive_report
 	receive_status status{receive_status::bad_length};
 	/* Reliable messages that became deliverable, in sequence order. */
 	std::vector<reliable_message> reliable;
-	/* `state`/`input` chunks newer than any seen before, and every
-	 * `event_u` chunk, in packet order.
+	/* Every unreliable chunk of the packet, in packet order, except
+	 * `state`/`input` chunks from a packet older than one already seen
+	 * (latest wins across packets; all chunks of one packet count as
+	 * equally new, so a bundle split into two chunks arrives whole).
 	 */
 	std::vector<unreliable_chunk> unreliable;
 };
@@ -190,13 +202,25 @@ struct connection_stats
 	net_clock last_heard{};
 };
 
-/* Section 3.5: Jacobson/Karels with RFC 6298 constants. */
+/* Section 3.5: Jacobson/Karels with RFC 6298 constants, plus a tick of
+ * slack.  The peer holds its ack until its next tick and we look for
+ * losses only at ours, so an ack for a lossless packet can arrive up to
+ * two tick periods after srtt; without the slack every message on a
+ * jitter-free link would be resent as soon as rttvar decays to zero.
+ *
+ *	rto = clamp(srtt + max(4 rttvar, tick) + tick, NET_V2_RTO_MIN, NET_V2_RTO_MAX)
+ */
 class rtt_estimator
 {
+	net_clock m_tick_period;
 	bool m_valid{};
 	net_clock m_srtt{};
 	net_clock m_rttvar{};
 public:
+	explicit rtt_estimator(const net_clock tick_period = NET_V2_DEFAULT_TICK_PERIOD) :
+		m_tick_period{tick_period}
+	{
+	}
 	void add_sample(net_clock r);
 	[[nodiscard]]
 	bool valid() const
@@ -295,17 +319,32 @@ class connection
 		net_clock sent_at{};
 		std::vector<std::uint16_t> msg_seqs;
 	};
+	/* A run of consecutive messages selected for the packet being
+	 * built: one RELIABLE chunk.  Indexes m_carried.
+	 */
+	struct selected_run
+	{
+		std::size_t first;
+		std::size_t count;
+	};
 	struct recv_slot
 	{
 		bool filled{};
 		std::uint8_t type{};
 		std::vector<std::uint8_t> payload;
 	};
-	struct latest_unreliable
+	/* Per latest-wins chunk type: the newest packet that carried one. */
+	struct latest_packet
 	{
 		bool valid{};
-		std::uint16_t packet_seq{};
-		std::vector<std::uint8_t> payload;
+		std::uint16_t seq{};
+	};
+	/* Parsed once by validate_chunks, applied by deliver_*. */
+	struct parsed_message
+	{
+		std::uint16_t seq;
+		std::uint8_t type;
+		std::span<const std::uint8_t> payload;
 	};
 	struct parsed_chunk
 	{
@@ -330,8 +369,12 @@ class connection
 	std::size_t m_in_flight{};
 	std::array<packet_log_entry, NET_V2_RECV_WINDOW> m_packet_log{};
 	net_clock m_last_sent{};
+	net_clock m_tick_start{};
+	unsigned m_tick_packets{};
 	bool m_ack_owed{};
 	packet_buffer m_outgoing{};
+	std::vector<out_msg *> m_carried;
+	std::vector<selected_run> m_runs;
 	std::optional<unreliable_chunk> m_pending_state;
 	std::deque<unreliable_chunk> m_pending_events;
 
@@ -345,8 +388,10 @@ class connection
 	std::uint16_t m_next_expected{};
 	std::array<recv_slot, NET_V2_RECV_WINDOW> m_recv_window{};
 	std::size_t m_recv_window_pending{};
-	std::array<latest_unreliable, 8> m_latest_unreliable{};
+	std::array<latest_packet, 8> m_latest_packet{};
 	std::deque<net_clock> m_protocol_error_times;
+	std::vector<parsed_message> m_parsed_messages;
+	std::vector<parsed_chunk> m_parsed_chunks;
 
 	/* Estimators */
 	rtt_estimator m_rtt;
@@ -367,10 +412,11 @@ class connection
 	bool any_message_due() const;
 	[[nodiscard]]
 	bool count_protocol_error(net_clock now);
+	/* §3.7 step 8.  Fills m_parsed_messages and m_parsed_chunks. */
 	[[nodiscard]]
-	bool validate_chunks(std::span<const std::uint8_t> payload, std::uint8_t flags, std::vector<parsed_chunk> &chunks) const;
-	void deliver_reliable_run(std::span<const std::uint8_t> run, receive_report &report);
-	void deliver_unreliable(const parsed_chunk &chunk, std::uint16_t packet_seq, receive_report &report);
+	bool validate_chunks(std::span<const std::uint8_t> payload, std::uint8_t flags);
+	void deliver_reliable(receive_report &report);
+	void deliver_unreliable(std::uint16_t packet_seq, receive_report &report);
 	[[nodiscard]]
 	std::uint16_t next_local_seq();
 public:
@@ -388,8 +434,9 @@ public:
 	 */
 	void set_unreliable_state(chunk_type type, std::span<const std::uint8_t> payload);
 
-	/* A best-effort chunk (`event_u`): sent once in the next packet with
-	 * room for it, never retransmitted.  Returns false if it was dropped.
+	/* A best-effort chunk (`event_u`, or a further `state` part): sent
+	 * once in the next packet with room for it, never retransmitted.
+	 * Returns false if it was dropped.
 	 */
 	bool send_unreliable(chunk_type type, std::span<const std::uint8_t> payload);
 
@@ -399,7 +446,10 @@ public:
 	 * a received reliable message, or NET_V2_KEEPALIVE_INTERVAL has passed
 	 * since the last packet.  Call repeatedly until it returns empty: the
 	 * second packet of a tick carries only reliable messages that did not
-	 * fit beside the state chunk.  The span is valid until the next call.
+	 * fit beside the state chunk, and no more than
+	 * config.max_packets_per_tick are built per tick (a new tick starts
+	 * when `now` has advanced by half a tick period since the first
+	 * packet of the current one).  The span is valid until the next call.
 	 */
 	[[nodiscard]]
 	std::span<const std::uint8_t> build_outgoing(net_clock now);
@@ -432,10 +482,6 @@ public:
 	}
 	[[nodiscard]]
 	connection_stats stats() const;
-
-	/* The newest `state` or `input` chunk received, if any. */
-	[[nodiscard]]
-	std::optional<std::span<const std::uint8_t>> latest_received(chunk_type type) const;
 
 	/* Peer time for a local time, once the clock offset is known. */
 	[[nodiscard]]
