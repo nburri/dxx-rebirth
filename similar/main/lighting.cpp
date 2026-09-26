@@ -92,7 +92,10 @@ struct render_vertex_bounds
  * the render list, so they tend to be close in space.
  */
 constexpr std::size_t render_vertex_block_size{16};
-constexpr std::size_t max_render_vertices{MAX_RENDER_SEGS * MAX_VERTICES_PER_SEGMENT};
+/* Each rendered vertex is listed once (render_vertex_flags), so the list
+ * never holds more than the vertices of the level.
+ */
+constexpr std::size_t max_render_vertices{MAX_VERTICES};
 
 /* The vertices of all rendered segments, each listed once, with a copy of
  * their positions (so that apply_light reads them sequentially) and the
@@ -623,8 +626,8 @@ void set_dynamic_light(const d_robot_info_array &Robot_info, render_state_t &rst
 	//	Create list of vertices that need to be looked at for setting of ambient light.
 	auto &Dynamic_light = LevelUniqueLightState.Dynamic_light;
 	auto &vcvertptr = LevelSharedSegmentState.get_vertex_state().get_vertices().vcptr;
-	/* Sized by MAX_RENDER_SEGS, several hundred KB: too large for the
-	 * stack, so keep one instance.  set_dynamic_light is not re-entrant.
+	/* Sized by MAX_VERTICES, several hundred KB: too large for the stack,
+	 * so keep one instance.  set_dynamic_light is not re-entrant.
 	 */
 	static render_vertex_list rvl;
 	rvl.n_render_vertices = 0;
