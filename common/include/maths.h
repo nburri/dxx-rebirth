@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <cassert>
 #include <cstdint>
 #include <optional>
 #include <stdlib.h>
@@ -193,11 +194,13 @@ std::optional<int32_t> checkmuldiv(fix a, fix b, fix divisor);
  * of FrameTime discards up to Divisor - 1 fix units per frame, so the
  * loss grows with the frame rate.  With the carry, the sum of the
  * results is exact on average, regardless of how the time is split into
- * frames.
+ * frames.  The amount must not be negative.
  *
- * Users should call reset() whenever the result is capped or clamped, or
- * the resource that it feeds is empty or full, so that a stale remainder
- * is not carried into an unrelated interval.
+ * The remainder is always less than Divisor fix units, so a stale
+ * remainder has a negligible effect.  Users call reset() when the result
+ * is capped or clamped, or the resource that it feeds is empty or full,
+ * and when the owning state is reinitialized, but this is best effort:
+ * not every change of the resource resets the remainder.
  */
 template <fix Divisor>
 struct fix_rate_divider
@@ -208,6 +211,7 @@ struct fix_rate_divider
 	[[nodiscard]]
 	fix take(const fix amount)
 	{
+		assert(amount >= 0);
 		const fix total{amount + remainder};
 		remainder = total % Divisor;
 		return total / Divisor;

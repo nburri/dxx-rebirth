@@ -2007,7 +2007,9 @@ window_event_result GameProcessFrame(const d_level_shared_robot_info_state &Leve
 		/* The headlight uses 3/8 energy units per second.  Carry the
 		 * remainder of the division into the next frame, so that the
 		 * drain rate does not depend on the frame rate.  The remainder is
-		 * discarded when the headlight is turned off below.
+		 * discarded when the headlight is forced off below.  It is not
+		 * discarded when the player turns the headlight off, which is
+		 * harmless, because it is less than 8 fix units.
 		 */
 		auto &headlight_drain = Local_player_rate_dividers.headlight_drain;
 		fix energy{player_info.energy};

@@ -40,8 +40,10 @@ extern fix Afterburner_charge;
 
 /* Remainders of the per-frame divisions of FrameTime for the local
  * player's ship.  They only exist for the local player, so player_info,
- * savegames and the network protocol are unchanged.  Call reset()
- * wherever the per-ship state is (re)initialized.
+ * savegames and the network protocol are unchanged.  reset() is called
+ * where the local ship is (re)initialized: new ship, level start,
+ * savegame load and demo playback start.  Each remainder is less than
+ * its divisor in fix units, so resets elsewhere are not needed.
  */
 struct local_player_rate_dividers
 {
