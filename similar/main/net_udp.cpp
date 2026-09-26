@@ -5444,17 +5444,17 @@ void dispatch_table::do_protocol_frame(int force, int listen) const
 		 * `time`, so that the delay between the scheduled time and the frame
 		 * in which the send happens does not accumulate and lower the rate
 		 * below PacketsPerSec (at 60 fps, 30 pps used to give only 20 pps).
-		 * At most one packet is sent per frame, so a small backlog is caught
-		 * up by sending in consecutive frames.  If the schedule is still two
-		 * or more intervals behind (a long frame, or the first send), or if
-		 * this send was forced, restart it from now instead.
+		 * If the next send would still be due at once (a frame longer than
+		 * the interval, or the first send), restart the schedule from now
+		 * instead, so that a backlog is not caught up with packets sent in
+		 * consecutive frames.  A forced send also restarts it.
 		 */
 		if (force)
 			last_pdata_time = time;
 		else
 		{
 			last_pdata_time += pdata_interval;
-			if (last_pdata_time + 2 * pdata_interval <= time)
+			if (last_pdata_time + pdata_interval <= time)
 				last_pdata_time = time;
 		}
 		net_udp_send_pdata();
