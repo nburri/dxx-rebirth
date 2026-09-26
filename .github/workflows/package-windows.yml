@@ -60,6 +60,12 @@ jobs:
           https://raw.githubusercontent.com/gabomdq/SDL_GameControllerDB/master/gamecontrollerdb.txt
           || true
 
+      - name: Keep the updated gamecontrollerdb.txt out of the version
+        # Otherwise `git describe` sees the downloaded file as a local change
+        # and marks the version with "*".
+        working-directory: src
+        run: git update-index --assume-unchanged contrib/gamecontrollerdb.txt
+
       - name: Configure and Build
         working-directory: src
         run: >-
