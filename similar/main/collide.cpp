@@ -515,7 +515,8 @@ volatile_wall_result check_volatile_wall(const vmobjptridx_t obj, const unique_s
 		if (get_player_id(obj) == Player_num)
 #endif
 		{
-			if (!((GameTime64 > Last_volatile_scrape_time + DESIGNATED_GAME_FRAMETIME) || (GameTime64 < Last_volatile_scrape_time)))
+			const fix64 elapsed_time{GameTime64 - Last_volatile_scrape_time};
+			if (!(elapsed_time > DESIGNATED_GAME_FRAMETIME || elapsed_time < 0))
 				return volatile_wall_result::none;
 			Last_volatile_scrape_time = {GameTime64};
 
@@ -523,7 +524,27 @@ volatile_wall_result check_volatile_wall(const vmobjptridx_t obj, const unique_s
 			if (d > 0)
 #endif
 			{
-				fix damage = fixmul(d,((FrameTime>DESIGNATED_GAME_FRAMETIME)?FrameTime:DESIGNATED_GAME_FRAMETIME));
+				/* Damage is applied at most once per
+				 * DESIGNATED_GAME_FRAMETIME, on the first frame after
+				 * that interval has passed.  During continuous contact,
+				 * the interval between two applications is therefore
+				 * rounded up to whole frames, so it is between
+				 * DESIGNATED_GAME_FRAMETIME and DESIGNATED_GAME_FRAMETIME
+				 * + FrameTime.  Scale the damage by the time that
+				 * actually elapsed, so that the damage per second is the
+				 * same at any frame rate.
+				 *
+				 * If more time than that elapsed, or the timer went
+				 * backward, the player was not in contact on the previous
+				 * frame.  Apply the damage for one designated frame, or
+				 * for the current frame if that is longer, as before.
+				 */
+				const fix damage_time{
+					(elapsed_time < 0 || elapsed_time > DESIGNATED_GAME_FRAMETIME + FrameTime)
+					? std::max<fix>(FrameTime, DESIGNATED_GAME_FRAMETIME)
+					: static_cast<fix>(elapsed_time)
+				};
+				fix damage = fixmul(d, damage_time);
 
 #if DXX_BUILD_DESCENT == 2
 				if (GameUniqueState.Difficulty_level == Difficulty_level_type::_0)
