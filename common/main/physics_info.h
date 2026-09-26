@@ -32,6 +32,7 @@ struct physics_angle_remainder
 	std::array<uint16_t, 3> rotation;	// pitch, bank, heading
 	uint16_t turnroll;	// rate limit of banking caused by turning
 	uint16_t levelling;	// rate limit of automatic levelling
+	std::array<uint16_t, 3> steering;	// guided missile steering: pitch, bank, heading
 };
 
 /* Fractional parts, in units of 1/32768 of a `fix`, of the velocity and

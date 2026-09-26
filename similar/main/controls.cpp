@@ -94,10 +94,10 @@ void read_flying_controls(object &obj, control_info &Controls)
 		 * `fixang` cannot represent to the next frame, so that small
 		 * inputs are not lost.
 		 */
-		auto &rotation_remainder{gmobj.mtype.phys_info.angle_remainder.rotation};
-		rotangs.p = fixmul_to_fixang_with_remainder(Controls.pitch_time, F1_0 / 2, rotation_remainder[0]) + Seismic_tremor_magnitude/64;
-		rotangs.b = fixmul_to_fixang_with_remainder(Controls.bank_time, F1_0 / 2, rotation_remainder[1]) + Seismic_tremor_magnitude/16;
-		rotangs.h = fixmul_to_fixang_with_remainder(Controls.heading_time, F1_0 / 2, rotation_remainder[2]) + Seismic_tremor_magnitude/64;
+		auto &steering_remainder{gmobj.mtype.phys_info.angle_remainder.steering};
+		rotangs.p = fixmul_to_fixang_with_remainder(Controls.pitch_time, F1_0 / 2, steering_remainder[0]) + Seismic_tremor_magnitude/64;
+		rotangs.b = fixmul_to_fixang_with_remainder(Controls.bank_time, F1_0 / 2, steering_remainder[1]) + Seismic_tremor_magnitude/16;
+		rotangs.h = fixmul_to_fixang_with_remainder(Controls.heading_time, F1_0 / 2, steering_remainder[2]) + Seismic_tremor_magnitude/64;
 
 		const auto &&rotmat{vm_angles_2_matrix(rotangs)};
 		gmobj.orient = vm_matrix_x_matrix(gmobj.orient, rotmat);
