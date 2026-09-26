@@ -43,7 +43,7 @@ Terminology:
   - Clients send PDATA and MDATA to `Netgame.players[0]` only
     (`net_udp_send_pdata`, `net_udp_send_mdata`).
   - `send_data_direct` refuses to send from a client to anyone except the host
-    (`Error("Client sent direct data to non-Host ...")`, `net_udp.cpp:5764`).
+    (`Error("Client sent direct data to non-Host ...")`, `net_udp.cpp:5837`).
   - The host forwards each client's PDATA and MDATA to all other clients
     (`net_udp_process_pdata`, `net_udp_process_mdata`). For MDATA the host keeps
     the original sender's player number in the packet header, so receivers see
@@ -191,7 +191,7 @@ info if the reactor is destroyed or fewer than 30 seconds of play time remain.
 2. The host answers each valid request with `game_info_lite`, at most 8 times
    per second across all requesters (`last_lite_req_time`, `net_udp.cpp:3419`).
 3. While a game runs, the host broadcasts `game_info_lite` every 10 seconds
-   (`do_protocol_frame`, `net_udp.cpp:5456`). The host also broadcasts it
+   (`do_protocol_frame`, `net_udp.cpp:5523`). The host also broadcasts it
    when the game starts, when the player list changes during `starting`, and
    when the host leaves (with `numplayers = 0`).
 4. The client keeps entries in `Active_udp_games`. An entry is matched by game
@@ -374,7 +374,7 @@ that player arrives (`net_udp_read_pdata_packet`), the host resends the `sync`
 every second (`net_udp_resend_sync_due_to_packet_loss`, called from
 `do_protocol_frame`).
 
-Then the host sends "extras" (`net_udp_send_extras`, `net_udp.cpp:6327`), one
+Then the host sends "extras" (`net_udp_send_extras`, `net_udp.cpp:6400`), one
 step per call and at most one step every 1/50 s, counting
 `Network_sending_extras` down:
 
@@ -393,6 +393,10 @@ step per call and at most one step every 1/50 s, counting
 "Direct" means `send_data_direct` to the joining player only (4.5). The other
 messages are broadcast to everyone.
 
+After the last step, the host sends `MULTI_HEARTBEAT` with priority 2 in its
+next frame in time-limited games (`multi_schedule_heartbeat`), because the sync data does not
+contain the level time.
+
 #### 2.5.4 Other clients
 
 Other clients learn about the new player from `addplayer`
@@ -404,17 +408,18 @@ disconnected player came back when that player's relayed `pdata` arrives with
 
 | What | Interval | Where |
 |---|---|---|
-| `pdata` (own ship) | `F1_0 / Netgame.PacketsPerSec` (default 30, allowed 5–40: `MIN_PPS` / `MAX_PPS`, `multi.h:155`). Also forced by `multi_send_fire` (at most 20/s) and by `multi_send_effect_blowup`. | `do_protocol_frame`, `net_udp.cpp:5426` |
+| `pdata` (own ship) | `F1_0 / Netgame.PacketsPerSec` (default 30, allowed 5–40: `MIN_PPS` / `MAX_PPS`, `multi.h:155`). The schedule advances by one interval per send (restarting from the current time after a forced send, or when it is still one or more intervals behind after advancing, so that a backlog after a long frame is not caught up with packets in consecutive frames), so the average rate matches `PacketsPerSec` at any frame rate at or above it; before, it was reset to the send time, and at 60 fps 30 pps gave only 20 packets per second. Also forced by `multi_send_fire` (at most 20/s) and by `multi_send_effect_blowup`. | `do_protocol_frame`, `net_udp.cpp:5480` |
 | D2 thief position (`MULTI_ROBOT_POSITION`) | Same tick as `pdata` | `multi_send_thief_frame`, `multibot.cpp:445` |
-| Robot frame and MDATA flush (unreliable) | Every 1/10 s | `net_udp.cpp:5435` |
+| D2 `MULTI_GUIDED` position | Every `F1_0 / Netgame.PacketsPerSec`, on its own schedule (advanced like the `pdata` one, but not restarted by forced sends, which can keep the `pdata` tick from coming while the player fires), while the local player has an active guided missile and `Network_status` is `playing`. Never sent from a forced `do_protocol_frame` call: `multi_send_fire` forces one before it queues `MULTI_FIRE`, so an update of a new missile would arrive before its fire message and move the sender's previous missile on the receiver. It is queued with priority 0 and sent at once, in the same mdata packet as the thief position (priority 1) if the `pdata` tick is in the same frame, or on its own (`net_udp_send_mdata`). The final position is also sent when the missile is released (priority 0, immediately followed by the release message with priority 1, so both go out at once in one packet), and at priority 1 when the missile is removed in play (marked `OF_SHOULD_BE_DEAD`, `Network_status` `playing`; not by `clear_transient_objects` at a level change). Before this pacing, the position was sent every frame (priority 0) from `read_flying_controls`. | `multi_send_guided_frame` (called from `do_protocol_frame`), `multi_send_guided_release` (from `release_local_guided_missile`), `multi_send_guided_final_position` (from `obj_delete`) |
+| Robot frame and MDATA flush (unreliable) | Every 1/10 s | `net_udp.cpp:5501` |
 | Reliable queue processing | Every protocol frame | `net_udp_noloss_process_queue` |
-| `ping` (host to clients) | Every second | `net_udp_ping_frame` |
+| `ping` (host to clients) | Every second, host only (before this change, clients also sent it to their entries for players 1–7, whose addresses a client does not know, and every receiver discarded it) | `net_udp_ping_frame` |
 | Player timeout check | Every second (only when `listen` is set) | `net_udp_timeout_check` |
 | `endlevel_h` / `endlevel_c` | Every second while the reactor is destroyed; also in the kill matrix screen | `do_protocol_frame`, `kmatrix.cpp:423` |
 | `game_info_lite` broadcast and tracker register (host) | Every 10 s | `do_protocol_frame` |
-| `MULTI_PLAYER_INV` (priority 0) | 3 times per second | `multi_do_frame`, `multi.cpp:1101` |
+| `MULTI_PLAYER_INV` (priority 0) | 3 times per second | `multi_do_frame`, `multi.cpp:1126` |
 | `MULTI_GMODE_UPDATE` (host, team or bounty games) | Every 2 s | `multi_do_frame` |
-| `MULTI_HEARTBEAT` | Every frame in which `ThisLevelTime` changed, sent by the lowest-numbered connected player, only if there is a time limit | `multi_do_frame`, `multi.cpp:1078` |
+| `MULTI_HEARTBEAT` (priority 1, or 2 when scheduled) | Once per second (each frame in which the whole-second value of `ThisLevelTime` changed; before this change, every frame, with priority 0), sent by the lowest-numbered connected player, only if there is a time limit. Also in the first frame of a level (`multi_prep_level_player`), and in the frame after the host has sent the extras to a joining player (`net_udp_send_extras`), both through `multi_schedule_heartbeat`, and those two are sent with priority 2 (reliable). | `multi_do_frame`, `multi.cpp:1103` |
 | Powerup respawn (`MultiLevelInv_Repopulate`) | Every 1/2 s, host only, non-coop | `multi.cpp:5544` |
 
 `do_protocol_frame` is called from `multi_do_frame` every game frame with
@@ -486,7 +491,7 @@ disconnected player came back when that player's relayed `pdata` arrives with
 
 ### 2.9 Leaving
 
-Client (`multi_leave_game`, `multi.cpp:1157`):
+Client (`multi_leave_game`, `multi.cpp:1182`):
 
 1. Sends `MULTI_POSITION` and drops its eggs.
 2. Sends `MULTI_PLAYER_DERES` (`deres_drop`) and `MULTI_QUIT`, both priority 2.
@@ -745,6 +750,10 @@ The trailer is sent as its own 14-byte packet (count = 1).
 
 The host computes the ping as the elapsed time in ms, clamped to 0–9999.
 
+Only the host sends `ping` (`do_protocol_frame`). The host ignores `ping`, and a
+client ignores a `ping` that does not come from the host's address and answers
+only the host. Only the host processes `pong`.
+
 #### 3.2.10 `endlevel_h` (14) and `endlevel_c` (15)
 
 `dispatch_table::send_endlevel_packet` (`net_udp.cpp:2801`),
@@ -844,7 +853,7 @@ Game messages (section 5) are appended to a send buffer, `UDP_MData.mbuf`
 (`net_udp.cpp:5337`). If the new message does not fit, the buffer is first sent
 unreliably.
 
-`net_udp_send_mdata` (`net_udp.cpp:5803`) wraps the buffer:
+`net_udp_send_mdata` (`net_udp.cpp:5876`) wraps the buffer:
 
 | Offset | Size | Field |
 |---|---|---|
@@ -856,7 +865,7 @@ unreliably.
 Behaviour:
 
 - The host sends to every `playing` client. A client sends to the host.
-- On receive (`net_udp_process_mdata`, `net_udp.cpp:5858`):
+- On receive (`net_udp_process_mdata`, `net_udp.cpp:5931`):
   - The packet is dropped if the player number is ≥ `MAX_PLAYERS` or if the
     packet is longer than `sizeof(UDP_mdata_info)`.
   - The source address must match: on the host, the address of the slot in
@@ -890,7 +899,7 @@ priority 0, so that the second copy goes out with the next reliable message
 
 ### 4.4 Reliable delivery ("packet loss prevention", `mdata_pneedack`)
 
-Code: `net_udp.cpp:5490-5749`. It is enabled when `Netgame.PacketLossPrevention`
+Code: `net_udp.cpp:5569-5819`. It is enabled when `Netgame.PacketLossPrevention`
 is set (default 1, `net_udp.cpp:4463`).
 
 State:
@@ -912,7 +921,7 @@ Sending (`net_udp_noloss_add_queue_pkt`):
 - For each recipient that must acknowledge, the current `pkt_num_tosend` is
   recorded and then incremented.
 
-Receiving (`net_udp_noloss_validate_mdata`, `net_udp.cpp:5556`):
+Receiving (`net_udp_noloss_validate_mdata`, `net_udp.cpp:5629`):
 
 - The source address must be the expected peer.
 - If `pkt_num == pkt_num_torecv`, the receiver sends an ACK, stores the number
@@ -935,7 +944,7 @@ Receiving (`net_udp_noloss_validate_mdata`, `net_udp.cpp:5556`):
 `net_udp_noloss_got_ack` marks the queue entry whose originator and
 per-recipient `pkt_num` match.
 
-Resend and timeout (`net_udp_noloss_process_queue`, `net_udp.cpp:5651`), run
+Resend and timeout (`net_udp_noloss_process_queue`, `net_udp.cpp:5724`), run
 every protocol frame:
 
 - Recipients that are not `playing`, the local player, and (on clients)
@@ -960,7 +969,7 @@ every protocol frame:
 
 ### 4.5 Direct messages
 
-`dispatch_table::send_data_direct` (`net_udp.cpp:5755`) sends a single message
+`dispatch_table::send_data_direct` (`net_udp.cpp:5828`) sends a single message
 to one player at once, without the send buffer:
 
 - Layout: the MDATA header plus one message.
@@ -970,7 +979,7 @@ to one player at once, without the send buffer:
 It is used for `MULTI_KILL_CLIENT` (client → host) and for the per-player
 extras sent to a joining player (`MULTI_DOOR_OPEN`, `MULTI_WALL_STATUS`,
 `MULTI_LIGHT`, `MULTI_START_TRIGGER`). The `multi_send_data_direct` template
-wrapper (`multi.cpp:1148`) passes `2` as `needack`.
+wrapper (`multi.cpp:1173`) passes `2` as `needack`.
 
 ---
 
@@ -1039,7 +1048,7 @@ message.
 | 32 | `MULTI_HOSTAGE_DOOR` | 7 | 7 | 0 | host | Hit points of a blastable wall (rejoin) |
 | 33 | `MULTI_SAVE_GAME` | 26 | 26 | 2 | host | Save the game |
 | 34 | `MULTI_RESTORE_GAME` | 6 | 6 | 2 | host | Restore a saved game |
-| 35 | `MULTI_HEARTBEAT` | 5 | 5 | 0 | lowest-numbered connected player | Level time (time-limited games) |
+| 35 | `MULTI_HEARTBEAT` | 5 | 5 | 1 (periodic), 2 (level start, after join extras) | lowest-numbered connected player | Level time (time-limited games) |
 | 36 | `MULTI_KILLGOALS` | 9 | 9 | 2 | host | Kill goal counters |
 | 37 | `MULTI_DO_BOUNTY` | 2 | 2 | 2 | host | Bounty target |
 | 38 | `MULTI_TYPING_STATE` | 3 | 3 | 2 | any | Chat typing indicator |
@@ -1051,7 +1060,7 @@ message.
 | 44 | `MULTI_VULWPN_AMMO_ADJ` | 6 | 6 | 2 | any | Remaining ammo in a vulcan/gauss powerup |
 | 45 | `MULTI_PLAYER_INV` | 21 | 15 | 0 (periodic), 1 (extras) | any | Sender's inventory |
 | 46 | `MULTI_MARKER` | 55 | – | 2 | any | Marker dropped |
-| 47 | `MULTI_GUIDED` | 26 | – | 0 | any | Guided missile position or release |
+| 47 | `MULTI_GUIDED` | 26 | – | 0 then flushed at once (paced position, final position before release), 1 (release, final position on removal) | any | Guided missile position or release |
 | 48 | `MULTI_STOLEN_ITEMS` | 11 | – | 2 | host | Thief's stolen items (rejoin) |
 | 49 | `MULTI_WALL_STATUS` | 6 | – | direct | host | Wall state (rejoin) |
 | 50 | `MULTI_SEISMIC` | 5 | – | 2 | any | Earthshaker disturbance duration |
@@ -1329,7 +1338,12 @@ trigger number. The receiver rejects triggers whose originator is itself.
 | 3 | 1 | Player who destroyed it |
 
 **`MULTI_HEARTBEAT` (35), 5 bytes.** Bytes 1–4: `ThisLevelTime` (fix). The
-receiver overwrites its own level time.
+receiver overwrites its own level time, which it then keeps advancing by its
+own frame time (`GameProcessFrame`), so the message only corrects drift. It is
+sent with priority 1, so that the value is not up to 1/10 s old when it
+arrives. The sync data does not contain the level time, so a joining player
+learns it from the first heartbeat after the extras, which is sent with
+priority 2 (reliable), as is the first heartbeat of a level.
 
 **`MULTI_HOSTAGE_DOOR` (32), 7 bytes.** Bytes 1–2: wall number. Bytes 3–6:
 hit points (fix). The receiver damages the wall down to that value.
@@ -1347,7 +1361,7 @@ D2 only:
 | `MULTI_SEISMIC` (50) | 1–4 duration (fix) |
 | `MULTI_EFFECT_BLOWUP` (62) | 1 player number (ignored), 2–3 segment, 4 side, 5–16 hit point |
 | `MULTI_MARKER` (46) | 1 player number (ignored by the receiver), 2 marker index, 3–14 position, 15–54 text (40) |
-| `MULTI_GUIDED` (47) | serialized: 1 player number (ignored), 2 release flag, 3–25 `shortpos` (`bytemat[9]`, `xo`, `yo`, `zo`, `segment`, `velx`, `vely`, `velz`, 16-bit each) |
+| `MULTI_GUIDED` (47) | serialized: 1 player number (ignored), 2 release flag, 3–25 `shortpos` (`bytemat[9]`, `xo`, `yo`, `zo`, `segment`, `velx`, `vely`, `velz`, 16-bit each). The receiver warps its copy of the sender's active guided missile to the `shortpos` and lets physics move it until the next update. With the release flag set, it ignores the `shortpos` and only releases the missile (`multi_do_guided`). |
 | `MULTI_STOLEN_ITEMS` (48) | 1–10 powerup ids |
 | `MULTI_DROP_BLOB` (54) | 1 player number (ignored) |
 | `MULTI_SOUND_FUNCTION` (55) | 1 player number (ignored), 2 function (0 = stop, 3 = start afterburner loop), 3 sound |

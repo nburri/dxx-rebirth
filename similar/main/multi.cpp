@@ -132,7 +132,7 @@ static void multi_add_lifetime_kills(int count);
 
 namespace {
 
-static void multi_send_heartbeat();
+static void multi_send_heartbeat(multiplayer_data_priority priority);
 static void multi_send_ranking(netplayer_info::player_rank);
 static void multi_send_gmode_update();
 
@@ -1064,9 +1064,30 @@ static void multi_compute_kill(const d_robot_info_array &Robot_info, const imobj
 
 }
 
+namespace {
+
+/* Whole second of ThisLevelTime in which this player last sent
+ * MULTI_HEARTBEAT, or -1 to send it in the next frame.
+ */
+static int last_heartbeat_second = -1;
+
+/* Priority of the next MULTI_HEARTBEAT.  The periodic heartbeat is sent
+ * unreliably, but the one scheduled by multi_schedule_heartbeat is the only
+ * one that tells a joining player the level time before the next second, so
+ * send that one reliably.
+ */
+static multiplayer_data_priority next_heartbeat_priority = multiplayer_data_priority::_1;
+
+}
+
+void multi_schedule_heartbeat()
+{
+	last_heartbeat_second = -1;
+	next_heartbeat_priority = multiplayer_data_priority::_2;
+}
+
 window_event_result multi_do_frame()
 {
-	static d_time_fix lasttime;
 	static fix64 last_gmode_time = 0, last_inventory_time = 0, last_repo_time = 0;
 
 	if (!(Game_mode & GM_MULTI) || Newdemo_state == ND_STATE_PLAYBACK)
@@ -1075,15 +1096,19 @@ window_event_result multi_do_frame()
 		return window_event_result::ignored;
 	}
 
-	if (+(Game_mode & GM_NETWORK) && Netgame.PlayTimeAllowed.count() && lasttime != ThisLevelTime)
+	/* The receiver only uses the heartbeat to correct its own level time,
+	 * which it advances every frame.  Send it when the second changes, not
+	 * every frame, so that the rate does not scale with the frame rate.
+	 */
+	if (const auto this_level_second{f2i(ThisLevelTime.count())}; +(Game_mode & GM_NETWORK) && Netgame.PlayTimeAllowed.count() && last_heartbeat_second != this_level_second)
 	{
 		for (unsigned i = 0; i < N_players; ++i)
 			if (vcplayerptr(i)->connected != player_connection_status::disconnected)
 			{
 				if (i==Player_num)
 				{
-					multi_send_heartbeat();
-					lasttime = ThisLevelTime;
+					multi_send_heartbeat(std::exchange(next_heartbeat_priority, multiplayer_data_priority::_1));
+					last_heartbeat_second = this_level_second;
 				}
 				break;
 			}
@@ -3542,6 +3567,10 @@ void multi_prep_level_player(void)
 	multi_consistency_error(1);
 
 	multi_sending_message.fill(msgsend_state::none);
+	/* ThisLevelTime restarts at 0, so send the heartbeat in the first frame
+	 * of the level even if the previous level ended in second 0.
+	 */
+	multi_schedule_heartbeat();
 	if (imulti_new_game)
 		for (uint_fast32_t i = 0; i != Players.size(); i++)
 			init_player_stats_new_ship(i);
@@ -4010,13 +4039,63 @@ shortpos create_shortpos_little(const d_level_shared_segment_state &LevelSharedS
 
 }
 
-void multi_send_guided_info(const object_base &miss, const char done)
+namespace {
+
+static void multi_send_guided_info(const object_base &miss, const uint8_t release, const multiplayer_data_priority priority)
 {
 	multi_guided_info gi;
 	gi.pnum = static_cast<uint8_t>(Player_num);
-	gi.release = done;
+	gi.release = release;
 	gi.sp = create_shortpos_little(LevelSharedSegmentState, miss);
-	multi_serialize_write(multiplayer_data_priority::_0, gi);
+	multi_serialize_write(priority, gi);
+}
+
+}
+
+void multi_send_guided_release(const object_base &miss)
+{
+	/* Position updates are paced by multi_send_guided_frame, and the
+	 * receiver ignores the position in a release message, so send the
+	 * final position before the release.  The release flushes both at
+	 * once, like the paced updates, so that the receiver does not get the
+	 * final position after it moved the missile past that position.
+	 */
+	multi_send_guided_info(miss, 0, multiplayer_data_priority::_0);
+	multi_send_guided_info(miss, 1, multiplayer_data_priority::_1);
+}
+
+void multi_send_guided_final_position(const object_base &miss)
+{
+	/* Called when the local player's active guided missile is removed in
+	 * play.  Position updates are paced by multi_send_guided_frame, so send
+	 * the final position, at once like the paced updates.  Do not send
+	 * anything when the level is being torn down.
+	 */
+	if (Network_status != network_state::playing)
+		return;
+	multi_send_guided_info(miss, 0, multiplayer_data_priority::_1);
+}
+
+bool multi_send_guided_frame()
+{
+	/* Called by do_protocol_frame at the pdata rate (Netgame.PacketsPerSec),
+	 * never from a forced call, and the caller sends the mdata packet at
+	 * once, together with the thief position if the pdata tick is in the
+	 * same frame.  The receiver (multi_do_guided) warps its copy of the
+	 * missile to the received position and velocity, then moves it by
+	 * physics until the next update, the same as for ship positions.  The
+	 * final state is sent by multi_send_guided_release and
+	 * multi_send_guided_final_position.
+	 *
+	 * Return whether an update was queued.
+	 */
+	if (Network_status != network_state::playing)
+		return false;
+	const auto &&gimobj = LevelUniqueObjectState.Guided_missile.get_player_active_guided_missile(LevelUniqueObjectState.Objects.vmptr, Player_num);
+	if (gimobj == nullptr)
+		return false;
+	multi_send_guided_info(*gimobj, 0, multiplayer_data_priority::_0);
+	return true;
 }
 
 namespace {
@@ -4141,14 +4220,18 @@ static void multi_do_kill_goal_counts(fvmobjptr &vmobjptr, const multiplayer_rsp
 	}
 }
 
-void multi_send_heartbeat ()
+void multi_send_heartbeat(const multiplayer_data_priority priority)
 {
 	if (!Netgame.PlayTimeAllowed.count())
 		return;
 
 	multi_command<multiplayer_command_t::MULTI_HEARTBEAT> multibuf;
 	PUT_INTEL_INT(&multibuf[1], ThisLevelTime.count());
-	multi_send_data(multibuf, multiplayer_data_priority::_0);
+	/* The receiver overwrites its level time with this value, so send it at
+	 * once (priority 1 or 2) rather than up to 100ms late with the next
+	 * regular mdata packet.  It is sent only once per second.
+	 */
+	multi_send_data(multibuf, priority);
 }
 
 static void multi_do_heartbeat(const multiplayer_rspan<multiplayer_command_t::MULTI_HEARTBEAT> buf)

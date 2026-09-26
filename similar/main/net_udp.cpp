@@ -5437,15 +5437,66 @@ void dispatch_table::do_protocol_frame(int force, int listen) const
 	if (WaitForRefuseAnswer && time>(RefuseTimeLimit+(F1_0*12)))
 		WaitForRefuseAnswer=0;
 
-	// Send positional update either in the regular PPS interval OR if forced
-	if (force || (Netgame.PacketsPerSec && time >= (last_pdata_time + (F1_0 / Netgame.PacketsPerSec))))
+	const fix64 pdata_interval{Netgame.PacketsPerSec ? F1_0 / Netgame.PacketsPerSec : 0};
+	/* Advance a schedule by one interval, instead of setting it to `time`,
+	 * so that the delay between the scheduled time and the frame in which
+	 * the send happens does not accumulate and lower the rate below
+	 * PacketsPerSec (at 60 fps, 30 pps used to give only 20 pps).  If the
+	 * next send would still be due at once (a frame longer than the
+	 * interval, or the first send), restart the schedule from now instead,
+	 * so that a backlog is not caught up with packets sent in consecutive
+	 * frames.
+	 */
+	const auto advance_schedule = [time, pdata_interval](fix64 &last_time) {
+		last_time += pdata_interval;
+		if (last_time + pdata_interval <= time)
+			last_time = time;
+	};
+#if DXX_BUILD_DESCENT == 2
+	/* Queue the guided missile position at the pdata rate.  It is sent in
+	 * the same mdata packet as the thief position (priority 1) if the pdata
+	 * tick below happens in this frame, or on its own at the end of this
+	 * block otherwise.
+	 *
+	 * It has its own schedule, which is not restarted by forced calls, and
+	 * it is never sent from a forced call.  multi_send_fire forces this
+	 * function before it queues MULTI_FIRE, and for a new guided missile,
+	 * an update sent then would reach the receiver before the fire message
+	 * and move the sender's previous guided missile, if the receiver still
+	 * has it, to the launch point of the new one.  Forced calls restart the
+	 * pdata schedule, so while the player fires (up to 20 forced calls per
+	 * second) the scheduled pdata tick may not come at all, but this
+	 * schedule still does.
+	 */
+	static fix64 last_guided_time;
+	bool guided_queued{false};
+	if (!force && pdata_interval && time >= last_guided_time + pdata_interval)
 	{
-		last_pdata_time = time;
+		advance_schedule(last_guided_time);
+		guided_queued = multi_send_guided_frame();
+	}
+#endif
+
+	// Send positional update either in the regular PPS interval OR if forced
+	if (force || (pdata_interval && time >= (last_pdata_time + pdata_interval)))
+	{
+		/* A forced send restarts the schedule. */
+		if (force)
+			last_pdata_time = time;
+		else
+			advance_schedule(last_pdata_time);
 		net_udp_send_pdata();
 #if DXX_BUILD_DESCENT == 2
                 multi_send_thief_frame();
 #endif
 	}
+#if DXX_BUILD_DESCENT == 2
+	/* Send the guided missile position now if the thief position did not
+	 * already send it.
+	 */
+	if (guided_queued)
+		net_udp_send_mdata(0, time);
+#endif
 	
 	if (force || (time >= (last_mdata_time+(F1_0/10))))
 	{
@@ -5479,7 +5530,14 @@ void dispatch_table::do_protocol_frame(int force, int listen) const
 #endif
 	}
 
-	net_udp_ping_frame(time);
+	/* Only the host measures pings.  A client does not know the addresses
+	 * of the other clients (they are unset, or the host's address for
+	 * players added after the client joined), and every receiver discards
+	 * a ping that does not come from the host (process_packet,
+	 * net_udp_process_ping).
+	 */
+	if (multi_i_am_master())
+		net_udp_ping_frame(time);
 #if DXX_USE_TRACKER
 	udp_tracker_verify_ack_timeout();
 #endif
@@ -6376,7 +6434,14 @@ void net_udp_send_extras ()
 
 	Network_sending_extras--;
 	if (!Network_sending_extras)
+	{
 		Player_joining_extras=-1;
+		/* The sync data does not include ThisLevelTime; the joining
+		 * player learns it only from MULTI_HEARTBEAT.  Send it in the
+		 * next frame instead of up to one second later.
+		 */
+		multi_schedule_heartbeat();
+	}
 }
 
 struct show_game_info_menu : std::array<newmenu_item, 2>, std::array<char, 512>, passive_newmenu

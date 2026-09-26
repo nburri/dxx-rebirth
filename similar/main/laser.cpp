@@ -2296,7 +2296,7 @@ void release_local_guided_missile(d_level_unique_object_state &LevelUniqueObject
 {
 	Missile_viewer = &missile;
 	if (+(Game_mode & GM_MULTI))
-		multi_send_guided_info(missile, 1);
+		multi_send_guided_release(missile);
 	if (Newdemo_state == ND_STATE_RECORDING)
 		newdemo_record_guided_end();
 	LevelUniqueObjectState.Guided_missile.clear_player_active_guided_missile(player_num);
