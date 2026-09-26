@@ -4023,6 +4023,7 @@ class DXXCommon(LazyObjectConstructor):
 					('register_compile_target', True, 'report compile targets to SCons core'),
 					('register_cpp_output_targets', None, None),
 					('register_runtime_test_link_targets', False, None),
+					('register_runtime_test_plain_link_targets', False, None),
 					('enable_build_failure_summary', True, 'print failed nodes and their commands'),
 					('wrap_PHYSFS_read', False, None),
 					('wrap_PHYSFS_write', False, None),
@@ -4600,6 +4601,8 @@ class DXXCommon(LazyObjectConstructor):
 			self.create_header_targets()
 		if user_settings.register_runtime_test_link_targets:
 			self._register_runtime_test_link_targets()
+		if user_settings.register_runtime_test_plain_link_targets:
+			self._register_runtime_test_plain_link_targets()
 		configure_pch_flags = archive.configure_pch_flags
 		if configure_pch_flags or env.GetOption('clean'):
 			self.pch_manager = PCHManager(self, configure_pch_flags, archive.pch_manager)
@@ -4927,7 +4930,22 @@ class DXXCommon(LazyObjectConstructor):
 				))
 			env.Program(target=builddir.File(test.target), source=test.source(self), LIBS=LIBS)
 
+	# Tests that do not use Boost.Test: plain programs that exit non-zero
+	# on failure.  Each is registered as an alias named after its target,
+	# so `scons register_runtime_test_plain_link_targets=1 <target>` builds
+	# and links just that test, without the Boost.Test configure check.
+	def _register_runtime_test_plain_link_targets(self):
+		runtime_test_plain_tests = self.runtime_test_plain_tests
+		if not runtime_test_plain_tests:
+			return
+		env = self.env
+		builddir = env.Dir(self.user_settings.builddir).Dir(self.srcdir)
+		for test in runtime_test_plain_tests:
+			program = env.Program(target=builddir.File(test.target), source=test.source(self), LIBS=[])
+			env.Alias(test.target, program)
+
 	runtime_test_boost_tests: collections.abc.Sequence[RuntimeTest] = None
+	runtime_test_plain_tests: collections.abc.Sequence[RuntimeTest] = None
 
 class DXXArchive(DXXCommon):
 	PROGRAM_NAME: typing.Final[str] = 'DXX-Archive'
@@ -4977,6 +4995,14 @@ class DXXArchive(DXXCommon):
 			)),
 		RuntimeTest('test-zip', (
 			'common/unittest/zip.cpp',
+			)),
+			)
+	runtime_test_plain_tests = (
+		# Simulation test of the v2 network transport
+		# (Documentation/netv2-transport.md).
+		RuntimeTest('test-net-v2-transport', (
+			'common/unittest/net_v2_transport.cpp',
+			'common/main/net_v2_transport.cpp',
 			)),
 			)
 	del RuntimeTest
