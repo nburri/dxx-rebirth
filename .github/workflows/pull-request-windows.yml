@@ -20,5 +20,10 @@ concurrency:
 jobs:
   windows:
     name: Package Windows
-    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'playtest')
+    # Adding another label to a playtest pull request must not restart the
+    # build, so a 'labeled' event only counts for the playtest label itself.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (contains(github.event.pull_request.labels.*.name, 'playtest') &&
+       (github.event.action != 'labeled' || github.event.label.name == 'playtest'))
     uses: ./.github/workflows/package-windows.yml
