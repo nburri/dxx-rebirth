@@ -90,7 +90,7 @@ The protocol has two version identifiers:
 
 - The program version `DXX_VERSION_MAJORi / MINORi / MICROi`, built from
   `SConstruct`.
-- `MULTI_PROTO_VERSION` (currently `16`, `multi.h:151`).
+- `MULTI_PROTO_VERSION` (currently `17`, `multi.h:151`). Version 17 added the pickup messages (5.3, "Host-decided pickups").
 
 In addition, request packets carry a 4-byte game identifier `UDP_REQ_ID`: `"D1XR"`
 in D1X and `"D2XR"` in D2X (`net_udp.cpp:77-81`).
@@ -998,7 +998,7 @@ wrapper (`multi.cpp:1148`) passes `2` as `needack`.
 ### 5.2 Summary
 
 Ids are the enumerator order in `for_each_multiplayer_command`. D1X has ids
-0–45 only. "Prio" is the priority used by the sender in the current code
+0–45, followed by the three pickup messages as 46–48. "Prio" is the priority used by the sender in the current code
 ("direct" = `send_data_direct` with ACK). "Any" means any player can send the
 message.
 
@@ -1068,6 +1068,9 @@ message.
 | 61 | `MULTI_GOT_ORB` | 2 | – | 2 | any | Sender picked up an orb |
 | 62 | `MULTI_EFFECT_BLOWUP` | 17 | – | 0 | any | Monitor or switch destroyed (sent before `MULTI_TRIGGER`) |
 | 63 | `MULTI_UPDATE_BUDDY_STATE` | 7 | – | 2 | any | Guide-bot goal |
+| 64 (D1: 46) | `MULTI_PICKUP_REQUEST` | 4 | 4 | direct | client | Asks the host for a limited powerup |
+| 65 (D1: 47) | `MULTI_PICKUP_REPLY` | 5 | 5 | direct | host | Grants or denies a pickup request |
+| 66 (D1: 48) | `MULTI_PICKUP_RELEASE` | 4 | 4 | direct | client | Gives back a granted powerup that could not be used |
 
 `DXX_MP_SIZE_BEGIN_SYNC` (`multiinternal.h:79`, `86`) is defined but not used
 by any message.
@@ -1241,6 +1244,42 @@ initial velocity, then reseeds from values it drew from its own sequence
 beforehand. It maps the object to (object number, originator). The sender
 (`maybe_drop_net_powerup`, `fireball.cpp:881-884`) seeds in the same way. The message is ignored during endlevel
 or after the reactor is destroyed.
+
+**Host-decided pickups: `MULTI_PICKUP_REQUEST` (64), `MULTI_PICKUP_REPLY`
+(65), `MULTI_PICKUP_RELEASE` (66).** In D1X the ids are 46–48. All three are
+sent with `send_data_direct` (reliable).
+
+| Message | Size | Layout |
+|---|---|---|
+| `MULTI_PICKUP_REQUEST` | 4 | 1–2 remote object number, 3 owner (as in `MULTI_REMOVE_OBJECT`) |
+| `MULTI_PICKUP_REPLY` | 5 | 1–2 remote object number, 3 owner (copied from the request), 4 granted (0/1) |
+| `MULTI_PICKUP_RELEASE` | 4 | same as the request |
+
+In network games, a client does not collect limited powerups on its own.
+These are all powerups except shields, energy, keys and extra lives
+(`multi_powerup_needs_host_grant`).
+
+1. When the local player touches such a powerup, the client sends
+   `MULTI_PICKUP_REQUEST` (`multi_request_powerup_pickup`). It has at most one
+   outstanding request per powerup, and asks again after 3 s without an answer
+   or 1 s after a denial.
+2. The host (`multi_do_pickup_request`) grants the request if the powerup still
+   exists, maps back to the same object number and owner, and is not reserved
+   by another player. The requester must be playing and alive. The host
+   reserves the powerup for the requester for 5 s and replies `granted=1`;
+   otherwise it replies `granted=0`. A repeated request from the player who
+   already holds the reservation gets no second reply.
+3. The client (`multi_do_pickup_reply`) uses a grant only as the answer to its
+   outstanding request and only within 2 s of sending it. It then calls
+   `do_powerup` without the "is another player closer?" check. If the powerup
+   was used, it sends `MULTI_REMOVE_OBJECT` as before. Otherwise, for example
+   when the player already carries the maximum amount, it sends
+   `MULTI_PICKUP_RELEASE`, and the host (`multi_do_pickup_release`) drops the
+   reservation.
+
+The host collects powerups instantly, as before, except those reserved by a
+client (`multi_powerup_reserved_for_other_player`). Reservations are matched
+by object signature and cleared by `reset_network_objects`.
 
 **`MULTI_CREATE_ROBOT_POWERUPS` (31), 27 bytes.**
 `multi_send_create_robot_powerups` (`multibot.cpp:705`),
