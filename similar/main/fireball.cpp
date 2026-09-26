@@ -838,6 +838,16 @@ void maybe_drop_net_powerup(powerup_type_t powerup_type, bool adjust_cap, bool r
 	auto &Vertices{LevelSharedVertexState.get_vertices()};
 	playernum_t pnum{Player_num};
 	if (+(Game_mode & GM_MULTI) && !(Game_mode & GM_MULTI_COOP)) {
+		/* Only the host replaces used or expired items.  If a client also
+		 * replaced them, the client and the host could both spawn a
+		 * replacement for the same item: the host respawns anything that
+		 * has been missing for about 2 seconds (MultiLevelInv_Repopulate),
+		 * and the client's MULTI_CREATE_POWERUP can take longer than that
+		 * to reach the host when reliable packets are resent.  The host
+		 * respawns the item within about 2 seconds.
+		 */
+		if (adjust_cap && !multi_i_am_master())
+			return;
 		if (+(Game_mode & GM_NETWORK) && adjust_cap)
 		{
 			MultiLevelInv_Recount(); // recount current items
