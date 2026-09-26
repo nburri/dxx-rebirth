@@ -577,6 +577,12 @@ void omega_charge_frame(player_info &player_info)
 		return;
 
 	//	Don't charge while firing. Wait 1/3 second after firing before recharging
+	/* On the frame where the delay expires, only charge for the part of
+	 * the frame after the delay expired.  Otherwise, the whole frame is
+	 * charged, which gives up to FrameTime / OMEGA_CHARGE_SCALE extra
+	 * charge per shot, more at low frame rates.
+	 */
+	fix charge_time{FrameTime};
 	auto &Omega_recharge_delay = player_info.Omega_recharge_delay;
 	if (Omega_recharge_delay)
 	{
@@ -585,6 +591,7 @@ void omega_charge_frame(player_info &player_info)
 			Omega_recharge_delay -= FrameTime;
 			return;
 		}
+		charge_time -= Omega_recharge_delay;
 		Omega_recharge_delay = 0;
 	}
 
@@ -600,7 +607,7 @@ void omega_charge_frame(player_info &player_info)
 		 * charge actually gained, so it follows automatically.
 		 */
 		const auto old_omega_charge{Omega_charge};
-		Omega_charge += omega_charge_divider.take(FrameTime);
+		Omega_charge += omega_charge_divider.take(charge_time);
 		if (Omega_charge >= MAX_OMEGA_CHARGE)
 		{
 			Omega_charge = MAX_OMEGA_CHARGE;
