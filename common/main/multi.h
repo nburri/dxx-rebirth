@@ -148,7 +148,7 @@ static inline player_ship_color get_team_color(const team_number tnum)
 }
 
 // What version of the multiplayer protocol is this? Increment each time something drastic changes in Multiplayer without the version number changes. Reset to 0 each time the version of the game changes
-constexpr std::uint16_t MULTI_PROTO_VERSION{16};
+constexpr std::uint16_t MULTI_PROTO_VERSION{17};
 // PROTOCOL VARIABLES AND DEFINES - END
 
 // limits for Packets (i.e. positional updates) per sec
@@ -419,6 +419,9 @@ void multi_send_destroy_controlcen(objnum_t objnum, playernum_t player);
 void multi_send_position(object &objnum);
 void multi_send_kill(vmobjptridx_t objnum);
 void multi_send_remobj(vmobjidx_t objnum);
+bool multi_powerup_needs_host_grant(const object_base &powerup);
+void multi_request_powerup_pickup(vmobjptridx_t powerup);
+bool multi_powerup_reserved_for_other_player(vcobjptridx_t powerup);
 void multi_send_door_open(vcsegidx_t segnum, sidenum_t side, wall_flags flag);
 void multi_send_drop_weapon(vmobjptridx_t objnum,int seed);
 void multi_reset_player_object(object &objp);

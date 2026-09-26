@@ -2399,7 +2399,20 @@ void collide_robot_and_materialization_center(const d_robot_info_array &Robot_in
 
 void collide_live_local_player_and_powerup(const vmobjptridx_t powerup)
 {
-	if (do_powerup(powerup))
+	if (multi_powerup_needs_host_grant(powerup))
+	{
+		/* A client only asks the host for the powerup.  It collects the
+		 * powerup when the host grants it (multi_do_pickup_reply).
+		 */
+		if (!multi_i_am_master())
+		{
+			multi_request_powerup_pickup(powerup);
+			return;
+		}
+		if (multi_powerup_reserved_for_other_player(powerup))
+			return;
+	}
+	if (do_powerup(powerup, true))
 	{
 		powerup->flags |= OF_SHOULD_BE_DEAD;
 		if (+(Game_mode & GM_MULTI))
