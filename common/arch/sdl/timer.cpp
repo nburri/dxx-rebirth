@@ -10,6 +10,7 @@
  *
  */
 
+#include <algorithm>
 #include <SDL.h>
 
 #include "args.h"
@@ -101,6 +102,20 @@ constexpr fix frame_wait_sleep_margin{F1_0 * 3 / 2 / 1000};
  */
 constexpr fix frame_wait_multi_interval{F1_0 / 1000};
 
+/* With vsync, the buffer swap waits for the monitor, so it paces the
+ * frames.  A software bound near the refresh interval would fight the
+ * swap: if the bound is a bit longer than the refresh interval, every
+ * other refresh is missed, and the frame rate is halved (a 540 Hz
+ * monitor would run at 270 fps with a bound of 1/500 s).  Keep only a
+ * bound of 1 ms, in case the driver does not wait for vsync.
+ */
+constexpr int vsync_maximum_fps{1000};
+
+}
+
+fix timer_get_frame_bound()
+{
+	return F1_0 / (CGameCfg.VSync ? vsync_maximum_fps : CGameArg.SysMaxFPS);
 }
 
 fix64 timer_wait_frame(const fix64 deadline)
@@ -143,16 +158,20 @@ void timer_delay_bound(const unsigned caller_bound)
 
 	uint32_t start = FrameStart;
 	const auto multiplayer{+(Game_mode & GM_MULTI)};
-	const auto vsync{CGameCfg.VSync};
-	static_assert(1000u / MAXIMUM_FPS > 0);
-	const auto bound = vsync ? 1000u / MAXIMUM_FPS : caller_bound;
+	/* With vsync, let the buffer swap pace the screen, but still respect
+	 * the menu frame limit.  Screens which ask for a lower rate (such as
+	 * 50 fps) run up to the menu limit instead, because a bound longer
+	 * than the refresh interval would make the swap miss refreshes
+	 * (50 fps on a 60 Hz monitor would become 30 fps).
+	 */
+	static_assert(1000u / MENU_MAXIMUM_FPS > 0);
+	const auto bound{CGameCfg.VSync ? std::min(caller_bound, 1000u / MENU_MAXIMUM_FPS) : caller_bound};
 	for (;;)
 	{
 		const uint32_t tv_now = SDL_GetTicks();
 		if (multiplayer)
 			multi_do_frame(); // during long wait, keep packets flowing
-		if (!vsync)
-			SDL_Delay(1);
+		SDL_Delay(1);
 		if (unlikely(start > tv_now))
 			start = tv_now;
 		if (unlikely(tv_now - start >= bound))

@@ -646,8 +646,7 @@ void calc_frame_time()
 {
 	fix last_frametime = FrameTime;
 
-	const auto vsync{CGameCfg.VSync};
-	const auto bound = f1_0 / (likely(vsync) ? MAXIMUM_FPS : CGameArg.SysMaxFPS);
+	const auto bound{timer_get_frame_bound()};
 	/* Also wait until the timer advanced, so that FrameTime is
 	 * positive.
 	 */

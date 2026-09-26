@@ -34,6 +34,11 @@ void timer_delay_bound(unsigned bound);
  * While waiting, keep multiplayer packets flowing.
  */
 fix64 timer_wait_frame(fix64 deadline);
+/* Return the minimum time between two frames of the game or the
+ * automap.
+ */
+[[nodiscard]]
+fix timer_get_frame_bound();
 static inline void timer_delay2(int fps)
 {
 	timer_delay_bound(1000u / fps);

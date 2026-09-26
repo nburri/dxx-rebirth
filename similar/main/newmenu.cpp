@@ -101,15 +101,9 @@ struct step_up
 		}
 };
 
-/* Menus redraw only on idle, so running them at the full game frame
- * rate (up to MAXIMUM_FPS) would keep the CPU and GPU busy for no
- * visible benefit.  Limit the menus to a rate that still keeps the
- * mouse cursor smooth.
- */
 static int get_menu_maximum_fps()
 {
-	constexpr int menu_maximum_fps{200};
-	return std::min(CGameArg.SysMaxFPS, menu_maximum_fps);
+	return std::min<int>(CGameArg.SysMaxFPS, MENU_MAXIMUM_FPS);
 }
 
 static grs_main_bitmap nm_background, nm_background1;

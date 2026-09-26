@@ -56,6 +56,11 @@ constexpr std::integral_constant<unsigned, DXX_MAXIMUM_FPS> MAXIMUM_FPS{};
 #ifdef NDEBUG
 static_assert(MINIMUM_FPS == DESIGNATED_GAME_FPS);
 #endif
+/* Menus redraw only on idle, so running them at the full game frame
+ * rate would keep the CPU and GPU busy for no visible benefit.  This
+ * rate still keeps the mouse cursor smooth.
+ */
+constexpr std::integral_constant<unsigned, 200> MENU_MAXIMUM_FPS{};
 
 // from mglobal.c
 using d_time_fix = std::chrono::duration<uint32_t, std::ratio<1, F1_0>>;
