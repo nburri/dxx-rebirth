@@ -68,6 +68,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "text.h"
 #include "kmatrix.h"
 #include "multibot.h"
+#include "endlevel.h"
 #include "gameseq.h"
 #include "physics.h"
 #include "switch.h"
@@ -551,8 +552,11 @@ namespace {
  * (MULTI_PICKUP_REQUEST), and the host grants it to the first player who
  * asks (MULTI_PICKUP_REPLY).  A granted powerup is reserved for that player
  * for pickup_reservation_time, so that no one else can collect it before
- * that player's MULTI_REMOVE_OBJECT reaches the host.  Entries are matched
- * by object signature, so a reused object slot does not inherit them.
+ * that player's MULTI_REMOVE_OBJECT reaches the host.  A client uses a
+ * grant only within pickup_grant_max_age of its request, which leaves the
+ * rest of the reservation for its MULTI_REMOVE_OBJECT to arrive.  Entries
+ * are matched by object signature, so a reused object slot does not
+ * inherit them.
  */
 struct pickup_reservation
 {
@@ -561,20 +565,24 @@ struct pickup_reservation
 	fix64 expires{};
 };
 
-/* Client side: when this client may ask for the powerup again. */
+/* Client side: the request for one powerup. */
 struct pickup_request_state
 {
 	object_signature_t signature{};
+	bool pending{};
+	fix64 sent_time{};
 	fix64 retry_time{};
 };
 
-constexpr fix64 pickup_reservation_time{F1_0 * 3};
-/* Ask again if there is no answer, or after a denial. */
-constexpr fix64 pickup_request_retry_time{F1_0};
-/* Ask again after a granted powerup could not be used, for example because
- * the player already carries the maximum amount.
+constexpr fix64 pickup_reservation_time{F1_0 * 5};
+constexpr fix64 pickup_grant_max_age{F1_0 * 2};
+/* Ask again if the host has not answered within this time. */
+constexpr fix64 pickup_reply_timeout{F1_0 * 3};
+/* Ask again this long after a denial, or after a granted powerup could not
+ * be used, for example because the player already carries the maximum
+ * amount.
  */
-constexpr fix64 pickup_unused_retry_time{F1_0 * 3};
+constexpr fix64 pickup_retry_time{F1_0};
 
 std::array<pickup_reservation, MAX_OBJECTS> Pickup_reservations;
 std::array<pickup_request_state, MAX_OBJECTS> Pickup_requests;
@@ -2975,7 +2983,9 @@ static void multi_put_pickup_object(multi_command<C> &multibuf, const uint16_t r
 }
 
 /* Map the object number and owner of a pickup message to a live local
- * powerup, or return nothing.
+ * powerup, or return nothing.  The local object must map back to the same
+ * object number and owner, so that a message about an object that is gone
+ * does not match a different object that now uses the same slot.
  */
 static std::optional<vmobjptridx_t> multi_get_pickup_object(const uint16_t remote_objnum, const int8_t owner)
 {
@@ -2984,6 +2994,10 @@ static std::optional<vmobjptridx_t> multi_get_pickup_object(const uint16_t remot
 		return std::nullopt;
 	const auto local_objnum{objnum_remote_to_local(remote_objnum, owner)};
 	if (local_objnum == object_none || local_objnum > Highest_object_index)
+		return std::nullopt;
+	if (object_owner[local_objnum] != owner)
+		return std::nullopt;
+	if (owner != owner_none && local_to_remote[local_objnum] != remote_objnum)
 		return std::nullopt;
 	const auto &&objp = Objects.vmptridx(local_objnum);
 	if (objp->type != object_type::OBJ_POWERUP || (objp->flags & OF_SHOULD_BE_DEAD))
@@ -3001,7 +3015,11 @@ static void multi_send_pickup_release(const uint16_t remote_objnum, const int8_t
 /* Host: a client asks for a powerup. */
 static void multi_do_pickup_request(const playernum_t pnum, const multiplayer_rspan<multiplayer_command_t::MULTI_PICKUP_REQUEST> buf)
 {
+	auto &Objects = LevelUniqueObjectState.Objects;
 	if (!multi_i_am_master() || pnum >= N_players || pnum == Player_num)
+		return;
+	const auto &plr = *vcplayerptr(pnum);
+	if (plr.connected != player_connection_status::playing || Objects.vcptr(plr.objnum)->type != object_type::OBJ_PLAYER)
 		return;
 	const uint16_t remote_objnum{GET_INTEL_SHORT(&buf[1])};
 	const int8_t owner = buf[3];
@@ -3010,7 +3028,13 @@ static void multi_do_pickup_request(const playernum_t pnum, const multiplayer_rs
 	{
 		const auto &obj = **objp;
 		auto &reservation = Pickup_reservations[*objp];
-		if (reservation.signature != obj.signature || GameTime64 >= reservation.expires || reservation.pnum == pnum)
+		const bool reserved{reservation.signature == obj.signature && GameTime64 < reservation.expires};
+		if (reserved && reservation.pnum == pnum)
+			/* Repeated request: the reliable reply to the first one is
+			 * still on its way.  Do not grant twice.
+			 */
+			return;
+		if (!reserved)
 		{
 			reservation = {obj.signature, pnum, GameTime64 + pickup_reservation_time};
 			granted = true;
@@ -3029,30 +3053,39 @@ static void multi_do_pickup_reply(const playernum_t pnum, const multiplayer_rspa
 		return;
 	const uint16_t remote_objnum{GET_INTEL_SHORT(&buf[1])};
 	const int8_t owner = buf[3];
+	const bool granted{buf[4] != 0};
 	const auto objp{multi_get_pickup_object(remote_objnum, owner)};
-	if (!buf[4])
-	{
-		if (objp)
-			Pickup_requests[*objp] = {(*objp)->signature, GameTime64 + pickup_request_retry_time};
-		return;
-	}
 	if (!objp)
+		/* The powerup is gone here, either because this player already
+		 * collected it or because another player's removal arrived.  Do not
+		 * send a release: if this player collected it, a release could
+		 * reach the host before this player's MULTI_REMOVE_OBJECT.  An
+		 * unused reservation expires on its own.
+		 */
+		return;
+	const auto &powerup = *objp;
+	auto &request = Pickup_requests[powerup];
+	if (!request.pending || request.signature != powerup->signature)
 	{
-		/* Granted, but the powerup is already gone here. */
+		/* Not an answer to an outstanding request.  Give a grant back. */
+		if (granted)
+			multi_send_pickup_release(remote_objnum, owner);
+		return;
+	}
+	request.pending = false;
+	request.retry_time = GameTime64 + pickup_retry_time;
+	if (!granted)
+		return;
+	/* A grant that arrives late may no longer be protected by the host's
+	 * reservation by the time the removal reaches the host.
+	 */
+	if (GameTime64 > request.sent_time + pickup_grant_max_age || Endlevel_sequence || !do_powerup(powerup, false))
+	{
 		multi_send_pickup_release(remote_objnum, owner);
 		return;
 	}
-	const auto &powerup = *objp;
-	if (do_powerup(powerup, false))
-	{
-		powerup->flags |= OF_SHOULD_BE_DEAD;
-		multi_send_remobj(powerup);
-	}
-	else
-	{
-		Pickup_requests[powerup] = {powerup->signature, GameTime64 + pickup_unused_retry_time};
-		multi_send_pickup_release(remote_objnum, owner);
-	}
+	powerup->flags |= OF_SHOULD_BE_DEAD;
+	multi_send_remobj(powerup);
 }
 
 /* Host: a client could not use a powerup it was granted. */
@@ -3075,17 +3108,15 @@ static void multi_do_pickup_release(const playernum_t pnum, const multiplayer_rs
  */
 void multi_request_powerup_pickup(const vmobjptridx_t powerup)
 {
-	if (Player_dead_state != player_dead_state::no)
-		return;
-	/* do_powerup refuses a powerup the player spat out less than 2
-	 * seconds ago.  Do not ask for it.
-	 */
-	if ((powerup->ctype.powerup_info.flags & PF_SPAT_BY_PLAYER) && powerup->ctype.powerup_info.creation_time > 0 && GameTime64 < powerup->ctype.powerup_info.creation_time + i2f(2))
+	if (Player_dead_state != player_dead_state::no || powerup_recently_spat_by_player(powerup))
 		return;
 	auto &request = Pickup_requests[powerup];
-	if (request.signature == powerup->signature && GameTime64 < request.retry_time)
+	if (request.signature == powerup->signature &&
+		(request.pending
+			? GameTime64 < request.sent_time + pickup_reply_timeout
+			: GameTime64 < request.retry_time))
 		return;
-	request = {powerup->signature, GameTime64 + pickup_request_retry_time};
+	request = {powerup->signature, true, GameTime64, 0};
 	const auto &&[owner, remote_objnum] = objnum_local_to_remote(powerup);
 	multi_command<multiplayer_command_t::MULTI_PICKUP_REQUEST> multibuf;
 	multi_put_pickup_object(multibuf, remote_objnum, owner);
@@ -3093,10 +3124,10 @@ void multi_request_powerup_pickup(const vmobjptridx_t powerup)
 }
 
 /* Host: whether a client currently holds the grant for this powerup. */
-bool multi_powerup_reserved_for_other_player(const object_base &powerup, const vcobjidx_t objnum)
+bool multi_powerup_reserved_for_other_player(const vcobjptridx_t powerup)
 {
-	const auto &reservation = Pickup_reservations[objnum];
-	return reservation.signature == powerup.signature && GameTime64 < reservation.expires && reservation.pnum != Player_num;
+	const auto &reservation = Pickup_reservations[powerup];
+	return reservation.signature == powerup->signature && GameTime64 < reservation.expires && reservation.pnum != Player_num;
 }
 
 }

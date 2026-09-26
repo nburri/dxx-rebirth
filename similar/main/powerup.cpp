@@ -376,6 +376,11 @@ static int player_hit_powerup(player_info &player_info, const char *const desc_h
 
 }
 
+bool powerup_recently_spat_by_player(const object &obj)
+{
+	return (obj.ctype.powerup_info.flags & PF_SPAT_BY_PLAYER) && obj.ctype.powerup_info.creation_time > 0 && GameTime64 < obj.ctype.powerup_info.creation_time + i2f(2);
+}
+
 int do_powerup(const vmobjptridx_t obj, const bool check_nearer_player)
 {
 	auto &Objects = LevelUniqueObjectState.Objects;
@@ -389,7 +394,7 @@ int do_powerup(const vmobjptridx_t obj, const bool check_nearer_player)
 		get_local_plrobj().shields < 0)
 		return 0;
 
-	if ((obj->ctype.powerup_info.flags & PF_SPAT_BY_PLAYER) && obj->ctype.powerup_info.creation_time>0 && GameTime64<obj->ctype.powerup_info.creation_time+i2f(2))
+	if (powerup_recently_spat_by_player(obj))
 		return 0;		//not enough time elapsed
 
 	/* Skipped for a pickup the host granted: the host has already decided

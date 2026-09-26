@@ -2409,7 +2409,7 @@ void collide_live_local_player_and_powerup(const vmobjptridx_t powerup)
 			multi_request_powerup_pickup(powerup);
 			return;
 		}
-		if (multi_powerup_reserved_for_other_player(powerup, powerup))
+		if (multi_powerup_reserved_for_other_player(powerup))
 			return;
 	}
 	if (do_powerup(powerup, true))

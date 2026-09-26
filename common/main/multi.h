@@ -421,7 +421,7 @@ void multi_send_kill(vmobjptridx_t objnum);
 void multi_send_remobj(vmobjidx_t objnum);
 bool multi_powerup_needs_host_grant(const object_base &powerup);
 void multi_request_powerup_pickup(vmobjptridx_t powerup);
-bool multi_powerup_reserved_for_other_player(const object_base &powerup, vcobjidx_t objnum);
+bool multi_powerup_reserved_for_other_player(vcobjptridx_t powerup);
 void multi_send_door_open(vcsegidx_t segnum, sidenum_t side, wall_flags flag);
 void multi_send_drop_weapon(vmobjptridx_t objnum,int seed);
 void multi_reset_player_object(object &objp);
