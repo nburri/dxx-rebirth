@@ -11,6 +11,7 @@
  */
 
 #include <SDL.h>
+#include <thread>
 
 #include "fwd-game.h"
 #include "maths.h"
@@ -80,6 +81,20 @@ void timer_delay_ms(unsigned milliseconds)
 	SDL_Delay(milliseconds);
 }
 
+void timer_delay_frame_step(const fix64 remaining)
+{
+	/* Sleep only while at least 2 ms remain.  SDL_Delay(1) may take
+	 * longer than 1 ms (up to about 2 ms on Windows), and sleeping
+	 * closer to the deadline would make the frame late.  For the rest
+	 * of the time, give up the time slice and let the caller check the
+	 * timer again.
+	 */
+	if (remaining >= F1_0 / 500)
+		SDL_Delay(1);
+	else
+		std::this_thread::yield();
+}
+
 // Replacement for timer_delay which considers calc time the program needs between frames (not reentrant)
 void timer_delay_bound(const unsigned caller_bound)
 {
@@ -88,6 +103,7 @@ void timer_delay_bound(const unsigned caller_bound)
 	uint32_t start = FrameStart;
 	const auto multiplayer{+(Game_mode & GM_MULTI)};
 	const auto vsync{CGameCfg.VSync};
+	static_assert(1000u / MAXIMUM_FPS > 0);
 	const auto bound = vsync ? 1000u / MAXIMUM_FPS : caller_bound;
 	for (;;)
 	{

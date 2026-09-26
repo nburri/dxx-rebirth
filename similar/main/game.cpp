@@ -654,7 +654,8 @@ void calc_frame_time()
 	{
 		const auto timer_value = timer_update();
 		FrameTime = timer_value - last_timer_value;
-		if (FrameTime > 0 && timer_value - sync_timer_value >= bound)
+		const auto elapsed = timer_value - sync_timer_value;
+		if (FrameTime > 0 && elapsed >= bound)
 		{
 			last_timer_value = timer_value;
 
@@ -667,7 +668,7 @@ void calc_frame_time()
 		if (multiplayer)
 			multi_do_frame(); // during long wait, keep packets flowing
 		if (may_sleep)
-			timer_delay_ms(1);
+			timer_delay_frame_step(bound - elapsed);
 	}
 
 	if ( cheats.turbo )

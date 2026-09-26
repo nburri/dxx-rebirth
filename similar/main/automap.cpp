@@ -1063,7 +1063,7 @@ static void draw_automap(fvcobjptr &vcobjptr, automap &am, fix eye = 0)
 		if (multiplayer)
 			multi_do_frame(); // during long wait, keep packets flowing
 		if (may_sleep)
-			timer_delay(F1_0>>8);
+			timer_delay_frame_step(bound - (am.t2 - am.t1));
 		am.t2 = timer_update();
 	}
 	if (am.pause_game)
