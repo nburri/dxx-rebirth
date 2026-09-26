@@ -1155,7 +1155,7 @@ originator's ship, using the seed, and maps it to (object number, originator).
 
 | Offset | Size | Field |
 |---|---|---|
-| 1 | 1 | Killed player number (ignored) |
+| 1 | 1 | Killed player number (`KILL_HOST`: used by clients; `KILL_CLIENT`: ignored, the host uses the sender) |
 | 2 | 2 | Killer's remote object number (`0xffff` if none) |
 | 4 | 1 | Killer's owner (`-1` if none) |
 | 5 | 1 | `KILL_HOST` only: `Netgame.team_vector` |
@@ -1170,9 +1170,10 @@ Flow:
   computes the kill locally with killed = the client.
 - When the **host** dies, it computes the kill and broadcasts `KILL_HOST`
   itself.
-- `multi_do_kill_host` runs only on clients. It uses the MDATA originator as
-  the killed player and applies the team vector and bounty target from the
-  packet. For a relayed kill the originator is the host (see section 8).
+- `multi_do_kill_host` runs only on clients and accepts the message only from
+  the host. It takes the killed player from byte 1, because for a relayed kill
+  the MDATA originator is the host, and applies the team vector and bounty
+  target from the packet.
 
 **`MULTI_PLAYER_DERES` (18), 108 bytes D2 / 58 bytes D1.**
 `multi_send_player_deres` (`multi.cpp:2700`), `multi_do_player_deres`
@@ -1530,10 +1531,11 @@ by reading the current code.
 4. **Some host-sent messages lose the player they are about.** Game message
    handlers receive the MDATA originator as `pnum`, and these handlers ignore
    the player number inside the message:
-   - `MULTI_KILL_HOST` relayed by the host for a client's death
-     (`multi_do_kill_client`): clients call `multi_do_kill_host` with `pnum` =
-     host and use the host's ship as the killed object
-     (`multi.cpp:1917-1932`).
+   - Fixed: `MULTI_KILL_HOST` relayed by the host for a client's death
+     (`multi_do_kill_client`). Clients used the sender, which is the host, as
+     the killed player, so every client death appeared as the host dying.
+     `multi_do_kill_host` now accepts the message only from the host and takes
+     the killed player from byte 1.
    - `MULTI_FLAGS` sent by the host for every player during rejoin extras
      (`net_udp_send_player_flags` → `multi_send_flags(i)`): receivers apply all
      of them to the host's ship (`multi_do_flags`, `multi.cpp:4257`).
