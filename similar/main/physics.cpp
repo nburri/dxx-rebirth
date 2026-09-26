@@ -26,6 +26,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <cmath>
 
 #include "joy.h"
 #include "dxxerror.h"
@@ -182,6 +183,81 @@ int Dont_move_ai_objects{0};
 
 #define FT (f1_0/64)
 
+namespace {
+
+/* Thrust and drag used to be applied in whole steps of `FT` (1/64 s), and
+ * the rest of the frame was scaled linearly.  Every frame shorter than `FT`
+ * took only the linear path, so top speed and turn rate depended on the
+ * frame rate.  The reference behavior is that of the old code at a steady
+ * 200 fps (`FrameTime` = F1_0 / 200 = 327), the long-time default frame
+ * rate cap, where each frame did
+ *
+ *     v = (v + accel * k) * R
+ *     k = fixdiv(327, FT)
+ *     R = 1 - fixmul(k, drag)
+ *
+ * Applying that recurrence `n` times gives the closed form
+ *
+ *     v = v * R ** n + accel * k * R * (1 - R ** n) / (1 - R)
+ *
+ * which is also defined for fractional `n`.  Using it with
+ * `n = FrameTime / 327` gives the same result for any frame rate, such that
+ * N short frames are equivalent to one long frame, and reproduces the old
+ * code at 200 fps up to rounding.
+ */
+constexpr fix drag_reference_frametime{F1_0 / 200};
+
+struct drag_integration
+{
+	double retained;	// fraction of the velocity that remains after the frame
+	double accel_gain;	// velocity gained per unit of per-step acceleration
+};
+
+[[nodiscard]]
+static drag_integration build_drag_integration(const fix drag, const fix frametime)
+{
+	/* Compute these as the old code did at 200 fps, including its
+	 * truncation, so that 200 fps is unchanged.
+	 */
+	const fix reference_fraction_of_step{fixdiv(drag_reference_frametime, FT)};
+	const fix reference_drag{fixmul(reference_fraction_of_step, drag)};
+	const double accel_per_frame{static_cast<double>(reference_fraction_of_step) / F1_0};
+	const double frames{static_cast<double>(frametime) / drag_reference_frametime};
+	if (reference_drag <= 0)
+		/* Drag too small to have any effect at the reference frame time */
+		return {1, accel_per_frame * frames};
+	/* A drag so high that it would zero the velocity in one reference
+	 * frame (only possible for rotational drag, which is 5/2 of the
+	 * object's drag) stops the object, as the old code did.
+	 */
+	const double retained_per_frame{std::max(0.0, 1 - static_cast<double>(reference_drag) / F1_0)};
+	const double retained{std::pow(retained_per_frame, frames)};
+	return {retained, accel_per_frame * retained_per_frame * (1 - retained) / (1 - retained_per_frame)};
+}
+
+[[nodiscard]]
+static fix apply_drag_integration(const drag_integration &di, const fix v, const fix accel)
+{
+	const double exact{v * di.retained + accel * di.accel_gain};
+	auto result{static_cast<fix>(std::clamp<double>(std::round(exact), std::numeric_limits<fix>::min(), std::numeric_limits<fix>::max()))};
+	/* Round to nearest to avoid a bias of the top speed, but always make
+	 * progress toward the exact result, so that a coasting object comes to
+	 * rest instead of keeping a tiny velocity forever.
+	 */
+	if (result == v && exact != v)
+		result += (exact < v) ? -1 : 1;
+	return result;
+}
+
+static void apply_drag_integration(const drag_integration &di, vms_vector &v, const vms_vector &accel)
+{
+	v.x = apply_drag_integration(di, v.x, accel.x);
+	v.y = apply_drag_integration(di, v.y, accel.y);
+	v.z = apply_drag_integration(di, v.z, accel.z);
+}
+
+}
+
 //	-----------------------------------------------------------------------------------------------------------
 // add rotational velocity & acceleration
 namespace dsx {
@@ -196,37 +272,19 @@ static void do_physics_sim_rot(object_base &obj)
 	if (obj.mtype.phys_info.drag)
 	{
 		const fix drag{(obj.mtype.phys_info.drag * 5) / 2};
-		int count{FrameTime / FT};
-		const fix r{FrameTime % FT};
-		const fix k{fixdiv(r, FT)};
+		const auto di{build_drag_integration(drag, FrameTime)};
 
 		if (obj.mtype.phys_info.flags & PF_USES_THRUST)
 		{
 			const auto accel{vm_vec_copy_scale(obj.mtype.phys_info.rotthrust, fixdiv(f1_0, obj.mtype.phys_info.mass))};
-			while (count--) {
-				vm_vec_add2(obj.mtype.phys_info.rotvel, accel);
-				vm_vec_scale(obj.mtype.phys_info.rotvel, f1_0 - drag);
-			}
-
-			//do linear scale on remaining bit of time
-
-			vm_vec_scale_add2(obj.mtype.phys_info.rotvel, accel, k);
-			vm_vec_scale(obj.mtype.phys_info.rotvel, f1_0 - fixmul(k, drag));
+			apply_drag_integration(di, obj.mtype.phys_info.rotvel, accel);
 		}
 		else
 #if DXX_BUILD_DESCENT == 2
 			if (! (obj.mtype.phys_info.flags & PF_FREE_SPINNING))
 #endif
 		{
-			fix total_drag{F1_0};
-			while (count--)
-				total_drag = fixmul(total_drag,f1_0-drag);
-
-			//do linear scale on remaining bit of time
-
-			total_drag = fixmul(total_drag,f1_0-fixmul(k,drag));
-
-			vm_vec_scale(obj.mtype.phys_info.rotvel, total_drag);
+			apply_drag_integration(di, obj.mtype.phys_info.rotvel, vms_vector{});
 		}
 
 	}
@@ -371,41 +429,15 @@ window_event_result do_physics_sim(const d_robot_info_array &Robot_info, const v
 	//do thrust & drag
 	if (const fix drag{obj->mtype.phys_info.drag})
 	{
-		int count{FrameTime / FT};
-		const fix r{FrameTime % FT};
-		const fix k{fixdiv(r, FT)};
+		const auto di{build_drag_integration(drag, FrameTime)};
 
 		if (obj->mtype.phys_info.flags & PF_USES_THRUST) {
 
 			const auto accel{vm_vec_copy_scale(obj->mtype.phys_info.thrust,fixdiv(f1_0,obj->mtype.phys_info.mass))};
-			const bool have_accel{accel.x || accel.y || accel.z};
-
-			while (count--) {
-				if (have_accel)
-					vm_vec_add2(obj->mtype.phys_info.velocity,accel);
-
-				vm_vec_scale(obj->mtype.phys_info.velocity,f1_0-drag);
-			}
-
-			//do linear scale on remaining bit of time
-
-			vm_vec_scale_add2(obj->mtype.phys_info.velocity,accel,k);
-			if (drag)
-				vm_vec_scale(obj->mtype.phys_info.velocity,f1_0-fixmul(k,drag));
+			apply_drag_integration(di, obj->mtype.phys_info.velocity, accel);
 		}
-		else if (drag)
-		{
-			fix total_drag{F1_0};
-
-			while (count--)
-				total_drag = fixmul(total_drag,f1_0-drag);
-
-			//do linear scale on remaining bit of time
-
-			total_drag = fixmul(total_drag,f1_0-fixmul(k,drag));
-
-			vm_vec_scale(obj->mtype.phys_info.velocity,total_drag);
-		}
+		else
+			apply_drag_integration(di, obj->mtype.phys_info.velocity, vms_vector{});
 	}
 
 	int count{0};
