@@ -58,7 +58,9 @@ static_assert(MINIMUM_FPS == DESIGNATED_GAME_FPS);
 #endif
 /* Menus redraw only on idle, so running them at the full game frame
  * rate would keep the CPU and GPU busy for no visible benefit.  This
- * rate still keeps the mouse cursor smooth.
+ * rate still keeps the mouse cursor smooth.  timer_delay_bound()
+ * applies it to all screens except the game, and the automap uses it
+ * too.
  */
 constexpr std::integral_constant<unsigned, 200> MENU_MAXIMUM_FPS{};
 

@@ -111,10 +111,13 @@ constexpr fix frame_wait_multi_interval{F1_0 / 1000};
  * frames.  A software bound near the refresh interval would fight the
  * swap: if the bound is a bit longer than the refresh interval, every
  * other refresh is missed, and the frame rate is halved (a 540 Hz
- * monitor would run at 270 fps with a bound of 1/500 s).  Keep only a
- * bound of 1 ms, in case the driver does not wait for vsync.
+ * monitor would run at 270 fps with a bound of 1/500 s).  Use a bound
+ * 10% above MAXIMUM_FPS, so that monitors up to that rate are never
+ * halved, and the game still does not run much faster than
+ * MAXIMUM_FPS when the swap does not block (for example while the
+ * window is minimized, or if the driver ignores the swap interval).
  */
-constexpr int vsync_maximum_fps{1000};
+constexpr int vsync_maximum_fps{MAXIMUM_FPS + MAXIMUM_FPS / 10};
 
 }
 
@@ -126,7 +129,11 @@ fix timer_get_frame_bound()
 fix64 timer_wait_frame(const fix64 deadline)
 {
 	const auto multiplayer{+(Game_mode & GM_MULTI)};
-	const auto may_sleep{!CGameArg.SysNoNiceFPS && !CGameCfg.VSync};
+	/* Also sleep with vsync: the swap usually blocks, so the wait is
+	 * short and the margin below prevents sleeping, but if the swap
+	 * does not block, the wait should not spin a core.
+	 */
+	const auto may_sleep{!CGameArg.SysNoNiceFPS};
 	auto timer_value{timer_update()};
 	/* Process packets on the first pass of a wait, as before, and then
 	 * at most once per frame_wait_multi_interval.
@@ -163,20 +170,22 @@ void timer_delay_bound(const unsigned caller_bound)
 
 	uint32_t start = FrameStart;
 	const auto multiplayer{+(Game_mode & GM_MULTI)};
-	/* With vsync, let the buffer swap pace the screen, but still respect
-	 * the menu frame limit.  Screens which ask for a lower rate (such as
-	 * 50 fps) run up to the menu limit instead, because a bound longer
-	 * than the refresh interval would make the swap miss refreshes
-	 * (50 fps on a 60 Hz monitor would become 30 fps).
+	/* Screens which are not the game never run faster than the menu
+	 * limit, nor faster than -maxfps.
 	 */
-	static_assert(1000u / MENU_MAXIMUM_FPS > 0);
-	const auto bound{CGameCfg.VSync ? std::min(caller_bound, 1000u / MENU_MAXIMUM_FPS) : caller_bound};
+	const unsigned menu_bound{1000u / std::min<unsigned>(CGameArg.SysMaxFPS, MENU_MAXIMUM_FPS)};
+	/* With vsync, let the buffer swap pace the screen within the menu
+	 * limit.  Screens which ask for a lower rate (such as 50 fps) run
+	 * up to the menu limit instead, because a bound longer than the
+	 * refresh interval would make the swap miss refreshes (50 fps on a
+	 * 60 Hz monitor would become 30 fps).
+	 */
+	const auto bound{CGameCfg.VSync ? menu_bound : std::max(caller_bound, menu_bound)};
 	for (;;)
 	{
 		const uint32_t tv_now = SDL_GetTicks();
 		if (multiplayer)
 			multi_do_frame(); // during long wait, keep packets flowing
-		SDL_Delay(1);
 		if (unlikely(start > tv_now))
 			start = tv_now;
 		if (unlikely(tv_now - start >= bound))
@@ -184,6 +193,7 @@ void timer_delay_bound(const unsigned caller_bound)
 			FrameStart = tv_now;
 			break;
 		}
+		SDL_Delay(1);
 	}
 }
 

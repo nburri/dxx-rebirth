@@ -1053,8 +1053,9 @@ static void draw_automap(fvcobjptr &vcobjptr, automap &am, fix eye = 0)
 		show_mousefs_indicator(canvas, raw_mouse_axis[0], raw_mouse_axis[1], raw_mouse_axis[2], gwidth - (gheight / 8), gheight - (gheight / 8), gheight / 5);
 	}
 
-	const auto bound{timer_get_frame_bound()};
 	// ogl is fast enough that the automap can read the input too fast and you start to turn really slow.  So delay a bit (and free up some cpu :)
+	// Limit the automap to MENU_MAXIMUM_FPS, like the old loop which slept about 3 ms per pass.
+	const auto bound{std::max<fix>(timer_get_frame_bound(), F1_0 / MENU_MAXIMUM_FPS)};
 	am.t2 = timer_wait_frame(am.t1 + bound);
 	if (am.pause_game)
 	{
