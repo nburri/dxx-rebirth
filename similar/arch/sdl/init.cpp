@@ -102,10 +102,17 @@ arch_atexit arch_init()
 #if DXX_MAX_JOYSTICKS
 	if (!CGameArg.CtlNoJoystick)
 	{
-		joy_init();
 #if SDL_MAJOR_VERSION == 2
+		/* Initialize the gamecontroller layer first, so that the mappings
+		 * from gamecontrollerdb.txt are loaded before joy_init() asks
+		 * SDL_IsGameController().  Otherwise, a device that is only
+		 * recognized through that file is opened both as a joystick and
+		 * as a gamecontroller, and every hat/D-pad press is delivered
+		 * twice (SDL_JOYHATMOTION and SDL_CONTROLLERBUTTONDOWN).
+		 */
 		gamecontroller_init();
 #endif
+		joy_init();
 	}
 #endif
 
