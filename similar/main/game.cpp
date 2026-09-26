@@ -2004,8 +2004,16 @@ window_event_result GameProcessFrame(const d_level_shared_robot_info_state &Leve
 		 * override the automatic disable.
 		 */
 		static int8_t player_headlight_forcibly_turned_off{};
+		/* The headlight uses 3/8 energy units per second.  Carry the
+		 * remainder of the division into the next frame, so that the
+		 * drain rate does not depend on the frame rate.  This only runs
+		 * for the local player, so a single remainder is sufficient.
+		 */
+		static fix headlight_drain_remainder;
+		const auto drain{FrameTime * 3 + headlight_drain_remainder};
+		headlight_drain_remainder = drain % 8;
 		fix energy{player_info.energy};
-		energy -= (FrameTime*3/8);
+		energy -= drain / 8;
 		bool headlight_should_turn_off{false};
 		if (energy < i2f(10)) {
 			if (!player_headlight_forcibly_turned_off)

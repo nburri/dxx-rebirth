@@ -48,6 +48,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 //physics vars rotvel, velocity
 
 #define AFTERBURNER_USE_SECS	3				//use up in 3 seconds
+#define AFTERBURNER_RECHARGE_SECS	8			//recharge in 8 seconds
 #define DROP_DELTA_TIME			(f1_0/15)	//drop 3 per second
 #endif
 
@@ -58,6 +59,17 @@ namespace dsx {
 
 #if DXX_BUILD_DESCENT == 2
 fix Afterburner_charge;
+
+namespace {
+
+/* Remainders of the per-frame divisions of FrameTime, carried into the
+ * next frame so that the afterburner drains and recharges at the same
+ * rate at any frame rate.
+ */
+fix Afterburner_drain_remainder;
+fix Afterburner_recharge_remainder;
+
+}
 #endif
 
 void read_flying_controls(object &obj, control_info &Controls)
@@ -123,10 +135,20 @@ void read_flying_controls(object &obj, control_info &Controls)
 	
 				old_count = (Afterburner_charge / (DROP_DELTA_TIME/AFTERBURNER_USE_SECS));
 
-				Afterburner_charge -= FrameTime/AFTERBURNER_USE_SECS;
+				/* Carry the remainder of the division into the next
+				 * frame, so that the drain rate does not depend on the
+				 * frame rate.  Afterburner_charge only exists for the
+				 * local player, so a single remainder is sufficient.
+				 */
+				const auto drain_time{FrameTime + Afterburner_drain_remainder};
+				Afterburner_drain_remainder = drain_time % AFTERBURNER_USE_SECS;
+				Afterburner_charge -= drain_time / AFTERBURNER_USE_SECS;
 
 				if (Afterburner_charge < 0)
+				{
 					Afterburner_charge = 0;
+					Afterburner_drain_remainder = 0;
+				}
 
 				new_count = (Afterburner_charge / (DROP_DELTA_TIME/AFTERBURNER_USE_SECS));
 
@@ -138,13 +160,22 @@ void read_flying_controls(object &obj, control_info &Controls)
 			fix cur_energy,charge_up;
 	
 			//charge up to full
-			charge_up = min(FrameTime/8,f1_0 - Afterburner_charge);	//recharge over 8 seconds
+			/* Carry the remainder of the division into the next frame,
+			 * so that the recharge rate does not depend on the frame
+			 * rate.  Discard it when the charge is limited by the
+			 * maximum or by the available energy.
+			 */
+			const auto charge_time{FrameTime + Afterburner_recharge_remainder};
+			Afterburner_recharge_remainder = charge_time % AFTERBURNER_RECHARGE_SECS;
+			charge_up = min(charge_time / AFTERBURNER_RECHARGE_SECS, f1_0 - Afterburner_charge);	//recharge over 8 seconds
 	
 			auto &energy = player_info.energy;
 			cur_energy = max(energy - i2f(10), 0);	//don't drop below 10
 
 			//maybe limit charge up by energy
 			charge_up = min(charge_up,cur_energy/10);
+			if (charge_up != charge_time / AFTERBURNER_RECHARGE_SECS)
+				Afterburner_recharge_remainder = 0;
 	
 			Afterburner_charge += charge_up;
 	
