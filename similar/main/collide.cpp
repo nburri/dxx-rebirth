@@ -546,18 +546,30 @@ volatile_wall_result check_volatile_wall(const vmobjptridx_t obj, const unique_s
 				 * actually elapsed since the previous damage, so that the
 				 * damage per second is the same at any frame rate.
 				 *
-				 * If more time than that elapsed, or the timer went
-				 * backward, the player was not in contact on the previous
-				 * frame.  Apply the damage for one designated frame, or
-				 * for the current frame if that is longer, as before.
+				 * Scraping bumps the ship away from the wall, so the
+				 * contact is intermittent, and the first contact after
+				 * the interval may come a few frames late.  Accept up to
+				 * one additional DESIGNATED_GAME_FRAMETIME as continuous
+				 * contact, so that intermittent scraping still gets the
+				 * exact rate.  This limits a single application to the
+				 * damage for 2 * DESIGNATED_GAME_FRAMETIME + FrameTime.
+				 *
+				 * If more time than that elapsed, the player was not in
+				 * contact.  If less than DESIGNATED_GAME_FRAMETIME
+				 * elapsed (which cannot happen during contact, because of
+				 * the gate above), the timer went backward, or the
+				 * timestamp is left over from a previous level or game.
+				 * In these cases, apply the damage for one designated
+				 * frame, or for the current frame if that is longer, as
+				 * before.
 				 */
 				const fix64 damage_elapsed_time{GameTime64 - Last_volatile_damage_time};
 				Last_volatile_damage_time = {GameTime64};
 				const fix nominal_damage_time{std::max<fix>(FrameTime, DESIGNATED_GAME_FRAMETIME)};
 				const fix damage_time{
-					(damage_elapsed_time < 0 || damage_elapsed_time > DESIGNATED_GAME_FRAMETIME + FrameTime)
-					? nominal_damage_time
-					: static_cast<fix>(damage_elapsed_time)
+					(damage_elapsed_time > DESIGNATED_GAME_FRAMETIME && damage_elapsed_time <= 2 * DESIGNATED_GAME_FRAMETIME + FrameTime)
+					? static_cast<fix>(damage_elapsed_time)
+					: nominal_damage_time
 				};
 				fix damage = fixmul(d, damage_time);
 				/* The palette flash is applied with the same frequency as
