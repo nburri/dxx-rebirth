@@ -5637,7 +5637,9 @@ class DXXProgram(DXXCommon):
 			if git_describe_version_describe_output:
 				extra_version = f'{extra_version} {git_describe_version_describe_output}'
 			# else use only extra_version as it was set in user_settings
-		extra_version = f'{self.VERSION_FORK_PREFIX}{extra_version}'
+		# Mark every fork build, even one with an explicitly empty
+		# extra_version.
+		extra_version = f'{self.VERSION_FORK_PREFIX}{extra_version}' if extra_version else self.VERSION_FORK_PREFIX.rstrip('-')
 		get_version_head = StaticSubprocess.get_version_head
 		ld_path = ToolchainInformation.get_tool_path(env, 'ld')[1]
 		_quote_cppdefine_as_char_initializer = self._quote_cppdefine_as_char_initializer
