@@ -564,6 +564,8 @@ struct pickup_reservation
 {
 	object_signature_t signature{};
 	playernum_t pnum{};
+	/* Sequence number of the request that was granted last. */
+	uint8_t sequence{};
 	fix64 expires{};
 };
 
@@ -581,13 +583,19 @@ constexpr fix64 pickup_reservation_time{F1_0 * 5};
 constexpr fix64 pickup_grant_max_age{F1_0 * 2};
 /* Ask again if the host has not answered within this time.  The host
  * answers every request, so a lost reply or request only delays the pickup.
+ * This is not shorter than pickup_grant_max_age, so that a slow reply to
+ * the latest request is not made obsolete by the next request.
  */
-constexpr fix64 pickup_reply_timeout{F1_0};
-/* Ask again this long after a denial, or after a granted powerup could not
- * be used, for example because the player already carries the maximum
- * amount.
+constexpr fix64 pickup_reply_timeout{pickup_grant_max_age};
+/* Ask again this long after a denial, or after a grant took ammo from a
+ * vulcan or gauss cannon.
  */
 constexpr fix64 pickup_retry_time{F1_0};
+/* Ask again this long after a granted powerup could not be used, for
+ * example because the player already has that weapon.  Each such request
+ * reserves the powerup until the release arrives.
+ */
+constexpr fix64 pickup_unused_retry_time{F1_0 * 5};
 
 std::array<pickup_reservation, MAX_OBJECTS> Pickup_reservations;
 std::array<pickup_request_state, MAX_OBJECTS> Pickup_requests;
@@ -3020,11 +3028,16 @@ static std::optional<vmobjptridx_t> multi_get_pickup_object(const uint16_t remot
 	return objp;
 }
 
-static void multi_send_pickup_release(const uint16_t remote_objnum, const int8_t owner)
+/* The release goes through the same buffer as MULTI_VULWPN_AMMO_ADJ, so
+ * that the host learns how much ammo a cannon has left before it can grant
+ * the cannon to another player.
+ */
+static void multi_send_pickup_release(const uint16_t remote_objnum, const int8_t owner, const uint8_t sequence)
 {
 	multi_command<multiplayer_command_t::MULTI_PICKUP_RELEASE> multibuf;
 	multi_put_pickup_object(multibuf, remote_objnum, owner);
-	multi_send_data_direct(multibuf, multi_who_is_master(), 2);
+	multibuf[4] = sequence;
+	multi_send_data(multibuf, multiplayer_data_priority::_2);
 }
 
 /* Host: a client asks for a powerup. */
@@ -3033,13 +3046,20 @@ static void multi_do_pickup_request(const playernum_t pnum, const multiplayer_rs
 	auto &Objects = LevelUniqueObjectState.Objects;
 	if (!multi_i_am_master() || pnum >= N_players || pnum == Player_num)
 		return;
-	const auto &plr = *vcplayerptr(pnum);
-	if (plr.connected != player_connection_status::playing || Objects.vcptr(plr.objnum)->type != object_type::OBJ_PLAYER)
-		return;
 	const uint16_t remote_objnum{GET_INTEL_SHORT(&buf[1])};
 	const int8_t owner = buf[3];
+	const uint8_t sequence{buf[4]};
+	const auto &plr = *vcplayerptr(pnum);
 	bool granted{false};
-	if (const auto objp{multi_get_pickup_object(remote_objnum, owner)})
+	/* Deny requests from players who are not playing or not alive, and
+	 * requests sent during a different level.
+	 */
+	const bool may_grant{
+		plr.connected == player_connection_status::playing &&
+		Objects.vcptr(plr.objnum)->type == object_type::OBJ_PLAYER &&
+		buf[5] == static_cast<uint8_t>(Current_level_num)
+	};
+	if (const auto objp{may_grant ? multi_get_pickup_object(remote_objnum, owner) : std::nullopt})
 	{
 		const auto &obj = **objp;
 		auto &reservation = Pickup_reservations[*objp];
@@ -3050,14 +3070,15 @@ static void multi_do_pickup_request(const playernum_t pnum, const multiplayer_rs
 		 */
 		if (!reserved || reservation.pnum == pnum)
 		{
-			reservation = {obj.signature, pnum, GameTime64 + pickup_reservation_time};
+			reservation = {obj.signature, pnum, sequence, GameTime64 + pickup_reservation_time};
 			granted = true;
 		}
 	}
 	multi_command<multiplayer_command_t::MULTI_PICKUP_REPLY> multibuf;
 	multi_put_pickup_object(multibuf, remote_objnum, owner);
-	multibuf[4] = buf[4];
-	multibuf[5] = granted;
+	multibuf[4] = sequence;
+	multibuf[5] = buf[5];
+	multibuf[6] = granted;
 	multi_send_data_direct(multibuf, pnum, 2);
 }
 
@@ -3069,7 +3090,7 @@ static void multi_do_pickup_reply(const playernum_t pnum, const multiplayer_rspa
 	const uint16_t remote_objnum{GET_INTEL_SHORT(&buf[1])};
 	const int8_t owner = buf[3];
 	const uint8_t sequence{buf[4]};
-	const bool granted{buf[5] != 0};
+	const bool granted{buf[6] != 0};
 	const auto objp{multi_get_pickup_object(remote_objnum, owner)};
 	if (!objp)
 		/* The powerup is gone here, either because this player already
@@ -3092,17 +3113,24 @@ static void multi_do_pickup_reply(const playernum_t pnum, const multiplayer_rspa
 	if (!granted)
 		return;
 	/* Use the grant only if it is recent enough to be protected by the
-	 * host's reservation until the removal arrives, and only if the ship
-	 * still touches the powerup.
+	 * host's reservation until the removal arrives.  The ship may have moved
+	 * on since it touched the powerup; it still gets the powerup, as it
+	 * would have without the host's decision.
 	 */
-	auto &vmobjptr = LevelUniqueObjectState.Objects.vmptr;
-	auto &plrobj = get_local_plrobj();
-	if (GameTime64 > request.sent_time + pickup_grant_max_age ||
-		Endlevel_sequence ||
-		vm_vec_dist_quick(plrobj.pos, powerup->pos) > (plrobj.size + powerup->size) * 2 ||
-		!do_powerup(powerup, false))
+	if (GameTime64 > request.sent_time + pickup_grant_max_age || Endlevel_sequence)
 	{
-		multi_send_pickup_release(remote_objnum, owner);
+		multi_send_pickup_release(remote_objnum, owner, sequence);
+		return;
+	}
+	/* do_powerup takes ammo from a vulcan or gauss cannon without
+	 * collecting it.  The player may take more soon, so do not wait long.
+	 */
+	const auto ammo_before{powerup->ctype.powerup_info.count};
+	if (!do_powerup(powerup, false))
+	{
+		if (powerup->ctype.powerup_info.count == ammo_before)
+			request.retry_time = GameTime64 + pickup_unused_retry_time;
+		multi_send_pickup_release(remote_objnum, owner, sequence);
 		return;
 	}
 	powerup->flags |= OF_SHOULD_BE_DEAD;
@@ -3117,7 +3145,11 @@ static void multi_do_pickup_release(const playernum_t pnum, const multiplayer_rs
 	if (const auto objp{multi_get_pickup_object(GET_INTEL_SHORT(&buf[1]), buf[3])})
 	{
 		auto &reservation = Pickup_reservations[*objp];
-		if (reservation.signature == (*objp)->signature && reservation.pnum == pnum)
+		/* Only a release of the latest grant ends the reservation.  An
+		 * older release must not end a reservation that a newer request
+		 * renewed.
+		 */
+		if (reservation.signature == (*objp)->signature && reservation.pnum == pnum && reservation.sequence == buf[4])
 			reservation = {};
 	}
 }
@@ -3172,6 +3204,7 @@ void multi_request_powerup_pickup(const vmobjptridx_t powerup)
 	multi_command<multiplayer_command_t::MULTI_PICKUP_REQUEST> multibuf;
 	multi_put_pickup_object(multibuf, remote_objnum, owner);
 	multibuf[4] = request.sequence;
+	multibuf[5] = static_cast<uint8_t>(Current_level_num);
 	multi_send_data_direct(multibuf, multi_who_is_master(), 2);
 }
 
@@ -3179,7 +3212,7 @@ void multi_request_powerup_pickup(const vmobjptridx_t powerup)
 bool multi_powerup_reserved_for_other_player(const vcobjptridx_t powerup)
 {
 	const auto &reservation = Pickup_reservations[powerup];
-	return reservation.signature == powerup->signature && GameTime64 < reservation.expires && reservation.pnum != Player_num;
+	return reservation.signature == powerup->signature && GameTime64 < reservation.expires;
 }
 
 }

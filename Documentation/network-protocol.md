@@ -1068,9 +1068,9 @@ message.
 | 61 | `MULTI_GOT_ORB` | 2 | – | 2 | any | Sender picked up an orb |
 | 62 | `MULTI_EFFECT_BLOWUP` | 17 | – | 0 | any | Monitor or switch destroyed (sent before `MULTI_TRIGGER`) |
 | 63 | `MULTI_UPDATE_BUDDY_STATE` | 7 | – | 2 | any | Guide-bot goal |
-| 64 (D1: 46) | `MULTI_PICKUP_REQUEST` | 5 | 5 | direct | client | Asks the host for a limited powerup |
-| 65 (D1: 47) | `MULTI_PICKUP_REPLY` | 6 | 6 | direct | host | Grants or denies a pickup request |
-| 66 (D1: 48) | `MULTI_PICKUP_RELEASE` | 4 | 4 | direct | client | Gives back a granted powerup that could not be used |
+| 64 (D1: 46) | `MULTI_PICKUP_REQUEST` | 6 | 6 | direct | client | Asks the host for a limited powerup |
+| 65 (D1: 47) | `MULTI_PICKUP_REPLY` | 7 | 7 | direct | host | Grants or denies a pickup request |
+| 66 (D1: 48) | `MULTI_PICKUP_RELEASE` | 5 | 5 | 2 | client | Gives back a granted powerup that could not be used |
 
 `DXX_MP_SIZE_BEGIN_SYNC` (`multiinternal.h:79`, `86`) is defined but not used
 by any message.
@@ -1246,14 +1246,17 @@ beforehand. It maps the object to (object number, originator). The sender
 or after the reactor is destroyed.
 
 **Host-decided pickups: `MULTI_PICKUP_REQUEST` (64), `MULTI_PICKUP_REPLY`
-(65), `MULTI_PICKUP_RELEASE` (66).** In D1X the ids are 46–48. All three are
-sent with `send_data_direct` (reliable).
+(65), `MULTI_PICKUP_RELEASE` (66).** In D1X the ids are 46–48. Request and
+reply are sent with `send_data_direct`. The release is sent with priority 2
+through the normal message buffer, so that it reaches the host after any
+`MULTI_VULWPN_AMMO_ADJ` sent before it. Like all client messages, the host
+also relays request and release to the other clients, which ignore them.
 
 | Message | Size | Layout |
 |---|---|---|
-| `MULTI_PICKUP_REQUEST` | 5 | 1–2 remote object number, 3 owner (as in `MULTI_REMOVE_OBJECT`), 4 sequence number |
-| `MULTI_PICKUP_REPLY` | 6 | 1–4 copied from the request, 5 granted (0/1) |
-| `MULTI_PICKUP_RELEASE` | 4 | 1–2 remote object number, 3 owner |
+| `MULTI_PICKUP_REQUEST` | 6 | 1–2 remote object number, 3 owner (as in `MULTI_REMOVE_OBJECT`), 4 sequence number, 5 level number (low byte) |
+| `MULTI_PICKUP_REPLY` | 7 | 1–5 copied from the request, 6 granted (0/1) |
+| `MULTI_PICKUP_RELEASE` | 5 | 1–2 remote object number, 3 owner, 4 sequence number of the grant |
 
 In network games, a client does not collect limited powerups on its own.
 These are all powerups except shields, energy, keys, extra lives and the
@@ -1263,23 +1266,26 @@ player's own team flag (`multi_powerup_needs_host_grant`).
    `MULTI_PICKUP_REQUEST` with a new sequence number
    (`multi_request_powerup_pickup`). It does not ask for a powerup spat out
    less than 2 s ago, or for a missile or mine it cannot carry more of. It has
-   at most one outstanding request per powerup, asks again after 1 s without an
+   at most one outstanding request per powerup, asks again after 2 s without an
    answer, and waits 1 s after a denial.
 2. The host (`multi_do_pickup_request`) grants the request if the powerup still
    exists, maps back to the same object number and owner, and is not reserved
-   by another player. The requester must be playing and alive. A grant starts
-   or extends a 5 s reservation for the requester. The host answers every
-   request, including repeated ones, with `MULTI_PICKUP_REPLY`.
+   by another player. The requester must be playing and alive, and the request
+   must be for the current level. A grant starts or extends a 5 s reservation
+   for the requester and records the request's sequence number. The host
+   answers every request, including repeated ones, with `MULTI_PICKUP_REPLY`.
 3. The client (`multi_do_pickup_reply`) uses only the reply whose sequence
    number matches its latest request; other replies are ignored. It uses a
-   grant only if it arrives within 2 s of that request, not during the exit
-   sequence, and while the ship is within twice the combined radius of the
-   powerup. It then calls `do_powerup` without the "is another player closer?"
-   check. If the powerup was used, it sends `MULTI_REMOVE_OBJECT` as before.
-   Otherwise, it sends `MULTI_PICKUP_RELEASE`, and the host
-   (`multi_do_pickup_release`) drops the reservation. A client never sends a
-   release for a powerup that is already gone, so a release cannot overtake
-   its own `MULTI_REMOVE_OBJECT`.
+   grant only if it arrives within 2 s of that request and not during the exit
+   sequence, even if the ship has moved on since touching the powerup. It then
+   calls `do_powerup` without the "is another player closer?" check. If the
+   powerup was used, it sends `MULTI_REMOVE_OBJECT` as before. Otherwise, it
+   sends `MULTI_PICKUP_RELEASE` with the grant's sequence number, and the host
+   (`multi_do_pickup_release`) drops the reservation if that is still the
+   latest grant. After an unused grant the client waits 5 s before asking for
+   that powerup again, or 1 s if it took ammo from a vulcan or gauss cannon. A
+   client never sends a release for a powerup that is already gone, so a
+   release cannot overtake its own `MULTI_REMOVE_OBJECT`.
 
 Because the host starts or extends the reservation when it receives the
 request, and the client uses a grant only within 2 s of sending that request,
