@@ -584,10 +584,25 @@ void omega_charge_frame(player_info &player_info)
 
 	if (auto &energy = player_info.energy)
 	{
+		/* Carry the remainder of the division by OMEGA_CHARGE_SCALE into the
+		 * next frame.  Without the carry, up to OMEGA_CHARGE_SCALE - 1 fix
+		 * units are discarded every frame.  The loss is relative to
+		 * FrameTime, so it grows with the frame rate: at 500 fps
+		 * (FrameTime=131), the recharge was 2.3% slower than intended.
+		 * This function only runs for the local player, so a single
+		 * remainder is sufficient.  The energy consumption is derived from
+		 * the charge actually gained, so it follows automatically.
+		 */
+		static fix Omega_charge_remainder;
+		const auto charge_time{FrameTime + Omega_charge_remainder};
+		Omega_charge_remainder = charge_time % OMEGA_CHARGE_SCALE;
 		const auto old_omega_charge{Omega_charge};
-		Omega_charge += FrameTime/OMEGA_CHARGE_SCALE;
+		Omega_charge += charge_time / OMEGA_CHARGE_SCALE;
 		if (Omega_charge > MAX_OMEGA_CHARGE)
+		{
 			Omega_charge = MAX_OMEGA_CHARGE;
+			Omega_charge_remainder = 0;
+		}
 
 		const auto energy_used{get_omega_energy_consumption(Omega_charge - old_omega_charge)};
 		energy = (energy > energy_used) ? energy - energy_used : 0;
