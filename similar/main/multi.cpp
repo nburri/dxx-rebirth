@@ -4069,10 +4069,10 @@ void multi_send_guided_final_position(const object_base &miss)
 
 bool multi_send_guided_frame()
 {
-	/* Called by do_protocol_frame on each position packet tick, the same as
-	 * multi_send_thief_frame, so that the updates follow the pdata schedule
-	 * (Netgame.PacketsPerSec) and share the mdata packet that the caller
-	 * sends at once.  The receiver (multi_do_guided) warps its copy of the
+	/* Called by do_protocol_frame on each scheduled (not forced) position
+	 * packet tick, like multi_send_thief_frame, so that the updates follow
+	 * the pdata schedule (Netgame.PacketsPerSec) and share the mdata packet
+	 * that the caller sends at once.  The receiver (multi_do_guided) warps its copy of the
 	 * missile to the received position and velocity, then moves it by
 	 * physics until the next update, the same as for ship positions.  The
 	 * final state is sent by multi_send_guided_release and

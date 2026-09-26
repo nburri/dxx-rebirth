@@ -5461,9 +5461,15 @@ void dispatch_table::do_protocol_frame(int force, int listen) const
 #if DXX_BUILD_DESCENT == 2
 		/* Queue the guided missile position, then send it in the same
 		 * mdata packet as the thief position (priority 1), or on its own
-		 * if there was no thief position to send.
+		 * if there was no thief position to send.  Only do this on the
+		 * scheduled tick.  multi_send_fire forces this function before it
+		 * queues MULTI_FIRE, and for a new guided missile, an update sent
+		 * then would reach the receiver before the fire message and move
+		 * the sender's previous guided missile, if the receiver still has
+		 * it, to the launch point of the new one.  Forced sends would also
+		 * raise the rate of updates while the player fires.
 		 */
-		const auto guided_queued{multi_send_guided_frame()};
+		const auto guided_queued{!force && multi_send_guided_frame()};
                 multi_send_thief_frame();
 		if (guided_queued)
 			net_udp_send_mdata(0, time);
