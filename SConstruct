@@ -3625,6 +3625,10 @@ class DXXCommon(LazyObjectConstructor):
 	VERSION_MAJOR: typing.Final[int] = 0
 	VERSION_MINOR: typing.Final[int] = 61
 	VERSION_MICRO: typing.Final[int] = 0
+	# Prefix of the version shown in the game (for example
+	# "D2X-Rebirth ggc-v0.61-nb2"), so that builds from this fork can be
+	# told apart from original DXX-Rebirth builds.
+	VERSION_FORK_PREFIX: typing.Final[str] = 'ggc-'
 	DXX_VERSION_SEQ: typing.Final[str] = ','.join([str(VERSION_MAJOR), str(VERSION_MINOR), str(VERSION_MICRO)])
 	pch_manager = None
 	# dict compilation_database_dict_fn_to_entries:
@@ -5514,7 +5518,7 @@ class DXXProgram(DXXCommon):
 		extra_version = f'v{self.VERSION_MAJOR}.{self.VERSION_MINOR}.{self.VERSION_MICRO}'
 		if git_describe_version and not (extra_version == git_describe_version or extra_version[1:] == git_describe_version):
 			extra_version += ' ' + git_describe_version
-		print(f'===== {self.PROGRAM_NAME} {extra_version} {compute_extra_version.revparse_HEAD} =====')
+		print(f'===== {self.PROGRAM_NAME} {self.VERSION_FORK_PREFIX}{extra_version} {compute_extra_version.revparse_HEAD} =====')
 		user_settings.register_variables(prefix, variables, filtered_help)
 
 	# Run `init()`, but decorate any exception that occurs with a description
@@ -5633,6 +5637,7 @@ class DXXProgram(DXXCommon):
 			if git_describe_version_describe_output:
 				extra_version = f'{extra_version} {git_describe_version_describe_output}'
 			# else use only extra_version as it was set in user_settings
+		extra_version = f'{self.VERSION_FORK_PREFIX}{extra_version}'
 		get_version_head = StaticSubprocess.get_version_head
 		ld_path = ToolchainInformation.get_tool_path(env, 'ld')[1]
 		_quote_cppdefine_as_char_initializer = self._quote_cppdefine_as_char_initializer
