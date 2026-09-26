@@ -1630,13 +1630,44 @@ static inline void adjust_button_time(fix &o, uint8_t add, uint8_t sub, fix v)
 		o -= v;
 }
 
-static void clamp_kconfig_control_with_overrun(fix &value, const fix &bound, fix &excess, const fix &ebound)
+template <std::size_t N>
+static void adjust_mouse_axis_field(fix &time, fix &mouse_time, const std::array<fix, N> &axes, const unsigned value, const unsigned invert, const int &sensitivity)
+{
+	const auto previous_time{time};
+	adjust_axis_field(time, axes, value, invert, sensitivity);
+	mouse_time += time - previous_time;
+}
+
+/* `mouse_time` is the part of `value` that relative mouse motion
+ * contributed during this frame.  The part of the input beyond `bound`
+ * that the mouse caused (this frame or through an earlier carry) is
+ * carried into the following frames, up to `mouse_carry_bound`, so that
+ * the clamp limits only the rate of a mouse movement, not its total.
+ * Whatever remains is subject to the user's overrun setting as before.
+ *
+ * The earlier carry is treated as spent at the full rate (`bound` per
+ * frame) whether or not the clamp had room for it, so that it expires
+ * within `mouse_carry_bound` of full-rate time even while another
+ * input keeps the control saturated.
+ */
+static void clamp_kconfig_control_with_overrun(fix &value, const fix &bound, fix &excess, const fix &ebound, fix &mouse_carry, const fix mouse_time, const fix mouse_carry_bound)
 {
 	/* Assume no integer overflow here */
-	value += excess;
+	const auto unspent_carry{mouse_carry > 0
+		? std::max<fix>(mouse_carry - bound, 0)
+		: std::min<fix>(mouse_carry + bound, 0)};
+	const auto mouse_value{mouse_time + unspent_carry};
+	value += excess + mouse_carry;
 	const auto ivalue{value};
 	clamp_symmetric_value(value, bound);
-	excess = ivalue - value;
+	const auto overflow{ivalue - value};
+	if (overflow > 0 && mouse_value > 0)
+		mouse_carry = std::min({overflow, mouse_value, mouse_carry_bound});
+	else if (overflow < 0 && mouse_value < 0)
+		mouse_carry = std::max({overflow, mouse_value, -mouse_carry_bound});
+	else
+		mouse_carry = 0;
+	excess = overflow - mouse_carry;
 	clamp_symmetric_value(excess, ebound);
 }
 
@@ -1671,8 +1702,6 @@ namespace dsx {
 
 void kconfig_read_controls(control_info &Controls, const d_event &event, int automap_flag)
 {
-	static fix64 mouse_delta_time = 0;
-
 #ifndef NDEBUG
 	// --- Don't do anything if in debug mode ---
 	if ( keyd_pressed[KEY_DELETE] )
@@ -1681,8 +1710,6 @@ void kconfig_read_controls(control_info &Controls, const d_event &event, int aut
 		return;
 	}
 #endif
-
-	const auto frametime{FrameTime};
 
 	switch (event.type)
 	{
@@ -1807,34 +1834,23 @@ void kconfig_read_controls(control_info &Controls, const d_event &event, int aut
 				break;
 			if (PlayerCfg.MouseFlightSim)
 			{
+				/* Flight sim mode is position based: accumulate the
+				 * position here and convert it to a rate for the
+				 * current frame in kconfig_end_loop.
+				 */
 				const auto ax{event_mouse_get_delta(event)};
-				for (uint_fast32_t i = 0; i <= 2; i++)
+				for (auto &&[raw_mouse_axis, d] : zip(Controls.raw_mouse_axis, ax))
 				{
-					int mouse_null_value = (i==2?16:PlayerCfg.MouseFSDead*8);
-					Controls.raw_mouse_axis[i] += ax[i];
-					clamp_symmetric_value(Controls.raw_mouse_axis[i], MOUSEFS_DELTA_RANGE);
-					if (Controls.raw_mouse_axis[i] > mouse_null_value) 
-						Controls.mouse_axis[i] = (((Controls.raw_mouse_axis[i] - mouse_null_value) * MOUSEFS_DELTA_RANGE) / (MOUSEFS_DELTA_RANGE - mouse_null_value) * frametime) / MOUSEFS_DELTA_RANGE;
-					else if (Controls.raw_mouse_axis[i] < -mouse_null_value)
-						Controls.mouse_axis[i] = (((Controls.raw_mouse_axis[i] + mouse_null_value) * MOUSEFS_DELTA_RANGE) / (MOUSEFS_DELTA_RANGE - mouse_null_value) * frametime) / MOUSEFS_DELTA_RANGE;
-					else
-						Controls.mouse_axis[i] = 0;
+					raw_mouse_axis += d;
+					clamp_symmetric_value(raw_mouse_axis, MOUSEFS_DELTA_RANGE);
 				}
 			}
 			else
-			{
 				Controls.pending_mouse_delta.update(event_mouse_get_delta(event));
-				mouse_delta_time = timer_query() + DESIGNATED_GAME_FRAMETIME;
-			}
 			break;
 		}
 		case event_type::idle:
 		default:
-			if (!PlayerCfg.MouseFlightSim && mouse_delta_time < timer_query())
-			{
-				Controls.mouse_axis[0] = Controls.mouse_axis[1] = Controls.mouse_axis[2] = 0;
-				mouse_delta_time = timer_query() + DESIGNATED_GAME_FRAMETIME;
-			}
 			break;
 	}
 }
@@ -1843,16 +1859,55 @@ void kconfig_end_loop(control_info &Controls, const fix frametime)
 {
 	static constexpr unsigned FREE_PITCH_FACTOR{1};
 	static constexpr unsigned LOCKED_PITCH_FACTOR{2};
-	if (const auto delta = Controls.pending_mouse_delta.consume())
+	/* Relative mouse motion is a displacement, not a rate: the counts
+	 * reported during a frame must produce the same amount of turning
+	 * no matter how long the frame was.  The *_time controls are later
+	 * divided by the frame time (read_flying_controls), so scaling the
+	 * counts by the actual frame time makes the turn per count
+	 * proportional to the frame time.  Below HIGH_FPS_REFERENCE_FPS,
+	 * keep that historical scaling, so that existing sensitivity and
+	 * overrun settings behave exactly as before.  Above it, scale by the
+	 * reference frame time instead, so that the mouse behaves as it does
+	 * at the reference rate rather than losing sensitivity as the frame
+	 * rate rises.
+	 */
+	const fix mouse_reference_frametime{std::max<fix>(frametime, HIGH_FPS_REFERENCE_FRAMETIME)};
+	if (!(PlayerCfg.ControlType & CONTROL_USING_MOUSE))
+		Controls.mouse_axis = {};
+	else if (PlayerCfg.MouseFlightSim)
+	{
+		/* Flight sim mode is position based: the deflection is a rate,
+		 * like a joystick axis, so scale it by the time of the frame
+		 * that uses it.  Compute it every frame, so that a mouse held
+		 * still keeps turning at the same rate when the frame rate
+		 * changes.
+		 */
+		for (auto &&[i, mouse_axis, raw_mouse_axis] : enumerate(zip(Controls.mouse_axis, Controls.raw_mouse_axis)))
+		{
+			const int mouse_null_value = (i == 2 ? 16 : PlayerCfg.MouseFSDead * 8);
+			if (raw_mouse_axis > mouse_null_value)
+				mouse_axis = (((raw_mouse_axis - mouse_null_value) * MOUSEFS_DELTA_RANGE) / (MOUSEFS_DELTA_RANGE - mouse_null_value) * frametime) / MOUSEFS_DELTA_RANGE;
+			else if (raw_mouse_axis < -mouse_null_value)
+				mouse_axis = (((raw_mouse_axis + mouse_null_value) * MOUSEFS_DELTA_RANGE) / (MOUSEFS_DELTA_RANGE - mouse_null_value) * frametime) / MOUSEFS_DELTA_RANGE;
+			else
+				mouse_axis = 0;
+		}
+	}
+	else if (const auto delta = Controls.pending_mouse_delta.consume())
 	{
 		for (auto &&[raw_mouse_axis, d] : zip(Controls.raw_mouse_axis, *delta))
 			raw_mouse_axis = static_cast<fix>(std::clamp(d,
 				static_cast<int64_t>(std::numeric_limits<fix>::min()),
 				static_cast<int64_t>(std::numeric_limits<fix>::max())));
-		Controls.mouse_axis[0] = (Controls.raw_mouse_axis[0] * frametime) / 8;
-		Controls.mouse_axis[1] = (Controls.raw_mouse_axis[1] * frametime) / 8;
-		Controls.mouse_axis[2] = (Controls.raw_mouse_axis[2] * frametime);
+		Controls.mouse_axis[0] = (Controls.raw_mouse_axis[0] * mouse_reference_frametime) / 8;
+		Controls.mouse_axis[1] = (Controls.raw_mouse_axis[1] * mouse_reference_frametime) / 8;
+		Controls.mouse_axis[2] = (Controls.raw_mouse_axis[2] * mouse_reference_frametime);
 	}
+	else
+		/* No motion was reported during this frame, so the mouse must
+		 * not contribute anything.
+		 */
+		Controls.mouse_axis = {};
 #if DXX_MAX_AXES_PER_JOYSTICK
 	std::array<fix, JOY_MAX_AXES> joy_axis{};
 	for (auto &&[i, o, raw_joy_axis] : enumerate(zip(joy_axis, Controls.raw_joy_axis)))
@@ -1879,6 +1934,7 @@ void kconfig_end_loop(control_info &Controls, const fix frametime)
 #endif
 
 	const auto speed_factor = (cheats.turbo ? 2 : 1) * frametime;
+	control_info::mouse_control_times mouse_time{};
 
 	//------------ Read pitch_time -----------
 	if ( !Controls.state.slide_on )
@@ -1897,10 +1953,15 @@ void kconfig_end_loop(control_info &Controls, const fix frametime)
 #endif
 		// From mouse...
 #ifdef dxx_kconfig_ui_kc_mouse_pitch_ud
-		adjust_axis_field(Controls.pitch_time, Controls.mouse_axis, kcm_mouse[dxx_kconfig_ui_kc_mouse_pitch_ud].value, kcm_mouse[dxx_kconfig_ui_kc_mouse_invert_pitch].value, PlayerCfg.MouseSens[player_config_mouse_index::pitch_ud]);
+		adjust_mouse_axis_field(Controls.pitch_time, mouse_time.pitch_time, Controls.mouse_axis, kcm_mouse[dxx_kconfig_ui_kc_mouse_pitch_ud].value, kcm_mouse[dxx_kconfig_ui_kc_mouse_invert_pitch].value, PlayerCfg.MouseSens[player_config_mouse_index::pitch_ud]);
 #endif
 	}
-	else Controls.pitch_time = 0;
+	else
+	{
+		Controls.pitch_time = 0;
+		// Pitch is disabled; do not apply a pending mouse carry later.
+		Controls.mouse_carry.pitch_time = 0;
+	}
 
 
 	//----------- Read vertical_thrust_time -----------------
@@ -1916,7 +1977,7 @@ void kconfig_end_loop(control_info &Controls, const fix frametime)
 #endif
 		// From mouse...
 #if defined(dxx_kconfig_ui_kc_mouse_pitch_ud) && defined(dxx_kconfig_ui_kc_mouse_invert_slide_ud)
-		adjust_axis_field(Controls.vertical_thrust_time, Controls.mouse_axis, kcm_mouse[dxx_kconfig_ui_kc_mouse_pitch_ud].value, kcm_mouse[dxx_kconfig_ui_kc_mouse_invert_slide_ud].value, PlayerCfg.MouseSens[player_config_mouse_index::slide_ud]);
+		adjust_mouse_axis_field(Controls.vertical_thrust_time, mouse_time.vertical_thrust_time, Controls.mouse_axis, kcm_mouse[dxx_kconfig_ui_kc_mouse_pitch_ud].value, kcm_mouse[dxx_kconfig_ui_kc_mouse_invert_slide_ud].value, PlayerCfg.MouseSens[player_config_mouse_index::slide_ud]);
 #endif
 	}
 	// From keyboard...
@@ -1930,7 +1991,7 @@ void kconfig_end_loop(control_info &Controls, const fix frametime)
 #endif
 	// From mouse...
 #if defined(dxx_kconfig_ui_kc_mouse_slide_ud) && defined(dxx_kconfig_ui_kc_mouse_invert_slide_ud)
-	adjust_axis_field(Controls.vertical_thrust_time, Controls.mouse_axis, kcm_mouse[dxx_kconfig_ui_kc_mouse_slide_ud].value, !kcm_mouse[dxx_kconfig_ui_kc_mouse_invert_slide_ud].value, PlayerCfg.MouseSens[player_config_mouse_index::slide_ud]);
+	adjust_mouse_axis_field(Controls.vertical_thrust_time, mouse_time.vertical_thrust_time, Controls.mouse_axis, kcm_mouse[dxx_kconfig_ui_kc_mouse_slide_ud].value, !kcm_mouse[dxx_kconfig_ui_kc_mouse_invert_slide_ud].value, PlayerCfg.MouseSens[player_config_mouse_index::slide_ud]);
 #endif
 
 	//---------- Read heading_time -----------
@@ -1945,10 +2006,15 @@ void kconfig_end_loop(control_info &Controls, const fix frametime)
 #endif
 #if defined(dxx_kconfig_ui_kc_mouse_turn) && defined(dxx_kconfig_ui_kc_mouse_invert_turn)
 		// From mouse...
-		adjust_axis_field(Controls.heading_time, Controls.mouse_axis, kcm_mouse[dxx_kconfig_ui_kc_mouse_turn].value, !kcm_mouse[dxx_kconfig_ui_kc_mouse_invert_turn].value, PlayerCfg.MouseSens[player_config_mouse_index::turn_lr]);
+		adjust_mouse_axis_field(Controls.heading_time, mouse_time.heading_time, Controls.mouse_axis, kcm_mouse[dxx_kconfig_ui_kc_mouse_turn].value, !kcm_mouse[dxx_kconfig_ui_kc_mouse_invert_turn].value, PlayerCfg.MouseSens[player_config_mouse_index::turn_lr]);
 #endif
 	}
-	else Controls.heading_time = 0;
+	else
+	{
+		Controls.heading_time = 0;
+		// Turning is disabled; do not apply a pending mouse carry later.
+		Controls.mouse_carry.heading_time = 0;
+	}
 
 	//----------- Read sideways_thrust_time -----------------
 	if ( Controls.state.slide_on )
@@ -1962,7 +2028,7 @@ void kconfig_end_loop(control_info &Controls, const fix frametime)
 #endif
 #if defined(dxx_kconfig_ui_kc_mouse_turn) && defined(dxx_kconfig_ui_kc_mouse_invert_slide_lr)
 		// From mouse...
-		adjust_axis_field(Controls.sideways_thrust_time, Controls.mouse_axis, kcm_mouse[dxx_kconfig_ui_kc_mouse_turn].value, !kcm_mouse[dxx_kconfig_ui_kc_mouse_invert_slide_lr].value, PlayerCfg.MouseSens[player_config_mouse_index::slide_lr]);
+		adjust_mouse_axis_field(Controls.sideways_thrust_time, mouse_time.sideways_thrust_time, Controls.mouse_axis, kcm_mouse[dxx_kconfig_ui_kc_mouse_turn].value, !kcm_mouse[dxx_kconfig_ui_kc_mouse_invert_slide_lr].value, PlayerCfg.MouseSens[player_config_mouse_index::slide_lr]);
 #endif
 	}
 	// From keyboard...
@@ -1976,7 +2042,7 @@ void kconfig_end_loop(control_info &Controls, const fix frametime)
 #endif
 #if defined(dxx_kconfig_ui_kc_mouse_slide_lr) && defined(dxx_kconfig_ui_kc_mouse_invert_slide_lr)
 	// From mouse...
-	adjust_axis_field(Controls.sideways_thrust_time, Controls.mouse_axis, kcm_mouse[dxx_kconfig_ui_kc_mouse_slide_lr].value, !kcm_mouse[dxx_kconfig_ui_kc_mouse_invert_slide_lr].value, PlayerCfg.MouseSens[player_config_mouse_index::slide_lr]);
+	adjust_mouse_axis_field(Controls.sideways_thrust_time, mouse_time.sideways_thrust_time, Controls.mouse_axis, kcm_mouse[dxx_kconfig_ui_kc_mouse_slide_lr].value, !kcm_mouse[dxx_kconfig_ui_kc_mouse_invert_slide_lr].value, PlayerCfg.MouseSens[player_config_mouse_index::slide_lr]);
 #endif
 
 	//----------- Read bank_time -----------------
@@ -1991,7 +2057,7 @@ void kconfig_end_loop(control_info &Controls, const fix frametime)
 #endif
 #if defined(dxx_kconfig_ui_kc_mouse_turn) && defined(dxx_kconfig_ui_kc_mouse_invert_bank)
 		// From mouse...
-		adjust_axis_field(Controls.bank_time, Controls.mouse_axis, kcm_mouse[dxx_kconfig_ui_kc_mouse_turn].value, !kcm_mouse[dxx_kconfig_ui_kc_mouse_invert_bank].value, PlayerCfg.MouseSens[player_config_mouse_index::bank_lr]);
+		adjust_mouse_axis_field(Controls.bank_time, mouse_time.bank_time, Controls.mouse_axis, kcm_mouse[dxx_kconfig_ui_kc_mouse_turn].value, !kcm_mouse[dxx_kconfig_ui_kc_mouse_invert_bank].value, PlayerCfg.MouseSens[player_config_mouse_index::bank_lr]);
 #endif
 	}
 	// From keyboard...
@@ -2005,7 +2071,7 @@ void kconfig_end_loop(control_info &Controls, const fix frametime)
 #endif
 #if defined(dxx_kconfig_ui_kc_mouse_bank) && defined(dxx_kconfig_ui_kc_mouse_invert_bank)
 	// From mouse...
-	adjust_axis_field(Controls.bank_time, Controls.mouse_axis, kcm_mouse[dxx_kconfig_ui_kc_mouse_bank].value, !kcm_mouse[dxx_kconfig_ui_kc_mouse_invert_bank].value, PlayerCfg.MouseSens[player_config_mouse_index::bank_lr]);
+	adjust_mouse_axis_field(Controls.bank_time, mouse_time.bank_time, Controls.mouse_axis, kcm_mouse[dxx_kconfig_ui_kc_mouse_bank].value, !kcm_mouse[dxx_kconfig_ui_kc_mouse_invert_bank].value, PlayerCfg.MouseSens[player_config_mouse_index::bank_lr]);
 #endif
 
 	//----------- Read forward_thrust_time -------------
@@ -2017,7 +2083,7 @@ void kconfig_end_loop(control_info &Controls, const fix frametime)
 #endif
 #if defined(dxx_kconfig_ui_kc_mouse_throttle) && defined(dxx_kconfig_ui_kc_mouse_invert_throttle)
 	// From mouse...
-	adjust_axis_field(Controls.forward_thrust_time, Controls.mouse_axis, kcm_mouse[dxx_kconfig_ui_kc_mouse_throttle].value, kcm_mouse[dxx_kconfig_ui_kc_mouse_invert_throttle].value, PlayerCfg.MouseSens[player_config_mouse_index::throttle]);
+	adjust_mouse_axis_field(Controls.forward_thrust_time, mouse_time.forward_thrust_time, Controls.mouse_axis, kcm_mouse[dxx_kconfig_ui_kc_mouse_throttle].value, kcm_mouse[dxx_kconfig_ui_kc_mouse_invert_throttle].value, PlayerCfg.MouseSens[player_config_mouse_index::throttle]);
 #endif
 
 	//----------- Read cruise-control-type of throttle.
@@ -2031,19 +2097,34 @@ void kconfig_end_loop(control_info &Controls, const fix frametime)
 	}
 
 	//----------- Clamp values between -FrameTime and FrameTime
-	clamp_kconfig_control_with_overrun(Controls.vertical_thrust_time, frametime, Controls.excess_vertical_thrust_time, frametime * PlayerCfg.MouseOverrun[player_config_mouse_index::slide_ud]);
-	clamp_kconfig_control_with_overrun(Controls.sideways_thrust_time, frametime, Controls.excess_sideways_thrust_time, frametime * PlayerCfg.MouseOverrun[player_config_mouse_index::slide_lr]);
-	clamp_kconfig_control_with_overrun(Controls.forward_thrust_time, frametime, Controls.excess_forward_thrust_time, frametime * PlayerCfg.MouseOverrun[player_config_mouse_index::throttle]);
+	/* Only relative mouse motion is a displacement whose excess must be
+	 * carried.  Flight sim mode is a rate, like a joystick axis.  Drop
+	 * the carry when the player cannot use it.
+	 */
+	if (!(PlayerCfg.ControlType & CONTROL_USING_MOUSE) || PlayerCfg.MouseFlightSim || Player_dead_state != player_dead_state::no)
+	{
+		mouse_time = {};
+		Controls.mouse_carry = {};
+	}
+	// The overrun buffer holds full-thrust time, so above the reference
+	// frame rate its bound is a duration (MouseOverrun reference frames),
+	// not a number of frames.  The mouse carry is bounded to
+	// MOUSE_CARRY_TIME of full-rate input, independent of MouseOverrun.
+	static constexpr fix MOUSE_CARRY_TIME{DESIGNATED_GAME_FRAMETIME};
+	clamp_kconfig_control_with_overrun(Controls.vertical_thrust_time, frametime, Controls.excess_vertical_thrust_time, mouse_reference_frametime * PlayerCfg.MouseOverrun[player_config_mouse_index::slide_ud], Controls.mouse_carry.vertical_thrust_time, mouse_time.vertical_thrust_time, MOUSE_CARRY_TIME);
+	clamp_kconfig_control_with_overrun(Controls.sideways_thrust_time, frametime, Controls.excess_sideways_thrust_time, mouse_reference_frametime * PlayerCfg.MouseOverrun[player_config_mouse_index::slide_lr], Controls.mouse_carry.sideways_thrust_time, mouse_time.sideways_thrust_time, MOUSE_CARRY_TIME);
+	clamp_kconfig_control_with_overrun(Controls.forward_thrust_time, frametime, Controls.excess_forward_thrust_time, mouse_reference_frametime * PlayerCfg.MouseOverrun[player_config_mouse_index::throttle], Controls.mouse_carry.forward_thrust_time, mouse_time.forward_thrust_time, MOUSE_CARRY_TIME);
 	if (!allow_uncapped_turning())
 	{
-		auto pitch_frametime = frametime / LOCKED_PITCH_FACTOR;
-		if(release_pitch_lock()) {
-			pitch_frametime = frametime / FREE_PITCH_FACTOR;
-		}
-		clamp_kconfig_control_with_overrun(Controls.pitch_time, pitch_frametime, Controls.excess_pitch_time, frametime * PlayerCfg.MouseOverrun[player_config_mouse_index::pitch_ud]);
-		clamp_kconfig_control_with_overrun(Controls.heading_time, frametime, Controls.excess_heading_time, frametime * PlayerCfg.MouseOverrun[player_config_mouse_index::turn_lr]);
-		clamp_kconfig_control_with_overrun(Controls.bank_time, frametime, Controls.excess_bank_time, frametime * PlayerCfg.MouseOverrun[player_config_mouse_index::bank_lr]);
+		const int pitch_factor = release_pitch_lock() ? FREE_PITCH_FACTOR : LOCKED_PITCH_FACTOR;
+		const fix pitch_frametime{frametime / pitch_factor};
+		clamp_kconfig_control_with_overrun(Controls.pitch_time, pitch_frametime, Controls.excess_pitch_time, mouse_reference_frametime * PlayerCfg.MouseOverrun[player_config_mouse_index::pitch_ud], Controls.mouse_carry.pitch_time, mouse_time.pitch_time, MOUSE_CARRY_TIME / pitch_factor);
+		clamp_kconfig_control_with_overrun(Controls.heading_time, frametime, Controls.excess_heading_time, mouse_reference_frametime * PlayerCfg.MouseOverrun[player_config_mouse_index::turn_lr], Controls.mouse_carry.heading_time, mouse_time.heading_time, MOUSE_CARRY_TIME);
+		clamp_kconfig_control_with_overrun(Controls.bank_time, frametime, Controls.excess_bank_time, mouse_reference_frametime * PlayerCfg.MouseOverrun[player_config_mouse_index::bank_lr], Controls.mouse_carry.bank_time, mouse_time.bank_time, MOUSE_CARRY_TIME);
 	}
+	else
+		/* Turning is not clamped, so nothing is carried. */
+		Controls.mouse_carry.pitch_time = Controls.mouse_carry.heading_time = Controls.mouse_carry.bank_time = 0;
 }
 
 }

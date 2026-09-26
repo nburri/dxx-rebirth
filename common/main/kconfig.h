@@ -88,7 +88,15 @@ struct control_info
 	ramp_controls_t<float> down_time; // to scale movement depending on how long the key is pressed
 	mouse_delta_state pending_mouse_delta;
 	fix pitch_time, vertical_thrust_time, heading_time, sideways_thrust_time, bank_time, forward_thrust_time;
-        fix excess_pitch_time, excess_vertical_thrust_time, excess_heading_time, excess_sideways_thrust_time, excess_bank_time, excess_forward_thrust_time;
+        fix excess_pitch_time{}, excess_vertical_thrust_time{}, excess_heading_time{}, excess_sideways_thrust_time{}, excess_bank_time{}, excess_forward_thrust_time{};
+	struct mouse_control_times
+	{
+		fix pitch_time, vertical_thrust_time, heading_time, sideways_thrust_time, bank_time, forward_thrust_time;
+	};
+	/* Relative mouse input that exceeded the per-frame limit of a
+	 * control, applied on the following frames.
+	 */
+	mouse_control_times mouse_carry{};
 };
 
 void kconfig_begin_loop(control_info &);
