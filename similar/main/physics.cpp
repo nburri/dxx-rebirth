@@ -198,7 +198,8 @@ namespace {
  *
  * Applying that recurrence `n` times gives the closed form
  *
- *     v = v * R ** n + accel * k * R * (1 - R ** n) / (1 - R)
+ *     v = v * R ** n + steady * (1 - R ** n)
+ *     steady = accel * k * R / (1 - R)
  *
  * which is also defined for fractional `n`.  Using it with
  * `n = FrameTime / 327` gives the same result for any frame rate, such that
@@ -206,6 +207,48 @@ namespace {
  * code at 200 fps up to rounding.
  */
 constexpr fix drag_reference_frametime{F1_0 / 200};
+/* `fixdiv(drag_reference_frametime, FT)`, which is exact */
+constexpr fix drag_reference_fraction_of_step{drag_reference_frametime * (F1_0 / FT)};
+static_assert(drag_reference_fraction_of_step == 20928);
+
+/* Frame rate independent description of the drag model for one drag
+ * value: over `n` reference frames, velocity decays by
+ * `exp(-decay_per_frame * n)` toward `accel * steady_state_per_accel`.
+ */
+struct drag_model
+{
+	double decay_per_frame;
+	double steady_state_per_accel;
+};
+
+[[nodiscard]]
+static drag_model build_drag_model(const fix drag)
+{
+	/* Compute these as the old code did at 200 fps, including its
+	 * truncation, so that 200 fps is unchanged.
+	 */
+	const fix reference_drag{fixmul(drag_reference_fraction_of_step, drag)};
+	constexpr double accel_per_frame{static_cast<double>(drag_reference_fraction_of_step) / F1_0};
+	if (reference_drag <= 0)
+		/* Drag too small to have any effect at the reference frame time:
+		 * no decay, and no steady state under thrust.
+		 */
+		return {0, 0};
+	const double drag_per_frame{static_cast<double>(reference_drag) / F1_0};
+	if (drag_per_frame < 1)
+	{
+		const double retained_per_frame{1 - drag_per_frame};
+		return {-std::log(retained_per_frame), accel_per_frame * retained_per_frame / drag_per_frame};
+	}
+	/* For a drag this high, the old code zeroed or negated the velocity
+	 * every frame, which cannot be made frame rate independent.  This is
+	 * only possible for rotational drag, which is 5/2 of the object's drag,
+	 * and only if that drag is 1.25 or more.  Use a continuous decay with
+	 * the same drag per reference frame instead.  It lets thrust act, with
+	 * a steady state of `accel * k / drag_per_frame`.
+	 */
+	return {drag_per_frame, accel_per_frame / drag_per_frame};
+}
 
 struct drag_integration
 {
@@ -216,23 +259,33 @@ struct drag_integration
 [[nodiscard]]
 static drag_integration build_drag_integration(const fix drag, const fix frametime)
 {
-	/* Compute these as the old code did at 200 fps, including its
-	 * truncation, so that 200 fps is unchanged.
-	 */
-	const fix reference_fraction_of_step{fixdiv(drag_reference_frametime, FT)};
-	const fix reference_drag{fixmul(reference_fraction_of_step, drag)};
-	const double accel_per_frame{static_cast<double>(reference_fraction_of_step) / F1_0};
 	const double frames{static_cast<double>(frametime) / drag_reference_frametime};
-	if (reference_drag <= 0)
-		/* Drag too small to have any effect at the reference frame time */
-		return {1, accel_per_frame * frames};
-	/* A drag so high that it would zero the velocity in one reference
-	 * frame (only possible for rotational drag, which is 5/2 of the
-	 * object's drag) stops the object, as the old code did.
-	 */
-	const double retained_per_frame{std::max(0.0, 1 - static_cast<double>(reference_drag) / F1_0)};
-	const double retained{std::pow(retained_per_frame, frames)};
-	return {retained, accel_per_frame * retained_per_frame * (1 - retained) / (1 - retained_per_frame)};
+	const auto model{build_drag_model(drag)};
+	if (!model.decay_per_frame)
+		return {1, frames * (static_cast<double>(drag_reference_fraction_of_step) / F1_0)};
+	const double retained{std::exp(-model.decay_per_frame * frames)};
+	return {retained, model.steady_state_per_accel * (1 - retained)};
+}
+
+/* Few distinct drag values are in use at a time, and `FrameTime` is the
+ * same for all objects in a frame, so cache the result of
+ * `build_drag_integration`.  This avoids calling `std::exp` and `std::log`
+ * for almost every object, and makes all objects with the same drag use
+ * the same factors.
+ */
+[[nodiscard]]
+static const drag_integration &get_drag_integration(const fix drag, const fix frametime)
+{
+	struct cache_entry
+	{
+		fix drag, frametime;
+		drag_integration integration;
+	};
+	static std::array<cache_entry, 32> cache{};
+	auto &e{cache[(static_cast<uint32_t>(drag) * UINT32_C(2654435761)) >> 27]};
+	if (e.drag != drag || e.frametime != frametime)
+		e = {drag, frametime, build_drag_integration(drag, frametime)};
+	return e.integration;
 }
 
 [[nodiscard]]
@@ -272,19 +325,18 @@ static void do_physics_sim_rot(object_base &obj)
 	if (obj.mtype.phys_info.drag)
 	{
 		const fix drag{(obj.mtype.phys_info.drag * 5) / 2};
-		const auto di{build_drag_integration(drag, FrameTime)};
 
 		if (obj.mtype.phys_info.flags & PF_USES_THRUST)
 		{
 			const auto accel{vm_vec_copy_scale(obj.mtype.phys_info.rotthrust, fixdiv(f1_0, obj.mtype.phys_info.mass))};
-			apply_drag_integration(di, obj.mtype.phys_info.rotvel, accel);
+			apply_drag_integration(get_drag_integration(drag, FrameTime), obj.mtype.phys_info.rotvel, accel);
 		}
 		else
 #if DXX_BUILD_DESCENT == 2
 			if (! (obj.mtype.phys_info.flags & PF_FREE_SPINNING))
 #endif
 		{
-			apply_drag_integration(di, obj.mtype.phys_info.rotvel, vms_vector{});
+			apply_drag_integration(get_drag_integration(drag, FrameTime), obj.mtype.phys_info.rotvel, vms_vector{});
 		}
 
 	}
@@ -429,7 +481,7 @@ window_event_result do_physics_sim(const d_robot_info_array &Robot_info, const v
 	//do thrust & drag
 	if (const fix drag{obj->mtype.phys_info.drag})
 	{
-		const auto di{build_drag_integration(drag, FrameTime)};
+		auto &di{get_drag_integration(drag, FrameTime)};
 
 		if (obj->mtype.phys_info.flags & PF_USES_THRUST) {
 
