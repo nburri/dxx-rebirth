@@ -83,6 +83,12 @@ void read_flying_controls(object &obj, control_info &Controls)
 
 		obj.mtype.phys_info.rotthrust = {};
 
+		/* `Seismic_tremor_magnitude` is reset every frame and only
+		 * accumulates on frames where `d_tick_step` is set (see
+		 * `apply_seismic_effect`), so the tremor is applied at
+		 * `DESIGNATED_GAME_FPS`, independent of the frame rate.  Do not
+		 * scale it by `FrameTime`.
+		 */
 		const auto Seismic_tremor_magnitude = LevelUniqueSeismicState.Seismic_tremor_magnitude;
 		/* Halve the steering input, carrying the half angle unit that
 		 * `fixang` cannot represent to the next frame, so that small
