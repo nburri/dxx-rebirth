@@ -647,10 +647,14 @@ void calc_frame_time()
 	fix last_frametime = FrameTime;
 
 	const auto bound{timer_get_frame_bound()};
+	fix64 timer_value;
 	/* Also wait until the timer advanced, so that FrameTime is
-	 * positive.
+	 * positive.  multi_do_frame() may reset the timer values while
+	 * waiting, so check them again after the wait.
 	 */
-	const auto timer_value{timer_wait_frame(std::max(sync_timer_value + bound, last_timer_value + 1))};
+	do {
+		timer_value = timer_wait_frame(std::max(sync_timer_value + bound, last_timer_value + 1));
+	} while (!(timer_value > last_timer_value && timer_value >= sync_timer_value + bound));
 	FrameTime = timer_value - last_timer_value;
 	last_timer_value = timer_value;
 

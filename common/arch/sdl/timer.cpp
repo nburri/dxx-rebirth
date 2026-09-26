@@ -47,7 +47,12 @@ static fix64 timer_read_clock()
 {
 	static const uint64_t frequency{SDL_GetPerformanceFrequency()};
 	static const uint64_t base{SDL_GetPerformanceCounter()};
-	const uint64_t elapsed{SDL_GetPerformanceCounter() - base};
+	const uint64_t counter{SDL_GetPerformanceCounter()};
+	/* On some systems, the counters of different cores are slightly
+	 * out of sync, so a reading may be below the first one.  Do not
+	 * let the subtraction wrap around to a huge time.
+	 */
+	const uint64_t elapsed{counter > base ? counter - base : 0};
 	constexpr uint64_t one{F1_0};
 	return static_cast<fix64>((elapsed / frequency) * one + (elapsed % frequency) * one / frequency);
 }
