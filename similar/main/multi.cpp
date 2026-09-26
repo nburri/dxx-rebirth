@@ -132,7 +132,7 @@ static void multi_add_lifetime_kills(int count);
 
 namespace {
 
-static void multi_send_heartbeat();
+static void multi_send_heartbeat(multiplayer_data_priority priority);
 static void multi_send_ranking(netplayer_info::player_rank);
 static void multi_send_gmode_update();
 
@@ -1071,11 +1071,19 @@ namespace {
  */
 static int last_heartbeat_second = -1;
 
+/* Priority of the next MULTI_HEARTBEAT.  The periodic heartbeat is sent
+ * unreliably, but the one scheduled by multi_schedule_heartbeat is the only
+ * one that tells a joining player the level time before the next second, so
+ * send that one reliably.
+ */
+static multiplayer_data_priority next_heartbeat_priority = multiplayer_data_priority::_1;
+
 }
 
 void multi_schedule_heartbeat()
 {
 	last_heartbeat_second = -1;
+	next_heartbeat_priority = multiplayer_data_priority::_2;
 }
 
 window_event_result multi_do_frame()
@@ -1099,7 +1107,7 @@ window_event_result multi_do_frame()
 			{
 				if (i==Player_num)
 				{
-					multi_send_heartbeat();
+					multi_send_heartbeat(std::exchange(next_heartbeat_priority, multiplayer_data_priority::_1));
 					last_heartbeat_second = this_level_second;
 				}
 				break;
@@ -4211,7 +4219,7 @@ static void multi_do_kill_goal_counts(fvmobjptr &vmobjptr, const multiplayer_rsp
 	}
 }
 
-void multi_send_heartbeat ()
+void multi_send_heartbeat(const multiplayer_data_priority priority)
 {
 	if (!Netgame.PlayTimeAllowed.count())
 		return;
@@ -4219,10 +4227,10 @@ void multi_send_heartbeat ()
 	multi_command<multiplayer_command_t::MULTI_HEARTBEAT> multibuf;
 	PUT_INTEL_INT(&multibuf[1], ThisLevelTime.count());
 	/* The receiver overwrites its level time with this value, so send it at
-	 * once rather than up to 100ms late with the next regular mdata packet.
-	 * It is sent only once per second.
+	 * once (priority 1 or 2) rather than up to 100ms late with the next
+	 * regular mdata packet.  It is sent only once per second.
 	 */
-	multi_send_data(multibuf, multiplayer_data_priority::_1);
+	multi_send_data(multibuf, priority);
 }
 
 static void multi_do_heartbeat(const multiplayer_rspan<multiplayer_command_t::MULTI_HEARTBEAT> buf)
