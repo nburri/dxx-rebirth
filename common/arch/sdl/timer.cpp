@@ -11,8 +11,8 @@
  */
 
 #include <SDL.h>
-#include <thread>
 
+#include "args.h"
 #include "fwd-game.h"
 #include "maths.h"
 #include "timer.h"
@@ -81,18 +81,59 @@ void timer_delay_ms(unsigned milliseconds)
 	SDL_Delay(milliseconds);
 }
 
-void timer_delay_frame_step(const fix64 remaining)
+namespace {
+
+/* SDL_Delay(1) may sleep longer than 1 ms, so the frame wait sleeps
+ * only while at least this much time remains, and yields for the rest
+ * of the wait.  On Windows, SDL_Delay(1) can take up to about 2 ms.
+ * Elsewhere, it is precise to about 0.1 ms, so a smaller margin
+ * suffices and saves CPU time at lower frame rates.
+ */
+#ifdef _WIN32
+constexpr fix frame_wait_sleep_margin{F1_0 * 2 / 1000};
+#else
+constexpr fix frame_wait_sleep_margin{F1_0 * 3 / 2 / 1000};
+#endif
+
+/* While waiting, process multiplayer packets at most this often.
+ * Checking on every pass of the wait would poll the network many
+ * thousand times per second.
+ */
+constexpr fix frame_wait_multi_interval{F1_0 / 1000};
+
+}
+
+fix64 timer_wait_frame(const fix64 deadline)
 {
-	/* Sleep only while at least 2 ms remain.  SDL_Delay(1) may take
-	 * longer than 1 ms (up to about 2 ms on Windows), and sleeping
-	 * closer to the deadline would make the frame late.  For the rest
-	 * of the time, give up the time slice and let the caller check the
-	 * timer again.
+	const auto multiplayer{+(Game_mode & GM_MULTI)};
+	const auto may_sleep{!CGameArg.SysNoNiceFPS && !CGameCfg.VSync};
+	auto timer_value{timer_update()};
+	/* Process packets on the first pass of a wait, as before, and then
+	 * at most once per frame_wait_multi_interval.
 	 */
-	if (remaining >= F1_0 / 500)
-		SDL_Delay(1);
-	else
-		std::this_thread::yield();
+	auto next_multi_frame{timer_value};
+	while (timer_value < deadline)
+	{
+		if (multiplayer && timer_value >= next_multi_frame)
+		{
+			multi_do_frame(); // during long wait, keep packets flowing
+			next_multi_frame = timer_value + frame_wait_multi_interval;
+		}
+		if (may_sleep)
+		{
+			/* Sleeping close to the deadline would make the frame
+			 * late, so during the last frame_wait_sleep_margin of
+			 * the wait, only give up the time slice.  This keeps the
+			 * frame rate steady at the cost of CPU time: at high
+			 * frame rates, the wait uses most of a core.
+			 * SDL_Delay(0) yields on Windows (Sleep(0)) and sleeps
+			 * for the timer slack (about 50 us on Linux) elsewhere.
+			 */
+			SDL_Delay(deadline - timer_value >= frame_wait_sleep_margin ? 1 : 0);
+		}
+		timer_value = timer_update();
+	}
+	return timer_value;
 }
 
 // Replacement for timer_delay which considers calc time the program needs between frames (not reentrant)

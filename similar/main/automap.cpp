@@ -1053,19 +1053,10 @@ static void draw_automap(fvcobjptr &vcobjptr, automap &am, fix eye = 0)
 		show_mousefs_indicator(canvas, raw_mouse_axis[0], raw_mouse_axis[1], raw_mouse_axis[2], gwidth - (gheight / 8), gheight - (gheight / 8), gheight / 5);
 	}
 
-	am.t2 = timer_query();
 	const auto vsync{CGameCfg.VSync};
 	const auto bound{F1_0 / (vsync ? MAXIMUM_FPS : CGameArg.SysMaxFPS)};
-	const auto may_sleep{!CGameArg.SysNoNiceFPS && !vsync};
-	const auto multiplayer{+(Game_mode & GM_MULTI)};
-	while (am.t2 - am.t1 < bound) // ogl is fast enough that the automap can read the input too fast and you start to turn really slow.  So delay a bit (and free up some cpu :)
-	{
-		if (multiplayer)
-			multi_do_frame(); // during long wait, keep packets flowing
-		if (may_sleep)
-			timer_delay_frame_step(bound - (am.t2 - am.t1));
-		am.t2 = timer_update();
-	}
+	// ogl is fast enough that the automap can read the input too fast and you start to turn really slow.  So delay a bit (and free up some cpu :)
+	am.t2 = timer_wait_frame(am.t1 + bound);
 	if (am.pause_game)
 	{
 		FrameTime=am.t2-am.t1;

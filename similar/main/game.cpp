@@ -648,27 +648,16 @@ void calc_frame_time()
 
 	const auto vsync{CGameCfg.VSync};
 	const auto bound = f1_0 / (likely(vsync) ? MAXIMUM_FPS : CGameArg.SysMaxFPS);
-	const auto may_sleep = !CGameArg.SysNoNiceFPS && !vsync;
-	const auto multiplayer{+(Game_mode & GM_MULTI)};
-	for (;;)
-	{
-		const auto timer_value = timer_update();
-		FrameTime = timer_value - last_timer_value;
-		const auto elapsed = timer_value - sync_timer_value;
-		if (FrameTime > 0 && elapsed >= bound)
-		{
-			last_timer_value = timer_value;
+	/* Also wait until the timer advanced, so that FrameTime is
+	 * positive.
+	 */
+	const auto timer_value{timer_wait_frame(std::max(sync_timer_value + bound, last_timer_value + 1))};
+	FrameTime = timer_value - last_timer_value;
+	last_timer_value = timer_value;
 
-			sync_timer_value += bound;
-			if (sync_timer_value + bound < timer_value) {
-				sync_timer_value = timer_value;
-			}
-			break;
-		}
-		if (multiplayer)
-			multi_do_frame(); // during long wait, keep packets flowing
-		if (may_sleep)
-			timer_delay_frame_step(bound - elapsed);
+	sync_timer_value += bound;
+	if (sync_timer_value + bound < timer_value) {
+		sync_timer_value = timer_value;
 	}
 
 	if ( cheats.turbo )
