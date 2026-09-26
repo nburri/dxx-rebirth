@@ -1384,6 +1384,14 @@ static void build_segment_list(render_state_t &rstate, const vms_vector &Viewer_
 	auto &Walls = LevelUniqueWallSubsystemState.Walls;
 	auto &vcwallptr = Walls.vcptr;
 	for (l=0;l<Render_depth;l++) {
+		/* Each pass rescans the whole list, since a segment whose window
+		 * was expanded is marked for reprocessing.  A pass that finds no
+		 * unprocessed segment changes nothing, so every later pass would
+		 * do the same.  Stop then, instead of scanning the whole list
+		 * again up to Render_depth (MAX_RENDER_SEGS in OpenGL builds)
+		 * times per frame.
+		 */
+		bool processed_any{false};
 		for (scnt=0;scnt < ecnt;scnt++) {
 			auto segnum = rstate.Render_list[scnt];
 			if (unlikely(segnum == segment_none))
@@ -1399,6 +1407,7 @@ static void build_segment_list(render_state_t &rstate, const vms_vector &Viewer_
 			const auto &check_w = srsm.render_window;
 
 			processed = true;
+			processed_any = true;
 
 			const auto &&seg = vcsegptridx(segnum);
 			const auto uor = rotate_list(vcvertptr, seg->verts).uor & clipping_code::behind;
@@ -1524,6 +1533,8 @@ no_add:
 
 		scnt = ecnt;
 		ecnt = lcnt;
+		if (!processed_any)
+			break;
 
 	}
 done_list:
