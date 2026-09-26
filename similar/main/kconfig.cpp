@@ -2099,9 +2099,11 @@ void kconfig_end_loop(control_info &Controls, const fix frametime)
 	//----------- Clamp values between -FrameTime and FrameTime
 	/* Only relative mouse motion is a displacement whose excess must be
 	 * carried.  Flight sim mode is a rate, like a joystick axis.  Drop
-	 * the carry when the player cannot use it.
+	 * the carry when the player cannot use it.  Below the reference
+	 * frame rate, keep the historical behavior (excess handled only by
+	 * MouseOverrun) and drop any carry left from faster frames.
 	 */
-	if (!(PlayerCfg.ControlType & CONTROL_USING_MOUSE) || PlayerCfg.MouseFlightSim || Player_dead_state != player_dead_state::no)
+	if (!(PlayerCfg.ControlType & CONTROL_USING_MOUSE) || PlayerCfg.MouseFlightSim || Player_dead_state != player_dead_state::no || frametime >= HIGH_FPS_REFERENCE_FRAMETIME)
 	{
 		mouse_time = {};
 		Controls.mouse_carry = {};
