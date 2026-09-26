@@ -623,7 +623,11 @@ void set_dynamic_light(const d_robot_info_array &Robot_info, render_state_t &rst
 	//	Create list of vertices that need to be looked at for setting of ambient light.
 	auto &Dynamic_light = LevelUniqueLightState.Dynamic_light;
 	auto &vcvertptr = LevelSharedSegmentState.get_vertex_state().get_vertices().vcptr;
-	render_vertex_list rvl;
+	/* Sized by MAX_RENDER_SEGS, several hundred KB: too large for the
+	 * stack, so keep one instance.  set_dynamic_light is not re-entrant.
+	 */
+	static render_vertex_list rvl;
+	rvl.n_render_vertices = 0;
 	auto &n_render_vertices = rvl.n_render_vertices;
 	range_for (const auto segnum, partial_const_range(rstate.Render_list, rstate.N_render_segs))
 	{
