@@ -523,7 +523,13 @@ volatile_wall_result check_volatile_wall(const vmobjptridx_t obj, const unique_s
 		{
 			const fix64 elapsed_time{GameTime64 - Last_volatile_scrape_time};
 			if (!(elapsed_time > DESIGNATED_GAME_FRAMETIME || elapsed_time < 0))
-				return volatile_wall_result::none;
+				return
+#if DXX_BUILD_DESCENT == 2
+					(d <= 0)
+					? volatile_wall_result::water_rate_limited
+					:
+#endif
+					volatile_wall_result::lava_rate_limited;
 			Last_volatile_scrape_time = {GameTime64};
 
 #if DXX_BUILD_DESCENT == 2
@@ -598,7 +604,14 @@ bool scrape_player_on_wall(const vmobjptridx_t obj, const vmsegptridx_t hitseg, 
 		return false;
 
 	const auto type = check_volatile_wall(obj, hitseg->unique_segment::sides[hitside]);
-	if (type != volatile_wall_result::none)
+	/* On rate limited frames, treat the wall as an ordinary wall, as
+	 * before: no sound and no bump.
+	 */
+	if (type == volatile_wall_result::lava
+#if DXX_BUILD_DESCENT == 2
+		|| type == volatile_wall_result::water
+#endif
+		)
 	{
 		if ((GameTime64 > Last_volatile_scrape_sound_time + F1_0/4) || (GameTime64 < Last_volatile_scrape_sound_time)) {
 			Last_volatile_scrape_sound_time = {GameTime64};
