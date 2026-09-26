@@ -1,7 +1,11 @@
 name: Pull Request - Windows
 on:
   workflow_dispatch:
+  # Windows packages take a long time to build, so pull requests only get
+  # one when they are meant to be play-tested: add the 'playtest' label.
+  # The build then also runs for later pushes to that pull request.
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
     branches:
       - master
       - release-500hz
@@ -16,4 +20,10 @@ concurrency:
 jobs:
   windows:
     name: Package Windows
+    # Adding another label to a playtest pull request must not restart the
+    # build, so a 'labeled' event only counts for the playtest label itself.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (contains(github.event.pull_request.labels.*.name, 'playtest') &&
+       (github.event.action != 'labeled' || github.event.label.name == 'playtest'))
     uses: ./.github/workflows/package-windows.yml
