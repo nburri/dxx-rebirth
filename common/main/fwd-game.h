@@ -41,12 +41,20 @@ constexpr std::integral_constant<int, 5> NDL{};       // Number of difficulty le
 constexpr std::integral_constant<unsigned, 30> DESIGNATED_GAME_FPS{};	// assuming the original intended Framerate was 30
 constexpr std::integral_constant<int, F1_0 / DESIGNATED_GAME_FPS> DESIGNATED_GAME_FRAMETIME;
 
+/* The limits are macros so that the -maxfps help text can show the
+ * numbers.  MAXIMUM_FPS is also the default for -maxfps.
+ */
 #ifdef NDEBUG
-constexpr auto MINIMUM_FPS = DESIGNATED_GAME_FPS;
-constexpr std::integral_constant<unsigned, 200> MAXIMUM_FPS{};
+#define DXX_MINIMUM_FPS	30
+#define DXX_MAXIMUM_FPS	500
 #else
-constexpr std::integral_constant<unsigned, 1> MINIMUM_FPS{};
-constexpr std::integral_constant<unsigned, 1000> MAXIMUM_FPS{};
+#define DXX_MINIMUM_FPS	1
+#define DXX_MAXIMUM_FPS	1000
+#endif
+constexpr std::integral_constant<unsigned, DXX_MINIMUM_FPS> MINIMUM_FPS{};
+constexpr std::integral_constant<unsigned, DXX_MAXIMUM_FPS> MAXIMUM_FPS{};
+#ifdef NDEBUG
+static_assert(MINIMUM_FPS == DESIGNATED_GAME_FPS);
 #endif
 
 // from mglobal.c

@@ -175,7 +175,7 @@ static void print_commandline_help()
 #define DXX_COMMAND_LINE_HELP(VERB)	\
 	VERB("\n System Options:\n\n")	\
 	VERB("  -nonicefps                    Don't free CPU-cycles\n")	\
-	VERB("  -maxfps <n>                   Set maximum framerate to <n>\n\t\t\t\t(default: " DXX_STRINGIZE(MAXIMUM_FPS) ", available: " DXX_STRINGIZE(MINIMUM_FPS) "-" DXX_STRINGIZE(MAXIMUM_FPS) ")\n")	\
+	VERB("  -maxfps <n>                   Set maximum framerate to <n>\n\t\t\t\t(default: " DXX_STRINGIZE(DXX_MAXIMUM_FPS) ", available: " DXX_STRINGIZE(DXX_MINIMUM_FPS) "-" DXX_STRINGIZE(DXX_MAXIMUM_FPS) ")\n")	\
 	VERB("  -hogdir <s>                   set shared data directory to <s>\n")	\
 	DXX_COMMAND_LINE_HELP_unix(	\
 		VERB("  -nohogdir                     don't try to use shared data directory\n")	\

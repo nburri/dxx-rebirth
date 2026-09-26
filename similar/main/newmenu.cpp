@@ -101,6 +101,17 @@ struct step_up
 		}
 };
 
+/* Menus redraw only on idle, so running them at the full game frame
+ * rate (up to MAXIMUM_FPS) would keep the CPU and GPU busy for no
+ * visible benefit.  Limit the menus to a rate that still keeps the
+ * mouse cursor smooth.
+ */
+static int get_menu_maximum_fps()
+{
+	constexpr int menu_maximum_fps{200};
+	return std::min(CGameArg.SysMaxFPS, menu_maximum_fps);
+}
+
 static grs_main_bitmap nm_background, nm_background1;
 static grs_subbitmap_ptr nm_background_sub;
 
@@ -1667,7 +1678,7 @@ window_event_result newmenu::event_handler(const d_event &event)
 			return newmenu_key_command(event, this);
 		case event_type::idle:
 			if (!(Game_mode & GM_MULTI) || !Game_wind || !Game_wind->is_visible())
-				timer_delay2(CGameArg.SysMaxFPS);
+				timer_delay2(get_menu_maximum_fps());
 			break;
 		case event_type::window_draw:
 			return newmenu_draw(this);
@@ -2205,7 +2216,7 @@ window_event_result listbox::event_handler(const d_event &event)
 			return listbox_key_command(event, this);
 		case event_type::idle:
 			if (!(+(Game_mode & GM_MULTI) && Game_wind))
-				timer_delay2(CGameArg.SysMaxFPS);
+				timer_delay2(get_menu_maximum_fps());
 			return window_event_result::ignored;
 		case event_type::window_draw:
 			return listbox_draw(this);
