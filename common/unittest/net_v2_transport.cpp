@@ -33,8 +33,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
+#include <iterator>
 #include <span>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "net_v2_transport.h"
@@ -181,13 +183,10 @@ public:
 	 */
 	void deliver(const unsigned dest, const net_clock now, const std::function<void(const datagram &, net_clock)> &f)
 	{
-		std::vector<queued> due;
-		std::erase_if(m_queue, [&](queued &q) {
-			if (q.dest != dest || q.arrival > now)
-				return false;
-			due.push_back(std::move(q));
-			return true;
-		});
+		/* Move the due packets to the back, take them out, sort them. */
+		const auto due_range{std::ranges::stable_partition(m_queue, [&](const queued &q) { return q.dest != dest || q.arrival > now; })};
+		std::vector<queued> due(std::make_move_iterator(due_range.begin()), std::make_move_iterator(due_range.end()));
+		m_queue.erase(due_range.begin(), due_range.end());
 		std::ranges::sort(due, {}, [](const queued &q) { return std::pair{q.arrival, q.order}; });
 		for (auto &q : due)
 		{
@@ -313,6 +312,7 @@ public:
 			link.deliver(i, peer_now, [&](const datagram &d, const net_clock at) { p.receive(d, at); });
 			if (act)
 				act(i);
+			p.conn.begin_tick(p.clock(peer_now));
 			for (;;)
 			{
 				const auto packet{p.conn.build_outgoing(p.clock(peer_now))};
@@ -568,7 +568,8 @@ void test_bounds(const std::uint64_t seed)
 		const std::array<std::uint8_t, 8> small{};
 		for (unsigned i{}; i != NET_V2_QUEUE_MAX_MESSAGES; ++i)
 			CHECK(c.enqueue_reliable(1, small) == enqueue_result::ok);
-		CHECK(c.state() == connection_state::connected || c.state() == connection_state::connecting);
+		CHECK(c.state() != connection_state::closed);
+		CHECK(c.closed_because() == close_reason::none);
 		CHECK(c.enqueue_reliable(1, small) == enqueue_result::queue_overflow);
 		CHECK(c.state() == connection_state::closed);
 		CHECK(c.closed_because() == close_reason::queue_overflow);
@@ -870,6 +871,137 @@ void test_unreliable_chunks_per_packet()
 	CHECK(r2.status == receive_status::accepted);
 	CHECK_MSG(r2.unreliable.size() == 1 && r2.unreliable[0].type == chunk_type::event_u, "reordered packet delivered " + std::to_string(r2.unreliable.size()) + " chunks");
 	std::printf("    two STATE chunks in one packet both delivered; an older packet's STATE dropped, its EVENT_U kept\n");
+}
+
+/* Second review round. */
+
+/* 1. A packet with a malformed chunk is not acknowledged, so the sender
+ * retransmits its messages and the receiver stays in order.
+ */
+void test_malformed_not_acked(const std::uint64_t seed)
+{
+	begin("malformed packet is not acked");
+	rng r{seed};
+	sim_world w{r, link_params{.latency = net_milliseconds(40)}};
+	w.run(10, [&](const unsigned i) { w.set_state(i); });
+	unsigned corrupted{};
+	w.link.mangle[1] = [&](datagram &d) {
+		if (corrupted != 0 || d.size() < NET_V2_HEADER_SIZE + NET_V2_CHUNK_HEADER_SIZE)
+			return;
+		const auto h{*packet_header::read(d)};
+		if (!h.has_flag(packet_flag::has_reliable))
+			return;
+		/* The first RELIABLE chunk's length: make it overrun the packet. */
+		d[NET_V2_HEADER_SIZE + 1] = 0xff;
+		d[NET_V2_HEADER_SIZE + 2] = 0x0f;
+		++corrupted;
+	};
+	w.run(300, [&](const unsigned i) {
+		w.set_state(i);
+		if (i == 0)
+			for (unsigned k{}; k != 3 && w.peers[0].sent.size() < 300; ++k)
+				w.enqueue_random_message(0, 40);
+	});
+	CHECK(corrupted == 1);
+	check_delivery(w, 0);
+	const auto host{w.peers[0].conn.stats()};
+	const auto client{w.peers[1].conn.stats()};
+	print_stats("host", host);
+	print_stats("client", client);
+	CHECK(w.peers[1].malformed == 1);
+	CHECK(client.protocol_errors == 1);
+	CHECK_MSG(host.message_resends >= 1, "the corrupted packet's messages must be resent");
+	CHECK(host.state == connection_state::connected && client.state == connection_state::connected);
+	CHECK(host.in_flight == 0 && host.queue_messages == 0);
+	CHECK(client.recv_window_pending == 0);
+	/* Exactly one packet went unacked: the corrupted one. */
+	CHECK_MSG(host.packets_lost == 1, "packets lost " + std::to_string(host.packets_lost));
+	std::printf("    one corrupted chunk length: %llu message(s) resent, all 300 delivered in order, both sides connected\n",
+		static_cast<unsigned long long>(host.message_resends));
+}
+
+/* 2. Hostile echo fields must not overflow the RTT arithmetic. */
+void test_hostile_echo()
+{
+	begin("hostile echo fields");
+	connection c{host_side, 0};
+	std::uint16_t seq{};
+	for (const auto &[echo_time, echo_delay, now] : {
+		std::tuple{net_time{0x7fffffff}, std::uint16_t{100}, net_clock{0}},
+		std::tuple{net_time{0x80000001}, std::uint16_t{0}, net_clock{0}},
+		std::tuple{net_time{0xffffffff}, std::uint16_t{0xfffe}, net_clock{0}},
+		std::tuple{net_time{1}, std::uint16_t{0xfffe}, net_clock{0x7fffffffffffffff}},
+		std::tuple{net_time{0x12345678}, std::uint16_t{7}, net_clock{-0x7fffffffffffffff}},
+	})
+	{
+		packet_header h;
+		h.session_id = host_side.session_id;
+		h.peer_token = host_side.peer_token;
+		h.player_id = host_side.remote_player_id;
+		h.flags = static_cast<std::uint8_t>(packet_flag::keepalive);
+		h.seq = ++seq;
+		h.echo_time = echo_time;
+		h.echo_delay = echo_delay;
+		std::array<std::uint8_t, NET_V2_HEADER_SIZE> d{};
+		h.write(d.data());
+		const auto report{c.on_receive(d, now)};
+		CHECK(report.status == receive_status::accepted);
+	}
+	const auto s{c.stats()};
+	CHECK_MSG(!s.rtt_valid || (s.srtt >= 0 && s.srtt <= net_seconds(10)), "srtt " + std::to_string(s.srtt));
+	std::printf("    extreme echo_time/echo_delay/now combinations: no overflow, no bogus sample\n");
+}
+
+/* 3. A caller that builds every frame at 240 Hz still gets one packet
+ * budget per 60 Hz tick.
+ */
+void test_high_rate_caller()
+{
+	begin("240 Hz caller, 60 Hz tick budget");
+	connection a{host_side, 0};
+	connection b{client_side, 0};
+	const datagram big(NET_V2_MAX_MESSAGE);
+	for (unsigned k{}; k != 90; ++k)
+		CHECK(a.enqueue_reliable(9, big) == enqueue_result::ok);
+	const net_clock frame{TICK / 4};
+	std::vector<unsigned> per_tick;
+	std::size_t delivered{};
+	std::uint64_t frames_with_packets{};
+	for (unsigned f{}; f != 4 * 200; ++f)
+	{
+		const net_clock now{f * frame};
+		const auto tick_index{static_cast<std::size_t>(now / TICK)};
+		if (per_tick.size() <= tick_index)
+			per_tick.resize(tick_index + 1);
+		bool any{};
+		/* No begin_tick: the budget must open by itself once per period. */
+		for (;;)
+		{
+			const auto p{a.build_outgoing(now)};
+			if (p.empty())
+				break;
+			any = true;
+			++per_tick[tick_index];
+			const auto report{b.on_receive(p, now + 1)};
+			CHECK(report.status == receive_status::accepted);
+			delivered += report.reliable.size();
+		}
+		if (any)
+			++frames_with_packets;
+		if (f % 4 == 3)
+		{
+			b.begin_tick(now + 2);
+			const auto ack{b.build_outgoing(now + 2)};
+			if (!ack.empty())
+				CHECK(a.on_receive(ack, now + 3).status == receive_status::accepted);
+		}
+	}
+	const auto worst{std::ranges::max(per_tick)};
+	CHECK_MSG(worst <= NET_V2_DEFAULT_MAX_PACKETS_PER_TICK, "packets in one tick period: " + std::to_string(worst));
+	CHECK_MSG(delivered == 90, "delivered " + std::to_string(delivered));
+	CHECK(a.stats().in_flight == 0);
+	std::printf("    %zu tick periods, at most %u packets in any of them, %llu of 800 frames sent, 90 KiB delivered\n",
+		per_tick.size(), worst, static_cast<unsigned long long>(frames_with_packets));
 }
 
 /* Replay and reorder window (§3.7 step 6) */
@@ -1176,6 +1308,9 @@ int main(const int argc, char **const argv)
 	test_bounds(seed);
 	test_timeouts(seed);
 	test_replay(seed);
+	test_malformed_not_acked(seed);
+	test_hostile_echo();
+	test_high_rate_caller();
 	test_window_in_one_packet();
 	test_packets_per_tick(seed);
 	test_unaligned_peers(seed);

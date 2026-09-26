@@ -18,6 +18,7 @@
  *
  * Typical use, once per network tick:
  *
+ *	c.begin_tick(now);
  *	c.set_unreliable_state(chunk_type::state, bundle);	// optional
  *	for (;;) {
  *		const auto packet{c.build_outgoing(now)};
@@ -68,8 +69,9 @@ struct connection_config
 	std::uint32_t peer_token{};
 	std::uint8_t local_player_id{NET_V2_PLAYER_ID_NONE};
 	std::uint8_t remote_player_id{NET_V2_PLAYER_ID_NONE};
-	/* The period at which build_outgoing is called.  It bounds the
-	 * packets per tick and pads the RTO for the peer's ack hold time.
+	/* The network tick.  A packet budget of max_packets_per_tick opens
+	 * once per tick_period (see begin_tick), and the RTO is padded by
+	 * it for the peer's ack hold time.
 	 */
 	net_clock tick_period{NET_V2_DEFAULT_TICK_PERIOD};
 	unsigned max_packets_per_tick{NET_V2_DEFAULT_MAX_PACKETS_PER_TICK};
@@ -116,8 +118,11 @@ enum class receive_status : std::uint8_t
 {
 	/* Header applied, every chunk delivered. */
 	accepted,
-	/* Header applied (acks, RTT, last_heard), but a chunk was malformed:
-	 * nothing was delivered and a protocol error was counted.
+	/* A chunk was malformed.  The header's acks, RTT sample and
+	 * last_heard were applied, but nothing was delivered and the packet
+	 * is not acknowledged (its ack bit stays clear), so a conforming
+	 * peer retransmits its reliable messages.  A protocol error was
+	 * counted.
 	 */
 	malformed_chunk,
 	bad_length,
@@ -249,6 +254,10 @@ public:
  * first window after the first sample (start of session) the applied
  * offset follows the target directly, since the first few samples are the
  * least accurate and a slew from them would take seconds.
+ *
+ * The window minimum is kept as a monotonic deque: a sample is dropped as
+ * soon as a newer one with a smaller RTT arrives, because the newer one
+ * outlives it and beats it.  The front is always the minimum.
  */
 class clock_sync
 {
@@ -258,15 +267,15 @@ class clock_sync
 		net_clock rtt;
 		net_clock offset;
 	};
-	std::deque<sample> m_samples;
+	std::deque<sample> m_candidates;
 	bool m_valid{};
 	net_clock m_offset{};
 	net_clock m_target{};
 	net_clock m_first_sample{};
 	net_clock m_last_update{};
 	net_clock m_slew_remainder{};
-	void expire(net_clock now);
-	void retarget();
+	/* Returns true if a candidate expired. */
+	bool expire(net_clock now);
 public:
 	void add_sample(net_clock now, net_clock rtt, net_clock offset);
 	/* Advance the slew.  Call at least once per tick. */
@@ -286,10 +295,11 @@ public:
 	{
 		return m_target;
 	}
+	/* Samples still able to become the window minimum. */
 	[[nodiscard]]
 	std::size_t sample_count() const
 	{
-		return m_samples.size();
+		return m_candidates.size();
 	}
 };
 
@@ -313,8 +323,6 @@ class connection
 		bool valid{};
 		bool acked{};
 		bool lost{};
-		/* False if the packet carried a retransmission. */
-		bool clean{};
 		std::uint16_t seq{};
 		net_clock sent_at{};
 		std::vector<std::uint16_t> msg_seqs;
@@ -361,14 +369,24 @@ class connection
 	std::uint16_t m_next_msg_seq{};
 	/* In sequence order.  Messages acked out of order stay in place,
 	 * marked acked, until everything before them is acked too;
-	 * m_held_acked counts those.
+	 * m_held_acked counts those.  Sent messages form a prefix of the
+	 * deque (sending is in order, popping only at the front), so
+	 * m_sent_count is also the index of the first unsent message.
+	 * m_resend_pending counts sent messages flagged for retransmission.
 	 */
 	std::deque<out_msg> m_messages;
+	std::size_t m_sent_count{};
 	std::size_t m_held_acked{};
+	std::size_t m_resend_pending{};
 	std::size_t m_queue_bytes{};
 	std::size_t m_in_flight{};
 	std::array<packet_log_entry, NET_V2_RECV_WINDOW> m_packet_log{};
+	/* Next packet sequence to examine for having fallen out of the
+	 * peer's ack bitfield unacked.
+	 */
+	std::uint16_t m_lost_scan_seq{1};
 	net_clock m_last_sent{};
+	bool m_tick_started{};
 	net_clock m_tick_start{};
 	unsigned m_tick_packets{};
 	bool m_ack_owed{};
@@ -403,6 +421,7 @@ class connection
 	void close_with(close_reason reason);
 	void check_timeouts(net_clock now);
 	void detect_rto_losses(net_clock now);
+	void flag_resend(out_msg &m);
 	void process_acks(std::uint16_t ack, std::uint64_t ack_bits, net_clock now, bool take_rtt_samples);
 	void resolve_packet(packet_log_entry &e, bool acked);
 	void pop_acked_messages();
@@ -440,16 +459,23 @@ public:
 	 */
 	bool send_unreliable(chunk_type type, std::span<const std::uint8_t> payload);
 
+	/* Open a new packet budget of config.max_packets_per_tick if at
+	 * least config.tick_period has passed since the last tick started
+	 * (always for the first call).  build_outgoing calls this itself, so
+	 * a caller that only calls build_outgoing, at whatever rate, still
+	 * gets one budget per tick period; calling it explicitly at the tick
+	 * merely documents the tick.
+	 */
+	void begin_tick(net_clock now);
+
 	/* Build the next datagram to send, or return an empty span if nothing
-	 * is due.  A packet is due when there is a pending state chunk, a
-	 * pending event, a reliable message to send or resend, an ack owed for
-	 * a received reliable message, or NET_V2_KEEPALIVE_INTERVAL has passed
-	 * since the last packet.  Call repeatedly until it returns empty: the
-	 * second packet of a tick carries only reliable messages that did not
-	 * fit beside the state chunk, and no more than
-	 * config.max_packets_per_tick are built per tick (a new tick starts
-	 * when `now` has advanced by half a tick period since the first
-	 * packet of the current one).  The span is valid until the next call.
+	 * is due or the tick's packet budget is spent.  A packet is due when
+	 * there is a pending state chunk, a pending event, a reliable message
+	 * to send or resend, an ack owed for a received reliable message, or
+	 * NET_V2_KEEPALIVE_INTERVAL has passed since the last packet.  Call
+	 * repeatedly until it returns empty: the second packet of a tick
+	 * carries only reliable messages that did not fit beside the state
+	 * chunk.  The span is valid until the next call.
 	 */
 	[[nodiscard]]
 	std::span<const std::uint8_t> build_outgoing(net_clock now);
