@@ -5489,7 +5489,14 @@ void dispatch_table::do_protocol_frame(int force, int listen) const
 #endif
 	}
 
-	net_udp_ping_frame(time);
+	/* Only the host measures pings.  A client does not know the addresses
+	 * of the other clients (they are unset, or the host's address for
+	 * players added after the client joined), and every receiver discards
+	 * a ping that does not come from the host (process_packet,
+	 * net_udp_process_ping).
+	 */
+	if (multi_i_am_master())
+		net_udp_ping_frame(time);
 #if DXX_USE_TRACKER
 	udp_tracker_verify_ack_timeout();
 #endif

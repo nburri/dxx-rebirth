@@ -409,7 +409,7 @@ disconnected player came back when that player's relayed `pdata` arrives with
 | D2 `MULTI_GUIDED` position (priority 1) | While the player steers a guided missile: at once for a new missile, then every `F1_0 / Netgame.PacketsPerSec` of game time. The final position is also sent (priority 0) when the missile is released, just before the release message, and when it is deleted. Before this pacing, the position was sent every frame. | `multi_send_guided_frame` (called from `read_flying_controls`), `release_local_guided_missile`, `obj_delete` |
 | Robot frame and MDATA flush (unreliable) | Every 1/10 s | `net_udp.cpp:5460` |
 | Reliable queue processing | Every protocol frame | `net_udp_noloss_process_queue` |
-| `ping` (host to clients) | Every second | `net_udp_ping_frame` |
+| `ping` (host to clients) | Every second, host only (before this change, clients also sent it to their entries for players 1–7, whose addresses a client does not know, and every receiver discarded it) | `net_udp_ping_frame` |
 | Player timeout check | Every second (only when `listen` is set) | `net_udp_timeout_check` |
 | `endlevel_h` / `endlevel_c` | Every second while the reactor is destroyed; also in the kill matrix screen | `do_protocol_frame`, `kmatrix.cpp:423` |
 | `game_info_lite` broadcast and tracker register (host) | Every 10 s | `do_protocol_frame` |
@@ -745,6 +745,10 @@ The trailer is sent as its own 14-byte packet (count = 1).
 | 2 | 8 | Echoed time stamp |
 
 The host computes the ping as the elapsed time in ms, clamped to 0–9999.
+
+Only the host sends `ping` (`do_protocol_frame`). The host ignores `ping`, and a
+client ignores a `ping` that does not come from the host's address and answers
+only the host. Only the host processes `pong`.
 
 #### 3.2.10 `endlevel_h` (14) and `endlevel_c` (15)
 
