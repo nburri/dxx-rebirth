@@ -1259,7 +1259,7 @@ static void kill_and_so_forth(const d_robot_info_array &Robot_info, fvmobjptridx
 				apply_damage_to_robot(Robot_info, o, o->shields + 1, get_local_player().objnum);
 				break;
 			case object_type::OBJ_POWERUP:
-				do_powerup(o);
+				do_powerup(o, true);
 				break;
 			default:
 				break;

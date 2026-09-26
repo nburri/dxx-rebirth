@@ -71,7 +71,7 @@ extern powerup_names_array Powerup_names;
 #endif
 
 void draw_powerup(const d_vclip_array &Vclip, grs_canvas &, const object_base &obj);
-int do_powerup(vmobjptridx_t obj);
+int do_powerup(vmobjptridx_t obj, bool check_nearer_player);
 
 //process (animate) a powerup for one frame
 void do_powerup_frame(const d_vclip_array &Vclip, vmobjptridx_t obj);

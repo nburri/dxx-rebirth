@@ -376,7 +376,7 @@ static int player_hit_powerup(player_info &player_info, const char *const desc_h
 
 }
 
-int do_powerup(const vmobjptridx_t obj)
+int do_powerup(const vmobjptridx_t obj, const bool check_nearer_player)
 {
 	auto &Objects = LevelUniqueObjectState.Objects;
 	auto &vcobjptr = Objects.vcptr;
@@ -392,7 +392,10 @@ int do_powerup(const vmobjptridx_t obj)
 	if ((obj->ctype.powerup_info.flags & PF_SPAT_BY_PLAYER) && obj->ctype.powerup_info.creation_time>0 && GameTime64<obj->ctype.powerup_info.creation_time+i2f(2))
 		return 0;		//not enough time elapsed
 
-	if (+(Game_mode & GM_MULTI))
+	/* Skipped for a pickup the host granted: the host has already decided
+	 * who gets the powerup.
+	 */
+	if (+(Game_mode & GM_MULTI) && check_nearer_player)
 	{
 		/*
 		 * The fact: Collecting a powerup is decided Client-side and due to PING it takes time for other players to know if one collected a powerup actually. This may lead to the case two players collect the same powerup!
