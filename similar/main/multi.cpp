@@ -4067,42 +4067,26 @@ void multi_send_guided_final_position(const object_base &miss)
 	multi_send_guided_info(miss, 0, multiplayer_data_priority::_1);
 }
 
-void multi_send_guided_frame(const object_base &miss)
+bool multi_send_guided_frame()
 {
-	/* Called each frame while the local player steers a guided missile.
-	 * The receiver (multi_do_guided) warps its copy of the missile to the
-	 * received position and velocity, then moves it by physics until the
-	 * next update, the same as for ship positions.  Sending once per frame
-	 * only adds redundant updates at high frame rates, so pace the updates
-	 * to the position packet rate (Netgame.PacketsPerSec) instead.  A new
-	 * missile is reported immediately.  The final state is sent by
-	 * multi_send_guided_release and multi_send_guided_final_position.
+	/* Called by do_protocol_frame on each position packet tick, the same as
+	 * multi_send_thief_frame, so that the updates follow the pdata schedule
+	 * (Netgame.PacketsPerSec) and share the mdata packet that the caller
+	 * sends at once.  The receiver (multi_do_guided) warps its copy of the
+	 * missile to the received position and velocity, then moves it by
+	 * physics until the next update, the same as for ship positions.  The
+	 * final state is sent by multi_send_guided_release and
+	 * multi_send_guided_final_position.
+	 *
+	 * Return whether an update was queued.
 	 */
-	static object_signature_t last_signature;
-	static fix64 next_send_time;
-	const fix64 interval{F1_0 / std::clamp<unsigned>(Netgame.PacketsPerSec, MIN_PPS, MAX_PPS)};
-	const fix64 now{GameTime64};
-	/* Restart the pacing for a new missile, or if the game time went
-	 * backward (new level).
-	 */
-	if (miss.signature != last_signature || now < next_send_time - interval)
-	{
-		last_signature = miss.signature;
-		next_send_time = now;
-	}
-	if (now < next_send_time)
-		return;
-	next_send_time += interval;
-	/* If the frame rate is below the packet rate, do not try to catch up
-	 * with a burst of updates.
-	 */
-	if (next_send_time <= now)
-		next_send_time = now + interval;
-	/* Send the update now, rather than waiting up to 100ms for the next
-	 * regular mdata packet, so that remote players see the missile steer at
-	 * the full paced rate.
-	 */
-	multi_send_guided_info(miss, 0, multiplayer_data_priority::_1);
+	if (Network_status != network_state::playing)
+		return false;
+	const auto &&gimobj = LevelUniqueObjectState.Guided_missile.get_player_active_guided_missile(LevelUniqueObjectState.Objects.vmptr, Player_num);
+	if (gimobj == nullptr)
+		return false;
+	multi_send_guided_info(*gimobj, 0, multiplayer_data_priority::_0);
+	return true;
 }
 
 namespace {

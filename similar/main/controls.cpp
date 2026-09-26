@@ -92,8 +92,9 @@ void read_flying_controls(object &obj, control_info &Controls)
 		gmobj.orient = vm_matrix_x_matrix(gmobj.orient, rotmat);
 
 		gmobj.mtype.phys_info.velocity = vm_vec_copy_scale(gmobj.orient.fvec, speed);
-		if (+(Game_mode & GM_MULTI))
-			multi_send_guided_frame(gmobj);
+		/* In multiplayer, do_protocol_frame sends the position of the
+		 * missile with each position packet (multi_send_guided_frame).
+		 */
 		return true;
 	};
 	if (!control_guided_missile())

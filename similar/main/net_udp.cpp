@@ -5459,7 +5459,14 @@ void dispatch_table::do_protocol_frame(int force, int listen) const
 		}
 		net_udp_send_pdata();
 #if DXX_BUILD_DESCENT == 2
+		/* Queue the guided missile position, then send it in the same
+		 * mdata packet as the thief position (priority 1), or on its own
+		 * if there was no thief position to send.
+		 */
+		const auto guided_queued{multi_send_guided_frame()};
                 multi_send_thief_frame();
+		if (guided_queued)
+			net_udp_send_mdata(0, time);
 #endif
 	}
 	
