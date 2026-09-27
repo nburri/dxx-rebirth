@@ -4995,6 +4995,10 @@ class DXXArchive(DXXCommon):
 			'common/unittest/net_v2_transport.cpp',
 			'common/main/net_v2_transport.cpp',
 			)),
+		# Test of the game-independent session layer (net_v2_session.h).
+		RuntimeTest('test-net-v2-session', (
+			'common/unittest/net_v2_session.cpp',
+			)),
 			)
 	del RuntimeTest
 
