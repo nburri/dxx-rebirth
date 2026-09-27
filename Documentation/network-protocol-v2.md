@@ -115,21 +115,20 @@ Pain points from the fork changelog (`Documentation/fork-changelog.md`):
   low 32 bits. The host's `GameTime64` and `ThisLevelTime` are derived from the
   same source, so the bundle header can carry level time as a tick-aligned
   value for free (§5.2).
-- Every packet header carries `send_time`, `echo_time`, `echo_delay` and
-  `echo_seq` (§3.1). From each received host packet, a client computes
+- Every packet header carries `send_time`, `echo_time` and `echo_delay`
+  (§3.1); the echo describes the packet the header's `ack` names, the
+  newest one received. From each received host packet, a client computes
 
   ```
-  rtt     = now - sent_at[echo_seq] - echo_delay  (sent_at from the local packet log)
+  rtt     = now - sent_at[ack] - echo_delay       (sent_at from the local packet log)
   offset  = send_time + rtt/2 - now               (host_time ≈ local + offset)
   ```
 
-  but only if `echo_seq` equals the packet's `ack` (a conforming peer echoes
-  the newest packet it received, which is also its `ack`), names a packet
-  still in the local packet log whose recorded `send_time` equals
-  `echo_time`, and has not been sampled before: each packet yields one
-  sample at most, whichever of the peer's packets carries its echo first,
-  so a reordered echo counts once and a repeated one (the same measurement
-  held longer) not at all.
+  but only if `ack` names a packet still in the local packet log whose
+  recorded `send_time` equals `echo_time`, and that packet has not been
+  sampled before: each packet yields one sample at most, whichever of the
+  peer's packets carries its echo first, so a reordered echo counts once and
+  a repeated one (the same measurement held longer) not at all.
   Anything else is ignored: the host later rewinds hits by the client's
   RTT, so a peer must not be able to steer it with numbers unrelated to
   real packets, nor by pinning one real old packet.
@@ -225,7 +224,7 @@ Files (new): `common/main/net_v2.h` (constants, wire structs, message ids),
 tested), `similar/main/net_v2.cpp` (socket I/O, session, packet dispatch;
 replaces most of `net_udp.cpp`).
 
-### 3.1 Packet header (36 bytes)
+### 3.1 Packet header (34 bytes)
 
 Every UDP datagram, connected or not, starts with this header.
 
@@ -240,9 +239,8 @@ Every UDP datagram, connected or not, starts with this header.
 | 14 | 2 | `ack` | Highest `seq` received from the peer (in wrapping order). |
 | 16 | 8 | `ack_bits` | Bit `i` (0–63) set: packet `ack - 1 - i` was received. 64 bits cover 1.07 s at 60 pps and 0.53 s at 120 pps, which is more than any RTO in §3.5, so a retransmission is never triggered by a bitfield too short to report a late ack. |
 | 24 | 4 | `send_time` | Sender's local clock (net time units) when the packet was built. |
-| 28 | 4 | `echo_time` | `send_time` of the most recent packet received from the peer, or 0. |
+| 28 | 4 | `echo_time` | `send_time` of the most recent packet received from the peer (the one `ack` names), or 0. The receiver of the echo takes a sample only if the packet `ack` names is in its packet log with that `send_time` and was not sampled before (§2.2). The echo fields follow only the newest packet received, never a reordered older one. |
 | 32 | 2 | `echo_delay` | Time between receiving that packet and sending this one, in net time units, saturated at 65535 (1 s). Peers send at least every 100 ms (§3.6), so saturation only happens on a stalled link and the RTT sample is then discarded. |
-| 34 | 2 | `echo_seq` | `seq` of the packet whose `send_time` is echoed, or 0; always equal to `ack`, since both name the newest packet received. The receiver of the echo takes a sample only if `echo_seq == ack`, the pair matches its packet log, and it has not sampled `echo_seq` before (§2.2). The echo fields follow only the newest packet received, never a reordered older one. |
 
 Maximum UDP payload: `NET_V2_MAX_PACKET` = 1200 bytes (header included). This
 is below the 1280-byte IPv6 minimum MTU minus headers, so no path in practice
@@ -257,7 +255,7 @@ datagram:
 | Offset | Size | Field |
 |---|---|---|
 | 0 | 1 | `chunk_type` |
-| 1 | 2 | `chunk_len` (bytes that follow, 0–1161) |
+| 1 | 2 | `chunk_len` (bytes that follow, 0–1163) |
 | 3 | `chunk_len` | chunk payload |
 
 A chunk that does not fit in the remaining bytes invalidates the whole packet
@@ -325,7 +323,7 @@ packet_log:  ring[256] of { u16 packet_seq; fix64 sent_at; vector<u16> msg_seqs;
 
 on_tick(build packet):
     header.seq = ++local_seq; header.ack/ack_bits = receiver state (below)
-    budget = 1200 - 36 - space reserved for the STATE/INPUT chunk of this tick
+    budget = 1200 - 34 - space reserved for the STATE/INPUT chunk of this tick
     first put messages marked RESEND (oldest first), then new messages from send_queue,
     each message only if 3 + msg_len fits in budget; stop at the first that does not fit
     (order is preserved: a message that does not fit blocks later ones, so a large
@@ -336,7 +334,7 @@ on_tick(build packet):
 
 on_ack(header.ack, header.ack_bits):
     for each packet_seq in {ack} ∪ {ack-1-i | bit i set}, not yet acked:
-        mark acked; if no echo ever came for it, rtt sample from its sent_at (§3.5)
+        mark acked; if a later packet was echoed before this one was acked, rtt sample from its sent_at (§3.5)
         for each msg_seq in it: erase from in_flight
     for each in_flight message m not acked:
         lost_by_gap = (ack - m.in_packet_seq) >= 3 wrapping      // 3 later packets acked
@@ -390,15 +388,17 @@ for losses only at its own). The two holds are added because the samples
 exclude them: on a steady link `rttvar` alone would not cover them, and the
 floor keeps `rttvar` from collapsing to zero.
 
-- RTT samples come from the echo fields (`echo_seq`, `echo_time`,
-  `echo_delay`, §2.2): one sample per packet sent, at most, when a received
-  packet with `echo_seq == ack` names it, its `send_time` matches, and it was
-  not sampled before. An ack measures a packet only if no echo ever came for
-  it (the peer received it out of order and echoed a newer one, or the echo's
-  carrier was lost); that value includes the peer's hold and the wait for
-  the next surviving carrier, and it is the one measurement of such a
-  delayed round trip, which the RTO must cover. Karn's rule is moot: packets
-  are never retransmitted, only messages are.
+- RTT samples come from the echo fields (`echo_time`, `echo_delay`, §2.2):
+  one sample per packet sent, at most, when a received packet's `ack` names
+  it, its `send_time` matches, and it was not sampled before. An ack
+  measures a packet only if a later-sent packet had already been echoed
+  before this one was first acked: it arrived out of order at the peer,
+  which echoes only its newest, so no echo will ever measure it, and its ack
+  is the one measurement of that delayed round trip, which the RTO must
+  cover. A packet left unechoed merely because the peer sends fewer packets
+  than the sender is not measured by its ack, which would carry the peer's
+  hold into `srtt` (the HUD ping and the rewind amount). Karn's rule is
+  moot: packets are never retransmitted, only messages are.
 - A message is retransmitted by the gap rule (3 later packets acked) *or* by
   the RTO, whichever comes first. With 60 packets per second the gap rule fires
   about 50 ms after the loss; the RTO is the fallback for the tail of a burst.
@@ -413,7 +413,7 @@ floor keeps `rttvar` from collapsing to zero.
 | Limit | Value | On violation |
 |---|---|---|
 | Packet size | 1200 bytes | Sender: never built; receiver: dropped. |
-| Packets per tick per connection | 1 normally; 2 if the reliable backlog or a further bundle part does not fit next to the state chunk | – |
+| Packets per tick per connection | 1 normally; 2 if the reliable backlog or a further bundle part does not fit next to the state chunk; a bundle that needs n > 1 packets allows n + 1 | – |
 | Reliable send queue (queued + in flight) per connection | 512 messages or 96 KiB | Host: kick that client, `kick_player_reason::queue_overflow` (new reason). Client: leave the game with the message "Connection to host too slow". |
 | Messages in flight | 256 (receiver window) | Sender stops taking new messages from the queue until acks arrive. |
 | Oldest unacked reliable message | 10 s | Same as queue overflow (this replaces the v1 `pkttimeout`; a message unacked for 10 s means the link is dead or unusable). |
@@ -439,7 +439,7 @@ address with an implausible `seq` is dropped.
 
 ### 3.7 Validation order (every received datagram)
 
-1. Length ≥ 36 and ≤ 1200, else drop.
+1. Length ≥ 34 and ≤ 1200, else drop.
 2. `proto == 100`, else drop silently (a v1 build or noise).
 3. `flags` reserved bits are 0, else drop.
 4. If `flags.UNCONNECTED`: `session_id` must be 0 (discovery) or the local
@@ -455,10 +455,9 @@ address with an implausible `seq` is dropped.
    packets): drop. This is done before any chunk is parsed, so a replayed
    packet never reaches the game layer twice.
 7. Update the peer's `last_heard`; RTT and clock sample from `echo_*` if
-   `echo_seq == ack`, `echo_seq` names a logged packet whose `send_time`
-   is `echo_time`, `echo_delay < 65535`, and `echo_seq` has not been
-   sampled before (each packet at most once; a repeated echo yields no
-   sample, §2.2).
+   `ack` names a logged packet whose `send_time` is `echo_time`,
+   `echo_delay < 65535`, and that packet has not been sampled before (each
+   packet at most once; a repeated echo yields no sample, §2.2).
 8. Walk the chunks. Every chunk must fit; every `RELIABLE` message must fit
    its chunk; every `STATE`/`INPUT` record must have the exact size for its
    flags. The first violation drops the whole packet: nothing of it is
@@ -558,7 +557,7 @@ program dictates them). The version string in `UPID_TRACKER_REGISTER` and
 `UPID_TRACKER_REQGAMES` becomes `"D2XR<major>.<minor>.<micro>.100"`, so a v2
 client never receives v1 games from the tracker and vice versa. The `z=` blob
 in `UPID_TRACKER_REGISTER` and `tracker_gameinfo` is a complete v2
-`GAME_INFO_LITE` datagram (36-byte header with `UNCONNECTED`, one `SESSION`
+`GAME_INFO_LITE` datagram (34-byte header with `UNCONNECTED`, one `SESSION`
 chunk). Hole punching (opcode 26) is unchanged. This assumes the tracker
 stores the blob opaquely, which is how the v1 client parses it (it looks for
 `z=` and hands the rest to the normal packet parser); see §9.
@@ -1368,7 +1367,7 @@ direction checks of §3.7 are table-driven like v1's `command_length`.
 
 ## 7. Bandwidth estimate (8 players, 60 Hz, D2 anarchy)
 
-Sizes from §3.1 (header 36), §3.2 (chunk header 3), §5.2 (bundle header 18,
+Sizes from §3.1 (header 34), §3.2 (chunk header 3), §5.2 (bundle header 18,
 player record 41), §5.3 (`INPUT` 46). "On wire" adds 28 bytes IPv4+UDP (48
 for IPv6).
 
@@ -1377,7 +1376,7 @@ reliable messages due):
 
 | Part | Bytes |
 |---|---|
-| Packet header | 36 |
+| Packet header | 34 |
 | `STATE` chunk header | 3 |
 | Bundle header | 18 |
 | 8 × player record | 328 |
@@ -1399,7 +1398,7 @@ reliable volume (e.g. 5 % loss → +75 B/s).
 
 | Part | Bytes |
 |---|---|
-| Packet header | 36 |
+| Packet header | 34 |
 | `INPUT` chunk header | 3 |
 | `INPUT` record | 46 |
 | **Payload** | **83** |
@@ -1415,8 +1414,8 @@ upstream per client. Host downstream from 7 clients: 46 620 B/s ≈ 46 KiB/s ≈
 |---|---|---|---|
 | 8 | 60 Hz | 1.38 Mbit/s | 197 kbit/s |
 | 8 | 30 Hz | 0.69 Mbit/s | 99 kbit/s |
-| 4 | 60 Hz | 3 × (36+3+18+164+28) × 60 = 44 820 B/s ≈ 359 kbit/s | 119 kbit/s |
-| 2 | 60 Hz | (36+3+18+82+28) × 60 = 10 020 B/s ≈ 80 kbit/s | 79 kbit/s |
+| 4 | 60 Hz | 3 × (34+3+18+164+28) × 60 = 44 460 B/s ≈ 356 kbit/s | 119 kbit/s |
+| 2 | 60 Hz | (34+3+18+82+28) × 60 = 9 900 B/s ≈ 79 kbit/s | 79 kbit/s |
 
 Comparison with v1 at 30 pps (default) and 8 players: the host relays 7
 `pdata` (49 + 28 bytes) per tick to each of 7 clients plus its own, i.e.

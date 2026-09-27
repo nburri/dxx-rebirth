@@ -8,7 +8,7 @@ game uses it yet; stage 1 puts it under the existing UDP socket.
 
 | File | Content |
 |---|---|
-| `common/main/net_v2.h` | Wire constants (§3.1–3.7, §2.2), the 36-byte `packet_header` (the design's 34 bytes plus `echo_seq`), the `chunk_header`, little-endian helpers, sequence arithmetic. Standard library only. |
+| `common/main/net_v2.h` | Wire constants (§3.1–3.7, §2.2), the 34-byte `packet_header`, the `chunk_header`, the state part byte, little-endian helpers, sequence arithmetic. Standard library only. |
 | `common/main/net_v2_transport.h` | `dcx::net_v2::connection`, `rtt_estimator`, `clock_sync`, the result/report types and `connection_stats`. |
 | `common/main/net_v2_transport.cpp` | Implementation. Compiled into the `common` objects of the game. |
 | `common/unittest/net_v2_transport.cpp` | The simulation test (no Boost, plain `main`). |
@@ -59,7 +59,7 @@ exits with status 1; success ends with `all tests passed`.
 | hostile echo | – | Extreme `echo_time`/`echo_delay`/`now` combinations (including the int32 overflow case) naming a real packet are accepted without overflow and yield no sample. |
 | echo authentication | 30 ms | 76 forged keepalives (real seq with a 9 s old time, unknown seq, an old seq with its true time, seq 0): `srtt`, `rttvar`, `rto` and the offset target are unchanged. |
 | tick credit | – | A 100 Hz caller enqueuing one message per frame sends 600 ± 5 packets in 10 s; a frame two ticks after the last gets both ticks (4 packets); a 60-tick stall still releases only 4. |
-| reordered echo | – | Packet 1 arriving after packet 2 does not move the echo fields; packet 2's echo sample is exact, and packet 1 is measured once by its ack, reorder delay included. |
+| reordered echo | – | Packet 1 arriving after packet 2 does not move the echo fields; packet 2's echo sample is exact and packet 1, acked in the same peer packet, is not measured by its ack: `srtt` stays exact. |
 | long blackout | – | 34 000 packets without an ack, then acks resume while every other packet of ours is lost: 30+ of the 75 lost are counted within 150 packets (the bitfield rule, not slot reuse). |
 | malformed replay | – | 20 copies of one corrupted datagram: 1 protocol error, 19 duplicates, connection open, the message arrives by retransmission. |
 | latest-wins wrap | – | 33 000 event-only packets, then 200 `state` chunks: none dropped; a reordered older `state` still is. |
@@ -67,20 +67,24 @@ exits with status 1; success ends with `all tests passed`.
 | hostile ack | – | `ack` 5000 after 5 packets sent: `bad_ack`, no packet resolved, no resend, one protocol error; its replay is `bad_ack` again, not counted; `ack` 5 is accepted. |
 | event head-of-line | – | Ten 4-byte events queued behind an 1161-byte one all go out beside a 300-byte state at once; the big one is dropped after 8 packets and fits when sent alone. |
 | zero tick period | – | `tick_period` 0 and `max_packets_per_tick` 0 are clamped (to 1 and 2) and the connection sends. |
-| echo pinning | 30 ms | 600 forged packets over 5 s pinning one real old packet in `echo_seq` with `echo_delay` 0 (with `ack` equal to it, and with `ack` moving on): `srtt`, `rttvar` and the offset target are unchanged. |
+| echo pinning | 30 ms | 600 forged packets over 5 s whose `ack` names one real old packet with its true `send_time` and `echo_delay` 0 (and a variant naming the next packet with the stale time): `srtt`, `rttvar` and the offset target are unchanged. |
 | corrupt acks | 40 ms | A packet with reliable messages is lost and the peer's next datagram falsely acks it but is corrupt: nothing of it is applied, the messages are retransmitted, all 200 arrive, one protocol error. |
 | stream stalled | – | Message 1 arrives, message 0 never does, the peer keeps sending state: the receiver closes with `stream_stalled` after 10 s. |
 | corrupted then intact | – | A corrupted copy of a packet, then the intact copy: the intact one is accepted and its message delivered; one protocol error. |
 | corrupted future seq | – | A corrupt datagram whose `seq` byte reads as a future sequence does not prevent the real packets 2, 3 and 4 from being accepted. |
 | big message, second packet | – | A 1 KiB message beside an 1100-byte state: the state goes out first, the message in the tick's second packet; `max_packets_per_tick` 1 is clamped to 2. |
-| held-back packets | 40 ms, 20 % held 33–50 ms | 1200 messages over a lossless link with a fifth of the packets delayed: at most a dozen resent by the RTO; `rttvar` stays above the floor. |
+| held-back packets | 40 ms, 20 % held 33–50 ms | 1200 messages over a lossless link with a fifth of the packets delayed: at most a dozen resent by the RTO; the held packets, acked after later ones were echoed, are measured by their acks. |
 | closed connection | – | `send_unreliable` returns false and `set_unreliable_state` is ignored once the connection is closed. |
 | two-part bundle | 30 ms | Two 900-byte parts every tick plus a message every third tick: each part delivered on all 200 ticks, none dropped. |
+| bundle with backlog | 30 ms | Two 900-byte parts and a 1 KiB message every tick: both parts on every tick, all messages delivered, three packets per tick at most. |
+| slow peer | 60 ms | A 60 Hz host against a 10 Hz peer: host `srtt` within 5 % of the round trip (the peer's ack hold does not leak in). |
+| two packets per tick | 30 ms | A host sending two packets per tick against a one-packet peer: `srtt` within 5 %. |
+| frame-rate caller | – | 5000 frames at 500 Hz setting the state only when `begin_tick` opened a tick: 600 ticks, 600 states delivered, none dropped. |
 | parts reordered | – | Part 1 arriving before part 0 of one tick: both applied; a stale part 0 is dropped while an older part 1 that is still the newest of its part applies. |
 | first grant | – | A connection created at 0 and first built at 3 s gets one tick (2 packets), not a burst. |
 | exact 60 Hz caller | – | 36 000 steps of exactly 1/60 s with a permanent backlog: never more than 2 packets per step. |
 | bulk transfer + state | 30 ms | 20 × 900-byte messages queued while a 350-byte state is set every tick: 207+ of 210 states delivered, none dropped, all messages in order. |
-| peer tick period | 10–85 ms, no jitter | A 60 Hz host (`peer_tick_period` 1/30) against a 30 Hz client: zero retransmissions over four latencies. |
+| peer tick period | 10–85 ms, no jitter | A 60 Hz host (`peer_tick` 1/30) against a 30 Hz client: zero retransmissions over four latencies. |
 | 240 Hz caller | – | `build_outgoing` called four times per tick period with a 90 KiB backlog: never more than 2 packets in any 16.7 ms window, everything delivered. |
 | window in one packet | – | 300 empty messages queued at once: the first packet carries exactly 256, the receiver accepts it, the remaining 44 follow after the ack. |
 | packets per tick | 30 ms | A 90 KiB backlog of 1 KiB messages drains at no more than 2 packets per tick and arrives in order. |
@@ -105,14 +109,18 @@ connection c{{.session_id = sid, .peer_token = tok, .local_player_id = 0, .remot
 // (default 2, at least 2) and peer_tick (default: same as tick; stage 1
 // sets it from the handshake).  report.unreliable holds views into
 // `datagram`, valid while it is, with the §3.8 part index/count.
+// begin_tick returns the ticks it granted (0 when none): a game loop that
+// runs faster than the tick calls it first and sets the state only when it
+// returned non-zero, so no state is replaced before it was sent.
 
 c.enqueue_reliable(msg_type, payload);            // ≤ 1024 bytes, or too_large
 c.set_unreliable_state(chunk_type::state, bundle); // latest wins, sent once
 c.set_unreliable_state(chunk_type::state, 1, 2, part_b); // §3.8: part 1 of 2, latest wins per part
 c.send_unreliable(chunk_type::event_u, bytes);     // best effort
 
-c.begin_tick(now);                                 // once per tick
-for (;;) {
+if (c.begin_tick(now))                             // once per tick period;
+    c.set_unreliable_state(chunk_type::state, bundle); // a frame-rate loop sets
+for (;;) {                                         // the state only then
     const auto packet{c.build_outgoing(now)};
     if (packet.empty()) break;
     sendto(..., packet);
@@ -145,8 +153,9 @@ first packet of a tick always carries the state chunks that fit; a head message
 that does not fit beside them rides the tick's second packet, which normally
 has no state left to carry, so no message size can starve and no message
 stream can displace the state. A pending state part opens the second packet
-too (a two-part bundle, §3.8, needs two packets); when that packet holds both
-a part and a blocked head message, the two alternate tick by tick. The tick's credit is spent only when a
+too, and a bundle that needs several packets (§3.8) raises the tick's limit to
+one more than it needs, so a blocked head message still gets a packet of its
+own and never displaces a part. The tick's credit is spent only when a
 packet is really built. `build_outgoing` calls `begin_tick` itself. `on_receive` applies the checks of §3.7
 in order and reports why a datagram was dropped (`receive_status`). A packet
 whose header validates but whose chunks do not (`malformed_chunk`) has no
@@ -193,7 +202,7 @@ the connection neither sends nor accepts anything.
 
 | Field | Meaning |
 |---|---|
-| `rtt_valid`, `srtt`, `rttvar`, `rto` | §3.5 estimator, in net time units (1/65536 s; `× 1000 / 65536` for ms). Samples come only from the echo fields, so they exclude the peer's hold time; an echo is taken only if `echo_seq` equals the packet's `ack` (a conforming peer echoes the newest packet it received, which is also its `ack`), names a packet in our log whose recorded `send_time` equals `echo_time`, and has not been sampled before (each of our packets yields one sample at most, whichever of the peer's packets carries its echo first, so a reordered echo still counts once and a repeated one not at all); the sample is then `now − sent_at − echo_delay` from our own log. A peer therefore cannot steer the estimate, not even by pinning one real old packet with a small delay. `rttvar` is floored at a quarter of the hold so that it cannot collapse to zero on a steady link. An ack contributes a sample for a packet no echo ever came for (the peer received it out of order and echoed a newer one, or the echo's carrier was lost): it includes the peer's hold and the wait for the next surviving carrier, which is exactly the long round trip the RTO has to cover; it counts as that packet's one sample, so under heavy loss or reordering `srtt` reads a few percent high (those packets really were acknowledged late). `rto` is `clamp(srtt + 4·rttvar + hold + tick, 50 ms, 1 s)` with `tick` the own period rounded up to whole units and `hold` the larger of the own and the peer's, and 1 s before the first sample; the two holds are added because the echo-based samples deliberately exclude the peer's ack hold (its tick) and our own detection alignment (ours). This `srtt` is what the HUD will show as ping. |
+| `rtt_valid`, `srtt`, `rttvar`, `rto` | §3.5 estimator, in net time units (1/65536 s; `× 1000 / 65536` for ms). Samples come from the echo fields, so they exclude the peer's hold time: an echo describes the packet the header's `ack` names, and it is taken only if that packet is in our log with the recorded `send_time` equal to `echo_time` and has not been sampled before (each of our packets yields one sample at most, whichever of the peer's packets carries its echo first, so a reordered echo still counts once and a repeated one not at all); the sample is `now − sent_at − echo_delay` from our own log. A peer therefore cannot steer the estimate, not even by pinning one real old packet with a small delay. A packet that is acked only after a later-sent packet of ours had already been echoed arrived out of order at the peer and will never be echoed; that packet alone is measured by its ack (once), so that its long round trip reaches the RTO. A packet left unechoed merely because the peer sends fewer packets than we do is not measured by its ack, which would carry the peer's hold into `srtt`, the HUD ping and the host's rewind. `rto` is `clamp(srtt + 4·rttvar + hold + tick, 50 ms, 1 s)` with `tick` the own period rounded up to whole units and `hold` the larger of the own and the peer's, and 1 s before the first sample; the two holds are added because the samples deliberately exclude them, and `rttvar` is floored at a quarter of the hold. This `srtt` is what the HUD will show as ping. |
 | `loss_estimate` | Moving average (1/64 per packet) of the fraction of our packets the peer never acknowledged. A packet counts as lost once the peer's `ack` is more than 64 ahead of it, or when its slot in the 256-entry packet log is reused without an ack (no acks at all), so the value lags by one to four seconds at 60 pps and settles slowly on a link that just became clean. |
 | `packets_sent/received/rejected/acked/lost` | Per direction. `rejected` counts every datagram `on_receive` dropped, including duplicates. |
 | `messages_enqueued/delivered` | Reliable messages queued here / delivered to the caller from the peer. |
@@ -217,10 +226,12 @@ the connection neither sends nor accepts anything.
   formula would retransmit every message whose ack is held for a tick.
 - `echo_delay` is clamped to `[0, 65535]`; a caller whose build time is
   behind its receive stamp sends 0 instead of a wrapped value.
-- The header has a 36th and 35th byte: `echo_seq` (offset 34), the `seq` of
-  the echoed packet, so that echoes can be verified against the packet log
-  (§2.2, §3.1 updated). Without it a peer could set `srtt` to seconds with
-  a made-up `echo_time`, and the host will rewind hits by that RTT.
+- The echo is verified against the packet log: the header's `ack` names the
+  echoed packet (a conforming peer echoes the newest packet it received,
+  which is also its `ack`), and a sample is taken only if that packet's
+  recorded `send_time` equals `echo_time` and it was not sampled before.
+  Without this a peer could set `srtt` to seconds with a made-up
+  `echo_time`, and the host will rewind hits by that RTT.
 - The echo fields follow only the newest packet received; a reordered
   older packet is acknowledged and delivered but not echoed, since echoing
   it would add the reorder delay to the peer's RTT sample.
@@ -239,8 +250,9 @@ the connection neither sends nor accepts anything.
   count high nibble, at most 4 parts; `net_v2.h`), so that a bundle split
   over two packets (§3.8) is latest-wins per part; the design leaves the
   parts self-describing at the application layer only, which the transport
-  cannot key on. A pending part opens a tick's second packet, and a part and
-  a blocked head message in that packet alternate tick by tick.
+  cannot key on. A pending part opens a tick's second packet, and a bundle
+  that needs several packets raises the tick's packet limit to one more than
+  it needs, so a blocked head message never displaces a part.
 - The tick period is a rational (`tick_period{numerator, denominator}`), so
   1/60 s is exact; the design's integer `fix` accumulator would drift by
   0.24 ms/s.
