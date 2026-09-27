@@ -34,6 +34,7 @@
 #include <cstdlib>
 #include <functional>
 #include <iterator>
+#include <new>
 #include <span>
 #include <string>
 #include <tuple>
@@ -941,6 +942,190 @@ void test_unreliable_chunks_per_packet()
 	std::printf("    two STATE chunks in one packet both delivered; an older packet's STATE dropped, its EVENT_U kept\n");
 }
 
+/* Sixteenth review round. */
+
+/* Every allocation in the test binary is counted, so that a test can
+ * assert that a code path allocates nothing.
+ */
+std::size_t g_allocations{};
+
+/* 1. Held messages allocate nothing once the connection has warmed up:
+ * the window slots and the held buffers swap and are retained.
+ */
+void test_held_buffers_retained()
+{
+	begin("held message buffers are retained");
+	connection a{host_side, 0};
+	connection b{client_side, 0};
+	const datagram m1(600, 1), m2(600, 2);
+	/* Two messages per tick, one packet each (they do not share), the
+	 * second delivered first so that it is held.  b never answers: a's
+	 * packets then carry no echo, so b's receive path has no clock
+	 * samples to store either, and its allocations are the ones under
+	 * test.
+	 */
+	const auto round{[&](const unsigned i) {
+		const net_clock t{net_clock{i} * TICK};
+		CHECK(a.enqueue_reliable(1, m1) == enqueue_result::ok);
+		CHECK(a.enqueue_reliable(2, m2) == enqueue_result::ok);
+		const datagram p1{[&] { const auto p{a.build_outgoing(t)}; return datagram{p.begin(), p.end()}; }()};
+		const datagram p2{[&] { const auto p{a.build_outgoing(t)}; return datagram{p.begin(), p.end()}; }()};
+		CHECK(!p1.empty() && !p2.empty());
+		const auto before{g_allocations};
+		CHECK(b.on_receive(p2, t + 1).status == receive_status::accepted);
+		const auto r{b.on_receive(p1, t + 2)};
+		CHECK(r.status == receive_status::accepted && r.reliable.size() == 2);
+		CHECK(std::ranges::equal(r.reliable[0].payload, m1) && std::ranges::equal(r.reliable[1].payload, m2));
+		return g_allocations - before;
+	}};
+	for (unsigned i{}; i != 10; ++i)
+		round(i);
+	std::size_t allocations{};
+	for (unsigned i{10}; i != 60; ++i)
+		allocations += round(i);
+	CHECK_MSG(allocations == 0, "allocations in on_receive after warm-up: " + std::to_string(allocations));
+	CHECK(b.stats().messages_delivered == 120);
+	std::printf("    50 ticks of a held message each: 0 allocations in on_receive after warm-up\n");
+}
+
+/* 2. The sequence jump bound follows the peer's tick: a 240 Hz peer
+ * sending four-part bundles is not rejected after a 4.5 s blackout
+ * (4320 packets, more than the old fixed 4096).
+ */
+void test_seq_jump_bound_follows_peer_tick()
+{
+	begin("sequence jump bound follows the peer's tick");
+	connection_config hc{host_side}, cc{client_side};
+	hc.tick = {net_seconds(1), 240};
+	hc.max_packets_per_tick = 5;
+	cc.peer_tick = {net_seconds(1), 240};
+	connection a{hc, 0};
+	connection b{cc, 0};
+	const datagram part(1100);
+	const std::array<std::uint8_t, 4> x{};
+	unsigned host_packets{};
+	bool blackout{};
+	/* One 240 Hz frame: the host sets a four-part bundle (one packet per
+	 * part) and sends; every fourth frame the client answers.
+	 */
+	const auto frame{[&](const unsigned f) {
+		const net_clock t{net_clock{f} * net_seconds(1) / 240};
+		a.begin_tick(t);
+		for (unsigned k{}; k != 4; ++k)
+			a.set_unreliable_state(chunk_type::state, k, 4, part);
+		for (;;)
+		{
+			const auto p{a.build_outgoing(t)};
+			if (p.empty())
+				break;
+			++host_packets;
+			if (!blackout)
+				CHECK_MSG(b.on_receive(p, t + 1).status == receive_status::accepted, "host packet rejected at frame " + std::to_string(f));
+		}
+		if (f % 4 == 3)
+		{
+			b.set_unreliable_state(chunk_type::input, x);
+			const auto q{b.build_outgoing(t + 2)};
+			if (!q.empty())
+				CHECK(a.on_receive(q, t + 3).status == receive_status::accepted);
+		}
+	}};
+	for (unsigned f{}; f != 240; ++f)
+		frame(f);
+	const auto before{host_packets};
+	blackout = true;
+	for (unsigned f{240}; f != 240 + 1080; ++f)
+		frame(f);
+	const auto lost{host_packets - before};
+	CHECK_MSG(lost > 4096, "packets in the blackout: " + std::to_string(lost));
+	blackout = false;
+	for (unsigned f{1320}; f != 1380; ++f)
+		frame(f);
+	CHECK(b.stats().protocol_errors == 0);
+	CHECK(a.state() == connection_state::connected && b.state() == connection_state::connected);
+	std::printf("    240 Hz host, %u packets lost in a 4.5 s blackout: the stream resumes, no bad_seq\n", lost);
+}
+
+/* 3. An ack the peer cannot have received is bad_ack even when it reads
+ * as far behind (forged 32768 or more ahead).
+ */
+void test_bad_ack_wrapped()
+{
+	begin("wrapped ack is bad_ack");
+	connection a{host_side, 0};
+	std::uint16_t seq{};
+	const auto forged{[&](const std::uint16_t ack, const net_clock now) {
+		packet_header h;
+		h.session_id = host_side.session_id;
+		h.peer_token = host_side.peer_token;
+		h.player_id = host_side.remote_player_id;
+		h.flags = static_cast<std::uint8_t>(packet_flag::keepalive);
+		h.seq = ++seq;
+		h.send_time = to_net_time(now);
+		h.ack = ack;
+		std::array<std::uint8_t, NET_V2_HEADER_SIZE> d{};
+		h.write(d.data());
+		return a.on_receive(d, now).status;
+	}};
+	/* Nothing sent yet: any ack is bogus. */
+	CHECK(forged(40000, 1) == receive_status::bad_ack);
+	CHECK(forged(1, 2) == receive_status::bad_ack);
+	CHECK(a.stats().protocol_errors == 2);
+	/* Ten packets sent: acks 1..10 are real, 11 and 40000 are not. */
+	const std::array<std::uint8_t, 2> x{};
+	for (unsigned i{}; i != 10; ++i)
+	{
+		a.set_unreliable_state(chunk_type::state, x);
+		CHECK(!a.build_outgoing(net_clock{i + 1} * TICK).empty());
+	}
+	const net_clock t{11 * TICK};
+	CHECK(forged(10, t) == receive_status::accepted);
+	CHECK(forged(1, t + 1) == receive_status::accepted);
+	CHECK(forged(11, t + 2) == receive_status::bad_ack);
+	CHECK(forged(40000, t + 3) == receive_status::bad_ack);
+	CHECK(a.stats().protocol_errors == 4);
+	CHECK(a.state() == connection_state::connected);
+	std::printf("    acks 40000 and 1 on a fresh connection, 11 and 40000 after ten packets: bad_ack; 1 and 10: accepted\n");
+}
+
+/* 6. The reviewer's wrap probe: a lossy, reordering, duplicating session
+ * long enough for the packet sequence to wrap twice per side and the
+ * message sequence four times.  Everything is delivered, nothing is
+ * rejected for the wrong reason, the state stream stays monotonic.
+ */
+void test_sequence_wrap(const std::uint64_t seed)
+{
+	begin("sequence numbers wrap under loss");
+	rng r{seed};
+	sim_world w{r, link_params{.latency = net_milliseconds(60), .jitter = net_milliseconds(15), .loss = 0.15, .duplication = 0.03, .reorder = 0.15}};
+	constexpr unsigned ticks{140000};
+	std::uint32_t events{};
+	w.run(ticks, [&](const unsigned i) {
+		for (unsigned k{}; k != 2; ++k)
+			w.enqueue_random_message(i, 60);
+		w.set_state(i);
+		w.send_event(i, events++);
+	});
+	w.link.params.loss = 0;
+	w.link.params.duplication = 0;
+	w.link.params.reorder = 0;
+	w.run(200, [&](const unsigned i) { w.set_state(i); });
+	for (unsigned i{}; i != 2; ++i)
+	{
+		check_delivery(w, i);
+		const auto s{w.peers[i].conn.stats()};
+		print_stats(i ? "client" : "host", s);
+		CHECK(s.state == connection_state::connected);
+		CHECK(s.in_flight == 0 && s.recv_window_pending == 0);
+		CHECK(w.peers[i].malformed == 0 && w.peers[i].rejected_other == 0);
+		CHECK(s.protocol_errors == 0);
+		CHECK_MSG(s.packets_sent > 2 * 65536, "packets " + std::to_string(s.packets_sent));
+		const auto &states{w.peers[i].states_seen};
+		CHECK(std::ranges::adjacent_find(states, std::greater_equal<>{}) == states.end());
+	}
+	std::printf("    %u ticks at 15 %% loss, 15 %% reorder, 3 %% duplication: two packet-sequence wraps per side, all %zu messages delivered each way\n", ticks, w.peers[0].sent.size());
+}
+
 /* Fifteenth review round. */
 
 /* 1. A well-formed packet whose seq is far ahead (a corrupted or forged
@@ -1035,7 +1220,7 @@ void test_reliable_before_events(const std::uint64_t seed)
 	begin("reliable messages before events");
 	rng r{seed};
 	sim_world w{r, link_params{.latency = net_milliseconds(30)}};
-	const datagram big(NET_V2_MAX_MESSAGE), event(700);
+	const datagram big(NET_V2_MAX_MESSAGE), event(250);
 	std::uint32_t sent{};
 	bool queued{};
 	/* The host's turn (act runs per peer): a state, an event, and once
@@ -1044,7 +1229,7 @@ void test_reliable_before_events(const std::uint64_t seed)
 	const auto tick{[&](const unsigned peer) {
 		if (peer != 0)
 			return;
-		w.set_state_parts(0, 1, 700);
+		w.set_state_parts(0, 1, 1000);
 		datagram e{event};
 		net_put_le32(e.data(), sent++);
 		CHECK(w.peers[0].conn.send_unreliable(chunk_type::event_u, e));
@@ -1061,14 +1246,14 @@ void test_reliable_before_events(const std::uint64_t seed)
 	w.run(60, tick);
 	w.run(5, [&](const unsigned peer) {
 		if (peer == 0)
-			w.set_state_parts(0, 1, 700);
+			w.set_state_parts(0, 1, 1000);
 	});
 	check_delivery(w, 0);
 	const auto host{w.peers[0].conn.stats()};
 	CHECK(host.state == connection_state::connected);
 	CHECK_MSG(host.unreliable_dropped == 0, "events dropped " + std::to_string(host.unreliable_dropped));
 	CHECK_MSG(w.peers[1].events_seen.size() >= 60, "events delivered " + std::to_string(w.peers[1].events_seen.size()) + " of " + std::to_string(sent));
-	std::printf("    700-byte state and event per tick, 1 KiB message queued: sent in the first tick, %zu of %u events delivered, none dropped\n", w.peers[1].events_seen.size(), sent);
+	std::printf("    1000-byte state and 250-byte event per tick, 1 KiB message queued: sent in the first tick, %zu of %u events delivered, none dropped\n", w.peers[1].events_seen.size(), sent);
 }
 
 /* 2. The bound hold ages by granted ticks, not by grants: a caller at
@@ -1425,7 +1610,7 @@ void test_event_beside_backlog(const std::uint64_t seed)
 				CHECK(w.peers[0].conn.enqueue_reliable(9, big) == enqueue_result::ok);
 				w.peers[0].sent.push_back({.type = 9, .payload = big});
 			}
-			datagram e(300);
+			datagram e(250);
 			net_put_le32(e.data(), sent++);
 			CHECK(w.peers[0].conn.send_unreliable(chunk_type::event_u, e));
 		}
@@ -1435,7 +1620,7 @@ void test_event_beside_backlog(const std::uint64_t seed)
 	const auto host{w.peers[0].conn.stats()};
 	CHECK_MSG(host.unreliable_dropped == 0, "events dropped " + std::to_string(host.unreliable_dropped));
 	CHECK_MSG(w.peers[1].events_seen.size() == 60, "events delivered " + std::to_string(w.peers[1].events_seen.size()) + " of 60");
-	std::printf("    300-byte event per tick beside 900-byte reliable messages: 60 of 60 delivered, none dropped\n");
+	std::printf("    250-byte event per tick beside 900-byte reliable messages: 60 of 60 delivered, none dropped\n");
 }
 
 /* 3. A reordered older peer packet neither samples the RTT nor lets its
@@ -1538,12 +1723,13 @@ void test_event_beside_big_state(const std::uint64_t seed)
 	begin("event beside a big state");
 	rng r{seed};
 	sim_world w{r, link_params{.latency = net_milliseconds(30)}};
-	const datagram event(700);
+	const datagram event(250);
 	std::uint32_t sent{};
 	w.run(100, [&](const unsigned i) {
 		if (i == 0)
 		{
-			w.set_state_parts(0, 1, 700);
+			/* Too big to share a packet with the event. */
+			w.set_state_parts(0, 1, 1000);
 			datagram e{event};
 			net_put_le32(e.data(), sent++);
 			CHECK(w.peers[0].conn.send_unreliable(chunk_type::event_u, e));
@@ -1557,7 +1743,7 @@ void test_event_beside_big_state(const std::uint64_t seed)
 	CHECK_MSG(host.unreliable_dropped == 0, "events dropped " + std::to_string(host.unreliable_dropped));
 	CHECK_MSG(events.size() == 100, "events delivered " + std::to_string(events.size()) + " of 100");
 	CHECK(w.peers[1].part_counts[0] == 100);
-	std::printf("    700-byte state and 700-byte event every tick: %zu of 100 events delivered, none dropped\n", events.size());
+	std::printf("    1000-byte state and 250-byte event every tick: %zu of 100 events delivered, none dropped\n", events.size());
 }
 
 /* 2. The gap rule counts acknowledged packets after the message's own,
@@ -2382,28 +2568,48 @@ void test_event_head_of_line()
 {
 	begin("event head-of-line");
 	connection a{host_side, 0};
-	const datagram huge(NET_V2_MAX_CHUNK_PAYLOAD), tiny(4), state(300);
-	CHECK(a.send_unreliable(chunk_type::event_u, huge));
+	const datagram big(NET_V2_MAX_EVENT), tiny(4), state(1000);
+	/* The event bound: one byte more is refused. */
+	CHECK(!a.send_unreliable(chunk_type::event_u, datagram(NET_V2_MAX_EVENT + 1)));
+	CHECK(a.stats().unreliable_dropped == 1);
+	CHECK(a.send_unreliable(chunk_type::event_u, big));
 	for (unsigned i{}; i != 10; ++i)
 		CHECK(a.send_unreliable(chunk_type::event_u, tiny));
 	a.set_unreliable_state(chunk_type::state, state);
+	/* The big event does not fit beside the state; the tiny ones do. */
 	const auto p0{a.build_outgoing(0)};
-	CHECK_MSG(p0.size() == NET_V2_HEADER_SIZE + (3 + NET_V2_STATE_PART_HEADER_SIZE + 300) + 10 * (3 + 4), "first packet " + std::to_string(p0.size()) + " bytes");
-	CHECK(a.stats().unreliable_dropped == 0);
+	CHECK_MSG(p0.size() == NET_V2_HEADER_SIZE + (3 + NET_V2_STATE_PART_HEADER_SIZE + 1000) + 10 * (3 + 4), "first packet " + std::to_string(p0.size()) + " bytes");
+	CHECK(a.stats().unreliable_dropped == 1);
 	unsigned ticks_until_dropped{};
-	for (unsigned t{1}; t != 20 && a.stats().unreliable_dropped == 0; ++t)
+	for (unsigned t{1}; t != 20 && a.stats().unreliable_dropped == 1; ++t)
 	{
 		a.set_unreliable_state(chunk_type::state, state);
 		CHECK(!a.build_outgoing(net_clock{t} * TICK).empty());
 		ticks_until_dropped = t;
 	}
-	CHECK(a.stats().unreliable_dropped == 1);
+	CHECK(a.stats().unreliable_dropped == 2);
 	CHECK_MSG(ticks_until_dropped == NET_V2_EVENT_SKIP_MAX - 1, "dropped after " + std::to_string(ticks_until_dropped + 1) + " packets");
-	/* Without a state chunk the huge event would have fitted. */
-	CHECK(a.send_unreliable(chunk_type::event_u, huge));
+	/* Without a state chunk the big event fits. */
+	CHECK(a.send_unreliable(chunk_type::event_u, big));
 	const auto p{a.build_outgoing(net_clock{30} * TICK)};
-	CHECK(p.size() == NET_V2_MAX_PACKET);
-	std::printf("    10 tiny events go out beside the state at once; the oversize one is dropped after %u packets, and fits alone\n", NET_V2_EVENT_SKIP_MAX);
+	CHECK(p.size() == NET_V2_HEADER_SIZE + 3 + NET_V2_MAX_EVENT);
+	/* The ring: of 70 queued events the oldest six make room, the 64
+	 * newest go out at once, in order.
+	 */
+	connection c{host_side, 0};
+	connection d{client_side, 0};
+	for (std::uint32_t i{}; i != 70; ++i)
+	{
+		datagram e(4);
+		net_put_le32(e.data(), i);
+		CHECK(c.send_unreliable(chunk_type::event_u, e));
+	}
+	CHECK(c.stats().unreliable_dropped == 6);
+	const auto r{d.on_receive(c.build_outgoing(0), 1)};
+	CHECK(r.status == receive_status::accepted);
+	CHECK_MSG(r.unreliable.size() == NET_V2_EVENT_QUEUE_MAX, "events delivered " + std::to_string(r.unreliable.size()));
+	CHECK(net_get_le32(r.unreliable.front().payload.data()) == 6 && net_get_le32(r.unreliable.back().payload.data()) == 69);
+	std::printf("    10 tiny events go out beside the state at once; the 255-byte one is dropped after %u packets, and fits alone; a full ring drops the oldest\n", NET_V2_EVENT_SKIP_MAX);
 }
 
 /* 6. A zero tick period does not divide by zero. */
@@ -3102,6 +3308,9 @@ int main(const int argc, char **const argv)
 	test_bounds(seed);
 	test_timeouts(seed);
 	test_replay(seed);
+	test_held_buffers_retained();
+	test_seq_jump_bound_follows_peer_tick();
+	test_bad_ack_wrapped();
 	test_forged_seq_far_ahead();
 	test_clock_stall_freezes_offset(seed);
 	test_reliable_before_events(seed);
@@ -3158,6 +3367,79 @@ int main(const int argc, char **const argv)
 	test_unreliable_chunks_per_packet();
 	test_fuzz(seed);
 	test_clock(seed);
+	test_sequence_wrap(seed);
 	std::printf("all tests passed\n");
 	return 0;
+}
+
+/* The allocation counter behind test_held_buffers_retained.  Not
+ * inlined: GCC would otherwise see free() applied to what operator new
+ * returned and call it mismatched.
+ */
+[[gnu::noinline]]
+void *operator new(const std::size_t n)
+{
+	++g_allocations;
+	if (auto *const p{std::malloc(n ? n : 1)})
+		return p;
+	throw std::bad_alloc{};
+}
+
+[[gnu::noinline]]
+void *operator new[](const std::size_t n)
+{
+	return ::operator new(n);
+}
+
+/* The nothrow forms too (std::get_temporary_buffer uses one), so that
+ * every allocation and deallocation goes through the same malloc/free.
+ */
+[[gnu::noinline]]
+void *operator new(const std::size_t n, const std::nothrow_t &) noexcept
+{
+	++g_allocations;
+	return std::malloc(n ? n : 1);
+}
+
+[[gnu::noinline]]
+void *operator new[](const std::size_t n, const std::nothrow_t &) noexcept
+{
+	++g_allocations;
+	return std::malloc(n ? n : 1);
+}
+
+[[gnu::noinline]]
+void operator delete(void *const p, const std::nothrow_t &) noexcept
+{
+	std::free(p);
+}
+
+[[gnu::noinline]]
+void operator delete[](void *const p, const std::nothrow_t &) noexcept
+{
+	std::free(p);
+}
+
+[[gnu::noinline]]
+void operator delete(void *const p) noexcept
+{
+	std::free(p);
+}
+
+[[gnu::noinline]]
+void operator delete(void *const p, std::size_t) noexcept
+{
+	std::free(p);
+}
+
+[[gnu::noinline]]
+void operator delete[](void *const p) noexcept
+{
+	std::free(p);
+}
+
+[[gnu::noinline]]
+void operator delete[](void *const p, std::size_t) noexcept
+{
+	std::free(p);
 }

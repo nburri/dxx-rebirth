@@ -246,6 +246,9 @@ connection::connection(const connection_config &config, const net_clock now) :
 	m_last_heard{now},
 	m_rtt{m_config.tick.units(), m_config.tick.units()}
 {
+	for (std::size_t i{}; i != NET_V2_EVENT_QUEUE_MAX; ++i)
+		m_event_free[i] = static_cast<std::uint8_t>(i);
+	m_event_free_count = NET_V2_EVENT_QUEUE_MAX;
 	set_peer_tick(config.peer_tick);
 }
 
@@ -260,6 +263,16 @@ void connection::set_peer_tick(tick_period peer_tick)
 		peer_tick = m_config.tick;
 	m_config.peer_tick = peer_tick;
 	m_rtt.set_hold_period(std::max(m_config.tick.units(), peer_tick.units()));
+	/* The largest forward jump the peer's own stream can make between
+	 * two packets we accept: everything it can send within the timeout
+	 * at its tick, with max_packets_per_tick or a full bundle's n + 1
+	 * packets per tick (our own setting stands in for the peer's), with
+	 * margin, and never beyond what seq_diff can tell from "behind".
+	 */
+	const auto units{std::max<net_clock>(peer_tick.units(), 1)};
+	const auto ticks{(NET_V2_TIMEOUT + units - 1) / units};
+	const auto per_tick{std::max<net_clock>(m_config.max_packets_per_tick, NET_V2_STATE_MAX_PARTS + 1)};
+	m_seq_jump_bound = static_cast<std::int16_t>(std::min<net_clock>(ticks * per_tick * NET_V2_SEQ_JUMP_MARGIN, 0x7fff));
 }
 
 void connection::close_with(const close_reason reason)
@@ -429,23 +442,25 @@ bool connection::send_unreliable(const chunk_type type, const std::span<const st
 	/* Only events: the peer rejects any other type in this position as
 	 * malformed, and state/input have their own path.
 	 */
-	if (type != chunk_type::event_u || payload.size() > NET_V2_MAX_CHUNK_PAYLOAD)
+	if (type != chunk_type::event_u || payload.size() > NET_V2_MAX_EVENT)
 	{
 		++m_stats.unreliable_dropped;
 		return false;
 	}
 	if (m_events_count == NET_V2_EVENT_QUEUE_MAX)
 	{
-		/* Full: the oldest goes. */
+		/* Full: the oldest goes, its slot is free again. */
+		m_event_free[m_event_free_count++] = event_index(0);
 		m_events_head = (m_events_head + 1) % NET_V2_EVENT_QUEUE_MAX;
 		--m_events_count;
 		++m_stats.unreliable_dropped;
 	}
-	auto &e{event_slot(m_events_count)};
-	e.size = payload.size();
+	const auto slot{m_event_free[--m_event_free_count]};
+	event_index(m_events_count++) = slot;
+	auto &e{m_event_slots[slot]};
+	e.size = static_cast<std::uint8_t>(payload.size());
 	e.skipped = 0;
 	std::ranges::copy(payload, e.data.begin());
-	++m_events_count;
 	return true;
 }
 
@@ -655,7 +670,7 @@ std::span<const std::uint8_t> connection::build_outgoing(const net_clock now)
 	std::size_t reserved{plan.first_packet_bytes};
 	if (opens_tick && m_events_count != 0)
 	{
-		const auto event_size{chunk_wire_size(event_slot(0).size)};
+		const auto event_size{chunk_wire_size(event(0).size)};
 		if (reserved + event_size <= NET_V2_MAX_PACKET - NET_V2_HEADER_SIZE)
 			reserved += event_size;
 	}
@@ -763,26 +778,26 @@ std::span<const std::uint8_t> connection::build_outgoing(const net_clock now)
 	write_state_parts(buf, pos);
 	/* Events: every one that fits, in queue order; one that does not fit
 	 * is skipped (not a head-of-line block) and dropped once it has been
-	 * skipped NET_V2_EVENT_SKIP_MAX times.  Sent and dropped ones leave
-	 * the ring; the kept ones close up behind the head (a slot copy
-	 * each, and few are ever kept).
+	 * skipped NET_V2_EVENT_SKIP_MAX times.  Sent and dropped ones free
+	 * their slot; the kept ones' indices close up behind the head.
 	 */
 	std::size_t kept{};
 	for (std::size_t i{}; i != m_events_count; ++i)
 	{
-		auto &e{event_slot(i)};
+		const auto slot{event_index(i)};
+		auto &e{m_event_slots[slot]};
 		if (chunk_wire_size(e.size) > NET_V2_MAX_PACKET - pos)
 		{
 			if (++e.skipped < NET_V2_EVENT_SKIP_MAX)
 			{
-				if (kept != i)
-					event_slot(kept) = e;
-				++kept;
+				event_index(kept++) = slot;
+				continue;
 			}
-			else
-				++m_stats.unreliable_dropped;
+			++m_stats.unreliable_dropped;
+			m_event_free[m_event_free_count++] = slot;
 			continue;
 		}
+		m_event_free[m_event_free_count++] = slot;
 		chunk_header{.type = static_cast<std::uint8_t>(chunk_type::event_u), .length = static_cast<std::uint16_t>(e.size)}.write(buf + pos);
 		pos += NET_V2_CHUNK_HEADER_SIZE;
 		std::copy_n(e.data.data(), e.size, buf + pos);
@@ -800,9 +815,9 @@ std::span<const std::uint8_t> connection::build_outgoing(const net_clock now)
 		h.flags |= static_cast<std::uint8_t>(packet_flag::keepalive);
 	h.seq = seq;
 	h.send_time = to_net_time(now);
-	if (m_any_received)
+	if (m_highest_seen)
 	{
-		h.ack = m_highest_seen;
+		h.ack = *m_highest_seen;
 		h.ack_bits = m_ack_bits;
 		h.echo_time = m_last_recv_send_time;
 		/* A caller whose build time is behind its receive time (clock
@@ -886,7 +901,7 @@ void connection::pop_acked_messages()
  * ack bounds the round trip of a packet that no echo will ever measure,
  * and only bounds it: srtt comes from echoes alone.
  */
-void connection::process_acks(const std::uint16_t ack, const std::uint64_t ack_bits, const net_clock now, const bool newest_carrier, const bool echo_before_valid, const std::uint16_t echo_before)
+void connection::process_acks(const std::uint16_t ack, const std::uint64_t ack_bits, const net_clock now, const bool newest_carrier, const std::optional<std::uint16_t> echo_before)
 {
 	if (ack == 0 && ack_bits == 0)
 		/* The peer has not received anything from us yet. */
@@ -909,7 +924,7 @@ void connection::process_acks(const std::uint16_t ack, const std::uint64_t ack_b
 			--m_stats.packets_lost;
 			m_loss_estimate = std::max(0.0, m_loss_estimate - 1.0 / (1 << NET_V2_LOSS_EWMA_SHIFT));
 		}
-		if (!e.echoed && newest_carrier && echo_before_valid && seq_diff(echo_before, s) > 0)
+		if (!e.echoed && newest_carrier && echo_before && seq_diff(*echo_before, s) > 0)
 		{
 			/* A later packet of ours was already echoed before this one
 			 * was first acknowledged: it arrived out of order at the
@@ -982,8 +997,8 @@ bool connection::count_protocol_error(const std::uint16_t seq, const net_clock n
 	 * sequence would otherwise sit at the front for the rest of the
 	 * wrap and shield the entries behind it.
 	 */
-	if (m_any_received)
-		std::erase_if(r, [this](const std::uint16_t s) { return seq_diff(m_highest_seen, s) > static_cast<std::int16_t>(NET_V2_ACK_BITS); });
+	if (m_highest_seen)
+		std::erase_if(r, [this](const std::uint16_t s) { return seq_diff(*m_highest_seen, s) > static_cast<std::int16_t>(NET_V2_ACK_BITS); });
 	if (std::ranges::find(r, seq) != r.end())
 		/* A replay of a packet already counted. */
 		return false;
@@ -1116,6 +1131,15 @@ void connection::deliver_reliable(const net_clock now)
 			continue;
 		slot.filled = true;
 		slot.type = pm.type;
+		/* A retained buffer from the pool (the entries of
+		 * m_delivered_held beyond the ones the last report uses) rather
+		 * than a fresh allocation, unless the slot still holds one.
+		 */
+		if (slot.payload.capacity() < pm.payload.size() && m_delivered_held.size() > m_delivered_held_count)
+		{
+			slot.payload.swap(m_delivered_held.back());
+			m_delivered_held.pop_back();
+		}
 		slot.payload.assign(pm.payload.begin(), pm.payload.end());
 		++m_recv_window_pending;
 	}
@@ -1125,11 +1149,15 @@ void connection::deliver_reliable(const net_clock now)
 		if (!slot.filled)
 			break;
 		/* Held storage: kept until the next on_receive, so the view
-		 * outlives this call like the ones into the datagram.
+		 * outlives this call like the ones into the datagram.  The slot
+		 * takes the retained (empty, capacity kept) buffer in exchange,
+		 * so neither side allocates again once warmed up.
 		 */
-		const auto &held{m_delivered_held.emplace_back(std::move(slot.payload))};
+		if (m_delivered_held_count == m_delivered_held.size())
+			m_delivered_held.emplace_back();
+		auto &held{m_delivered_held[m_delivered_held_count++]};
+		held.swap(slot.payload);
 		m_report_reliable.push_back({.type = slot.type, .payload = held});
-		slot.payload.clear();
 		slot.filled = false;
 		--m_recv_window_pending;
 		++m_next_expected;
@@ -1143,7 +1171,7 @@ void connection::deliver_reliable(const net_clock now)
 	m_ack_owed = true;
 }
 
-connection::latest_packet &connection::latest_for(const chunk_type type, const unsigned part)
+std::optional<std::uint16_t> &connection::latest_for(const chunk_type type, const unsigned part)
 {
 	return m_latest[state_index(type)][part];
 }
@@ -1161,16 +1189,15 @@ void connection::deliver_unreliable(const std::uint16_t packet_seq)
 			 * may even have wrapped (a type not seen for 32 768 packets
 			 * would otherwise be dropped for the next 32 768).
 			 */
-			const auto age{latest.valid ? seq_diff(m_highest_seen, latest.seq) : std::int16_t{-1}};
+			const auto age{latest ? seq_diff(*m_highest_seen, *latest) : std::int16_t{-1}};
 			const bool reference{age >= 0 && age <= static_cast<std::int16_t>(NET_V2_ACK_BITS)};
-			if (reference && seq_diff(packet_seq, latest.seq) < 0)
+			if (reference && seq_diff(packet_seq, *latest) < 0)
 				/* From a packet older than one already applied:
 				 * reordered, drop.  Chunks of the same packet are all
 				 * delivered.
 				 */
 				continue;
-			latest.valid = true;
-			latest.seq = packet_seq;
+			latest = packet_seq;
 		}
 		m_report_unreliable.push_back({.type = c.type, .part = c.part, .part_count = c.part_count, .payload = c.payload});
 	}
@@ -1182,7 +1209,9 @@ receive_report connection::on_receive(const std::span<const std::uint8_t> datagr
 	 * storage.  The vectors keep their capacity, so a datagram costs no
 	 * allocation once the connection has warmed up.
 	 */
-	m_delivered_held.clear();
+	for (std::size_t i{}; i != m_delivered_held_count; ++i)
+		m_delivered_held[i].clear();
+	m_delivered_held_count = 0;
 	m_report_reliable.clear();
 	m_report_unreliable.clear();
 	receive_report report;
@@ -1219,10 +1248,10 @@ receive_report connection::on_receive(const std::span<const std::uint8_t> datagr
 	 * deliver must not be acknowledged.
 	 */
 	std::uint64_t new_ack_bits{};
-	if (m_any_received)
+	if (m_highest_seen)
 	{
-		const auto d{seq_diff(h.seq, m_highest_seen)};
-		if (d > NET_V2_MAX_SEQ_JUMP)
+		const auto d{seq_diff(h.seq, *m_highest_seen)};
+		if (d > m_seq_jump_bound)
 		{
 			/* A corrupted or forged sequence far ahead: taking it as the
 			 * new highest would reject every real packet that follows as
@@ -1254,12 +1283,20 @@ receive_report connection::on_receive(const std::span<const std::uint8_t> datagr
 			new_ack_bits = m_ack_bits | bit;
 		}
 	}
-	/* An ack of a packet we have not sent is a protocol error, and it
-	 * would drive the loss scan and the gap rule over everything in
-	 * flight on every packet.  Counted once per sequence; a replay of
-	 * the datagram is rejected the same way but counts no more.
+	/* An ack of a packet we have not sent is a protocol error, and one
+	 * ahead of our newest would drive the loss scan and the gap rule
+	 * over everything in flight on every packet.  "Not sent" is: ahead
+	 * of the newest, or further behind it than we have sent packets (an
+	 * ack forged 32768 or more ahead reads as one far behind).  Once we
+	 * have sent half the sequence space every number has been used, and
+	 * an honest ack may lag by any distance after a one-way blackout, so
+	 * from then on only "ahead" can be told; a far-behind ack is then
+	 * harmless anyway, since the log is consulted by sequence.  Counted
+	 * once per sequence; a replay of the datagram is rejected the same
+	 * way but counts no more.
 	 */
-	if (!(h.ack == 0 && h.ack_bits == 0) && seq_diff(h.ack, m_local_seq) > 0)
+	const auto ack_behind{seq_diff(m_local_seq, h.ack)};
+	if (!(h.ack == 0 && h.ack_bits == 0) && (ack_behind < 0 || (m_stats.packets_sent < 0x8000 && static_cast<std::uint64_t>(ack_behind) >= m_stats.packets_sent)))
 	{
 		if (count_protocol_error(h.seq, now))
 			close_with(close_reason::protocol_error);
@@ -1280,7 +1317,6 @@ receive_report connection::on_receive(const std::span<const std::uint8_t> datagr
 		m_state = connection_state::connected;
 	m_last_heard = now;
 	++m_stats.packets_received;
-	const bool echo_before_valid{m_echo_sampled_any};
 	const auto echo_before{m_echo_sampled_seq};
 	/* Only the newest packet received measures the round trip: a
 	 * reordered older peer packet carries its own reorder delay in every
@@ -1288,7 +1324,7 @@ receive_report connection::on_receive(const std::span<const std::uint8_t> datagr
 	 * us, so such an echo widens rttvar (a bound) and never moves srtt;
 	 * the packet's acks are honoured below.
 	 */
-	const bool newest{!m_any_received || seq_diff(h.seq, m_highest_seen) > 0};
+	const bool newest{!m_highest_seen || seq_diff(h.seq, *m_highest_seen) > 0};
 	if (!(h.ack == 0 && h.ack_bits == 0) && h.echo_delay != NET_V2_ECHO_DELAY_SATURATED)
 	{
 		/* The echo describes the packet `ack` names (the newest the peer
@@ -1325,10 +1361,9 @@ receive_report connection::on_receive(const std::span<const std::uint8_t> datagr
 					m_rtt.add_bound(rtt);
 				}
 			}
-			else if (!m_echo_sampled_any || seq_diff(h.ack, m_echo_sampled_seq) > 0)
+			else if (!m_echo_sampled_seq || seq_diff(h.ack, *m_echo_sampled_seq) > 0)
 			{
 				e.echoed = true;
-				m_echo_sampled_any = true;
 				m_echo_sampled_seq = h.ack;
 				m_rtt.add_sample(rtt);
 				const net_time peer_now{h.send_time + static_cast<net_time>(rtt / 2)};
@@ -1344,12 +1379,11 @@ receive_report connection::on_receive(const std::span<const std::uint8_t> datagr
 			 */
 		}
 	}
-	process_acks(h.ack, h.ack_bits, now, newest, echo_before_valid, echo_before);
+	process_acks(h.ack, h.ack_bits, now, newest, echo_before);
 	/* Step 9: record and apply.  Only the newest packet moves the echo
 	 * fields: echoing a late, reordered packet would inflate the peer's
 	 * RTT sample by the reorder delay.
 	 */
-	m_any_received = true;
 	m_ack_bits = new_ack_bits;
 	if (newest)
 	{

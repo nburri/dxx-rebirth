@@ -57,14 +57,25 @@ namespace net_v2 {
  */
 constexpr std::size_t NET_V2_EVENT_QUEUE_MAX{64};
 
-/* A well-formed packet whose `seq` is further ahead of the newest seen
- * than this is rejected (`bad_seq`) and counted as a protocol error: a
- * conforming peer cannot send that many packets within the 5 s timeout
- * (3 per tick at 60 Hz is 900), and accepting it would move the reorder
- * window past every real packet, time the connection out and turn our
- * acks into protocol errors at the peer.  An implementation bound.
+/* The largest `event_u` payload `send_unreliable` takes.  Events are
+ * cosmetic and small (§6.9 gives each a u8 length); the bound keeps the
+ * ring of slots at some 17 KiB per connection instead of 75.  An
+ * implementation bound, not a wire constant: the chunk length field
+ * still allows NET_V2_MAX_CHUNK_PAYLOAD and a receiver accepts it.
  */
-constexpr std::int16_t NET_V2_MAX_SEQ_JUMP{4096};
+constexpr std::size_t NET_V2_MAX_EVENT{255};
+
+/* A well-formed packet whose `seq` is further ahead of the newest seen
+ * than a conforming peer could have sent within NET_V2_TIMEOUT is
+ * rejected (`bad_seq`) and counted as a protocol error: accepting it
+ * would move the reorder window past every real packet, time the
+ * connection out and turn our acks into protocol errors at the peer.
+ * The bound follows the peer's tick (set_peer_tick): the ticks in the
+ * timeout, times the packets a tick may carry (max_packets_per_tick or
+ * a full bundle's parts + 1, whichever is more), times this margin,
+ * capped to the half sequence space seq_diff can tell apart.
+ */
+constexpr net_clock NET_V2_SEQ_JUMP_MARGIN{2};
 
 /* A pending event that did not fit beside the state chunk in this many
  * packets is dropped; later events are not held up by it in the
@@ -184,15 +195,21 @@ enum class receive_status : std::uint8_t
 	closed,
 	/* Already seen, or older than the 64-packet reorder window. */
 	duplicate,
-	/* `seq` is more than NET_V2_MAX_SEQ_JUMP ahead of the newest seen: a
-	 * corrupted or forged sequence, not a stream a conforming peer can
-	 * produce.  Nothing is applied; one protocol error is counted per
-	 * distinct `seq`, and 16 within 10 s close the connection.
+	/* `seq` is further ahead of the newest seen than the peer could have
+	 * sent within the timeout (NET_V2_SEQ_JUMP_MARGIN): a corrupted or
+	 * forged sequence, not a stream a conforming peer can produce.
+	 * Nothing is applied; one protocol error is counted per distinct
+	 * `seq`, and 16 within 10 s close the connection.
 	 */
 	bad_seq,
-	/* `ack` names a packet we have not sent.  Nothing is applied; one
-	 * protocol error is counted per distinct `seq`, as for a malformed
-	 * packet, and 16 within 10 s close the connection the same way.
+	/* `ack` names a packet we have not sent: ahead of our newest, or
+	 * further behind it than we have sent packets (an ack forged 32768
+	 * or more ahead reads as one far behind; once half the sequence
+	 * space has been used every number has been sent, and an honest ack
+	 * may lag by any distance after a one-way blackout, so from then on
+	 * only "ahead" can be told).  Nothing is applied; one protocol error
+	 * is counted per distinct `seq`, as for a malformed packet, and 16
+	 * within 10 s close the connection the same way.
 	 */
 	bad_ack,
 	/* A chunk was malformed.  Nothing of the datagram was applied, not
@@ -473,14 +490,6 @@ class connection
 		std::uint8_t type{};
 		std::vector<std::uint8_t> payload;
 	};
-	/* Per latest-wins chunk type and part: the newest packet that
-	 * carried one.
-	 */
-	struct latest_packet
-	{
-		bool valid{};
-		std::uint16_t seq{};
-	};
 	/* One pending part of the outgoing latest-wins bundle, copied into a
 	 * fixed buffer: no allocation per tick.
 	 */
@@ -499,9 +508,9 @@ class connection
 	/* A queued best-effort event (always `event_u`), in a fixed slot. */
 	struct pending_event
 	{
-		std::size_t size{};
-		unsigned skipped{};
-		std::array<std::uint8_t, NET_V2_MAX_CHUNK_PAYLOAD> data{};
+		std::uint8_t size{};
+		std::uint8_t skipped{};
+		std::array<std::uint8_t, NET_V2_MAX_EVENT> data{};
 	};
 	/* Parsed once by validate_chunks, applied by deliver_*. */
 	struct parsed_message
@@ -578,30 +587,45 @@ class connection
 	std::vector<selected_run> m_runs;
 	/* The outgoing latest-wins bundles, [0] state and [1] input. */
 	std::array<state_bundle, 2> m_state_out{};
-	/* The outgoing events: a ring of NET_V2_EVENT_QUEUE_MAX slots, the
-	 * oldest at m_events_head, m_events_count of them in use.
+	/* The outgoing events: NET_V2_EVENT_QUEUE_MAX slots, queued in the
+	 * order of a ring of slot indices (the oldest at m_events_head,
+	 * m_events_count in use); the slots not in the ring are on the free
+	 * stack.  Sending or dropping an event frees its slot and closes the
+	 * index ring up behind the head; no slot is ever copied.
 	 */
-	std::array<pending_event, NET_V2_EVENT_QUEUE_MAX> m_events{};
+	std::array<pending_event, NET_V2_EVENT_QUEUE_MAX> m_event_slots{};
+	std::array<std::uint8_t, NET_V2_EVENT_QUEUE_MAX> m_event_order{};
+	std::array<std::uint8_t, NET_V2_EVENT_QUEUE_MAX> m_event_free{};
+	std::size_t m_event_free_count{};
 	std::size_t m_events_head{};
 	std::size_t m_events_count{};
+	/* The slot index of the i-th queued event. */
 	[[nodiscard]]
-	pending_event &event_slot(const std::size_t i)
+	std::uint8_t &event_index(const std::size_t i)
 	{
-		return m_events[(m_events_head + i) % NET_V2_EVENT_QUEUE_MAX];
+		return m_event_order[(m_events_head + i) % NET_V2_EVENT_QUEUE_MAX];
 	}
-	/* The newest of our packets sampled through an echo.  Samples
-	 * progress: a conforming peer echoes the newest packet it received,
-	 * so an echo of an older packet in the peer's newest packet is not a
-	 * measurement (and a hostile peer's lever otherwise).  A packet acked
-	 * only after a later one was already echoed arrived out of order at
-	 * the peer, so its ack is its one bound.
+	[[nodiscard]]
+	pending_event &event(const std::size_t i)
+	{
+		return m_event_slots[event_index(i)];
+	}
+	/* The newest of our packets sampled through an echo, once any was.
+	 * Samples progress: a conforming peer echoes the newest packet it
+	 * received, so an echo of an older packet in the peer's newest
+	 * packet is not a measurement (and a hostile peer's lever otherwise).
+	 * A packet acked only after a later one was already echoed arrived
+	 * out of order at the peer, so its ack is its one bound.
 	 */
-	bool m_echo_sampled_any{};
-	std::uint16_t m_echo_sampled_seq{};
+	std::optional<std::uint16_t> m_echo_sampled_seq;
 
 	/* Receiver side */
-	bool m_any_received{};
-	std::uint16_t m_highest_seen{};
+	/* The newest sequence received, once anything was. */
+	std::optional<std::uint16_t> m_highest_seen;
+	/* The largest forward jump of `seq` still taken as the peer's own
+	 * stream; see NET_V2_SEQ_JUMP_MARGIN and set_peer_tick.
+	 */
+	std::int16_t m_seq_jump_bound{};
 	std::uint64_t m_ack_bits{};
 	net_clock m_last_heard{};
 	/* Of the newest packet received (m_highest_seen), which our headers
@@ -613,10 +637,16 @@ class connection
 	std::array<recv_slot, NET_V2_RECV_WINDOW> m_recv_window{};
 	std::size_t m_recv_window_pending{};
 	/* Payloads of messages held out of order and delivered by the last
-	 * on_receive: the report's views point into them.  Cleared by the
-	 * next on_receive.
+	 * on_receive: the report's views point into the first
+	 * m_delivered_held_count entries.  The entries beyond them are the
+	 * pool of retained buffers: a window slot takes one when it fills
+	 * (instead of allocating) and gives its payload back on delivery, by
+	 * swap, and the next on_receive clears the delivered ones back into
+	 * the pool.  Buffers are never destroyed, so a held message costs no
+	 * allocation once as many have been held at once before.
 	 */
 	std::vector<std::vector<std::uint8_t>> m_delivered_held;
+	std::size_t m_delivered_held_count{};
 	/* The lists the last report points into; cleared by the next
 	 * on_receive.
 	 */
@@ -626,7 +656,10 @@ class connection
 	 * messages, or last advanced; the stream_stalled clock.
 	 */
 	net_clock m_recv_gap_since{};
-	std::array<std::array<latest_packet, NET_V2_STATE_MAX_PARTS>, 2> m_latest{};
+	/* Per latest-wins chunk type and part: the newest packet that
+	 * carried one, once any did.
+	 */
+	std::array<std::array<std::optional<std::uint16_t>, NET_V2_STATE_MAX_PARTS>, 2> m_latest{};
 	/* Sequences of malformed packets already counted as a protocol
 	 * error, oldest first; a replay of one counts no further error.
 	 * Never used to reject anything: an intact copy is accepted.
@@ -651,7 +684,7 @@ class connection
 	void check_timeouts(net_clock now);
 	void detect_rto_losses(net_clock now);
 	void flag_resend(out_msg &m);
-	void process_acks(std::uint16_t ack, std::uint64_t ack_bits, net_clock now, bool newest_carrier, bool echo_before_valid, std::uint16_t echo_before);
+	void process_acks(std::uint16_t ack, std::uint64_t ack_bits, net_clock now, bool newest_carrier, std::optional<std::uint16_t> echo_before);
 	void resolve_packet(packet_log_entry &e, bool acked);
 	void pop_acked_messages();
 	[[nodiscard]]
@@ -664,7 +697,7 @@ class connection
 	[[nodiscard]]
 	bool count_protocol_error(std::uint16_t seq, net_clock now);
 	[[nodiscard]]
-	latest_packet &latest_for(chunk_type type, unsigned part);
+	std::optional<std::uint16_t> &latest_for(chunk_type type, unsigned part);
 	[[nodiscard]]
 	bool any_state_pending() const;
 	[[nodiscard]]
@@ -702,9 +735,9 @@ public:
 	 * room for it, never retransmitted.  An event that does not fit does
 	 * not hold up the ones behind it and is dropped after
 	 * NET_V2_EVENT_SKIP_MAX packets.  Returns false if it was dropped at
-	 * once.  Only `event_u` is accepted: `state`/`input` go through
-	 * set_unreliable_state, and any other type (`reliable`, `session`,
-	 * unknown) would be rejected by the peer as malformed.
+	 * once, or refused: only `event_u` of at most NET_V2_MAX_EVENT bytes
+	 * is accepted (`state`/`input` go through set_unreliable_state, and
+	 * any other type would be rejected by the peer as malformed).
 	 */
 	bool send_unreliable(chunk_type type, std::span<const std::uint8_t> payload);
 
@@ -780,7 +813,8 @@ public:
 	receive_report on_receive(std::span<const std::uint8_t> datagram, net_clock now);
 
 	/* The peer's tick became known (stage 1 learns it in the handshake):
-	 * the RTO's hold term follows.  Zero terms mean the same as `tick`.
+	 * the RTO's hold term and the sequence jump bound follow.  Zero terms
+	 * mean the same as `tick`.
 	 */
 	void set_peer_tick(tick_period peer_tick);
 
