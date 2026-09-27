@@ -294,12 +294,17 @@ public:
 	net_clock now{};
 	std::uint32_t tick_count{};
 
-	sim_world(rng &r, const link_params &p, const std::array<net_clock, 2> biases = {}) :
+	/* Peer i ticks every tick_every[i] simulation ticks (a 30 Hz client
+	 * against the 60 Hz simulation is {1, 2}).
+	 */
+	std::array<unsigned, 2> tick_every{{1, 1}};
+
+	sim_world(rng &r, const link_params &p, const std::array<net_clock, 2> biases = {}, const std::array<connection_config, 2> &configs = {{host_side, client_side}}) :
 		random{r},
 		link{r, p},
 		peers{{
-			sim_peer{host_side, biases[0], 0},
-			sim_peer{client_side, biases[1], 0},
+			sim_peer{configs[0], biases[0], 0},
+			sim_peer{configs[1], biases[1], 0},
 		}}
 	{
 	}
@@ -313,6 +318,8 @@ public:
 		++tick_count;
 		for (unsigned i{}; i != 2; ++i)
 		{
+			if (tick_count % tick_every[i] != 0)
+				continue;
 			auto &p{peers[i]};
 			const auto peer_now{now + phase[i]};
 			link.deliver(i, peer_now, [&](const datagram &d, const net_clock at) { p.receive(d, at); });
@@ -1069,12 +1076,13 @@ void test_corrupted_future_seq()
 	std::printf("    corrupt datagram claiming seq 3: the real packets 2, 3 and 4 all accepted\n");
 }
 
-/* 4. A head message that does not fit beside the state chunk goes out
- * without it, and the budget is at least two packets per tick.
+/* 4. A head message that does not fit beside the state chunk rides the
+ * tick's second packet; the state is never displaced from the first, and
+ * the budget is at least two packets per tick.
  */
-void test_state_omitted_for_big_message()
+void test_big_message_rides_second_packet()
 {
-	begin("state omitted for a big head message");
+	begin("big head message rides the second packet");
 	connection_config h{host_side};
 	h.max_packets_per_tick = 1;
 	connection a{h, 0};
@@ -1084,16 +1092,75 @@ void test_state_omitted_for_big_message()
 	a.set_unreliable_state(chunk_type::state, state);
 	/* Built at the construction time, so exactly one tick is granted. */
 	const auto p1{a.build_outgoing(0)};
-	CHECK_MSG(p1.size() == NET_V2_HEADER_SIZE + 6 + 3 + NET_V2_MAX_MESSAGE, "first packet " + std::to_string(p1.size()) + " bytes");
-	CHECK(packet_header::read(p1)->has_flag(packet_flag::has_reliable));
-	/* Nothing more due in this tick; the state is still pending and
-	 * goes out with the next tick.
-	 */
+	CHECK_MSG(p1.size() == NET_V2_HEADER_SIZE + 3 + 1100, "first packet " + std::to_string(p1.size()) + " bytes");
+	CHECK(!packet_header::read(p1)->has_flag(packet_flag::has_reliable));
+	const auto p2{a.build_outgoing(0)};
+	CHECK_MSG(p2.size() == NET_V2_HEADER_SIZE + 6 + 3 + NET_V2_MAX_MESSAGE, "second packet " + std::to_string(p2.size()) + " bytes");
+	CHECK(packet_header::read(p2)->has_flag(packet_flag::has_reliable));
 	CHECK(a.build_outgoing(0).empty());
-	const auto p2{a.build_outgoing(TICK)};
-	CHECK_MSG(p2.size() == NET_V2_HEADER_SIZE + 3 + 1100, "second packet " + std::to_string(p2.size()) + " bytes");
 	CHECK(a.stats().unreliable_dropped == 0);
-	std::printf("    1 KiB message beside an 1100-byte state: message alone first, state with the next tick\n");
+	std::printf("    1 KiB message beside an 1100-byte state: state first, the message in the tick's second packet\n");
+}
+
+/* 4b. A stream of large reliable messages never displaces the per-tick
+ * state chunk (regression: the round-5 omission starved it).
+ */
+void test_state_survives_bulk_transfer(const std::uint64_t seed)
+{
+	begin("state chunk survives a bulk transfer");
+	rng r{seed};
+	sim_world w{r, link_params{.latency = net_milliseconds(30)}};
+	w.run(10, [&](const unsigned i) { w.set_state(i); });
+	datagram big(900);
+	for (unsigned k{}; k != 20; ++k)
+	{
+		big[0] = static_cast<std::uint8_t>(k);
+		CHECK(w.peers[0].conn.enqueue_reliable(9, big) == enqueue_result::ok);
+		w.peers[0].sent.push_back({.type = 9, .payload = big});
+	}
+	w.run(200, [&](const unsigned i) { w.set_state(i); });
+	check_delivery(w, 0);
+	const auto host{w.peers[0].conn.stats()};
+	const auto &states{w.peers[1].states_seen};
+	CHECK_MSG(host.unreliable_dropped == 0, "states dropped " + std::to_string(host.unreliable_dropped));
+	CHECK_MSG(states.size() >= 207, "states delivered " + std::to_string(states.size()) + " of 210");
+	CHECK(std::ranges::adjacent_find(states, std::greater_equal<>{}) == states.end());
+	std::printf("    20 x 900-byte messages with a 350-byte state every tick: %zu of 210 states delivered, none dropped\n", states.size());
+}
+
+/* 2. The RTO covers the peer's ack hold, which is the peer's tick, not
+ * ours: a 60 Hz host talking to a 30 Hz client never resends on a
+ * jitter-free link.
+ */
+void test_peer_tick_period(const std::uint64_t seed)
+{
+	begin("peer tick period");
+	rng r{seed};
+	connection_config h{host_side}, c{client_side};
+	h.peer_tick_period = 2 * TICK;
+	c.tick_period = 2 * TICK;
+	c.peer_tick_period = TICK;
+	for (unsigned round{}; round != 4; ++round)
+	{
+		sim_world w{r, link_params{.latency = net_milliseconds(10 + 25 * round)}, {}, {{h, c}}};
+		w.tick_every = {{1, 2}};
+		w.phase = {{static_cast<net_clock>(r.below(TICK)), static_cast<net_clock>(r.below(TICK))}};
+		w.run(400, [&](const unsigned i) {
+			w.set_state(i);
+			for (unsigned k{}; k != (i == 0 ? 2u : 1u) && w.peers[i].sent.size() < 400; ++k)
+				w.enqueue_random_message(i, 60);
+		});
+		/* Let the last messages arrive. */
+		w.run(12, [&](const unsigned i) { w.set_state(i); });
+		for (unsigned i{}; i != 2; ++i)
+		{
+			check_delivery(w, i);
+			const auto s{w.peers[i].conn.stats()};
+			CHECK_MSG(s.message_resends == 0, "round " + std::to_string(round) + (i ? " client" : " host") + " resends " + std::to_string(s.message_resends));
+		}
+		const auto s{w.peers[0].conn.stats()};
+		std::printf("    60 Hz host, 30 Hz client, latency %.0f ms: 0 resends, host srtt %.1f ms, rto %.1f ms\n", to_ms(w.link.params.latency), to_ms(s.srtt), to_ms(s.rto));
+	}
 }
 
 /* Fourth review round: the coordinator's probe cases. */
@@ -1913,7 +1980,9 @@ int main(const int argc, char **const argv)
 	test_stream_stalled();
 	test_malformed_then_intact();
 	test_corrupted_future_seq();
-	test_state_omitted_for_big_message();
+	test_big_message_rides_second_packet();
+	test_state_survives_bulk_transfer(seed);
+	test_peer_tick_period(seed);
 	test_latest_wins_wrap();
 	test_grant_closes_tick();
 	test_hostile_ack();

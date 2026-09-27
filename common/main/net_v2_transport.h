@@ -84,6 +84,11 @@ struct connection_config
 	 */
 	net_clock tick_period{NET_V2_DEFAULT_TICK_PERIOD};
 	unsigned max_packets_per_tick{NET_V2_DEFAULT_MAX_PACKETS_PER_TICK};
+	/* The peer's tick period: it holds its acks up to this long.  0 means
+	 * the same as tick_period; the session layer sets it from the
+	 * handshake (stage 1).
+	 */
+	net_clock peer_tick_period{};
 };
 
 enum class connection_state : std::uint8_t
@@ -173,6 +178,16 @@ struct unreliable_chunk
 	std::vector<std::uint8_t> payload;
 };
 
+/* An unreliable chunk as delivered: a view into the datagram the caller
+ * passed to on_receive, valid only as long as that buffer is, and at the
+ * latest until the next on_receive.
+ */
+struct unreliable_view
+{
+	chunk_type type{};
+	std::span<const std::uint8_t> payload;
+};
+
 struct receive_report
 {
 	receive_status status{receive_status::bad_length};
@@ -182,8 +197,9 @@ struct receive_report
 	 * `state`/`input` chunks from a packet older than one already seen
 	 * (latest wins across packets; all chunks of one packet count as
 	 * equally new, so a bundle split into two chunks arrives whole).
+	 * Views into the caller's datagram, see unreliable_view.
 	 */
-	std::vector<unreliable_chunk> unreliable;
+	std::vector<unreliable_view> unreliable;
 };
 
 struct connection_stats
@@ -227,23 +243,26 @@ struct connection_stats
 	net_clock last_heard{};
 };
 
-/* Section 3.5: Jacobson/Karels with RFC 6298 constants, plus a tick of
- * slack.  The peer holds its ack until its next tick and we look for
- * losses only at ours, so an ack for a lossless packet can arrive up to
- * two tick periods after srtt; without the slack every message on a
- * jitter-free link would be resent as soon as rttvar decays to zero.
+/* Section 3.5: Jacobson/Karels with RFC 6298 constants, plus slack for
+ * the tick.  The peer holds its ack until its next tick (`hold`, its
+ * tick period) and we look for losses only at ours (`tick`), so an ack
+ * for a lossless packet can arrive up to hold + tick after srtt; without
+ * the slack every message on a jitter-free link would be resent as soon
+ * as rttvar decays to zero.
  *
- *	rto = clamp(srtt + max(4 rttvar, tick) + tick, NET_V2_RTO_MIN, NET_V2_RTO_MAX)
+ *	rto = clamp(srtt + max(4 rttvar, hold) + tick, NET_V2_RTO_MIN, NET_V2_RTO_MAX)
  */
 class rtt_estimator
 {
 	net_clock m_tick_period;
+	net_clock m_hold_period;
 	bool m_valid{};
 	net_clock m_srtt{};
 	net_clock m_rttvar{};
 public:
-	explicit rtt_estimator(const net_clock tick_period = NET_V2_DEFAULT_TICK_PERIOD) :
-		m_tick_period{tick_period}
+	explicit rtt_estimator(const net_clock tick_period = NET_V2_DEFAULT_TICK_PERIOD, const net_clock hold_period = NET_V2_DEFAULT_TICK_PERIOD) :
+		m_tick_period{tick_period},
+		m_hold_period{hold_period}
 	{
 	}
 	void add_sample(net_clock r);
@@ -413,7 +432,6 @@ class connection
 	std::size_t m_held_acked{};
 	std::size_t m_resend_pending{};
 	std::size_t m_queue_bytes{};
-	std::size_t m_in_flight{};
 	std::array<packet_log_entry, NET_V2_RECV_WINDOW> m_packet_log{};
 	/* Next packet sequence to examine for having fallen out of the
 	 * peer's ack bitfield unacked.
@@ -439,7 +457,13 @@ class connection
 	packet_buffer m_outgoing{};
 	std::vector<out_msg *> m_carried;
 	std::vector<selected_run> m_runs;
-	std::optional<unreliable_chunk> m_pending_state;
+	/* The latest-wins chunk of this tick, copied straight into a fixed
+	 * buffer: no allocation per tick.
+	 */
+	bool m_state_pending{};
+	chunk_type m_state_type{};
+	std::size_t m_state_size{};
+	std::array<std::uint8_t, NET_V2_MAX_CHUNK_PAYLOAD> m_state_buffer{};
 	std::deque<pending_event> m_pending_events;
 
 	/* Receiver side */
@@ -447,8 +471,9 @@ class connection
 	std::uint16_t m_highest_seen{};
 	std::uint64_t m_ack_bits{};
 	net_clock m_last_heard{};
-	/* The newest packet received, which our headers echo. */
-	std::uint16_t m_last_recv_seq{};
+	/* Of the newest packet received (m_highest_seen), which our headers
+	 * echo.
+	 */
 	net_time m_last_recv_send_time{};
 	net_clock m_last_recv_local_time{};
 	std::uint16_t m_next_expected{};
