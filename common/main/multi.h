@@ -175,8 +175,10 @@ static inline player_ship_color get_team_color(const team_number tnum)
  * other instead of misbehaving.  It equals NET_V2_PROTO_VERSION in net_v2.h.
  * 101: stage 2 (state bundle, INPUT, interpolation).
  * 102: stage 3 (object ids, host-decided pickups and drops, INVENTORY).
+ * 103: stage 3 review fixes (PICKUP_GRANT `life`, MULTI_PLAYER_DERES mine
+ * counts).
  */
-constexpr std::uint16_t MULTI_PROTO_VERSION{102};
+constexpr std::uint16_t MULTI_PROTO_VERSION{103};
 // PROTOCOL VARIABLES AND DEFINES - END
 
 /* The network tick rate (positions per second, and the pacing of every
@@ -1045,6 +1047,10 @@ void net_objects_announce(vmobjptridx_t obj, uint8_t owner, bool appear);
 void net_objects_host_drop_player_eggs(playernum_t pnum);
 /* Player `pnum` reappeared (MULTI_REAPPEAR): it may be dropped again. */
 void net_objects_player_reappeared(playernum_t pnum);
+/* The local player sent its MULTI_PLAYER_DERES: its life ended (grants
+ * for it that arrive later are not applied).
+ */
+void net_objects_own_deres();
 /* A client drops a weapon, missiles, a flag or an orb: ask the host to
  * create it.  False if not sent.
  */

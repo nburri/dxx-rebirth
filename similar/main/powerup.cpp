@@ -390,11 +390,38 @@ int do_powerup(const vmobjptridx_t obj, const powerup_pickup_mode mode)
 		return 0;
 
 	/* A granted pickup was checked by the host, which also decides between
-	 * players who touch the same powerup (the v1 "closer player" guess is
-	 * gone with protocol v2 stage 3).
+	 * players who touch the same powerup (protocol v2 stage 3).
 	 */
 	if (mode == powerup_pickup_mode::local && (obj->ctype.powerup_info.flags & PF_SPAT_BY_PLAYER) && obj->ctype.powerup_info.creation_time>0 && GameTime64<obj->ctype.powerup_info.creation_time+i2f(2))
 		return 0;		//not enough time elapsed
+
+	if (mode == powerup_pickup_mode::local && +(Game_mode & GM_MULTI))
+	{
+		/*
+		 * An object without a net id (a robot's egg) is still taken
+		 * client-side and announced with MULTI_REMOVE_OBJECT, so two
+		 * players can collect it at once.  Keep the v1 guess: do not
+		 * collect it if someone else is closer.
+		 * NOTE: Player positions and PING can still cause a small margin
+		 * of error.
+		 */
+		auto &vcobjptr = Objects.vcptr;
+		vms_vector tvec;
+		const fix mydist = vm_vec_normalized_dir(tvec, obj->pos, ConsoleObject->pos);
+
+		for (auto &&[i, plr] : enumerate(Players))
+		{
+			if (i == Player_num)
+				continue;
+			if (plr.connected != player_connection_status::playing)
+				continue;
+			auto &o = *vcobjptr(plr.objnum);
+			if (o.type == object_type::OBJ_GHOST)
+				continue;
+			if (mydist > vm_vec_normalized_dir(tvec, obj->pos, o.pos))
+				return 0;
+		}
+	}
 
 	auto &plrobj = get_local_plrobj();
 	auto &player_info = plrobj.ctype.player_info;

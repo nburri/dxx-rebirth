@@ -1563,8 +1563,9 @@ static void set_camera_pos(vms_vector &camera_pos, const vcobjptridx_t objp)
 
 /* The local ship exploded: drop what it carried.  In a network game the
  * host drops the powerups from its copy of the inventory and announces
- * them (protocol v2 stage 3); every machine arms the mines itself.  The
- * deres goes first, after the inventory it describes.
+ * them (protocol v2 stage 3); every machine arms the mines itself, from
+ * the mine counts the deres carries (this ship's).  The deres goes first,
+ * after the inventory it describes.
  */
 void drop_local_player_eggs(const vmobjptridx_t cobjp)
 {

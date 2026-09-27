@@ -428,8 +428,35 @@ void test_inventory_mirror()
 	CHECK(!(m.current().primary_flags & BIT_PLASMA));
 	/* Death: nothing carried; the grant count continues. */
 	m.on_grant(r, SHIELD, evaluate_pickup(m.current(), r, SHIELD, 1));
+	CHECK(m.life() == 0);
 	m.clear();
 	CHECK(m.current() == inventory{} && m.pending() == 0 && m.issued() == 3);
+	/* The next life begins; a new session starts at life 0 again. */
+	CHECK(m.life() == 1);
+	m.clear();
+	CHECK(m.life() == 2);
+	m.reset({});
+	CHECK(m.life() == 0 && m.current() == inventory{});
+	/* The client's count follows the host's: one life per deres, however
+	 * often it is sent before the reappearance.
+	 */
+	own_life l;
+	CHECK(l.current(0));
+	l.on_deres();
+	CHECK(l.life == 1 && !l.current(0) && l.current(1));
+	l.on_deres();
+	CHECK(l.life == 1);
+	l.on_reappear();
+	l.on_deres();
+	CHECK(l.life == 2);
+	for (int i = 0; i < 300; ++i)
+	{
+		l.on_reappear();
+		l.on_deres();
+	}
+	CHECK(l.life == static_cast<std::uint8_t>(302));
+	l.reset();
+	CHECK(l.life == 0 && !l.dropped);
 	/* Many grants in flight: bounded, the newest kept. */
 	m.reset(spawn_inventory());
 	for (int i = 0; i < 40; ++i)
@@ -631,9 +658,10 @@ void test_wire()
 	}
 	{
 		std::array<std::uint8_t, pickup_grant_msg::SIZE> b;
-		pickup_grant_msg{4, 0x8001, 2, 0x10000, 146, 1}.write(b);
+		pickup_grant_msg{4, 0x8001, 2, 0x10000, 146, 1, 200}.write(b);
 		const auto r{pickup_grant_msg::read(b)};
-		CHECK(r && r->pid == 4 && r->netid == 0x8001 && r->powerup_id == 2 && r->count == 0x10000 && r->remaining == 146 && r->removed());
+		CHECK(r && r->pid == 4 && r->netid == 0x8001 && r->powerup_id == 2 && r->count == 0x10000 && r->remaining == 146 && r->removed() && r->life == 200);
+		CHECK(!pickup_grant_msg::read(std::span<const std::uint8_t>(b).first(13)));
 		b[0] = 8;
 		CHECK(!pickup_grant_msg::read(b));
 	}
@@ -674,7 +702,7 @@ struct model_object
 
 struct model_message
 {
-	enum class kind { request, grant, deny, create, remove, report, drop } k{};
+	enum class kind { request, grant, deny, create, remove, report, drop, deres, reappear } k{};
 	std::uint8_t from{};
 	pickup_request_msg request{};
 	pickup_grant_msg grant{};
@@ -693,6 +721,9 @@ struct model_client
 	pending_pickups<> pending;
 	std::deque<model_message> inbox;
 	unsigned grants_received{};
+	own_life life;
+	/* Sent its deres, not reappeared yet. */
+	bool dead{};
 };
 
 struct model_game
@@ -702,6 +733,8 @@ struct model_game
 	std::map<netid_t, model_object> host_objects;
 	std::unique_ptr<table_type> table{std::make_unique<table_type>()};
 	std::array<inventory_mirror, PLAYERS> mirrors;
+	/* The host dropped the player's items; it has not reappeared. */
+	std::array<bool, PLAYERS> dropped{};
 	std::array<model_client, PLAYERS> clients;
 	std::deque<model_message> host_inbox;
 	std::int64_t now{};
@@ -710,6 +743,11 @@ struct model_game
 	std::map<netid_t, unsigned> consumed_grants;
 	unsigned grants{}, denies{};
 	std::uint32_t cannon_ammo_granted{};
+	/* Plasma cannons the host created or removed on its own (not the
+	 * drops of dead and departed players), for the conservation check.
+	 */
+	unsigned plasma_created{}, plasma_removed{}, plasma_dropped{};
+	unsigned stale_grants{};
 
 	[[nodiscard]]
 	inventory_rules rules(const unsigned pid) const
@@ -741,8 +779,10 @@ struct model_game
 				clients[i].inbox.push_back(m);
 	}
 	/* Host: create an object (respawn, death drop). */
-	void host_create(const std::uint8_t type, const std::uint32_t count, const std::uint8_t owner = 0xff)
+	void host_create(const std::uint8_t type, const std::uint32_t count, const std::uint8_t owner = 0xff, const bool drop = false)
 	{
+		if (types[type].kind == pickup_kind::primary && types[type].bit == BIT_PLASMA)
+			++(drop ? plasma_dropped : plasma_created);
 		const auto id{table->allocate(0)};
 		CHECK(id != NETID_NONE);
 		table->bind(id, next_objnum++ % MAX_OBJECTS, 0);
@@ -759,6 +799,8 @@ struct model_game
 	}
 	void host_remove(const netid_t id)
 	{
+		if (const auto it{host_objects.find(id)}; it != host_objects.end() && it->second.desc.kind == pickup_kind::primary && it->second.desc.bit == BIT_PLASMA)
+			++plasma_removed;
 		host_objects.erase(id);
 		table->unbind(id);
 		clients[0].objects.erase(id);
@@ -780,7 +822,7 @@ struct model_game
 			o.count = it->second.count;
 		}
 		const auto inv{pid == 0 ? clients[0].inv : mirrors[pid].current()};
-		const auto d{decide_pickup(o, {static_cast<std::uint8_t>(pid), true, true}, inv, rules(pid), now)};
+		const auto d{decide_pickup(o, {static_cast<std::uint8_t>(pid), pid == 0 || !dropped[pid], true}, inv, rules(pid), now)};
 		if (!d.grant)
 		{
 			++denies;
@@ -798,7 +840,7 @@ struct model_game
 			++consumed_grants[rq.netid];
 		if (obj.desc.kind == pickup_kind::vulcan_cannon)
 			cannon_ammo_granted += d.outcome.taken;
-		pickup_grant_msg g{static_cast<std::uint8_t>(pid), rq.netid, rq.powerup_id, d.outcome.taken, d.outcome.remaining, static_cast<std::uint8_t>(d.outcome.consumed ? 1 : 0)};
+		pickup_grant_msg g{static_cast<std::uint8_t>(pid), rq.netid, rq.powerup_id, d.outcome.taken, d.outcome.remaining, static_cast<std::uint8_t>(d.outcome.consumed ? 1 : 0), mirrors[pid].life()};
 		if (pid == 0)
 			apply_pickup(clients[0].inv, rules(0), obj.desc, d.outcome);
 		else
@@ -830,9 +872,19 @@ struct model_game
 					host_request(m.from, m.request);
 					break;
 				case model_message::kind::report:
-					mirrors[m.from].on_report(rules(m.from), m.report.inv, m.report.seq);
+					/* A dead player's report waits for its reappearance. */
+					if (!dropped[m.from])
+						mirrors[m.from].on_report(rules(m.from), m.report.inv, m.report.seq);
+					break;
+				case model_message::kind::deres:
+					host_drop(m.from);
+					break;
+				case model_message::kind::reappear:
+					dropped[m.from] = false;
 					break;
 				case model_message::kind::drop:
+					if (dropped[m.from])
+						break;
 					{
 						const auto type{m.drop.powerup_id};
 						const auto &desc{types[type]};
@@ -847,10 +899,81 @@ struct model_game
 			}
 		}
 	}
+	/* Host: player `pid` died (its deres) or left: drop the plasma cannon
+	 * and quad lasers of the host's copy (grants in flight included),
+	 * once per life, and forget the rest.
+	 */
+	void host_drop(const unsigned pid)
+	{
+		if (pid == 0 || dropped[pid])
+			return;
+		dropped[pid] = true;
+		const auto inv{mirrors[pid].current()};
+		if (inv.primary_flags & BIT_PLASMA)
+			host_create(2, 1, 0xff, true);
+		if (inv.powerup_flags & FLAG_QUAD)
+			host_create(6, 1, 0xff, true);
+		mirrors[pid].clear();
+	}
+	/* Host: a player joins slot `pid` (a new player, or the one who left
+	 * it): an empty copy until its first report (net_objects_host_join).
+	 */
+	void host_join(const unsigned pid)
+	{
+		mirrors[pid].reset({});
+		dropped[pid] = false;
+		auto &c{clients[pid]};
+		c = model_client{};
+		c.objects = host_objects;
+		for (auto &[id, o] : c.objects)
+			o.hidden = false;
+	}
+	/* Client `pid` dies: its inventory, then its deres. */
+	void client_die(const unsigned pid)
+	{
+		auto &c{clients[pid]};
+		if (pid == 0 || c.dead)
+			return;
+		model_message rep{.k = model_message::kind::report, .from = static_cast<std::uint8_t>(pid)};
+		rep.report = {static_cast<std::uint8_t>(pid), c.applied, c.inv};
+		host_inbox.push_back(rep);
+		host_inbox.push_back({.k = model_message::kind::deres, .from = static_cast<std::uint8_t>(pid)});
+		c.life.on_deres();
+		c.dead = true;
+	}
+	/* Client `pid` respawns with a new ship. */
+	void client_respawn(const unsigned pid)
+	{
+		auto &c{clients[pid]};
+		if (!c.dead)
+			return;
+		c.dead = false;
+		c.inv = spawn_inventory();
+		c.life.on_reappear();
+		host_inbox.push_back({.k = model_message::kind::reappear, .from = static_cast<std::uint8_t>(pid)});
+		model_message rep{.k = model_message::kind::report, .from = static_cast<std::uint8_t>(pid)};
+		rep.report = {static_cast<std::uint8_t>(pid), c.applied, c.inv};
+		host_inbox.push_back(rep);
+	}
+	/* Plasma cannons in the level and carried by live players. */
+	[[nodiscard]]
+	unsigned plasma_in_game() const
+	{
+		unsigned n{0};
+		for (const auto &[id, o] : host_objects)
+			if (o.desc.kind == pickup_kind::primary && o.desc.bit == BIT_PLASMA)
+				++n;
+		for (const auto &c : clients)
+			if (!c.dead && (c.inv.primary_flags & BIT_PLASMA))
+				++n;
+		return n;
+	}
 	/* Client `pid` touches the object: asks if it can use it. */
 	void client_touch(const unsigned pid, const netid_t id)
 	{
 		auto &c{clients[pid]};
+		if (c.dead)
+			return;
 		const auto it{c.objects.find(id)};
 		if (it == c.objects.end() || it->second.hidden)
 			return;
@@ -880,6 +1003,8 @@ struct model_game
 	void client_consume(const unsigned pid)
 	{
 		auto &c{clients[pid]};
+		if (c.dead)
+			return;
 		if (c.inv.secondary[0])
 			--c.inv.secondary[0];
 		c.inv.energy = std::max(0, c.inv.energy - 3 * F1);
@@ -896,7 +1021,7 @@ struct model_game
 	void client_drop_missiles(const unsigned pid)
 	{
 		auto &c{clients[pid]};
-		if (pid == 0 || c.inv.secondary[0] < 4)
+		if (pid == 0 || c.dead || c.inv.secondary[0] < 4)
 			return;
 		c.inv.secondary[0] -= 4;
 		model_message m{.k = model_message::kind::drop, .from = static_cast<std::uint8_t>(pid)};
@@ -921,15 +1046,24 @@ struct model_game
 						{
 							++c.applied;
 							++c.grants_received;
-							/* Apply the granted amount, as do_powerup does
-							 * with the count the grant sets.
-							 */
-							const auto &desc{it->second.desc};
-							pickup_outcome o{true, g.removed(), g.count, g.remaining};
-							if (desc.kind == pickup_kind::energy || desc.kind == pickup_kind::shield)
-								o = evaluate_pickup(c.inv, rules(pid), desc, 1);
-							apply_pickup(c.inv, rules(pid), desc, o);
 							c.pending.erase(g.netid);
+							/* A grant for a life that ended was in the
+							 * host's drop of that life
+							 * (net_objects.cpp apply_own_grant).
+							 */
+							if (!c.life.current(g.life))
+								++stale_grants;
+							else
+							{
+								/* Apply the granted amount, as do_powerup
+								 * does with the count the grant sets.
+								 */
+								const auto &desc{it->second.desc};
+								pickup_outcome o{true, g.removed(), g.count, g.remaining};
+								if (desc.kind == pickup_kind::energy || desc.kind == pickup_kind::shield)
+									o = evaluate_pickup(c.inv, rules(pid), desc, 1);
+								apply_pickup(c.inv, rules(pid), desc, o);
+							}
 						}
 						if (g.removed())
 							c.objects.erase(it);
@@ -1162,6 +1296,7 @@ void test_cannon_ammunition()
  */
 void test_random_game()
 {
+	unsigned stale_total{0}, dropped_total{0};
 	for (unsigned seed = 1; seed <= 30; ++seed)
 	{
 		std::mt19937 rng{seed};
@@ -1194,6 +1329,10 @@ void test_random_game()
 				std::advance(it, rng() % g.host_objects.size());
 				g.host_remove(it->first);
 			}
+			else if (pick < 79)
+				g.client_die(pid);
+			else if (pick < 83)
+				g.client_respawn(pid);
 			/* The network: the host reads everything, clients read a
 			 * random part of what arrived.
 			 */
@@ -1202,8 +1341,14 @@ void test_random_game()
 			for (unsigned i = 1; i < model_game::PLAYERS; ++i)
 				g.client_receive(i, rng() % 3);
 		}
+		for (unsigned i = 1; i < model_game::PLAYERS; ++i)
+			g.client_respawn(i);
 		g.settle();
 		g.check_agreement();
+		/* No plasma cannon appeared from nowhere or vanished: a grant
+		 * for a life that ended is never applied to the next ship.
+		 */
+		CHECK(g.plasma_in_game() == 2 + g.plasma_created - g.plasma_removed);
 		/* Final reports: the host's copies are exact. */
 		for (unsigned i = 1; i < model_game::PLAYERS; ++i)
 		{
@@ -1216,9 +1361,104 @@ void test_random_game()
 		{
 			CHECK(g.mirrors[i].current() == g.clients[i].inv);
 			CHECK(g.mirrors[i].pending() == 0);
+			CHECK(g.mirrors[i].life() == g.clients[i].life.life);
 		}
 		CHECK(g.grants > 50);
+		stale_total += g.stale_grants;
+		dropped_total += g.plasma_dropped;
 	}
+	/* The random games did reach the cases they are meant to cover. */
+	CHECK(stale_total > 0);
+	CHECK(dropped_total > 0);
+}
+
+/* A client asks for a cannon and dies before the grant arrives (review
+ * finding: the grant arrived after the respawn and gave the new ship the
+ * cannon that the host had also dropped).  The grant is for the life
+ * that ended: the host drops the cannon once, and the new ship does not
+ * get it, whether the grant arrives before or after the respawn.
+ */
+void test_grant_after_death()
+{
+	for (int respawn_first = 0; respawn_first < 2; ++respawn_first)
+	{
+		model_game g;
+		g.start();
+		const auto plasma{level_netid(2)};
+		CHECK(g.plasma_in_game() == 2);
+		g.client_touch(1, plasma);
+		g.client_die(1);
+		/* The host grants (life 0), then drops the cannon with the rest. */
+		g.host_receive();
+		CHECK(g.grants == 1 && g.host_objects.count(plasma) == 0);
+		CHECK(g.plasma_dropped == 1 && g.mirrors[1].life() == 1);
+		CHECK(g.mirrors[1].current() == inventory{});
+		if (respawn_first)
+			g.client_respawn(1);
+		g.settle();
+		g.client_respawn(1);
+		g.settle();
+		CHECK(g.stale_grants == 1);
+		CHECK(!(g.clients[1].inv.primary_flags & BIT_PLASMA));
+		CHECK(g.clients[1].inv == spawn_inventory());
+		CHECK(g.plasma_in_game() == 2);
+		g.check_agreement();
+		/* The copy and the client agree once the next report arrives. */
+		model_message rep{.k = model_message::kind::report, .from = 1};
+		rep.report = {1, g.clients[1].applied, g.clients[1].inv};
+		g.host_inbox.push_back(rep);
+		g.host_receive();
+		CHECK(g.mirrors[1].current() == g.clients[1].inv && g.mirrors[1].pending() == 0);
+		CHECK(g.mirrors[1].life() == g.clients[1].life.life);
+		/* The new life's grants apply again. */
+		netid_t dropped{NETID_NONE};
+		for (const auto &[id, o] : g.host_objects)
+			if (!is_level_netid(id) && o.desc.kind == pickup_kind::primary)
+				dropped = id;
+		CHECK(dropped != NETID_NONE);
+		g.client_touch(1, dropped);
+		g.settle();
+		CHECK(g.clients[1].inv.primary_flags & BIT_PLASMA);
+		CHECK(g.plasma_in_game() == 2);
+		g.check_agreement();
+	}
+}
+
+/* A player who carries a cannon leaves; the host drops it.  A player who
+ * joins the slot (or the same one, rejoining) starts with an empty copy,
+ * not with what the departed ship held: if it leaves again before its
+ * first report, nothing is dropped a second time.
+ */
+void test_rejoin_after_drop()
+{
+	model_game g;
+	g.start();
+	const auto plasma{level_netid(2)};
+	g.client_touch(1, plasma);
+	g.settle();
+	CHECK(g.clients[1].inv.primary_flags & BIT_PLASMA);
+	/* Disconnect: the host drops from its copy. */
+	g.host_drop(1);
+	g.clients[1].dead = true;
+	CHECK(g.plasma_dropped == 1);
+	g.settle();
+	CHECK(g.plasma_in_game() == 2);
+	g.host_join(1);
+	CHECK(g.mirrors[1].current() == inventory{} && g.mirrors[1].life() == 0);
+	/* Leaves again before its first report. */
+	g.host_drop(1);
+	g.clients[1].dead = true;
+	CHECK(g.plasma_dropped == 1);
+	g.settle();
+	CHECK(g.plasma_in_game() == 2);
+	/* Joins again and reports: the copy is its inventory. */
+	g.host_join(1);
+	model_message rep{.k = model_message::kind::report, .from = 1};
+	rep.report = {1, 0, g.clients[1].inv};
+	g.host_inbox.push_back(rep);
+	g.settle();
+	CHECK(g.mirrors[1].current() == spawn_inventory());
+	g.check_agreement();
 }
 
 /* Join in progress: the snapshot carries every net id with its object;
@@ -1328,6 +1568,8 @@ int main()
 	test_deny_and_restore();
 	test_stale_and_duplicate_requests();
 	test_cannon_ammunition();
+	test_grant_after_death();
+	test_rejoin_after_drop();
 	test_random_game();
 	test_joiner_snapshot();
 	std::puts("all tests passed");

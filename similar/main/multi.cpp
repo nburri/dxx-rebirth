@@ -1766,9 +1766,19 @@ static void multi_do_player_deres(const d_robot_info_array &Robot_info, object_a
 	auto &player_info = objp->ctype.player_info;
 	/* Protocol v2 stage 3: the dead player's inventory came in the
 	 * INVENTORY sent right before this message.  Every machine arms its
-	 * mines (seeded, as before); only the host drops the powerups, from
-	 * its copy of the inventory, and announces them with OBJ_CREATE.
+	 * mines (seeded, as before) from the mine counts in this message,
+	 * which are the dying player's own (the host's copy may include
+	 * grants still on their way to it); only the host drops the
+	 * powerups, from its copy of the inventory, and announces them with
+	 * OBJ_CREATE.
 	 */
+	{
+		auto &secondary_ammo{player_info.secondary_ammo};
+#if DXX_BUILD_DESCENT == 2
+		secondary_ammo[secondary_weapon_index::smart_mine] = buf[3];
+#endif
+		secondary_ammo[secondary_weapon_index::proximity] = buf[4];
+	}
 	drop_player_armed_bombs(objp);
 	net_objects_host_drop_player_eggs(pnum);
 
@@ -2591,7 +2601,17 @@ void multi_send_player_deres(deres_type_t type)
 	multibuf[1] = Player_num;
 	multibuf[2] = type;
 	auto &player_info = get_local_plrobj().ctype.player_info;
+	/* The mines every machine arms, as this machine does
+	 * (drop_player_armed_bombs).
+	 */
+#if DXX_BUILD_DESCENT == 2
+	multibuf[3] = player_info.secondary_ammo[secondary_weapon_index::smart_mine];
+#else
+	multibuf[3] = 0;
+#endif
+	multibuf[4] = player_info.secondary_ammo[secondary_weapon_index::proximity];
 	multi_send_data(multibuf, multiplayer_data_priority::_2);
+	net_objects_own_deres();
 	if (+(player_info.powerup_flags & player_flag::cloaked))
 		multi_send_decloak();
 	multi_strip_robots(Player_num);

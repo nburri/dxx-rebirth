@@ -2342,8 +2342,11 @@ bool snapshot_includes(const object_base &objp)
 {
 	/* A powerup picked up in this frame is gone (its id is unbound);
 	 * sending it would leave a copy on the joiner that nothing removes.
+	 * Only powerups: a ship hit lethally in this frame also carries
+	 * OF_SHOULD_BE_DEAD until the death sequence starts next frame, and
+	 * the joiner must still receive every player object.
 	 */
-	if (objp.flags & OF_SHOULD_BE_DEAD)
+	if (objp.type == object_type::OBJ_POWERUP && (objp.flags & OF_SHOULD_BE_DEAD))
 		return false;
 	if (objp.type == object_type::OBJ_POWERUP || objp.type == object_type::OBJ_PLAYER || objp.type == object_type::OBJ_CNTRLCEN || objp.type == object_type::OBJ_GHOST || objp.type == object_type::OBJ_ROBOT || objp.type == object_type::OBJ_HOSTAGE)
 		return true;

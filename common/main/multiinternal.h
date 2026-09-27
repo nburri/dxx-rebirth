@@ -41,7 +41,7 @@
 	VALUE(MULTI_CONTROLCEN_FIRE      , 16)	\
 	VALUE(MULTI_DECLOAK              , 2)	\
 	VALUE(MULTI_ROBOT_POSITION       , 5 + quaternionpos::packed_size::value)	\
-	VALUE(MULTI_PLAYER_DERES         , 3)	/* stage 3: the inventory and the eggs are the host's */	\
+	VALUE(MULTI_PLAYER_DERES         , 5)	/* stage 3: the inventory and the eggs are the host's; + the mines to arm */	\
 	VALUE(MULTI_DOOR_OPEN            , DXX_MP_SIZE_DOOR_OPEN)	\
 	VALUE(MULTI_ROBOT_EXPLODE        , 7)	\
 	VALUE(MULTI_ROBOT_RELEASE        , 5)	\

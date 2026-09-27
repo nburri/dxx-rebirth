@@ -99,6 +99,8 @@ struct authority_state
 	nv::pending_pickups<16> pending;
 	/* Client: the grants for this player received (INVENTORY `seq`). */
 	uint16_t applied_grants{};
+	/* Client: its own lives, to tell a grant for a life that ended. */
+	nv::own_life life;
 	nv::inventory last_sent{};
 	bool have_last_sent{};
 	fix64 last_sent_time{};
@@ -524,7 +526,8 @@ void report_others_pickup(const playernum_t pnum, const powerup_type_t id)
 
 void send_grant(const playernum_t pnum, const netid_t id, const powerup_type_t powerup, const uint32_t count, const uint32_t remaining, const bool removed)
 {
-	nv::pickup_grant_msg g{static_cast<uint8_t>(pnum), id, static_cast<uint8_t>(powerup), count, remaining, static_cast<uint8_t>(removed ? underlying_value(nv::grant_flag::removed) : 0)};
+	const uint8_t life{pnum < MAX_PLAYERS ? A.mirrors[pnum].life() : uint8_t{}};
+	nv::pickup_grant_msg g{static_cast<uint8_t>(pnum), id, static_cast<uint8_t>(powerup), count, remaining, static_cast<uint8_t>(removed ? underlying_value(nv::grant_flag::removed) : 0), life};
 	std::array<uint8_t, nv::pickup_grant_msg::SIZE> buf;
 	g.write(buf);
 	send(session_msg::pickup_grant, buf);
@@ -643,11 +646,20 @@ void host_touch(const vmobjptridx_t obj, const netid_t id)
 }
 
 /* A client's own grant arrived: apply its effect.  A grant that arrives
- * while the player is dead (it asked just before dying) still goes into
- * the inventory, since the host dropped the item with the rest.
+ * while the player is dead but before its deres (it asked just before
+ * dying) still goes into the inventory, so that the report sent with the
+ * deres includes it as the host's copy does, and the host drops it with
+ * the rest.  A grant for a life whose deres was already sent was in the
+ * host's drop of that life: it is not applied at all, least of all to the
+ * ship of the next life.
  */
 void apply_own_grant(const imobjptridx_t objp, const nv::pickup_grant_msg &g)
 {
+	if (!A.life.current(g.life))
+	{
+		con_printf(CON_VERBOSE, "net: grant of powerup %u for an ended life (%u, now %u) ignored", g.powerup_id, g.life, A.life.life);
+		return;
+	}
 	const auto powerup{static_cast<powerup_type_t>(g.powerup_id)};
 	const auto desc{desc_of(powerup)};
 	const bool alive{Player_dead_state == player_dead_state::no && ConsoleObject->type == object_type::OBJ_PLAYER};
@@ -931,6 +943,7 @@ void net_objects_level_start()
 	A.pending.reset();
 	A.dropped.fill(false);
 	A.applied_grants = 0;
+	A.life.reset();
 	A.have_last_sent = false;
 	auto &Objects{LevelUniqueObjectState.Objects};
 	for (unsigned i = 0; i < MAX_PLAYERS; ++i)
@@ -951,6 +964,7 @@ void net_objects_snapshot_begin()
 	A.pending.reset();
 	A.dropped.fill(false);
 	A.applied_grants = 0;
+	A.life.reset();
 	A.have_last_sent = false;
 }
 
@@ -974,9 +988,13 @@ void net_objects_host_join(const playernum_t pnum)
 {
 	if (pnum >= MAX_PLAYERS)
 		return;
-	auto &Objects{LevelUniqueObjectState.Objects};
-	const auto objnum{vcplayerptr(pnum)->objnum};
-	A.mirrors[pnum].reset(objnum <= Highest_object_index ? inventory_of(*Objects.vcptr(objnum)) : nv::inventory{});
+	/* The joiner (a new player or the one who left this slot) starts
+	 * with an empty copy, not with what the slot's ship may still hold:
+	 * the items of a player who left were dropped when it left, and the
+	 * joiner reports its own inventory in its first frame and before any
+	 * request.
+	 */
+	A.mirrors[pnum].reset({});
 	A.dropped[pnum] = false;
 }
 
@@ -1146,7 +1164,14 @@ void net_objects_host_drop_player_eggs(const playernum_t pnum)
 		net_objects_announce(Objects.vmptridx(Net_create_objnums[i]), NO_OWNER, false);
 	Net_create_loc = 0;
 	if (pnum != Player_num)
+	{
+		/* The ship carries nothing any more: the items lie in the level
+		 * (MultiLevelInv must not count them twice), and a player who
+		 * joins this slot later must not start with them.
+		 */
 		A.mirrors[pnum].clear();
+		write_inventory(*objp, A.mirrors[pnum].current(), false);
+	}
 	con_printf(CON_VERBOSE, "net: P#%u dropped %u powerups", pnum, created);
 }
 
@@ -1156,8 +1181,18 @@ void net_objects_player_reappeared(const playernum_t pnum)
 		return;
 	A.dropped[pnum] = false;
 	if (pnum == Player_num)
+	{
 		/* Report the new ship's inventory even if it equals the old. */
 		A.have_last_sent = false;
+		A.life.on_reappear();
+	}
+}
+
+void net_objects_own_deres()
+{
+	if (!net_objects_active())
+		return;
+	A.life.on_deres();
 }
 
 bool net_objects_request_drop(const powerup_type_t id, const uint32_t count)

@@ -536,21 +536,31 @@ public:
 		pickup_outcome outcome{};
 	};
 	/* A new session for the player (level start, join): the client's
-	 * count starts at 0 as well.
+	 * count and life start at 0 as well.
 	 */
 	void reset(const inventory &inv)
 	{
 		base_ = current_ = inv;
 		pending_count_ = 0;
 		issued_ = 0;
+		life_ = 0;
 	}
 	/* The player died and its items were dropped: nothing is carried
-	 * any more; grants still on their way were dropped with the rest.
+	 * any more; grants still on their way were dropped with the rest,
+	 * and the player's next life begins (grants for the old one are
+	 * recognised by their life, see own_life).
 	 */
 	void clear()
 	{
 		base_ = current_ = {};
 		pending_count_ = 0;
+		life_ = static_cast<std::uint8_t>(life_ + 1);
+	}
+	/* The life the grants to this player are for (PICKUP_GRANT `life`). */
+	[[nodiscard]]
+	std::uint8_t life() const
+	{
+		return life_;
 	}
 	[[nodiscard]]
 	const inventory &current() const
@@ -611,6 +621,49 @@ private:
 	std::array<pending_grant, MAX_PENDING> pending_{};
 	std::size_t pending_count_{};
 	std::uint16_t issued_{};
+	std::uint8_t life_{};
+};
+
+/* The client's count of its own lives, the counterpart of
+ * inventory_mirror::life on the host: a life ends when the player's items
+ * are dropped (its MULTI_PLAYER_DERES; the host drops them once per life,
+ * when that deres arrives) and the next begins at 0 again with a new
+ * session.  A grant carries the life of the host's copy it was applied
+ * to; a grant for an earlier life (the player asked just before dying,
+ * and the answer arrives after the deres, maybe after the respawn) was
+ * dropped with the rest of that life's items on the host and must not be
+ * applied to the new ship.
+ */
+struct own_life
+{
+	std::uint8_t life{};
+	bool dropped{};
+	void reset()
+	{
+		life = 0;
+		dropped = false;
+	}
+	/* The player sent its deres. */
+	void on_deres()
+	{
+		if (dropped)
+			return;
+		dropped = true;
+		life = static_cast<std::uint8_t>(life + 1);
+	}
+	/* The player reappeared (MULTI_REAPPEAR). */
+	void on_reappear()
+	{
+		dropped = false;
+	}
+	/* Whether a grant for `grant_life` is for the life being played, or
+	 * the one that just ended but whose deres is not sent yet.
+	 */
+	[[nodiscard]]
+	bool current(const std::uint8_t grant_life) const
+	{
+		return grant_life == life;
+	}
 };
 
 /* The client's pickups: a powerup the local ship touched is hidden and
@@ -1045,7 +1098,8 @@ struct pickup_request_msg
 
 /* PICKUP_GRANT (0x25), host to all.  It also removes the object or, for a
  * cannon that stays, sets its ammunition (the design's OBJ_REMOVE and
- * OBJ_AMMO for a pickup, folded into the grant).
+ * OBJ_AMMO for a pickup, folded into the grant).  `life` is the life of
+ * the player it is for (inventory_mirror::life, own_life).
  */
 enum class grant_flag : std::uint8_t
 {
@@ -1054,13 +1108,14 @@ enum class grant_flag : std::uint8_t
 
 struct pickup_grant_msg
 {
-	static constexpr std::size_t SIZE{13};
+	static constexpr std::size_t SIZE{14};
 	std::uint8_t pid{};
 	netid_t netid{};
 	std::uint8_t powerup_id{};
 	std::uint32_t count{};
 	std::uint32_t remaining{};
 	std::uint8_t flags{};
+	std::uint8_t life{};
 	[[nodiscard]]
 	bool removed() const
 	{
@@ -1075,6 +1130,7 @@ struct pickup_grant_msg
 		c.u32(count);
 		c.u32(remaining);
 		c.u8(flags);
+		c.u8(life);
 	}
 	[[nodiscard]]
 	static std::optional<pickup_grant_msg> read(const std::span<const std::uint8_t> buf)
@@ -1089,6 +1145,7 @@ struct pickup_grant_msg
 		m.count = c.r32();
 		m.remaining = c.r32();
 		m.flags = c.r8();
+		m.life = c.r8();
 		if (m.pid >= NETID_CREATORS || m.netid == NETID_NONE)
 			return std::nullopt;
 		return m;
