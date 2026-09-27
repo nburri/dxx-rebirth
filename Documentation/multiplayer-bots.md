@@ -118,7 +118,9 @@ controls, pilot state, memory and path. Nothing about bots goes into `player`,
 - **Host leaves**: the game ends (`HOST_SHUTDOWN`) and the bots go with it.
   There is no host migration in v2, so nothing more is needed.
 - **Level change**: bots persist across levels with their scores, like
-  humans (`LEVEL_START` → `SNAPSHOT_GAME`).
+  humans (`LEVEL_START` → `SNAPSHOT_GAME`). The host's level load carries
+  every slot's scores to its new ship object (`net_score_carry.h`), the
+  bots' included.
 
 ---
 

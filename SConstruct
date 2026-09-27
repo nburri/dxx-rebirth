@@ -5035,6 +5035,11 @@ class DXXArchive(DXXCommon):
 		RuntimeTest('test-bot-flight', (
 			'common/unittest/bot_flight.cpp',
 			)),
+		# Test of the score carry-over across a level load
+		# (net_score_carry.h).
+		RuntimeTest('test-net-score-carry', (
+			'common/unittest/net_score_carry.cpp',
+			)),
 			)
 	del RuntimeTest
 
