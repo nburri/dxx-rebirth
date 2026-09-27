@@ -381,7 +381,7 @@ void joy_init()
 	range_for (const unsigned i, xrange(n))
 	{
 #if SDL_MAJOR_VERSION == 2
-		if (SDL_IsGameController(i))
+		if (gamecontroller_use_for_device(i))
 		{
 			con_printf(CON_NORMAL, "sdl-gamecontroller: joystick #%d is a gamecontroller", i);
 			continue;
