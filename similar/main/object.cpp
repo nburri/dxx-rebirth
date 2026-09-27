@@ -1561,6 +1561,25 @@ static void set_camera_pos(vms_vector &camera_pos, const vcobjptridx_t objp)
 	}
 }
 
+/* The local ship exploded: drop what it carried.  In a network game the
+ * host drops the powerups from its copy of the inventory and announces
+ * them (protocol v2 stage 3); every machine arms the mines itself.  The
+ * deres goes first, after the inventory it describes.
+ */
+void drop_local_player_eggs(const vmobjptridx_t cobjp)
+{
+	if (+(Game_mode & GM_NETWORK))
+	{
+		multi_send_player_deres(deres_explode);
+		drop_player_armed_bombs(cobjp);
+		net_objects_host_drop_player_eggs(Player_num);
+		return;
+	}
+	drop_player_eggs(cobjp);
+	if (+(Game_mode & GM_MULTI))
+		multi_send_player_deres(deres_explode);
+}
+
 }
 
 //	------------------------------------------------------------------------------------------------------------------
@@ -1632,12 +1651,8 @@ window_event_result dead_player_frame(const d_robot_info_array &Robot_info)
 				Player_dead_state = player_dead_state::exploded;
 				
 				const auto cobjp = vmobjptridx(ConsoleObject);
-				drop_player_eggs(cobjp);
 				player_info.Player_eggs_dropped = true;
-				if (+(Game_mode & GM_MULTI))
-				{
-					multi_send_player_deres(deres_explode);
-				}
+				drop_local_player_eggs(cobjp);
 
 				explode_badass_player(Robot_info, cobjp);
 
@@ -1664,11 +1679,7 @@ window_event_result dead_player_frame(const d_robot_info_array &Robot_info)
 			auto &player_info = get_local_plrobj().ctype.player_info;
 			if (!player_info.Player_eggs_dropped) {
 				player_info.Player_eggs_dropped = true;
-				drop_player_eggs(vmobjptridx(ConsoleObject));
-				if (+(Game_mode & GM_MULTI))
-				{
-					multi_send_player_deres(deres_explode);
-				}
+				drop_local_player_eggs(vmobjptridx(ConsoleObject));
 			}
 
 			return DoPlayerDead();		//kill_player();

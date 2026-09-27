@@ -164,6 +164,14 @@ void host_kick_all(kick_player_reason reason);
  */
 void host_end_level();
 
+/* Stage 3 (similar/main/net_objects.cpp): a reliable game message of
+ * type `type` (net_v2_session.h).  On the host, to every player in the
+ * game but `exclude`; on a client, to the host.
+ */
+void game_broadcast(uint8_t type, std::span<const uint8_t> payload, playernum_t exclude = MAX_PLAYERS);
+/* On the host, to player `slot` (if connected). */
+void game_send_to(playernum_t slot, uint8_t type, std::span<const uint8_t> payload);
+
 /* Apply the level start data in Netgame to the local game state (the v1
  * read_sync_packet without the parsing): player list, scores, ship
  * placement.  Called by the host after host_send_level_start and by a

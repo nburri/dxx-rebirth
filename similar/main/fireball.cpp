@@ -838,15 +838,12 @@ void maybe_drop_net_powerup(powerup_type_t powerup_type, bool adjust_cap, bool r
 	auto &Vertices{LevelSharedVertexState.get_vertices()};
 	playernum_t pnum{Player_num};
 	if (+(Game_mode & GM_MULTI) && !(Game_mode & GM_MULTI_COOP)) {
-		/* Only the host replaces used or expired items.  If a client also
-		 * replaced them, the client and the host could both spawn a
-		 * replacement for the same item: the host respawns anything that
-		 * has been missing for about 2 seconds (MultiLevelInv_Repopulate),
-		 * and the client's MULTI_CREATE_POWERUP can take longer than that
-		 * to reach the host when reliable packets are resent.  The host
-		 * respawns the item within about 2 seconds.
+		/* Only the host creates powerups in a network game (protocol v2
+		 * stage 3): it replaces used or expired items (here, or within
+		 * about 2 seconds in MultiLevelInv_Repopulate) and announces them
+		 * with OBJ_CREATE.
 		 */
-		if (adjust_cap && !multi_i_am_master())
+		if (!multi_i_am_master())
 			return;
 		if (+(Game_mode & GM_NETWORK) && adjust_cap)
 		{
@@ -884,17 +881,11 @@ void maybe_drop_net_powerup(powerup_type_t powerup_type, bool adjust_cap, bool r
 		auto &vcvertptr{Vertices.vcptr};
 		const auto &&segnum{choose_drop_segment(LevelUniqueSegmentState.get_segments().vmptridx, vcvertptr, LevelUniqueWallSubsystemState.Walls.vcptr, pnum)};
 		const auto &&new_pos{pick_random_point_in_seg(vcvertptr, segnum, std::minstd_rand(d_rand()))};
-		/* Continue this client's own random sequence after the drop, so
-		 * that several drops in one frame do not all reuse the same
-		 * sequence.
-		 */
-		const unsigned resume_seed{(static_cast<unsigned>(d_rand()) << 15) ^ static_cast<unsigned>(d_rand())};
-		d_srand(multi_create_powerup_seed(new_pos));
+		/* The host sends the velocity drop_powerup chose: no shared seed. */
 		const auto &&objnum{drop_powerup(LevelUniqueObjectState, LevelSharedSegmentState, LevelUniqueSegmentState, Vclip, powerup_type, {}, new_pos, segnum, true)};
-		d_srand(resume_seed);
 		if (objnum == object_none)
 			return;
-		multi_send_create_powerup(powerup_type, segnum, objnum, new_pos);
+		net_objects_announce(objnum, 0xff, true);
 		object_create_explosion_without_damage(Vclip, segnum, new_pos, i2f(5), vclip_index::powerup_disappearance);
 	}
 }

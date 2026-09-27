@@ -321,8 +321,6 @@ struct player_hit_headlight_powerup
 			: player_flag::headlight;
 		powerup_basic(15, 0, 15, 0, "HEADLIGHT BOOST! (Headlight is O%s)", active ? "N" : "FF");
 		multi_digi_play_sample(Powerup_info[powerup_type_t::POW_HEADLIGHT].hit_sound, F1_0);
-		if (active && +(Game_mode & GM_MULTI))
-			multi_send_flags (Player_num);
 	}
 };
 
@@ -336,7 +334,8 @@ static int player_hit_flag_powerup(player_info &player_info, const std::span<con
 	{
 		player_info.powerup_flags |= player_flag::has_team_flag;
 		powerup_basic_str(15, 0, 15, 0, desc);
-		multi_send_got_flag(pnum);
+		/* The others learn it from the host's PICKUP_GRANT. */
+		digi_start_sound_queued(sound_effect::SOUND_HUD_YOU_GOT_FLAG, F1_0 * 2);
 		return 1;
 	}
 	return 0;
@@ -378,10 +377,9 @@ static int player_hit_powerup(player_info &player_info, const char *const desc_h
 
 }
 
-int do_powerup(const vmobjptridx_t obj)
+int do_powerup(const vmobjptridx_t obj, const powerup_pickup_mode mode)
 {
 	auto &Objects = LevelUniqueObjectState.Objects;
-	auto &vcobjptr = Objects.vcptr;
 	auto &vmobjptr = Objects.vmptr;
 	int used{0};
 	int special_used{0};		//for when hitting vulcan cannon gets vulcan ammo
@@ -391,32 +389,12 @@ int do_powerup(const vmobjptridx_t obj)
 		get_local_plrobj().shields < 0)
 		return 0;
 
-	if ((obj->ctype.powerup_info.flags & PF_SPAT_BY_PLAYER) && obj->ctype.powerup_info.creation_time>0 && GameTime64<obj->ctype.powerup_info.creation_time+i2f(2))
+	/* A granted pickup was checked by the host, which also decides between
+	 * players who touch the same powerup (the v1 "closer player" guess is
+	 * gone with protocol v2 stage 3).
+	 */
+	if (mode == powerup_pickup_mode::local && (obj->ctype.powerup_info.flags & PF_SPAT_BY_PLAYER) && obj->ctype.powerup_info.creation_time>0 && GameTime64<obj->ctype.powerup_info.creation_time+i2f(2))
 		return 0;		//not enough time elapsed
-
-	if (+(Game_mode & GM_MULTI))
-	{
-		/*
-		 * The fact: Collecting a powerup is decided Client-side and due to PING it takes time for other players to know if one collected a powerup actually. This may lead to the case two players collect the same powerup!
-		 * The solution: Let us check if someone else is closer to a powerup and if so, do not collect it.
-		 * NOTE: Player positions computed by 'shortpos' and PING can still cause a small margin of error.
-		 */
-		vms_vector tvec;
-		const fix mydist = vm_vec_normalized_dir(tvec, obj->pos, ConsoleObject->pos);
-
-		for (auto &&[i, plr] : enumerate(Players))
-		{
-			if (i == Player_num)
-				continue;
-			if (plr.connected != player_connection_status::playing)
-				continue;
-			auto &o = *vcobjptr(plr.objnum);
-			if (o.type == object_type::OBJ_GHOST)
-				continue;
-			if (mydist > vm_vec_normalized_dir(tvec, obj->pos, o.pos))
-				return 0;
-		}
-	}
 
 	auto &plrobj = get_local_plrobj();
 	auto &player_info = plrobj.ctype.player_info;
@@ -513,11 +491,12 @@ int do_powerup(const vmobjptridx_t obj)
 				obj->ctype.powerup_info.count -= ammo_used;
 				if (!used)
 				{
+					/* In a network game the host's PICKUP_GRANT tells
+					 * everyone what is left in the cannon.
+					 */
 					powerup_basic(7, 14, 21, VULCAN_AMMO_SCORE, "%s!", TXT_VULCAN_AMMO);
 					special_used = 1;
 					id = powerup_type_t::POW_VULCAN_AMMO;		//set new id for making sound at end of this function
-					if (+(Game_mode & GM_MULTI))
-                                                multi_send_vulcan_weapon_ammo_adjust(obj); // let other players know how much ammo we took.
 				}
 			}
 			break;
@@ -690,7 +669,7 @@ int do_powerup(const vmobjptridx_t obj)
 					powerup_basic_str(15, 0, 15, 0, "Orb!!!");
 					player_info.powerup_flags |= player_flag::has_team_flag;
 					used=1;
-					multi_send_got_orb (Player_num);
+					digi_play_sample(sound_effect::SOUND_YOU_GOT_ORB, F1_0 * 2);
 				}
 			}
 		  break;	
