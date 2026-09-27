@@ -163,8 +163,9 @@ struct ship
 	/* One frame of apply_pilot_controls and do_physics_sim. */
 	void step(const steer_output &c, const fix ft)
 	{
+		/* The production rounding (bot_apply_controls). */
 		const auto held{[ft](const double axis) {
-			return static_cast<fix>(std::lround(std::clamp(axis, -1.0, 1.0) * ft));
+			return held_axis_time(axis, ft);
 		}};
 		const fix rot_scale{fixdiv(ship_max_rotthrust, ft)};
 		const fix thrust_scale{fixdiv(ship_max_thrust, ft)};
@@ -224,6 +225,26 @@ struct ticker
 		return n;
 	}
 };
+
+/* The held time of an axis (held_axis_time, as bot_apply_controls uses
+ * it): full axes are FrameTime, the result is clamped, and small axes are
+ * rounded to nearest, symmetric about zero (no bias toward minus
+ * infinity at 500 fps, FrameTime 131).
+ */
+void test_held_axis_time()
+{
+	CHECK(held_axis_time(1, 131) == 131);
+	CHECK(held_axis_time(-1, 131) == -131);
+	CHECK(held_axis_time(3, 131) == 131);
+	CHECK(held_axis_time(-3, 131) == -131);
+	CHECK(held_axis_time(0, 131) == 0);
+	for (const double a : {0.001, 0.003, 0.004, 0.01, 0.25, 0.5, 0.77})
+		CHECK(held_axis_time(a, 131) == -held_axis_time(-a, 131));
+	CHECK(held_axis_time(0.003, 131) == 0);
+	CHECK(held_axis_time(0.004, 131) == 1);
+	CHECK(held_axis_time(-0.003, 131) == 0);
+	CHECK(held_axis_time(0.5, 1092) == 546);
+}
 
 void test_limits()
 {
@@ -504,6 +525,7 @@ void test_combat_movement()
 
 int main()
 {
+	test_held_axis_time();
 	test_limits();
 	test_turns();
 	test_tracking();

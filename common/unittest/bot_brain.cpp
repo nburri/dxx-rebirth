@@ -633,6 +633,61 @@ void test_slot_allocation()
 	CHECK(!slot_flown_by_bot(false, true));
 }
 
+void test_dodge_and_bend_rules()
+{
+	/* Which projectiles are dodged: never the bot's own; a partner's only
+	 * when friendly fire is on; anyone else's always.
+	 */
+	CHECK(!shot_worth_dodging(true, false, true));
+	CHECK(!shot_worth_dodging(true, false, false));
+	CHECK(!shot_worth_dodging(false, true, false));
+	CHECK(shot_worth_dodging(false, true, true));
+	CHECK(shot_worth_dodging(false, false, false));
+	CHECK(shot_worth_dodging(false, false, true));
+	/* One roll per projectile: the same (salt, signature) always gives the
+	 * same roll, however many projectiles are judged in between; the rolls
+	 * are uniform over the signatures, and another life (salt) rolls anew.
+	 */
+	{
+		constexpr uint32_t salt{0x12345678};
+		unsigned below{0}, differ{0};
+		double sum{0};
+		for (unsigned sig = 0; sig < 65536; ++sig)
+		{
+			const double r{dodge_roll(salt, static_cast<uint16_t>(sig))};
+			CHECK(r >= 0 && r < 1);
+			CHECK(r == dodge_roll(salt, static_cast<uint16_t>(sig)));
+			sum += r;
+			below += r < 0.45;
+			differ += r != dodge_roll(salt + 1, static_cast<uint16_t>(sig));
+		}
+		CHECK(std::fabs(sum / 65536 - 0.5) < 0.01);
+		CHECK(std::fabs(below / 65536.0 - 0.45) < 0.01);
+		CHECK(differ > 65000);
+		static_assert(dodge_roll(1, 2) == dodge_roll(1, 2));
+	}
+	/* The bend exception of the wall probe: the steer point nearer than
+	 * the wall and the flight toward it.
+	 */
+	constexpr double max_angle{radians(40)};
+	const vec3 pos{0, 0, 0};
+	/* Flying at the steer point 20 units ahead, wall at 30: a bend. */
+	CHECK(wall_hit_is_bend(pos, {0, 0, 50}, {0, 0, 20}, 30, max_angle));
+	/* 30 degrees off: still a bend. */
+	CHECK(wall_hit_is_bend(pos, {0, 0, 50}, {10, 0, 17.32}, 30, max_angle));
+	/* The wall nearer than the steer point: an obstacle. */
+	CHECK(!wall_hit_is_bend(pos, {0, 0, 50}, {0, 0, 40}, 30, max_angle));
+	/* The steer point is near but to the side (or behind): the wall along
+	 * the velocity is not its bend.
+	 */
+	CHECK(!wall_hit_is_bend(pos, {0, 0, 50}, {20, 0, 0}, 30, max_angle));
+	CHECK(!wall_hit_is_bend(pos, {0, 0, 50}, {0, 0, -10}, 30, max_angle));
+	CHECK(!wall_hit_is_bend(pos, {0, 0, 50}, {15, 0, 15}, 30, max_angle));
+	/* Degenerate: at the steer point, or not moving. */
+	CHECK(!wall_hit_is_bend(pos, {0, 0, 50}, pos, 30, max_angle));
+	CHECK(!wall_hit_is_bend(pos, {0, 0, 0}, {0, 0, 20}, 30, max_angle));
+}
+
 }
 
 int main()
@@ -647,6 +702,7 @@ int main()
 	test_tables();
 	test_primary_choice();
 	test_slot_allocation();
+	test_dodge_and_bend_rules();
 	std::puts("test-bot-brain: all checks passed");
 	return 0;
 }

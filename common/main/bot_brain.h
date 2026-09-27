@@ -808,6 +808,59 @@ inline std::optional<vec3> dodge_direction(const vec3 &rel_pos, const vec3 &rel_
 	return away;
 }
 
+/* Section 4.6, dodge: whether a projectile is worth dodging.  Not the
+ * bot's own, and not one of a partner's (a teammate in a team game, anyone
+ * in cooperative) when friendly fire is off: it cannot hurt the bot.
+ */
+[[nodiscard]]
+constexpr bool shot_worth_dodging(const bool own, const bool from_partner, const bool friendly_fire)
+{
+	return !own && (friendly_fire || !from_partner);
+}
+
+/* Section 4.6, dodge: the bot's roll for one projectile, uniform in
+ * [0, 1), a hash of the bot's salt (drawn from its random numbers once per
+ * life) and the projectile's signature.  Each projectile thus gets exactly
+ * one roll however often it is judged, however many are in the air, with
+ * no list of judged projectiles to overflow.
+ */
+[[nodiscard]]
+constexpr double dodge_roll(const uint32_t salt, const uint16_t signature)
+{
+	uint64_t z{(static_cast<uint64_t>(salt) << 16 | signature) + UINT64_C(0x9e3779b97f4a7c15)};
+	z = (z ^ (z >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
+	z = (z ^ (z >> 27)) * UINT64_C(0x94d049bb133111eb);
+	z ^= z >> 31;
+	return static_cast<double>(z >> 11) * 0x1.0p-53;
+}
+
+/* Section 4.3, wall avoidance: a wall that the probe along the velocity
+ * meets is the bend the path is about to take, not an obstacle, when the
+ * point the bot steers at is nearer than the wall and the bot flies
+ * toward that point (within `max_angle`): a velocity that points
+ * elsewhere measures a wall that has nothing to do with the steer point.
+ */
+[[nodiscard]]
+inline bool wall_hit_is_bend(const vec3 &pos, const vec3 &vel, const vec3 &steer_point, const double hit_distance, const double max_angle)
+{
+	const auto to{steer_point - pos};
+	const double d{length(to)};
+	if (!(d < hit_distance) || d <= 0 || length(vel) <= 0)
+		return false;
+	return std::acos(std::clamp(dot(to, vel) / (d * length(vel)), -1.0, 1.0)) < max_angle;
+}
+
+/* Section 3.4: the time an axis is held for a frame, in fix, as the
+ * human's keys give it (FrameTime for a full axis); rounded, not
+ * truncated toward minus infinity as fixmul would, so that at 500 fps
+ * (FrameTime 131) a small axis is not biased.
+ */
+[[nodiscard]]
+inline int32_t held_axis_time(const double axis, const int32_t frame_time)
+{
+	return static_cast<int32_t>(std::lround(std::clamp(axis, -1.0, 1.0) * frame_time));
+}
+
 /* Section 4.4: trigger discipline. */
 [[nodiscard]]
 inline bool should_fire(const double aim_angle, const double fire_cone, const bool shot_clear, const double dist, const double max_range)

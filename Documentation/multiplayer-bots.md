@@ -443,7 +443,8 @@ default order `DefaultPrimaryOrder` (not the host's `PlayerCfg`).
   0.4–1.2 s (random within the style's range), plus vertical bobbing for
   Ace+. Circle-strafing happens when the target is in the band.
 - **Dodge**: at 20 Hz the bot scans weapon objects within 150 units whose
-  parent is not itself. For each it predicts the closest approach over the
+  parent is not itself (nor a teammate or coop partner when friendly fire
+  is off). For each it predicts the closest approach over the
   next 0.7 s, assuming the projectile flies straight. If a projectile will
   pass within `ship radius + 3`, the bot dodges with probability
   `dodge_prob`, after `reaction_ticks`: full thrust perpendicular to the
@@ -989,8 +990,9 @@ by tracing the code and simulating the ship (`test-bot-flight`):
    (0.4 s) meets the wall of every corridor bend the path is about to
    take, and each hit pushed back at half the top speed for 150 ms. Now a
    wall beyond the path point the bot steers at is ignored while it follows
-   its path, and a hit takes away the speed into the wall (more when near)
-   plus a push of 0.1 × top speed.
+   its path and flies toward that point (velocity within 40° of the
+   direction to it; `wall_hit_is_bend`), and a hit takes away the speed
+   into the wall (more when near) plus a push of 0.1 × top speed.
 6. *The thrust axes were taken in the frame without the turn roll*, but
    `apply_pilot_controls` applies them in the rolled frame: a sideways
    command leaked into vertical by the roll angle (up to about 20°). Now the
@@ -1001,7 +1003,15 @@ by tracing the code and simulating the ship (`test-bot-flight`):
    bias of half a step (0.4 % of full thrust) toward negative. The held
    time is now rounded. (Not a cause of the shaking: the physics carries
    its remainders, and the simulation flies the same path at 30 and 500
-   fps within 4 %.)
+   fps within 4 %.) The rounding is `held_axis_time` (bot_brain.h), which
+   the flight test's ship model uses too.
+8. *The stuck recovery could outlive the moment.* It was counted down
+   only while the bot followed its path; a fight in the open (a clear
+   shot) does not follow it, and a replan to the same segment did not end
+   it, so the bot could fly at full speed along the recovery direction
+   into walls for the whole fight. Now the 0.5 s run out on the tactics
+   tick whatever moves the bot (`stuck_detector::tick_recovery`), and
+   combat movement or a new path ends the recovery at once.
 
 Also checked and found correct: the rotation and thrust signs (positive
 pitch lowers the nose, positive heading turns right, as
@@ -1014,11 +1024,15 @@ check, and the roam goals (a random segment; arrival 1.5 ship radii).
 
 Added with the fixes: roam goals at least 120 units away with a
 neighbour (`pick_roam_goal`, tested for spread and reachability), and a
-first dodge (§4.6): at 20 Hz each projectile within 150 units is judged
-once; if it will pass within the ship's radius + 3 in the next 0.7 s,
-the bot, with the skill's `dodge_prob` (Hotshot 0.45), thrusts across its
-flight, away from where it passes, for 0.35 s after half its reaction
-time.
+first dodge (§4.6): at 20 Hz each projectile within 150 units is judged;
+if it will pass within the ship's radius + 3 in the next 0.7 s, the bot,
+with the skill's `dodge_prob` (Hotshot 0.45), thrusts across its flight,
+away from where it passes, for 0.35 s after half its reaction time. Each
+projectile gets exactly one roll, however heavy the fire: the roll is a
+hash of the projectile's signature and a salt the bot draws once per life
+(`dodge_roll`), not an entry in a list of judged projectiles. The bot's
+own shots are not dodged, nor, with friendly fire off, a partner's
+(teammate, or anyone in cooperative; `shot_worth_dodging`).
 
 Presets unchanged (§5.1): a Monte Carlo of the aim (reaction delay with
 dead reckoning, lead 0.7, σ 2.8°, a target juking at 35–58 units/s every
@@ -1032,8 +1046,9 @@ and behind; a strafing target tracked inside the fire cone, and not
 without the feed-forward; a waypoint course at the same pace at every
 frame rate without weaving; a fight that moves around), `test-bot-brain`
 (the errors near the vertical, the feed-forward, the line-of-sight rate,
-the jukes, the combat velocity, the dodge, the trigger) and
-`test-bot-nav` (the roam goals).
+the jukes, the combat velocity, the dodge with its shot filter and one
+roll per projectile, the bend exception, the trigger) and `test-bot-nav`
+(the roam goals, the stuck recovery's expiry).
 
 **Not in B1:** pickups, fuel centres and energy (a bot that runs dry can
 only fire ammunition weapons until it dies; B3), secondaries, afterburner,

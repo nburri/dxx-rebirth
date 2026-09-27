@@ -412,24 +412,54 @@ void test_stuck_detector()
 	CHECK(t == 90);
 	CHECK(s.recovering());
 	CHECK(s.failures() == 1);
-	/* Recovery lasts its ticks, then asks for a new plan. */
+	/* Recovery lasts its ticks, then asks for a new plan; it is timed by
+	 * tick_recovery alone (the path need not be followed meanwhile), and
+	 * update does not count progress while it runs.
+	 */
 	unsigned rec{1};
-	while ((ev = s.update(100)) == stuck_event::none)
+	CHECK(s.update(100) == stuck_event::none);
+	while (!s.tick_recovery())
 		++rec;
-	CHECK(ev == stuck_event::recovered);
 	CHECK(rec == 30);
 	CHECK(!s.recovering());
+	CHECK(!s.tick_recovery());
 	/* Second failure, then the third gives the goal up. */
 	while ((ev = s.update(100)) == stuck_event::none)
 		;
 	CHECK(ev == stuck_event::stuck);
-	while ((ev = s.update(100)) == stuck_event::none)
+	while (!s.tick_recovery())
 		;
-	CHECK(ev == stuck_event::recovered);
 	while ((ev = s.update(100)) == stuck_event::none)
 		;
 	CHECK(ev == stuck_event::give_up);
 	CHECK(s.failures() == 0);
+	/* A new path (a replan to the same segment) or combat movement ends
+	 * a recovery at once, keeping the failure count.
+	 */
+	s.reset();
+	while ((ev = s.update(100)) == stuck_event::none)
+		;
+	CHECK(s.recovering());
+	s.restart_window();
+	CHECK(!s.recovering());
+	CHECK(!s.tick_recovery());
+	CHECK(s.failures() == 1);
+	while ((ev = s.update(100)) == stuck_event::none)
+		;
+	CHECK(s.recovering());
+	s.cancel_recovery();
+	CHECK(!s.recovering());
+	CHECK(s.failures() == 2);
+	/* Without a path to follow (update never called), a recovery still
+	 * expires after its ticks.
+	 */
+	s.reset();
+	while ((ev = s.update(100)) == stuck_event::none)
+		;
+	for (unsigned k = 1; k < 30; ++k)
+		CHECK(!s.tick_recovery());
+	CHECK(s.tick_recovery());
+	CHECK(!s.recovering());
 	/* A slow crawl (1 unit per second) is stuck too. */
 	s.reset();
 	remaining = 100;

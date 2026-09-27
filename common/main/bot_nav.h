@@ -358,6 +358,14 @@ inline double remaining_length(const std::span<const vec3> points, const std::si
  * 60 Hz); then `recover_ticks` of recovery manoeuvre, after which the
  * path is planned again; after `max_failures` failures for one goal,
  * give it up.
+ *
+ * The recovery is timed by `tick_recovery`, called once per tick
+ * whatever the bot does, not by `update`, which only runs while the bot
+ * follows its path: a recovery must not outlive the moment it was meant
+ * for (a fight in the open, where the path is not followed, would
+ * otherwise leave it on and the bot flying along the recovery direction
+ * into walls).  A new path or combat movement ends it
+ * (`restart_window`, `cancel_recovery`).
  */
 struct stuck_params
 {
@@ -372,8 +380,6 @@ enum class stuck_event : uint8_t
 	none,
 	/* Start the recovery manoeuvre. */
 	stuck,
-	/* Recovery over: plan again (with the stuck edge penalised). */
-	recovered,
 	/* Too many failures for this goal: choose another. */
 	give_up,
 };
@@ -400,11 +406,21 @@ public:
 		m_recover = 0;
 		m_failures = 0;
 	}
-	/* A new path to the same goal: its remaining length starts anew. */
+	/* A new path to the same goal: its remaining length starts anew, and
+	 * a recovery under way is over (the new path avoids the stuck edge).
+	 */
 	void restart_window()
 	{
 		m_have = false;
 		m_ticks = 0;
+		m_recover = 0;
+	}
+	/* Something else moves the bot (combat): no recovery manoeuvre, and
+	 * the progress is measured anew when the path is followed again.
+	 */
+	void cancel_recovery()
+	{
+		restart_window();
 	}
 	[[nodiscard]]
 	bool recovering() const
@@ -416,16 +432,23 @@ public:
 	{
 		return m_failures;
 	}
-	/* Once per tick with the remaining path length. */
+	/* Once per tick, whatever the bot does: true when a recovery has just
+	 * run out (plan again, with the stuck edge penalised).
+	 */
+	bool tick_recovery()
+	{
+		if (!m_recover || --m_recover)
+			return false;
+		restart_window();
+		return true;
+	}
+	/* Once per tick while the path is followed, with the remaining path
+	 * length.
+	 */
 	stuck_event update(const double remaining)
 	{
 		if (m_recover)
-		{
-			if (--m_recover)
-				return stuck_event::none;
-			restart_window();
-			return stuck_event::recovered;
-		}
+			return stuck_event::none;
 		if (!m_have || remaining <= m_best - m_params.min_progress)
 		{
 			m_have = true;
