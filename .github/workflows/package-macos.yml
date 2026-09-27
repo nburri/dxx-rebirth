@@ -66,17 +66,19 @@ jobs:
           sdl2=1
           macos_add_frameworks=0
           macos_bundle_libs=1
-          build/D{1,2}X-Rebirth.app
+          d1x=0
+          d2x=1
+          build/D2X-Rebirth.app
 
           # Copy gamecontrollerdb.txt into app bundles
 
-          for app in build/D{1,2}X-Rebirth.app; do
+          for app in build/D2X-Rebirth.app; do
             if [ -d "$app" ] && [ -f "contrib/gamecontrollerdb.txt" ]; then
               cp "contrib/gamecontrollerdb.txt" "$app/Contents/Resources/"
             fi
           done
 
-          mv build/D{1,2}X-Rebirth.app ..
+          mv build/D2X-Rebirth.app ..
 
       - name: Upload SConf log
         if: ${{ !cancelled() }}
@@ -89,7 +91,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: "DXX-Rebirth-MacOS${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ steps.architecture.outputs.uname_m }}"
-          path: 'D*X-Rebirth.app'
+          path: 'D2X-Rebirth.app'
 
       - name: Check header includes
         working-directory: src
@@ -105,5 +107,7 @@ jobs:
           sdl2=1
           macos_add_frameworks=0
           macos_bundle_libs=1
+          d1x=0
+          d2x=1
           check_header_includes=1
-          build/{common,d1x-rebirth,d2x-rebirth}/check_header_includes
+          build/{common,d2x-rebirth}/check_header_includes
