@@ -93,6 +93,22 @@ constexpr double BOT_CLOAK_SEE_DISTANCE{40};
 /* The engagement distance band before the style's range scale. */
 constexpr double BOT_RANGE_LO{35};
 constexpr double BOT_RANGE_HI{95};
+/* A roaming bot flies at least this far (section 4.3). */
+constexpr double BOT_ROAM_MIN_DISTANCE{120};
+/* A hunt toward a target that moves to another segment is planned again
+ * at most this often (the plan also expires after 2 s).
+ */
+constexpr unsigned BOT_HUNT_REPLAN_TICKS{b::BOT_TICK_RATE / 2};
+/* Section 4.6, dodge: projectiles within this distance are looked at,
+ * their closest pass within this time, for this long a dodge.
+ */
+constexpr double BOT_DODGE_SCAN{150};
+constexpr double BOT_DODGE_HORIZON{0.7};
+constexpr unsigned BOT_DODGE_TICKS{b::ticks_from_ms(350)};
+/* Section 4.3: a wall beyond the steer point is a bend only while the
+ * velocity points within this angle of the steer point.
+ */
+constexpr double BOT_BEND_MAX_ANGLE{b::radians(40)};
 /* Stage B1 plays every bot at the Hotshot preset (section 9). */
 constexpr b::bot_skill BOT_B1_SKILL{b::bot_skill::hotshot};
 
@@ -164,6 +180,8 @@ struct bot_state
 	unsigned stagger{};
 	/* Brain output, fixed at the last tick. */
 	vec3 face_dir{0, 0, 1};
+	/* The angular velocity of face_dir (the steering's feed-forward). */
+	vec3 face_rate;
 	vec3 move_cmd;
 	bool fire{};
 	int heading_pref{1};
@@ -178,7 +196,13 @@ struct bot_state
 	uint8_t last_attacker{0xff};
 	uint32_t attacked_tick{};
 	b::aim_error aim;
-	b::strafe_state strafe;
+	b::juke_state juke;
+	/* Section 4.6, dodge: the salt of this life's rolls (b::dodge_roll),
+	 * and the dodge under way.
+	 */
+	uint32_t dodge_salt{};
+	vec3 dodge_dir;
+	uint32_t dodge_from{}, dodge_until{};
 	/* Navigation. */
 	bot_goal goal{bot_goal::none};
 	uint32_t goal_seg{};
@@ -188,6 +212,7 @@ struct bot_state
 	std::size_t point_index{};
 	std::size_t steer_index{};
 	uint32_t next_plan_tick{};
+	uint32_t last_plan_tick{};
 	b::stuck_detector stuck;
 	b::edge_penalties penalties;
 	vec3 recover_dir;
@@ -206,6 +231,7 @@ struct bot_state
 	{
 		pl = {};
 		face_dir = {0, 0, 1};
+		face_rate = {};
 		move_cmd = {};
 		fire = false;
 		ctl = {};
@@ -219,7 +245,10 @@ struct bot_state
 		shot_clear = false;
 		attacked_tick = tick;
 		aim.reset();
-		strafe.reset();
+		juke.reset();
+		dodge_salt = rng.next();
+		dodge_dir = {};
+		dodge_from = dodge_until = 0;
 		clear_path();
 		goal = bot_goal::none;
 		stuck.reset();
@@ -234,6 +263,7 @@ struct bot_state
 		points.clear();
 		point_edges.clear();
 		point_index = steer_index = 0;
+		stuck.restart_window();
 	}
 };
 
@@ -459,6 +489,7 @@ void plan_path(bot_state &bs, const object &obj, const uint32_t goal_seg, const 
 {
 	bs.clear_path();
 	bs.next_plan_tick = tick + 2 * b::BOT_TICK_RATE;
+	bs.last_plan_tick = tick;
 	const uint32_t start{obj.segnum};
 	if (start >= B.graph.size() || goal_seg >= B.graph.size())
 		return;
@@ -511,17 +542,12 @@ void set_goal(bot_state &bs, const object &obj, const bot_goal g, const uint32_t
 
 void choose_roam_goal(bot_state &bs, const object &obj, const uint32_t tick)
 {
-	const auto n{static_cast<unsigned>(B.graph.size())};
-	if (!n)
+	if (B.graph.size() < 2)
 		return;
-	uint32_t seg{bs.rng.below(n)};
-	/* Somewhere else, preferably not next door. */
-	for (unsigned tries = 0; tries < 8; ++tries)
-	{
-		if (seg != obj.segnum && b::distance(B.graph.position(seg), to_vec(obj.pos)) > 80)
-			break;
-		seg = bs.rng.below(n);
-	}
+	/* Somewhere else, not next door (bot_nav.h). */
+	const uint32_t seg{b::pick_roam_goal(B.graph, obj.segnum, to_vec(obj.pos), BOT_ROAM_MIN_DISTANCE, [&bs](const uint32_t n) {
+		return bs.rng.below(n);
+	})};
 	set_goal(bs, obj, bot_goal::roam, seg, std::nullopt, tick);
 }
 
@@ -594,12 +620,18 @@ void perceive(bot_state &bs, const object &obj, const uint32_t tick)
 			return line_clear(obj, obj.pos, obj.segnum, to_fixvec(bs.points[k]), rad, false);
 		});
 	}
-	/* Section 4.3: wall avoidance, a probe along the velocity. */
+	/* Section 4.3: wall avoidance, a probe along the velocity.  It takes
+	 * away the speed into the wall, the more the nearer the wall, and
+	 * pushes off a little.  A wall beyond the path point the bot steers
+	 * at is the bend it is about to take, not an obstacle: B1 braked for
+	 * every bend of a corridor, which made the bots crawl.
+	 */
 	const auto vel{to_vec(obj.mtype.phys_info.velocity)};
 	const double speed{b::length(vel)};
 	if (speed > 5)
 	{
-		const auto end{to_fixvec(pos + vel * 0.4)};
+		constexpr double probe_time{0.4};
+		const auto end{to_fixvec(pos + vel * probe_time)};
 		fvi_info hit;
 		const auto type{find_vector_intersection(fvi_query{
 			obj.pos,
@@ -612,8 +644,62 @@ void perceive(bot_state &bs, const object &obj, const uint32_t tick)
 		}, obj.segnum, obj.size / 2, hit)};
 		if (type == fvi_hit_type::Wall)
 		{
-			bs.avoid = b::normalized(to_vec(hit.hit_wallnorm)) * (B.limits.max_speed * 0.5);
-			bs.avoid_until = tick + b::PERCEPTION_DIVISOR * 3;
+			const double hit_distance{b::distance(pos, to_vec(hit.hit_pnt))};
+			/* Fighting in the open, the bot does not follow its path. */
+			const bool following{!(p.visible && bs.shot_clear)};
+			const bool bend{following && bs.steer_index < bs.points.size() && b::wall_hit_is_bend(pos, vel, bs.points[bs.steer_index], hit_distance, BOT_BEND_MAX_ANGLE)};
+			const auto normal{b::normalized(to_vec(hit.hit_wallnorm))};
+			const double into{-b::dot(vel, normal)};
+			if (!bend && into > 0)
+			{
+				const double nearness{1 - std::clamp(hit_distance / (speed * probe_time), 0.0, 1.0)};
+				bs.avoid = normal * (into * (0.5 + nearness) + B.limits.max_speed * 0.1);
+				bs.avoid_until = tick + b::PERCEPTION_DIVISOR * 2;
+			}
+		}
+	}
+	/* Section 4.6, dodge: each projectile coming at the bot gets one roll
+	 * (b::dodge_roll); with the skill's probability the bot thrusts across
+	 * its flight for a moment, a reaction time later.  The bot's own shots
+	 * and, without friendly fire, its partners' are not dodged.
+	 */
+	if (bs.skill->dodge_prob > 0 && tick >= bs.dodge_until)
+	{
+		const double radius{obj.size / 65536.0 + 3};
+		const auto frame{to_frame(obj.orient)};
+		const auto own_objnum{vcplayerptr(bs.pid)->objnum};
+		const bool coop = +(Game_mode & GM_MULTI_COOP);
+		const bool friendly_fire{!Netgame.NoFriendlyFire};
+		for (const object &o : Objects.vcptr)
+		{
+			if (o.type != object_type::OBJ_WEAPON)
+				continue;
+			const auto &li{o.ctype.laser_info};
+			bool own{false}, from_partner{false};
+			if (li.parent_type == object_type::OBJ_PLAYER)
+			{
+				own = li.parent_num == own_objnum;
+				const auto &parent{*Objects.vcptr(li.parent_num)};
+				if (!own && parent.type == object_type::OBJ_PLAYER && laser_parent_is_matching_signature(li, parent))
+				{
+					const auto shooter{get_player_id(parent)};
+					from_partner = coop || same_team(bs.pid, shooter);
+				}
+			}
+			if (!b::shot_worth_dodging(own, from_partner, friendly_fire))
+				continue;
+			const auto rel{to_vec(o.pos) - pos};
+			if (b::length(rel) > BOT_DODGE_SCAN)
+				continue;
+			const auto away{b::dodge_direction(rel, to_vec(o.mtype.phys_info.velocity) - vel, BOT_DODGE_HORIZON, radius, frame.r)};
+			if (!away)
+				continue;
+			if (b::dodge_roll(bs.dodge_salt, static_cast<uint16_t>(o.signature)) >= bs.skill->dodge_prob)
+				continue;
+			bs.dodge_dir = *away;
+			bs.dodge_from = tick + b::ticks_from_ms(bs.skill->reaction_ms) / 2;
+			bs.dodge_until = bs.dodge_from + BOT_DODGE_TICKS;
+			break;
 		}
 	}
 	/* The host's copy of the bot's inventory, and the clients' (the
@@ -649,16 +735,18 @@ void think(bot_state &bs, object &obj, const uint32_t tick)
 	choose_weapon(obj);
 	if (bs.target)
 	{
-		const auto t{*bs.target};
-		if (bs.visible_now[t] && bs.shot_clear)
-		{
-			/* A direct engagement needs no path. */
-			bs.goal = bot_goal::none;
-			bs.clear_path();
-			return;
-		}
-		const auto &m{bs.memory[t]};
-		if (bs.goal != bot_goal::hunt || bs.goal_seg != m.segment || bs.points.empty() || tick >= bs.next_plan_tick)
+		/* Hunt: a path to where the target is (or was last seen), also
+		 * while the bot fights it in the open.  B1 dropped the path for a
+		 * direct engagement, so until the bot reacted to the target (a
+		 * reaction time), whenever the line of fire closed and whenever
+		 * the target left the field of view for a moment, the bot had
+		 * nowhere to go and stopped dead: it fought on one spot.  Now it
+		 * chases along the path in those moments.  A target that moves on
+		 * is planned for again at most every half second.
+		 */
+		const auto &m{bs.memory[*bs.target]};
+		const bool moved{bs.goal != bot_goal::hunt || bs.goal_seg != m.segment};
+		if (bs.points.empty() || tick >= bs.next_plan_tick || (moved && tick - bs.last_plan_tick >= BOT_HUNT_REPLAN_TICKS))
 			set_goal(bs, obj, bot_goal::hunt, m.segment, m.pos, tick);
 		return;
 	}
@@ -669,7 +757,7 @@ void think(bot_state &bs, object &obj, const uint32_t tick)
 }
 
 /* Section 4.3: fly along the path; returns the wanted velocity. */
-vec3 follow_path(bot_state &bs, object &obj, const bool engaged, const uint32_t tick)
+vec3 follow_path(bot_state &bs, object &obj, const bool engaged)
 {
 	const auto pos{to_vec(obj.pos)};
 	const auto frame{to_frame(obj.orient)};
@@ -677,7 +765,10 @@ vec3 follow_path(bot_state &bs, object &obj, const bool engaged, const uint32_t 
 	if (bs.points.empty())
 	{
 		if (!engaged)
+		{
 			bs.face_dir = frame.f;
+			bs.face_rate = {};
+		}
 		return {};
 	}
 	const double reach{std::max(obj.size / 65536.0 * 1.5, 5.0)};
@@ -699,7 +790,10 @@ vec3 follow_path(bot_state &bs, object &obj, const bool engaged, const uint32_t 
 			speed = std::min(speed, std::max(max_speed * 0.4, dist * 1.5));
 	}
 	if (!engaged)
+	{
 		bs.face_dir = b::normalized(to);
+		bs.face_rate = {};
+	}
 	/* Stuck recovery (section 4.3). */
 	switch (bs.stuck.update(b::remaining_length(bs.points, bs.point_index, pos)))
 	{
@@ -715,9 +809,6 @@ vec3 follow_path(bot_state &bs, object &obj, const bool engaged, const uint32_t 
 			con_printf(CON_VERBOSE, "bots: '%s' stuck in segment %hu", static_cast<const char *>(bs.cfg.name), static_cast<uint16_t>(obj.segnum));
 			break;
 		}
-		case b::stuck_event::recovered:
-			plan_path(bs, obj, bs.goal_seg, std::nullopt, tick);
-			break;
 		case b::stuck_event::give_up:
 			bs.goal = bot_goal::none;
 			bs.clear_path();
@@ -749,7 +840,8 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 	if (b::layer_due(tick, b::STRATEGY_DIVISOR, bs.stagger))
 		think(bs, obj, tick);
 	bs.aim.update(bs.rng, b::radians(sk.aim_sigma_deg), b::ticks_from_ms(sk.aim_drift_ms));
-	const int strafe_dir{bs.strafe.update(bs.rng, b::ticks_from_ms(sk.strafe_min_ms), b::ticks_from_ms(sk.strafe_max_ms))};
+	const double range_scale{bs.style->range_scale};
+	bs.juke.update(bs.rng, b::ticks_from_ms(sk.strafe_min_ms), b::ticks_from_ms(sk.strafe_max_ms), BOT_RANGE_LO * range_scale, BOT_RANGE_HI * range_scale);
 	const auto pos{to_vec(obj.pos)};
 	const auto vel{to_vec(obj.mtype.phys_info.velocity)};
 	const auto frame{to_frame(obj.orient)};
@@ -757,6 +849,11 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 	const unsigned reaction_ticks{b::ticks_from_ms(sk.reaction_ms)};
 	const auto *const p{bs.seen.delayed(reaction_ticks / b::PERCEPTION_DIVISOR)};
 	bs.fire = false;
+	/* Section 4.3: the stuck recovery runs out on time, whatever moves
+	 * the bot meanwhile; then the path is planned again.
+	 */
+	if (bs.stuck.tick_recovery() && bs.goal != bot_goal::none)
+		plan_path(bs, obj, bs.goal_seg, std::nullopt, tick);
 	vec3 wanted;
 	if (p && p->visible && bs.target && *bs.target == p->target && bs.visible_now[p->target])
 	{
@@ -769,27 +866,33 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 		const auto est{p->pos + p->vel * delay};
 		const auto aim{b::aim_point(pos, est, p->vel, weapon_speed(pi), sk.lead)};
 		bs.face_dir = b::apply_aim_offset(aim - pos, frame.u, bs.aim.yaw(), bs.aim.pitch());
+		/* The steering's feed-forward: how fast the line to the target
+		 * turns, as the bot reckons it.
+		 */
+		bs.face_rate = b::line_of_sight_rate(aim - pos, p->vel - vel);
 		const auto to{est - pos};
 		const double dist{b::length(to)};
 		if (bs.shot_clear)
 		{
-			/* Section 4.6: keep the range, strafe. */
-			const auto d{b::normalized(to)};
-			const double scale{bs.style->range_scale};
-			const double approach{b::range_keeping_speed(dist, BOT_RANGE_LO * scale, BOT_RANGE_HI * scale, max_speed * 0.8)};
-			const auto lateral{b::normalized(frame.r - d * b::dot(frame.r, d))};
-			const double strafe_speed{sk.strafe ? max_speed * 0.6 : 0};
-			wanted = d * approach + lateral * (strafe_dir * strafe_speed);
+			/* Section 4.6: close in and back off inside the band, strafe
+			 * across the line of sight in changing directions.
+			 */
+			const double strafe_speed{sk.strafe ? max_speed * 0.7 : 0};
+			/* Combat movement takes over: no recovery manoeuvre. */
+			bs.stuck.cancel_recovery();
+			wanted = b::combat_velocity(to, frame.r, frame.u, bs.juke, sk.strafe_vertical, max_speed * 0.8, strafe_speed);
 		}
 		else
-			wanted = follow_path(bs, obj, true, tick);
+			wanted = follow_path(bs, obj, true);
 		const double err{b::angle_between(frame.f, bs.face_dir)};
 		bs.fire = b::should_fire(err, b::radians(sk.fire_cone_deg), bs.shot_clear, dist, weapon_range(pi));
 	}
 	else
-		wanted = follow_path(bs, obj, false, tick);
+		wanted = follow_path(bs, obj, false);
 	if (bs.stuck.recovering())
 		wanted = bs.recover_dir * max_speed;
+	else if (tick >= bs.dodge_from && tick < bs.dodge_until)
+		wanted += bs.dodge_dir * max_speed;
 	if (tick < bs.avoid_until)
 		wanted += bs.avoid;
 	bs.move_cmd = b::velocity_command(wanted, vel, max_speed);
@@ -807,25 +910,24 @@ void steer(bot_state &bs, const object &obj)
 		return;
 	}
 	/* The rotation applies to the orientation without the turn roll
-	 * (do_physics_sim_rot).
+	 * (do_physics_sim_rot); the thrust to the orientation with it
+	 * (apply_pilot_controls).
 	 */
 	vms_matrix unrolled{obj.orient};
 	if (const fixang roll{obj.mtype.phys_info.turnroll})
 		unrolled = vm_matrix_x_matrix(obj.orient, vm_angles_2_matrix(vms_angvec{.p = 0, .b = static_cast<fixang>(-roll), .h = 0}));
-	const auto frame{to_frame(unrolled)};
-	const auto local{frame.to_local(bs.face_dir)};
-	const auto e{b::steer_errors_local(local, bs.heading_pref)};
-	if (std::abs(e.heading) > 0.2)
-		bs.heading_pref = e.heading > 0 ? 1 : -1;
 	constexpr double rev_to_rad{2 * std::numbers::pi / 65536.0};
 	const auto &rotvel{obj.mtype.phys_info.rotvel};
-	const double cap{bs.skill->turn_cap};
-	c.pitch = b::rotation_axis(e.pitch, rotvel.x * rev_to_rad, B.limits.turn, cap);
-	c.heading = b::rotation_axis(e.heading, rotvel.y * rev_to_rad, B.limits.turn, cap);
-	const auto thrust{frame.to_local(bs.move_cmd)};
-	c.sideways = std::clamp(thrust.x, -1.0, 1.0);
-	c.vertical = std::clamp(thrust.y, -1.0, 1.0);
-	c.forward = std::clamp(thrust.z, -1.0, 1.0);
+	const auto out{b::steer_controls({
+		.unrolled = to_frame(unrolled),
+		.thrust_frame = to_frame(obj.orient),
+		.face_dir = bs.face_dir,
+		.face_rate = bs.face_rate,
+		.move_cmd = bs.move_cmd,
+		.pitch_rate = rotvel.x * rev_to_rad,
+		.heading_rate = rotvel.y * rev_to_rad,
+	}, B.limits.turn, bs.skill->turn_cap, bs.heading_pref)};
+	c = {out.pitch, out.heading, out.forward, out.sideways, out.vertical};
 }
 
 void compute_limits()
@@ -1256,13 +1358,19 @@ void bot_apply_controls(object &obj)
 	 * the bots coast.
 	 */
 	const bot_controls bc{Endlevel_sequence ? bot_controls{} : bs->ctl};
-	const fix ft{FrameTime};
-	c.pitch_time = fixmul(to_fix(bc.pitch), ft);
-	c.heading_time = fixmul(to_fix(bc.heading), ft);
+	/* An axis held for the whole frame is FrameTime (the human's keys);
+	 * rounded, not truncated toward minus infinity as fixmul would, so
+	 * that at 500 fps (FrameTime 131) a small axis is not biased.
+	 */
+	const auto held{[](const double axis) {
+		return b::held_axis_time(axis, FrameTime);
+	}};
+	c.pitch_time = held(bc.pitch);
+	c.heading_time = held(bc.heading);
 	c.bank_time = 0;
-	c.forward_thrust_time = fixmul(to_fix(bc.forward), ft);
-	c.sideways_thrust_time = fixmul(to_fix(bc.sideways), ft);
-	c.vertical_thrust_time = fixmul(to_fix(bc.vertical), ft);
+	c.forward_thrust_time = held(bc.forward);
+	c.sideways_thrust_time = held(bc.sideways);
+	c.vertical_thrust_time = held(bc.vertical);
 #if DXX_BUILD_DESCENT == 2
 	c.state.afterburner = 0;
 #endif

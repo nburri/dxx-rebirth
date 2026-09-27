@@ -445,7 +445,8 @@ default order `DefaultPrimaryOrder` (not the host's `PlayerCfg`).
   0.4–1.2 s (random within the style's range), plus vertical bobbing for
   Ace+. Circle-strafing happens when the target is in the band.
 - **Dodge**: at 20 Hz the bot scans weapon objects within 150 units whose
-  parent is not itself. For each it predicts the closest approach over the
+  parent is not itself (nor a teammate or coop partner when friendly fire
+  is off). For each it predicts the closest approach over the
   next 0.7 s, assuming the projectile flies straight. If a projectile will
   pass within `ship radius + 3`, the bot dodges with probability
   `dodge_prob`, after `reaction_ticks`: full thrust perpendicular to the
@@ -795,8 +796,8 @@ error, reaction delay line, memory, target scoring, steering and velocity
 controllers, strafing, trigger discipline, the B1 primary choice),
 `common/main/bot.h` (the game interface and the setup), `similar/main/bot.cpp`
 (the bots on the host) and `similar/main/bot_menu.cpp` (the setup and its
-menus). Tests: `test-bot-nav` and `test-bot-brain` (§8.1; the `.ngp` parser
-and the dodge predictor come with B2 and B4).
+menus). Tests: `test-bot-nav`, `test-bot-brain` and `test-bot-flight`
+(§8.1; the `.ngp` parser comes with B2).
 
 **Setup (§6.1–§6.3).** "Bots..." follows "Maximum players" in the host
 setup menu; its label is `Bots: none...`, `Bots: 3 (Hotshot)...` (or
@@ -854,8 +855,9 @@ layer dead-reckons the target from the state it saw a reaction time ago
 (a straight flight is tracked, a turn is noticed late), then aims with
 lead `ℓ` and the drifting aim error. Target choice with 20 % hysteresis,
 revenge, weak targets and the bounty. The engagement keeps a 35–95 unit
-band and strafes (flip every 0.4–1.2 s). A hit tells the bot the attacker's
-position ±20 units.
+band, closing in and backing off inside it, and jukes across the line of
+sight (below, "Movement and combat fixes"). A hit tells the bot the
+attacker's position ±20 units.
 
 **Steering (deviation).** The design's `axis = angle_error / (max_turn_rate
 × FrameTime)` depends on knowing the ship's turn rate and ignores its
@@ -863,7 +865,8 @@ rotational inertia. B1 asks physics for the ship's real response
 (`compute_rotation_response` / `compute_thrust_response` in `physics.cpp`,
 from the frame-rate-independent drag model) and uses a cascaded
 controller: the wanted rate is proportional to the error (critically
-damped for the ship's time constant) and capped at `turn_cap` × the ship's
+damped for the ship's time constant) plus the rate at which the wanted
+direction turns (feed-forward), capped at `turn_cap` × the ship's
 maximum; the axis is the feed-forward plus rate feedback. It uses only the
 current state, so it is frame-rate independent (the test settles a 90°
 turn in the same time at frame lengths from 2 to 50 ms). The thrust axes
@@ -881,8 +884,10 @@ tries the next 4 points with an fvi of 2/3 of the ship's radius, furthest
 first. Stuck: less than 3 units of progress in 90 ticks; 0.5 s of backing
 off with a random sidestep; the edge gets a 200-unit penalty; replan; after
 3 failures a new goal. A wall probe along the velocity (0.4 s) pushes the
-bot off walls. Goals: none (direct engagement), hunt (the target's last
-seen segment, replanned every 2 s) and roam (a random segment). Doors open
+bot off walls. Goals: hunt (the target's segment, also while fighting it
+in the open; replanned every 2 s, or after 0.5 s when the target moved to
+another segment) and roam (a random segment at least 120 units away).
+Doors open
 through `bot_hit_wall` in `collide_player_and_wall`, the door part of
 `wall_hit_process` without its HUD text.
 
@@ -937,11 +942,122 @@ host's copy, the ghost, and `player_left` to the clients with reason
 `kicked`) and the bot is forgotten. The setup keeps the bot for the next
 game.
 
+**Movement and combat fixes (after the v0.61-exp-8 playtest).** The first
+playtest (one human against Hotshot bots, anarchy, 500 fps) found bots that
+stayed near one spot, shaking, and practically never hit. The causes, found
+by tracing the code and simulating the ship (`test-bot-flight`):
+
+1. *The aim lagged every moving target.* The steering's wanted rate was
+   proportional to the angle error only, so the ship trailed a target
+   whose direction turns at ω by ω × τ (τ = 0.19 s, the ship's turn time
+   constant): 9° behind a player strafing at 50 units/s at 60 units, at
+   every frame rate. The Hotshot fire cone is 6°, so the bots almost never
+   fired, and the rare shots went behind the target. Fix: the tactics
+   layer computes the angular velocity of the line to the aim point
+   (`line_of_sight_rate`, from the target's perceived velocity and the
+   bot's own) and the controller adds it as feed-forward
+   (`rotation_axis(…, feed_forward)`). Tracking error on the same target:
+   0.1–1.7° from 500 to 30 fps (the simulation: 100 % of the time inside
+   the cone, 0 % before).
+2. *The steering errors were the direction's heading and pitch angles*,
+   whose heading swings by up to 180° for a direction near straight up or
+   down (the heading of a point just above the nose flips sides with a
+   tiny motion): the ship shook left and right under or over its target.
+   Fix: the errors are the components of the shortest rotation onto the
+   direction (angle × unit axis), continuous everywhere but straight
+   behind, where the preferred side is kept.
+3. *The fight stood still.* Inside the 35–95 unit band the approach speed
+   was zero and the strafe went straight left and right at 0.6 × top
+   speed, reversing every 0.4–1.2 s; the ship (0.47 s to reach speed) only
+   swung to and fro. In anarchy every bot is every other bot's enemy, so
+   bots met each other, stopped and shook, and (item 1) could not kill
+   each other. Fix: `juke_state`: each run of the strafe takes a new
+   direction across the line of sight at least 90° from the last (with a
+   vertical share, `strafe_vertical`: Hotshot 0.5, Ace 0.8, Insane 1) and
+   a new preferred distance in the band; `combat_velocity` closes in or
+   backs off to it (at most 0.8 × top speed) and strafes at 0.7 × top
+   speed. Run lengths: Trainee 1.2–2 s, Rookie 0.9–1.8 s, Hotshot
+   0.6–1.4 s, Ace 0.5–1.3 s, Insane 0.4–1.1 s. In the simulation a Hotshot
+   fighting a still target covers 130 × 75 × 60 units in 30 s at half the
+   top speed on average, keeps 45–90 units, and has the target in its
+   fire cone all the time.
+4. *The bot stopped dead whenever it had a target but no clear shot yet.*
+   A direct engagement dropped the path; until the reaction delay had
+   passed (280 ms at Hotshot), whenever the line of fire closed, and
+   whenever the target left the field of view, the tactics layer had no
+   path and wanted zero velocity. Fix: the hunt path to the target's
+   segment is kept (and replanned) during the fight, and the bot chases
+   along it in those moments.
+5. *Wall avoidance braked at every bend.* The probe along the velocity
+   (0.4 s) meets the wall of every corridor bend the path is about to
+   take, and each hit pushed back at half the top speed for 150 ms. Now a
+   wall beyond the path point the bot steers at is ignored while it follows
+   its path and flies toward that point (velocity within 40° of the
+   direction to it; `wall_hit_is_bend`), and a hit takes away the speed
+   into the wall (more when near) plus a push of 0.1 × top speed.
+6. *The thrust axes were taken in the frame without the turn roll*, but
+   `apply_pilot_controls` applies them in the rolled frame: a sideways
+   command leaked into vertical by the roll angle (up to about 20°). Now the
+   rotation uses the unrolled frame and the thrust the rolled one
+   (`steer_controls`).
+7. *Small axes were biased at high frame rates.* `fixmul(axis, FrameTime)`
+   truncates toward minus infinity; at 500 fps (FrameTime 131) that is a
+   bias of half a step (0.4 % of full thrust) toward negative. The held
+   time is now rounded. (Not a cause of the shaking: the physics carries
+   its remainders, and the simulation flies the same path at 30 and 500
+   fps within 4 %.) The rounding is `held_axis_time` (bot_brain.h), which
+   the flight test's ship model uses too.
+8. *The stuck recovery could outlive the moment.* It was counted down
+   only while the bot followed its path; a fight in the open (a clear
+   shot) does not follow it, and a replan to the same segment did not end
+   it, so the bot could fly at full speed along the recovery direction
+   into walls for the whole fight. Now the 0.5 s run out on the tactics
+   tick whatever moves the bot (`stuck_detector::tick_recovery`), and
+   combat movement or a new path ends the recovery at once.
+
+Also checked and found correct: the rotation and thrust signs (positive
+pitch lowers the nose, positive heading turns right, as
+`vm_angles_2_matrix` composes them), the units (`rotvel` in revolutions
+per second, the physics' steady states from `compute_*_response`), the
+controls applied every frame through `apply_pilot_controls` (not only on
+the tick), the fire path (`bots_fire` → `do_laser_firing_player` with the
+bot's pilot and fire timer, `MULTI_FIRE` as the bot), the line-of-fire
+check, and the roam goals (a random segment; arrival 1.5 ship radii).
+
+Added with the fixes: roam goals at least 120 units away with a
+neighbour (`pick_roam_goal`, tested for spread and reachability), and a
+first dodge (§4.6): at 20 Hz each projectile within 150 units is judged;
+if it will pass within the ship's radius + 3 in the next 0.7 s, the bot,
+with the skill's `dodge_prob` (Hotshot 0.45), thrusts across its flight,
+away from where it passes, for 0.35 s after half its reaction time. Each
+projectile gets exactly one roll, however heavy the fire: the roll is a
+hash of the projectile's signature and a salt the bot draws once per life
+(`dodge_roll`), not an entry in a list of judged projectiles. The bot's
+own shots are not dodged, nor, with friendly fire off, a partner's
+(teammate, or anyone in cooperative; `shot_worth_dodging`).
+
+Presets unchanged (§5.1): a Monte Carlo of the aim (reaction delay with
+dead reckoning, lead 0.7, σ 2.8°, a target juking at 35–58 units/s every
+0.3–1.2 s, laser speed 120) gives Hotshot about 50 % hits at 40 units, 30 %
+at 60 and 10–15 % at 90, and much more against a target that flies
+straight: the reaction delay, not the lead, is what a human beats. The
+tests: `test-bot-flight` (the steering and a model of the Pyro-GX with
+the game's control quantisation and drag model at 30/60/144/500 fps:
+turns without overshoot or hunting, including straight up and just above
+and behind; a strafing target tracked inside the fire cone, and not
+without the feed-forward; a waypoint course at the same pace at every
+frame rate without weaving; a fight that moves around), `test-bot-brain`
+(the errors near the vertical, the feed-forward, the line-of-sight rate,
+the jukes, the combat velocity, the dodge with its shot filter and one
+roll per projectile, the bend exception, the trigger) and `test-bot-nav`
+(the roam goals, the stuck recovery's expiry).
+
 **Not in B1:** pickups, fuel centres and energy (a bot that runs dry can
 only fire ammunition weapons until it dies; B3), secondaries, afterburner,
-dodging (B4), wall, force field and lava damage to bots, triggers, the
-presets and styles, the `PLAYER_LIST` bot flag, `.ngp` persistence and
-humans replacing bots (B2), adding and removing bots in game (B5).
+the full dodge (homing missiles, the nearer wall; B4), wall, force
+field and lava damage to bots, triggers, the presets and styles, the
+`PLAYER_LIST` bot flag, `.ngp` persistence and humans replacing bots
+(B2), adding and removing bots in game (B5).
 
 ---
 
