@@ -175,8 +175,13 @@ void clock_sync::update(const net_clock now)
 {
 	if (!m_valid)
 		return;
-	if (expire(now) && !m_candidates.empty())
-		m_target = m_candidates.front().offset;
+	if (expire(now))
+		/* A stall that empties the window leaves nothing to aim for:
+		 * the target freezes where the applied offset is, rather than
+		 * keeping the slew running toward a sample that has expired.
+		 * The next sample sets a fresh target.
+		 */
+		m_target = m_candidates.empty() ? m_offset : m_candidates.front().offset;
 	const auto elapsed{now - m_last_update};
 	if (elapsed <= 0)
 		return;
@@ -429,12 +434,18 @@ bool connection::send_unreliable(const chunk_type type, const std::span<const st
 		++m_stats.unreliable_dropped;
 		return false;
 	}
-	if (m_pending_events.size() >= NET_V2_EVENT_QUEUE_MAX)
+	if (m_events_count == NET_V2_EVENT_QUEUE_MAX)
 	{
-		m_pending_events.pop_front();
+		/* Full: the oldest goes. */
+		m_events_head = (m_events_head + 1) % NET_V2_EVENT_QUEUE_MAX;
+		--m_events_count;
 		++m_stats.unreliable_dropped;
 	}
-	m_pending_events.push_back({.chunk = {.type = type, .payload = {payload.begin(), payload.end()}}});
+	auto &e{event_slot(m_events_count)};
+	e.size = payload.size();
+	e.skipped = 0;
+	std::ranges::copy(payload, e.data.begin());
+	++m_events_count;
 	return true;
 }
 
@@ -569,7 +580,7 @@ std::span<const std::uint8_t> connection::build_outgoing(const net_clock now)
 	 * above has run begin_tick).  The tick is opened, and its credit
 	 * spent, only once a packet is really built.
 	 */
-	const bool header_due{any_state_pending() || !m_pending_events.empty() || m_ack_owed || now - m_last_sent >= NET_V2_KEEPALIVE_INTERVAL};
+	const bool header_due{any_state_pending() || m_events_count != 0 || m_ack_owed || now - m_last_sent >= NET_V2_KEEPALIVE_INTERVAL};
 	const bool messages_due{any_message_due()};
 	if (!header_due && !messages_due)
 		return {};
@@ -642,9 +653,9 @@ std::span<const std::uint8_t> connection::build_outgoing(const net_clock now)
 	 */
 	const auto plan{plan_state_parts()};
 	std::size_t reserved{plan.first_packet_bytes};
-	if (opens_tick && !m_pending_events.empty())
+	if (opens_tick && m_events_count != 0)
 	{
-		const auto event_size{chunk_wire_size(m_pending_events.front().chunk.payload.size())};
+		const auto event_size{chunk_wire_size(event_slot(0).size)};
 		if (reserved + event_size <= NET_V2_MAX_PACKET - NET_V2_HEADER_SIZE)
 			reserved += event_size;
 	}
@@ -752,28 +763,32 @@ std::span<const std::uint8_t> connection::build_outgoing(const net_clock now)
 	write_state_parts(buf, pos);
 	/* Events: every one that fits, in queue order; one that does not fit
 	 * is skipped (not a head-of-line block) and dropped once it has been
-	 * skipped NET_V2_EVENT_SKIP_MAX times.
+	 * skipped NET_V2_EVENT_SKIP_MAX times.  Sent and dropped ones leave
+	 * the ring; the kept ones close up behind the head (a slot copy
+	 * each, and few are ever kept).
 	 */
-	for (auto it{m_pending_events.begin()}; it != m_pending_events.end();)
+	std::size_t kept{};
+	for (std::size_t i{}; i != m_events_count; ++i)
 	{
-		const auto &c{it->chunk};
-		if (chunk_wire_size(c.payload.size()) > NET_V2_MAX_PACKET - pos)
+		auto &e{event_slot(i)};
+		if (chunk_wire_size(e.size) > NET_V2_MAX_PACKET - pos)
 		{
-			if (++it->skipped < NET_V2_EVENT_SKIP_MAX)
+			if (++e.skipped < NET_V2_EVENT_SKIP_MAX)
 			{
-				++it;
-				continue;
+				if (kept != i)
+					event_slot(kept) = e;
+				++kept;
 			}
-			++m_stats.unreliable_dropped;
-			it = m_pending_events.erase(it);
+			else
+				++m_stats.unreliable_dropped;
 			continue;
 		}
-		chunk_header{.type = static_cast<std::uint8_t>(c.type), .length = static_cast<std::uint16_t>(c.payload.size())}.write(buf + pos);
+		chunk_header{.type = static_cast<std::uint8_t>(chunk_type::event_u), .length = static_cast<std::uint16_t>(e.size)}.write(buf + pos);
 		pos += NET_V2_CHUNK_HEADER_SIZE;
-		std::ranges::copy(c.payload, buf + pos);
-		pos += c.payload.size();
-		it = m_pending_events.erase(it);
+		std::copy_n(e.data.data(), e.size, buf + pos);
+		pos += e.size;
 	}
+	m_events_count = kept;
 
 	packet_header h;
 	h.session_id = m_config.session_id;
@@ -813,7 +828,7 @@ std::span<const std::uint8_t> connection::build_outgoing(const net_clock now)
 	 * the state chunk gets the tick's second packet, like a blocked
 	 * reliable head.
 	 */
-	m_tick_backlog = any_message_due() || any_state_pending() || !m_pending_events.empty();
+	m_tick_backlog = any_message_due() || any_state_pending() || m_events_count != 0;
 	m_ack_owed = false;
 	++m_stats.packets_sent;
 	return {buf, pos};
@@ -1207,6 +1222,18 @@ receive_report connection::on_receive(const std::span<const std::uint8_t> datagr
 	if (m_any_received)
 	{
 		const auto d{seq_diff(h.seq, m_highest_seen)};
+		if (d > NET_V2_MAX_SEQ_JUMP)
+		{
+			/* A corrupted or forged sequence far ahead: taking it as the
+			 * new highest would reject every real packet that follows as
+			 * a duplicate until the timeout, and make our acks protocol
+			 * errors at the peer.  A protocol error here, once per
+			 * sequence, nothing applied.
+			 */
+			if (count_protocol_error(h.seq, now))
+				close_with(close_reason::protocol_error);
+			return reject(receive_status::bad_seq);
+		}
 		if (d > 0)
 		{
 			const auto shift{static_cast<unsigned>(d)};

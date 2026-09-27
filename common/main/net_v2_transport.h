@@ -51,11 +51,20 @@ namespace dcx {
 namespace net_v2 {
 
 /* Best-effort one-shot chunks (`send_unreliable`) that do not fit in the
- * current packet wait for the next one.  At most this many wait; older
- * ones are dropped first.  This is an implementation bound, not a wire
- * constant.
+ * current packet wait for the next one.  At most this many wait, in a
+ * fixed ring of slots (queueing one allocates nothing); older ones are
+ * dropped first.  This is an implementation bound, not a wire constant.
  */
 constexpr std::size_t NET_V2_EVENT_QUEUE_MAX{64};
+
+/* A well-formed packet whose `seq` is further ahead of the newest seen
+ * than this is rejected (`bad_seq`) and counted as a protocol error: a
+ * conforming peer cannot send that many packets within the 5 s timeout
+ * (3 per tick at 60 Hz is 900), and accepting it would move the reorder
+ * window past every real packet, time the connection out and turn our
+ * acks into protocol errors at the peer.  An implementation bound.
+ */
+constexpr std::int16_t NET_V2_MAX_SEQ_JUMP{4096};
 
 /* A pending event that did not fit beside the state chunk in this many
  * packets is dropped; later events are not held up by it in the
@@ -148,12 +157,9 @@ enum class enqueue_result : std::uint8_t
 	closed,
 };
 
-/* Result of connection::on_receive, in the order of the checks of
- * section 3.7.  Everything from `bad_length` on means the datagram had no
- * effect at all.
- */
 /* Why on_receive dropped a datagram, in the order the checks run (§3.7):
- * the first failing check names the status.
+ * the first failing check names the status.  Everything from `bad_length`
+ * on means the datagram had no effect at all.
  */
 enum class receive_status : std::uint8_t
 {
@@ -178,6 +184,12 @@ enum class receive_status : std::uint8_t
 	closed,
 	/* Already seen, or older than the 64-packet reorder window. */
 	duplicate,
+	/* `seq` is more than NET_V2_MAX_SEQ_JUMP ahead of the newest seen: a
+	 * corrupted or forged sequence, not a stream a conforming peer can
+	 * produce.  Nothing is applied; one protocol error is counted per
+	 * distinct `seq`, and 16 within 10 s close the connection.
+	 */
+	bad_seq,
 	/* `ack` names a packet we have not sent.  Nothing is applied; one
 	 * protocol error is counted per distinct `seq`, as for a malformed
 	 * packet, and 16 within 10 s close the connection the same way.
@@ -209,12 +221,6 @@ struct reliable_message
 	std::span<const std::uint8_t> payload;
 };
 
-struct unreliable_chunk
-{
-	chunk_type type{};
-	std::vector<std::uint8_t> payload;
-};
-
 /* An unreliable chunk as delivered: a view into the datagram the caller
  * passed to on_receive, valid only as long as that buffer is, and at the
  * latest until the next on_receive.  For `state`/`input`, `part` and
@@ -240,11 +246,14 @@ struct receive_report
 	 * Views, see reliable_message.
 	 */
 	std::span<const reliable_message> reliable;
-	/* Every unreliable chunk of the packet, in packet order, except
-	 * `state`/`input` chunks from a packet older than one already seen
-	 * (latest wins across packets; all chunks of one packet count as
-	 * equally new, so a bundle split into two chunks arrives whole).
-	 * Views into the caller's datagram, see unreliable_view.
+	/* Every unreliable chunk of the packet, in packet order, except a
+	 * `state`/`input` part from a packet older than the newest one that
+	 * already delivered that (type, part) within the reorder window:
+	 * latest wins per part (§3.8), so a bundle whose parts travelled in
+	 * different packets is not guaranteed to arrive whole or together;
+	 * consumers keep the newest of each part.  All chunks of one packet
+	 * count as equally new.  Views into the caller's datagram, see
+	 * unreliable_view.
 	 */
 	std::span<const unreliable_view> unreliable;
 };
@@ -487,10 +496,12 @@ class connection
 		std::array<state_part, NET_V2_STATE_MAX_PARTS> parts{};
 	};
 
+	/* A queued best-effort event (always `event_u`), in a fixed slot. */
 	struct pending_event
 	{
-		unreliable_chunk chunk;
+		std::size_t size{};
 		unsigned skipped{};
+		std::array<std::uint8_t, NET_V2_MAX_CHUNK_PAYLOAD> data{};
 	};
 	/* Parsed once by validate_chunks, applied by deliver_*. */
 	struct parsed_message
@@ -567,7 +578,17 @@ class connection
 	std::vector<selected_run> m_runs;
 	/* The outgoing latest-wins bundles, [0] state and [1] input. */
 	std::array<state_bundle, 2> m_state_out{};
-	std::deque<pending_event> m_pending_events;
+	/* The outgoing events: a ring of NET_V2_EVENT_QUEUE_MAX slots, the
+	 * oldest at m_events_head, m_events_count of them in use.
+	 */
+	std::array<pending_event, NET_V2_EVENT_QUEUE_MAX> m_events{};
+	std::size_t m_events_head{};
+	std::size_t m_events_count{};
+	[[nodiscard]]
+	pending_event &event_slot(const std::size_t i)
+	{
+		return m_events[(m_events_head + i) % NET_V2_EVENT_QUEUE_MAX];
+	}
 	/* The newest of our packets sampled through an echo.  Samples
 	 * progress: a conforming peer echoes the newest packet it received,
 	 * so an echo of an older packet in the peer's newest packet is not a

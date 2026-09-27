@@ -941,6 +941,87 @@ void test_unreliable_chunks_per_packet()
 	std::printf("    two STATE chunks in one packet both delivered; an older packet's STATE dropped, its EVENT_U kept\n");
 }
 
+/* Fifteenth review round. */
+
+/* 1. A well-formed packet whose seq is far ahead (a corrupted or forged
+ * bit) is rejected and counted, not taken as the new highest: the stream
+ * continues, and our acks stay valid at the peer.
+ */
+void test_forged_seq_far_ahead()
+{
+	begin("forged seq far ahead");
+	connection a{host_side, 0};
+	connection b{client_side, 0};
+	const std::array<std::uint8_t, 2> x{};
+	const auto exchange{[&](const unsigned i) {
+		const net_clock t{net_clock{i} * TICK};
+		a.set_unreliable_state(chunk_type::state, x);
+		const auto p{a.build_outgoing(t)};
+		CHECK(!p.empty());
+		CHECK_MSG(b.on_receive(p, t + 1).status == receive_status::accepted, "real packet at tick " + std::to_string(i) + " rejected");
+		b.set_unreliable_state(chunk_type::input, x);
+		const auto q{b.build_outgoing(t + 2)};
+		CHECK(!q.empty());
+		CHECK_MSG(a.on_receive(q, t + 3).status == receive_status::accepted, "peer's packet at tick " + std::to_string(i) + " rejected");
+	}};
+	for (unsigned i{}; i != 5; ++i)
+		exchange(i);
+	/* A keepalive (100 ms after the last packet) with bit 14 of its seq
+	 * flipped.
+	 */
+	const net_clock t{11 * TICK};
+	datagram k{[&] { const auto p{a.build_outgoing(t)}; return datagram{p.begin(), p.end()}; }()};
+	auto h{*packet_header::read(k)};
+	CHECK(h.has_flag(packet_flag::keepalive));
+	h.seq = static_cast<std::uint16_t>(h.seq ^ (1u << 14));
+	h.write(k.data());
+	CHECK(b.on_receive(k, t + 1).status == receive_status::bad_seq);
+	CHECK(b.stats().protocol_errors == 1);
+	/* A replay of it counts no further error. */
+	CHECK(b.on_receive(k, t + 2).status == receive_status::bad_seq);
+	CHECK(b.stats().protocol_errors == 1);
+	/* The stream continues, and the peer sees no bad_ack. */
+	for (unsigned i{12}; i != 18; ++i)
+		exchange(i);
+	CHECK(a.stats().protocol_errors == 0 && b.stats().packets_received == 11);
+	CHECK(a.state() == connection_state::connected && b.state() == connection_state::connected);
+	std::printf("    keepalive with seq bit 14 flipped: bad_seq, one protocol error, the stream continues, no bad_ack at the peer\n");
+}
+
+/* 2. When the 2 s sample window empties (a stall), the clock target
+ * freezes at the applied offset instead of the slew running on toward an
+ * expired sample.
+ */
+void test_clock_stall_freezes_offset(const std::uint64_t seed)
+{
+	begin("clock target freezes in a stall");
+	rng r{seed};
+	sim_world w{r, link_params{.latency = net_milliseconds(50)}, {{0, net_seconds(100)}}};
+	w.run(120, [&](const unsigned i) { w.set_state(i); });
+	CHECK(w.peers[1].conn.stats().clock_offset_valid);
+	/* A 50 ms step: below the jump threshold, so it is slewed at 5 ms/s
+	 * once the old samples have left the window.
+	 */
+	w.peers[1].bias += net_milliseconds(50);
+	w.run(130, [&](const unsigned i) { w.set_state(i); });
+	const auto before_stall{w.peers[1].conn.stats()};
+	CHECK_MSG(before_stall.clock_offset_target != before_stall.clock_offset, "slew not in progress: target " + std::to_string(before_stall.clock_offset_target) + " applied " + std::to_string(before_stall.clock_offset));
+	/* Nothing gets through for 2.5 s (the timeout is 5 s). */
+	w.link.blocked = {{true, true}};
+	w.run(60, [&](const unsigned i) { w.set_state(i); });
+	const auto slewing{w.peers[1].conn.stats().clock_offset};
+	CHECK_MSG(slewing != before_stall.clock_offset, "the slew stopped while samples were still in the window");
+	w.run(72, [&](const unsigned i) { w.set_state(i); });
+	const auto frozen{w.peers[1].conn.stats()};
+	w.run(18, [&](const unsigned i) { w.set_state(i); });
+	const auto later{w.peers[1].conn.stats()};
+	CHECK_MSG(later.clock_offset == frozen.clock_offset, "applied offset still moving after the window emptied: " + std::to_string(frozen.clock_offset) + " -> " + std::to_string(later.clock_offset));
+	CHECK(later.clock_offset_target == later.clock_offset);
+	CHECK(later.state == connection_state::connected);
+	const auto truth{w.peers[0].bias - w.peers[1].bias};
+	std::printf("    50 ms step, then a 2.5 s stall: the applied offset slews until the window empties, then holds %.2f ms from the truth\n", to_ms(later.clock_offset - truth));
+}
+
 /* Fourteenth review round. */
 
 /* 1. Priority within a tick: state parts, then reliable messages, then
@@ -2023,7 +2104,10 @@ void test_stream_stalled()
 	h.peer_token = host_side.peer_token;
 	h.player_id = host_side.local_player_id;
 	h.flags = static_cast<std::uint8_t>(packet_flag::has_reliable);
-	h.seq = 60000;
+	/* Just below the wrap, so that a's real packets (seq 1, 2, ...) are
+	 * a plausible continuation (within NET_V2_MAX_SEQ_JUMP).
+	 */
+	h.seq = 65000;
 	datagram d(NET_V2_HEADER_SIZE + NET_V2_CHUNK_HEADER_SIZE + NET_V2_RELIABLE_RUN_HEADER_SIZE + NET_V2_MESSAGE_HEADER_SIZE);
 	h.write(d.data());
 	auto *p{d.data() + NET_V2_HEADER_SIZE};
@@ -3018,6 +3102,8 @@ int main(const int argc, char **const argv)
 	test_bounds(seed);
 	test_timeouts(seed);
 	test_replay(seed);
+	test_forged_seq_far_ahead();
+	test_clock_stall_freezes_offset(seed);
 	test_reliable_before_events(seed);
 	test_bound_hold_ages_by_ticks();
 	test_held_message_view_lifetime();
