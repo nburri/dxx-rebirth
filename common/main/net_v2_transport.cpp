@@ -84,6 +84,14 @@ void rtt_estimator::add_sample(const net_clock r)
 	m_rttvar = std::max(m_rttvar, m_hold_period / 4);
 }
 
+void rtt_estimator::add_bound(const net_clock r)
+{
+	if (!m_valid)
+		return;
+	const auto err{m_srtt > r ? m_srtt - r : r - m_srtt};
+	m_rttvar = std::max((3 * m_rttvar + err) / 4, m_hold_period / 4);
+}
+
 
 net_clock rtt_estimator::rto() const
 {
@@ -460,10 +468,16 @@ void connection::detect_rto_losses(const net_clock now)
 void connection::update(const net_clock now)
 {
 	m_clock.update(now);
-	begin_tick(now);
+	grant_ticks(now);
 }
 
 unsigned connection::begin_tick(const net_clock now)
+{
+	grant_ticks(now);
+	return std::exchange(m_unreported_ticks, 0u);
+}
+
+void connection::grant_ticks(const net_clock now)
 {
 	/* Exact: times scaled by the period's denominator, periods in units
 	 * of the numerator.
@@ -477,7 +491,7 @@ unsigned connection::begin_tick(const net_clock now)
 	 */
 	const auto elapsed{now * tick.denominator - m_tick_origin + tick.denominator};
 	if (elapsed < tick.numerator)
-		return 0;
+		return;
 	auto ticks{elapsed / tick.numerator};
 	m_tick_origin += ticks * tick.numerator;
 	if (!m_tick_granted)
@@ -489,6 +503,7 @@ unsigned connection::begin_tick(const net_clock now)
 		ticks = 1;
 	}
 	m_tick_credit = static_cast<unsigned>(std::min<net_clock>(ticks, NET_V2_TICK_GRANT_MAX));
+	m_unreported_ticks = std::min(m_unreported_ticks + m_tick_credit, NET_V2_TICK_GRANT_MAX);
 	/* Whatever was left of the previous tick is not carried on top. */
 	m_tick_open = false;
 	m_tick_packets = 0;
@@ -497,7 +512,6 @@ unsigned connection::begin_tick(const net_clock now)
 	 */
 	check_timeouts(now);
 	detect_rto_losses(now);
-	return m_tick_credit;
 }
 
 std::span<const std::uint8_t> connection::build_outgoing(const net_clock now)
@@ -575,8 +589,20 @@ std::span<const std::uint8_t> connection::build_outgoing(const net_clock now)
 	 * that does not fit beside them rides a later packet of the tick,
 	 * which the budget below always leaves room for.
 	 */
-	const std::size_t state_size{plan_state_parts().first_packet_bytes};
-	select(state_size);
+	/* Room for the state parts that fit and for the head pending event:
+	 * neither must be crowded out by reliable messages, which have their
+	 * own later packets; an event that does not fit even so goes to the
+	 * tick's second packet, like a blocked reliable head.
+	 */
+	const auto plan{plan_state_parts()};
+	std::size_t reserved{plan.first_packet_bytes};
+	if (!m_pending_events.empty())
+	{
+		const auto event_size{chunk_wire_size(m_pending_events.front().chunk.payload.size())};
+		if (reserved + event_size <= NET_V2_MAX_PACKET - NET_V2_HEADER_SIZE)
+			reserved += event_size;
+	}
+	select(reserved);
 	if (!header_due && m_carried.empty())
 		/* Something is due but did not fit this time; never emit an
 		 * empty packet for it, or the caller's send loop would not end.
@@ -591,7 +617,7 @@ std::span<const std::uint8_t> connection::build_outgoing(const net_clock now)
 		 * than one packet (§3.8) gets one packet more than it needs, so
 		 * that a blocked head message never displaces a part.
 		 */
-		const auto needed{plan_state_parts().packets};
+		const auto needed{plan.packets};
 		m_tick_budget = std::max(m_config.max_packets_per_tick, needed > 1 ? needed + 1 : 0u);
 	}
 
@@ -789,7 +815,7 @@ void connection::pop_acked_messages()
  * fields are the RTT measurement of choice (they account for the peer's
  * hold); an ack measures a packet only when no echo ever came for it.
  */
-void connection::process_acks(const std::uint16_t ack, const std::uint64_t ack_bits, const net_clock now, const bool echo_before_valid, const std::uint16_t echo_before)
+void connection::process_acks(const std::uint16_t ack, const std::uint64_t ack_bits, const net_clock now, const bool newest_carrier, const bool echo_before_valid, const std::uint16_t echo_before)
 {
 	if (ack == 0 && ack_bits == 0)
 		/* The peer has not received anything from us yet. */
@@ -800,9 +826,19 @@ void connection::process_acks(const std::uint16_t ack, const std::uint64_t ack_b
 			continue;
 		const auto s{static_cast<std::uint16_t>(ack - i)};
 		auto &e{m_packet_log[s % NET_V2_RECV_WINDOW]};
-		if (!e.valid || e.seq != s || e.acked || e.lost)
+		if (!e.valid || e.seq != s || e.acked)
 			continue;
-		if (!e.echoed && echo_before_valid && seq_diff(echo_before, s) > 0)
+		if (e.lost)
+		{
+			/* Given up on too early: a late ack still acknowledges the
+			 * messages (they were delivered), and the loss estimate takes
+			 * the packet back.
+			 */
+			e.lost = false;
+			--m_stats.packets_lost;
+			m_loss_estimate = std::max(0.0, m_loss_estimate - 1.0 / (1 << NET_V2_LOSS_EWMA_SHIFT));
+		}
+		if (!e.echoed && newest_carrier && echo_before_valid && seq_diff(echo_before, s) > 0)
 		{
 			/* A later packet of ours was already echoed before this one
 			 * was first acknowledged: it arrived out of order at the
@@ -812,7 +848,9 @@ void connection::process_acks(const std::uint16_t ack, const std::uint64_t ack_b
 			 * merely left unechoed because the peer sends fewer packets
 			 * than we do is not measured this way: that ack would carry
 			 * the peer's hold at full weight into srtt, the HUD ping and
-			 * the host's rewind.
+			 * the host's rewind.  Nor is one whose first ack rides a
+			 * reordered older peer packet: that ack carries the peer
+			 * packet's own delay.
 			 */
 			const auto r{now - e.sent_at};
 			if (r >= 0 && r <= NET_V2_RTT_SAMPLE_MAX)
@@ -1145,6 +1183,13 @@ receive_report connection::on_receive(const std::span<const std::uint8_t> datagr
 	++m_stats.packets_received;
 	const bool echo_before_valid{m_echo_sampled_any};
 	const auto echo_before{m_echo_sampled_seq};
+	/* Only the newest packet received measures the round trip: a
+	 * reordered older peer packet carries its own reorder delay in every
+	 * sample it could give.  That delay is exactly what a late ack costs
+	 * us, so such an echo widens rttvar (a bound) and never moves srtt;
+	 * the packet's acks are honoured below.
+	 */
+	const bool newest{!m_any_received || seq_diff(h.seq, m_highest_seen) > 0};
 	if (!(h.ack == 0 && h.ack_bits == 0) && h.echo_delay != NET_V2_ECHO_DELAY_SATURATED)
 	{
 		/* The echo describes the packet `ack` names (the newest the peer
@@ -1167,7 +1212,12 @@ receive_report connection::on_receive(const std::span<const std::uint8_t> datagr
 			 * moving the echo mark, which would make older packets look
 			 * reordered.
 			 */
-			if (rtt >= 0 && rtt <= NET_V2_RTT_SAMPLE_MAX)
+			if (rtt >= 0 && rtt <= NET_V2_RTT_SAMPLE_MAX && !newest)
+			{
+				e.echoed = true;
+				m_rtt.add_bound(rtt);
+			}
+			else if (rtt >= 0 && rtt <= NET_V2_RTT_SAMPLE_MAX)
 			{
 				e.echoed = true;
 				if (!m_echo_sampled_any || seq_diff(h.ack, m_echo_sampled_seq) > 0)
@@ -1181,12 +1231,11 @@ receive_report connection::on_receive(const std::span<const std::uint8_t> datagr
 			}
 		}
 	}
-	process_acks(h.ack, h.ack_bits, now, echo_before_valid, echo_before);
+	process_acks(h.ack, h.ack_bits, now, newest, echo_before_valid, echo_before);
 	/* Step 9: record and apply.  Only the newest packet moves the echo
 	 * fields: echoing a late, reordered packet would inflate the peer's
 	 * RTT sample by the reorder delay.
 	 */
-	const bool newest{!m_any_received || seq_diff(h.seq, m_highest_seen) > 0};
 	m_any_received = true;
 	m_ack_bits = new_ack_bits;
 	if (newest)

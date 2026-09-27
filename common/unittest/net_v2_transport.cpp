@@ -608,7 +608,15 @@ void test_bounds(const std::uint64_t seed)
 		/* A pending state chunk above the chunk limit is dropped, not sent. */
 		c.set_unreliable_state(chunk_type::state, std::vector<std::uint8_t>(NET_V2_MAX_CHUNK_PAYLOAD + 1));
 		CHECK(c.stats().unreliable_dropped == 1);
-		std::printf("    oversize message rejected at enqueue\n");
+		/* The state part boundary: the maximum is taken, one more is not. */
+		connection s{host_side, 0};
+		s.set_unreliable_state(chunk_type::state, std::vector<std::uint8_t>(NET_V2_MAX_STATE_PART));
+		CHECK(s.stats().unreliable_dropped == 0);
+		CHECK(s.build_outgoing(0).size() == NET_V2_MAX_PACKET);
+		s.set_unreliable_state(chunk_type::state, std::vector<std::uint8_t>(NET_V2_MAX_STATE_PART + 1));
+		CHECK(s.stats().unreliable_dropped == 1);
+		CHECK(s.build_outgoing(TICK).empty());
+		std::printf("    oversize message rejected at enqueue; state part of %zu bytes taken, %zu dropped\n", NET_V2_MAX_STATE_PART, NET_V2_MAX_STATE_PART + 1);
 	}
 	{
 		/* Message count bound */
@@ -921,6 +929,172 @@ void test_unreliable_chunks_per_packet()
 	CHECK(r2.status == receive_status::accepted);
 	CHECK_MSG(r2.unreliable.size() == 1 && r2.unreliable[0].type == chunk_type::event_u, "reordered packet delivered " + std::to_string(r2.unreliable.size()) + " chunks");
 	std::printf("    two STATE chunks in one packet both delivered; an older packet's STATE dropped, its EVENT_U kept\n");
+}
+
+/* Eleventh review round. */
+
+/* 1. The documented frame-rate pattern works in any call order: update()
+ * first, then begin_tick, still reports the tick.
+ */
+void test_frame_rate_caller_update_first()
+{
+	begin("500 Hz caller, update() before begin_tick");
+	connection a{host_side, 0};
+	connection b{client_side, 0};
+	const std::array<std::uint8_t, 40> state{};
+	unsigned ticks{}, states{}, doubles{};
+	for (unsigned f{}; f != 5000; ++f)
+	{
+		const net_clock now{net_clock{f} * net_seconds(1) / 500};
+		a.update(now);
+		if (a.begin_tick(now))
+		{
+			++ticks;
+			a.set_unreliable_state(chunk_type::state, state);
+			/* Asking again in the same tick reports nothing. */
+			if (a.begin_tick(now))
+				++doubles;
+		}
+		for (;;)
+		{
+			const auto p{a.build_outgoing(now)};
+			if (p.empty())
+				break;
+			const auto report{b.on_receive(p, now + 1)};
+			CHECK(report.status == receive_status::accepted);
+			states += static_cast<unsigned>(report.unreliable.size());
+		}
+		if (f % 8 == 7)
+		{
+			const auto ack{b.build_outgoing(now + 2)};
+			if (!ack.empty())
+				CHECK(a.on_receive(ack, now + 3).status == receive_status::accepted);
+		}
+	}
+	CHECK_MSG(a.stats().unreliable_dropped == 0, "states dropped " + std::to_string(a.stats().unreliable_dropped));
+	CHECK_MSG(ticks >= 599 && ticks <= 601, "ticks " + std::to_string(ticks));
+	CHECK(states == ticks && doubles == 0);
+	std::printf("    5000 frames with update() first: %u ticks reported, %u states delivered, none dropped, no double report\n", ticks, states);
+}
+
+/* 2. Events keep their room beside a standing reliable backlog. */
+void test_event_beside_backlog(const std::uint64_t seed)
+{
+	begin("event beside a reliable backlog");
+	rng r{seed};
+	sim_world w{r, link_params{.latency = net_milliseconds(30)}};
+	const datagram big(900);
+	std::uint32_t sent{};
+	w.run(60, [&](const unsigned i) {
+		w.set_state(i);
+		if (i == 0)
+		{
+			while (w.peers[0].conn.stats().queue_messages < 4)
+			{
+				CHECK(w.peers[0].conn.enqueue_reliable(9, big) == enqueue_result::ok);
+				w.peers[0].sent.push_back({.type = 9, .payload = big});
+			}
+			datagram e(300);
+			net_put_le32(e.data(), sent++);
+			CHECK(w.peers[0].conn.send_unreliable(chunk_type::event_u, e));
+		}
+	});
+	w.run(10, [&](const unsigned i) { w.set_state(i); });
+	check_delivery(w, 0);
+	const auto host{w.peers[0].conn.stats()};
+	CHECK_MSG(host.unreliable_dropped == 0, "events dropped " + std::to_string(host.unreliable_dropped));
+	CHECK_MSG(w.peers[1].events_seen.size() == 60, "events delivered " + std::to_string(w.peers[1].events_seen.size()) + " of 60");
+	std::printf("    300-byte event per tick beside 900-byte reliable messages: 60 of 60 delivered, none dropped\n");
+}
+
+/* 3. A reordered older peer packet neither samples the RTT nor lets its
+ * acks measure a packet: the peer->us reorder delay stays out of srtt.
+ */
+void test_late_peer_packet_no_sample()
+{
+	begin("late peer packet gives no sample");
+	connection a{host_side, 0};
+	connection b{client_side, 0};
+	const std::array<std::uint8_t, 2> x{};
+	a.set_unreliable_state(chunk_type::state, x);
+	const auto p1{a.build_outgoing(0)};
+	CHECK(b.on_receive(p1, 1000).status == receive_status::accepted);
+	b.set_unreliable_state(chunk_type::input, x);
+	const datagram q1{[&] { const auto p{b.build_outgoing(1100)}; return datagram{p.begin(), p.end()}; }()};
+	a.set_unreliable_state(chunk_type::state, x);
+	const auto p2{a.build_outgoing(TICK)};
+	CHECK(b.on_receive(p2, TICK + 1000).status == receive_status::accepted);
+	b.set_unreliable_state(chunk_type::input, x);
+	const datagram q2{[&] { const auto p{b.build_outgoing(TICK + 1100)}; return datagram{p.begin(), p.end()}; }()};
+	/* Q2 arrives on time and measures packet 2: 2100 units. */
+	CHECK(a.on_receive(q2, TICK + 2200).status == receive_status::accepted);
+	const auto s1{a.stats()};
+	CHECK_MSG(s1.rtt_valid && s1.srtt == 2100, "srtt " + std::to_string(s1.srtt));
+	/* Q1 arrives 4 s late: accepted, its acks honoured, srtt untouched;
+	 * its delay only widens rttvar (that is what a late ack costs).
+	 */
+	CHECK(a.on_receive(q1, TICK + 2200 + 4 * net_seconds(1)).status == receive_status::accepted);
+	const auto s2{a.stats()};
+	CHECK_MSG(s2.srtt == s1.srtt, "srtt " + std::to_string(s2.srtt) + " after the late packet");
+	CHECK_MSG(s2.rttvar > s1.rttvar, "rttvar " + std::to_string(s2.rttvar) + " vs " + std::to_string(s1.rttvar));
+	CHECK(s2.packets_acked == 2);
+	std::printf("    Q2 on time (srtt 2100 units), Q1 four seconds late: srtt unchanged, rttvar widened, both acks honoured\n");
+}
+
+/* 4. A late ack of packets already given up as lost still acknowledges
+ * their messages: they are not resent, and the loss estimate takes them
+ * back.
+ */
+void test_late_ack_of_lost_packets()
+{
+	begin("late ack of packets marked lost");
+	connection a{host_side, 0};
+	connection b{client_side, 0};
+	const std::array<std::uint8_t, 4> x{{1, 2, 3, 4}};
+	/* 70 packets in 35 ticks (two 1 KiB messages per tick, one packet
+	 * each), well inside the initial 1 s RTO, so only the late ack is
+	 * under test.
+	 */
+	const datagram big(NET_V2_MAX_MESSAGE);
+	std::vector<datagram> packets;
+	for (unsigned i{}; i != 35; ++i)
+	{
+		CHECK(a.enqueue_reliable(1, big) == enqueue_result::ok);
+		CHECK(a.enqueue_reliable(1, big) == enqueue_result::ok);
+		for (unsigned k{}; k != 2; ++k)
+		{
+			const auto p{a.build_outgoing(net_clock{i + 1} * TICK)};
+			CHECK(!p.empty());
+			packets.emplace_back(p.begin(), p.end());
+		}
+	}
+	const net_clock t{36 * TICK};
+	/* The peer acks packets 1-5 first (A1), then 6-70 (A2). */
+	for (unsigned i{}; i != 5; ++i)
+		CHECK(b.on_receive(packets[i], t + i).status == receive_status::accepted);
+	b.set_unreliable_state(chunk_type::input, x);
+	const datagram a1{[&] { const auto p{b.build_outgoing(t + 10)}; return datagram{p.begin(), p.end()}; }()};
+	for (unsigned i{5}; i != 70; ++i)
+		CHECK(b.on_receive(packets[i], t + 20 + i).status == receive_status::accepted);
+	b.set_unreliable_state(chunk_type::input, x);
+	const datagram a2{[&] { const auto p{b.build_outgoing(t + TICK)}; return datagram{p.begin(), p.end()}; }()};
+	/* A2 arrives first: packets 1-5 fall out of the bitfield and are
+	 * given up, their messages flagged for retransmission.
+	 */
+	CHECK(a.on_receive(a2, t + TICK + 1).status == receive_status::accepted);
+	auto s{a.stats()};
+	CHECK_MSG(s.packets_lost == 5 && s.resends_by_gap == 5, "lost " + std::to_string(s.packets_lost) + ", gap resends flagged " + std::to_string(s.resends_by_gap));
+	/* A1 arrives late, before the next build: the messages were
+	 * delivered, so nothing is resent.
+	 */
+	CHECK(a.on_receive(a1, t + TICK + 2).status == receive_status::accepted);
+	s = a.stats();
+	CHECK_MSG(s.packets_lost == 0 && s.packets_acked == 70, "lost " + std::to_string(s.packets_lost) + ", acked " + std::to_string(s.packets_acked));
+	CHECK(s.in_flight == 0 && s.queue_messages == 0);
+	(void)a.build_outgoing(38 * TICK);
+	CHECK(a.stats().message_resends == 0);
+	CHECK(b.stats().messages_delivered == 70);
+	std::printf("    acks of packets 1-5 arrive after those of 6-70: given up, then taken back, no message resent\n");
 }
 
 /* Tenth review round. */
@@ -2493,6 +2667,10 @@ int main(const int argc, char **const argv)
 	test_bounds(seed);
 	test_timeouts(seed);
 	test_replay(seed);
+	test_frame_rate_caller_update_first();
+	test_event_beside_backlog(seed);
+	test_late_peer_packet_no_sample();
+	test_late_ack_of_lost_packets();
 	test_event_beside_big_state(seed);
 	test_gap_rule_counts_acks();
 	test_rejected_sample_keeps_packet();

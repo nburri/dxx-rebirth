@@ -290,6 +290,12 @@ public:
 	{
 	}
 	void add_sample(net_clock r);
+	/* A bound on a round trip rather than a measurement of it (the echo
+	 * of a reordered peer packet, which carries that packet's own
+	 * delay): it widens rttvar, so that the RTO covers such a delay, but
+	 * never moves srtt.  Ignored before the first real sample.
+	 */
+	void add_bound(net_clock r);
 	/* The hold term changed (the peer's tick became known). */
 	void set_hold_period(const net_clock hold_period)
 	{
@@ -498,6 +504,8 @@ class connection
 	net_clock m_tick_origin{};
 	bool m_tick_granted{};
 	unsigned m_tick_credit{};
+	/* Ticks granted since begin_tick last reported them. */
+	unsigned m_unreported_ticks{};
 	bool m_tick_open{};
 	unsigned m_tick_packets{};
 	/* Packets allowed in the open tick: max_packets_per_tick, or one
@@ -555,10 +563,14 @@ class connection
 	connection_stats m_stats;
 
 	void close_with(close_reason reason);
+	/* The period arithmetic behind begin_tick: grant the ticks elapsed,
+	 * judge the timeouts and the RTO once per grant.
+	 */
+	void grant_ticks(net_clock now);
 	void check_timeouts(net_clock now);
 	void detect_rto_losses(net_clock now);
 	void flag_resend(out_msg &m);
-	void process_acks(std::uint16_t ack, std::uint64_t ack_bits, net_clock now, bool echo_before_valid, std::uint16_t echo_before);
+	void process_acks(std::uint16_t ack, std::uint64_t ack_bits, net_clock now, bool newest_carrier, bool echo_before_valid, std::uint16_t echo_before);
 	void resolve_packet(packet_log_entry &e, bool acked);
 	void pop_acked_messages();
 	[[nodiscard]]
@@ -632,12 +644,15 @@ public:
 	 * that was open, so an unfinished allowance is never spent on top of
 	 * the new one.
 	 *
-	 * Returns the ticks granted by this call (0 if none).  build_outgoing
-	 * calls this itself; a caller running faster than the tick (a game
-	 * loop at frame rate) calls it first and sets the state chunk only
-	 * when it returned non-zero, so that a state is never replaced
-	 * before it was sent:
+	 * Returns the ticks granted since the caller last asked (0 if none).
+	 * update() and build_outgoing() grant ticks as well but never consume
+	 * this report, so the order of calls does not matter and a second
+	 * call within the same tick returns 0.  A caller running faster than
+	 * the tick (a game loop at frame rate) sets the state chunk only when
+	 * it returned non-zero, so that a state is never replaced before it
+	 * was sent:
 	 *
+	 *	c.update(now);	// optional
 	 *	if (c.begin_tick(now))
 	 *		c.set_unreliable_state(chunk_type::state, bundle);
 	 *	while (!(packet = c.build_outgoing(now)).empty())
@@ -667,8 +682,8 @@ public:
 	void set_peer_tick(tick_period peer_tick);
 
 	/* Advance the clock slew and, once per tick period, the timeouts
-	 * and the RTO loss detection (begin_tick), without building a packet.
-	 * build_outgoing does this too.
+	 * and the RTO loss detection, without building a packet and without
+	 * consuming begin_tick's report.  build_outgoing does this too.
 	 */
 	void update(net_clock now);
 
