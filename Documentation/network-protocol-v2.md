@@ -335,7 +335,7 @@ on_tick(build packet):
 on_ack(header.ack, header.ack_bits):
     for each packet_seq in {ack} ∪ {ack-1-i | bit i set}, not yet acked:
         mark acked (also if it had been given up as lost: a late ack still counts);
-        if a later packet was echoed before this one was acked, rtt sample from its sent_at (§3.5)
+        if a later packet was echoed before this one was acked, rttvar bound from its sent_at (§3.5; srtt untouched)
         for each msg_seq in it: erase from in_flight
     for each in_flight message m not acked:
         lost_by_gap = acked packets after m.in_packet_seq >= 3   // ack itself + set bits between
@@ -379,27 +379,42 @@ Per connection (Jacobson/Karels, RFC 6298 constants):
 ```
 first sample:   srtt = r;  rttvar = r/2
 later samples:  rttvar = 3/4 rttvar + 1/4 |srtt - r|;  srtt = 7/8 srtt + 1/8 r
+bound b:        rttvar = 3/4 rttvar + 1/4 |srtt - b|;  excess = max(excess, b - srtt)
+each tick, once no bound came for 1 s:  excess = 15/16 excess
 always:         rttvar = max(rttvar, hold/4)
-rto = clamp(srtt + 4 rttvar + hold + tick, NET_V2_RTO_MIN = 50 ms, NET_V2_RTO_MAX = 1000 ms)
+rto = clamp(srtt + max(4 rttvar, excess) + hold + tick, NET_V2_RTO_MIN = 50 ms, NET_V2_RTO_MAX = 1000 ms)
 ```
 
 where `tick` is the sender's own tick period and `hold` the longer of its own
 and the peer's (the peer holds an ack until its next tick; the sender looks
 for losses only at its own). The two holds are added because the samples
 exclude them: on a steady link `rttvar` alone would not cover them, and the
-floor keeps `rttvar` from collapsing to zero.
+floor keeps `rttvar` from collapsing to zero. A bound is a delayed round trip
+that did happen (below); `rttvar` is a mean deviation and forgets it within a
+few samples while the next packet may be held just as long, so the largest
+excess of a bound over `srtt` is kept for as long as bounds keep coming and
+for a second after the last, then fades by a sixteenth per tick, and the RTO
+covers it whenever it exceeds the variance term: a loss is not declared
+before a delay that was just seen.
 
-- RTT samples come from the echo fields (`echo_time`, `echo_delay`, §2.2):
-  one sample per packet sent, at most, when a received packet's `ack` names
-  it, its `send_time` matches, and it was not sampled before. An ack
-  measures a packet only if a later-sent packet had already been echoed
-  before this one was first acked: it arrived out of order at the peer,
-  which echoes only its newest, so no echo will ever measure it, and its ack
-  is the one measurement of that delayed round trip, which the RTO must
-  cover. A packet left unechoed merely because the peer sends fewer packets
-  than the sender is not measured by its ack, which would carry the peer's
-  hold into `srtt` (the HUD ping and the rewind amount). Karn's rule is
-  moot: packets are never retransmitted, only messages are.
+- RTT samples come from the echo fields (`echo_time`, `echo_delay`, §2.2)
+  of the newest packet received: one sample per packet sent, at most, when
+  that packet's `ack` names it, its `send_time` matches, it was not sampled
+  before, and it is newer than the packet last sampled (a conforming peer
+  echoes the newest packet it received, so an echo of an older one is never
+  genuine and is ignored; otherwise a hostile peer could name a seconds-old
+  unechoed packet with `echo_delay` 0). `srtt` moves on samples alone.
+  Bounds widen `rttvar` only (`rttvar = 3/4 rttvar + 1/4 |srtt - r|`, with
+  the floor): the echo carried by a reordered older peer packet, whose own
+  delay is what a late ack costs, and the ack of a packet that was first
+  acked only after a later-sent packet had already been echoed, which
+  arrived out of order at the peer, will never be echoed, and whose ack is
+  the one word about that delayed round trip, which the RTO must cover. An
+  ack is never a sample: it includes the peer's hold, and a peer may hold
+  ack bits back at will. A packet left unechoed merely because the peer
+  sends fewer packets than the sender is not bounded by its ack either
+  (the RTO already adds the hold). Karn's rule is moot: packets are never
+  retransmitted, only messages are.
 - A message is retransmitted by the gap rule (3 later packets acked) *or* by
   the RTO, whichever comes first. With 60 packets per second the gap rule fires
   about 50 ms after the loss; the RTO is the fallback for the tail of a burst.
@@ -457,11 +472,12 @@ address with an implausible `seq` is dropped.
    packet never reaches the game layer twice.
 7. Update the peer's `last_heard`; RTT and clock sample from `echo_*` if
    `ack` names a logged packet whose `send_time` is `echo_time`,
-   `echo_delay < 65535`, and that packet has not been sampled before (each
-   packet at most once; a repeated echo yields no sample, §2.2). Only the
-   newest packet received measures `srtt`; a reordered older one carries
-   its own reorder delay, which is what a late ack costs, so its echo
-   widens `rttvar` only.
+   `echo_delay < 65535`, that packet has not been sampled before (each
+   packet at most once; a repeated echo yields no sample, §2.2), and it is
+   newer than the packet last sampled (an echo of an older one is not
+   genuine and is ignored). Only the newest packet received measures
+   `srtt`; a reordered older one carries its own reorder delay, which is
+   what a late ack costs, so its echo widens `rttvar` only.
 8. Walk the chunks. Every chunk must fit; every `RELIABLE` message must fit
    its chunk; every `STATE`/`INPUT` record must have the exact size for its
    flags. The first violation drops the whole packet: nothing of it is
