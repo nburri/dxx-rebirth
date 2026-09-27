@@ -195,7 +195,8 @@ enum class player_dead_state : uint8_t
 
 namespace dcx {
 
-extern player_dead_state Player_dead_state;          // !0 means player is dead!
+/* Local_pilot.dead_state (pilot.h): !0 means the local player is dead! */
+extern player_dead_state &Player_dead_state;
 extern objnum_t Player_fired_laser_this_frame;
 
 // create quaternion structure from object data which greatly saves bytes by using quaternion instead or orientation matrix
@@ -303,7 +304,7 @@ void obj_attach(object_array &Objects, vmobjptridx_t parent, vmobjptridx_t sub);
 void create_small_fireball_on_object(vmobjptridx_t objp, fix size_scale, int sound_flag);
 
 #if DXX_BUILD_DESCENT == 2
-extern int Drop_afterburner_blob_flag;		//ugly hack
+extern int &Drop_afterburner_blob_flag;		//ugly hack; Local_pilot.drop_afterburner_blob_flag (pilot.h)
 enum class game_marker_index : uint8_t;
 enum class player_marker_index : uint8_t;
 // returns object number

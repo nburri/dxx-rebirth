@@ -53,6 +53,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "render.h"
 #include "piggy.h"
 #include "laser.h"
+#include "pilot.h"
 #include "weapon.h"
 #include "common/3d/globvars.h"
 #include "playsave.h"
@@ -3290,7 +3291,7 @@ void show_reticle(grs_canvas &canvas, const player_info &player_info, enum retic
 	y = canvas.cv_bitmap.bm_h/2;
 	size = (canvas.cv_bitmap.bm_h / (32-(PlayerCfg.ReticleSize*4)));
 
-	laser_ready = allowed_to_fire_laser(player_info);
+	laser_ready = allowed_to_fire_laser(Local_pilot, player_info);
 
 	missile_ready = allowed_to_fire_missile(player_info);
 	auto &Primary_weapon = player_info.Primary_weapon;

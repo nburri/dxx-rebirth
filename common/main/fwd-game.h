@@ -116,7 +116,8 @@ template <typename T>
 struct d_game_shared_state;
 struct d_game_unique_state;
 
-extern int Global_missile_firing_count;
+/* Local_pilot.missile_firing_count (pilot.h) */
+extern int &Global_missile_firing_count;
 
 extern int PaletteRedAdd, PaletteGreenAdd, PaletteBlueAdd;
 
@@ -250,7 +251,9 @@ struct game_cheats;
 extern game_cheats cheats;
 
 game_window *game_setup();
-bool allowed_to_fire_laser(const player_info &);
+struct pilot;
+/* Clears the pilot's pending missiles if the pilot is dead. */
+bool allowed_to_fire_laser(pilot &, const player_info &);
 void reset_globals_for_new_game();
 void check_rear_view(control_info &Controls);
 int create_special_path();

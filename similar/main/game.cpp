@@ -133,7 +133,7 @@ int	PaletteRedAdd, PaletteGreenAdd, PaletteBlueAdd;
 
 int Game_suspended{0}; //if non-zero, nothing moves but player
 game_mode_flags Game_mode;
-int Global_missile_firing_count{0};
+int &Global_missile_firing_count{Local_pilot.missile_firing_count};
 
 std::optional<Difficulty_level_type> build_difficulty_level_from_untrusted(const int8_t untrusted)
 {
@@ -1355,11 +1355,11 @@ void palette_restore(void)
 }
 
 //	--------------------------------------------------------------------------------------------------
-bool allowed_to_fire_laser(const player_info &player_info)
+bool allowed_to_fire_laser(pilot &p, const player_info &player_info)
 {
-	if (Player_dead_state != player_dead_state::no)
+	if (p.dead_state != player_dead_state::no)
 	{
-		Global_missile_firing_count = 0;
+		p.missile_firing_count = 0;
 		return 0;
 	}
 
@@ -2129,7 +2129,7 @@ window_event_result GameProcessFrame(const d_level_shared_robot_info_state &Leve
 		}
 
 		if (laser_firing_count)
-			do_laser_firing_player(plrobj);
+			do_laser_firing_player(Local_pilot, Objects.vmptridx(get_local_player().objnum));
 		delayed_autoselect(player_info, Controls);
 	}
 
@@ -2139,7 +2139,7 @@ window_event_result GameProcessFrame(const d_level_shared_robot_info_state &Leve
 	}
 
 #if DXX_BUILD_DESCENT == 2
-	omega_charge_frame(player_info);
+	omega_charge_frame(Local_pilot, player_info);
 	slide_textures();
 	auto &LevelSharedDestructibleLightState = LevelSharedSegmentState.DestructibleLights;
 	flicker_lights(LevelSharedDestructibleLightState, Flickering_light_state, vmsegptridx);
@@ -2335,7 +2335,7 @@ bool FireLaser(player_info &player_info, const control_info &Controls)
 	auto &vmobjptridx = Objects.vmptridx;
 	if (!Controls.state.fire_primary)
 		return false;
-	if (!allowed_to_fire_laser(player_info))
+	if (!allowed_to_fire_laser(Local_pilot, player_info))
 		return false;
 	auto &Primary_weapon = player_info.Primary_weapon;
 	if (!Weapon_info[Primary_weapon_to_weapon_info[Primary_weapon]].fire_count)

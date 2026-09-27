@@ -44,6 +44,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "timer.h"
 #include "render.h"
 #include "laser.h"
+#include "pilot.h"
 #include "screens.h"
 #include "textures.h"
 #include "slew.h"
@@ -317,7 +318,7 @@ static void do_weapon_n_item_stuff(object_array &Objects, control_info &Controls
 
 	if (Global_missile_firing_count) {
 		--Global_missile_firing_count;
-		do_missile_firing(player_info.Secondary_weapon, plrobjidx);
+		do_missile_firing(Local_pilot, player_info.Secondary_weapon, plrobjidx);
 	}
 
 	if (Controls.state.cycle_primary > 0)
@@ -355,7 +356,7 @@ static void do_weapon_n_item_stuff(object_array &Objects, control_info &Controls
 	{
 		const auto bomb = which_bomb(player_info);
 		for (uint_fast32_t i = std::exchange(Controls.state.drop_bomb, 0); i--;)
-			do_missile_firing(bomb, plrobjidx);
+			do_missile_firing(Local_pilot, bomb, plrobjidx);
 	}
 #if DXX_BUILD_DESCENT == 2
 	if (Controls.state.toggle_bomb > 0)

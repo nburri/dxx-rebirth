@@ -30,34 +30,26 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 
 #ifdef DXX_BUILD_DESCENT
 #include "kconfig.h"
+#include "pilot.h"
 namespace dsx {
+/* The local player's ship from the local input devices: returns unless
+ * `obj` is the ship of `Player_num` (D2), then applies `Controls` with
+ * `Local_pilot`.
+ */
 void read_flying_controls(object &obj, control_info &Controls);
+/* Turn one frame of `Controls` into thrust and rotational thrust for the
+ * player ship `obj`, flown by `p`: afterburner charge and drain, blob
+ * drops, wiggle, and in D2 the steering of the ship's guided missile.
+ * Reads no input device and no "local player" state.
+ */
+void apply_pilot_controls(object &obj, pilot &p, const control_info &Controls);
 }
 #if DXX_BUILD_DESCENT == 2
-#include "maths.h"
 namespace dsx {
-extern fix Afterburner_charge;
-
-/* Remainders of the per-frame divisions of FrameTime for the local
- * player's ship.  They only exist for the local player, so player_info,
- * savegames and the network protocol are unchanged.  reset() is called
- * where the local ship is (re)initialized: new ship, level start,
- * savegame load and demo playback start.  Each remainder is less than
- * its divisor in fix units, so resets elsewhere are not needed.
- */
-struct local_player_rate_dividers
-{
-	fix_rate_divider<4> omega_charge;			// OMEGA_CHARGE_SCALE
-	fix_rate_divider<3> afterburner_drain;		// AFTERBURNER_USE_SECS
-	fix_rate_divider<8> afterburner_recharge;	// AFTERBURNER_RECHARGE_SECS
-	fix_rate_divider<8> headlight_drain;		// FrameTime*3/8
-	void reset()
-	{
-		*this = {};
-	}
-};
-
-extern local_player_rate_dividers Local_player_rate_dividers;
+/* Local_pilot.afterburner_charge */
+extern fix &Afterburner_charge;
+/* Local_pilot.rate_dividers */
+extern pilot_rate_dividers &Local_player_rate_dividers;
 }
 #endif
 #endif
