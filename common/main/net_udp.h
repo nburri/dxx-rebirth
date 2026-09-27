@@ -8,6 +8,12 @@
  *
  * Prototypes for UDP-protocol network management functions.
  *
+ * The wire protocol is the v2 protocol of
+ * Documentation/network-protocol-v2.md: the transport of
+ * net_v2_transport.h under the session layer of similar/main/net_v2.cpp.
+ * similar/main/net_udp.cpp keeps the menus (game list, join, setup) and
+ * the level start flow.
+ *
  */
 
 #pragma once
@@ -17,7 +23,6 @@
 #include "ntstring.h"
 #include "fwd-window.h"
 #include "d_array.h"
-#include "d_bitset.h"
 #include <array>
 
 // Exported functions
@@ -55,7 +60,6 @@ window_event_result net_udp_setup_game(const d_select_event &);
 #endif
 void net_udp_manual_join_game();
 void net_udp_list_join_game(grs_canvas &canvas);
-window_event_result net_udp_level_sync();
 
 // Some defines
 // Our default port - easy to remember: D = 4, X = 24, X = 24
@@ -76,20 +80,6 @@ enum class tracker_game_id : uint16_t
 constexpr std::integral_constant<unsigned, 12> UDP_NETGAMES_PPAGE{}; // Netgames on one page of Netlist
 }
 #define UDP_NETGAMES_PAGES 75 // Pages available on Netlist (UDP_MAX_NETGAMES/UDP_NETGAMES_PPAGE)
-#define UDP_TIMEOUT (5*F1_0) // 5 seconds disconnect timeout
-#define UDP_MDATA_STOR_QUEUE_SIZE 1024u // Store up to 1024 MDATA packets
-#define UDP_MDATA_STOR_MIN_FREE_2JOIN 384u // have at least this many free packet slots before we let someone join the game
-#define UDP_MDATA_PKT_NUM_MIN 1 // start from pkt_num 1 (0 is used to initialize the trace list)
-#define UDP_MDATA_PKT_NUM_MAX (UDP_MDATA_STOR_QUEUE_SIZE*100) // the max value for pkt_num. roll over when we go any higher. this should be smaller than INT_MAX
-
-// UDP-Packet identificators (ubyte) and their (max. sizes).
-#define UPID_MAX_SIZE			       1024 // Max size for a packet
-#define UPID_MDATA_BUF_SIZE			454
-#if DXX_USE_TRACKER
-#define UPID_TRACKER_REGISTER			 21 // Register or update a game on the tracker.
-#define UPID_TRACKER_REMOVE			 22 // Remove our game from the tracker.
-#define UPID_TRACKER_REQGAMES			 23 // Request a list of all games stored on the tracker.
-#endif
 
 // Structure keeping lite game infos (for netlist, etc.)
 #ifdef DXX_BUILD_DESCENT
@@ -97,7 +87,8 @@ struct UDP_netgame_info_lite : public prohibit_void_ptr<>
 {
 	struct _sockaddr                game_addr;
 	std::array<short, 3>                 program_iver;
-	fix                             GameID;
+	/* Section 4.1: the game list is keyed by the session id. */
+	uint32_t                        session_id;
 #if DXX_USE_TRACKER
 	tracker_game_id			TrackerGameID;
 #endif
@@ -112,48 +103,8 @@ struct UDP_netgame_info_lite : public prohibit_void_ptr<>
 	ubyte                           numconnected;
 	ubyte                           max_numplayers;
 	netgame_rule_flags game_flag;
-};
-
-struct player_acknowledgement_mask : enumerated_bitset<MAX_PLAYERS, std::conditional<std::is_same<std::size_t, unsigned>::value, unsigned long, playernum_t>::type>
-{
-public:
-	constexpr player_acknowledgement_mask() :
-		enumerated_bitset{(1u << MAX_PLAYERS) - 1}
-	{
-	}
+	uint8_t                         tick_rate;
+	/* Local time the entry was last refreshed; stale entries expire. */
+	fix64                           last_seen;
 };
 #endif
-
-// packet structure for multi-buffer
-struct UDP_mdata_info : prohibit_void_ptr<>
-{
-	ubyte				type;
-	ubyte				Player_num;
-	uint16_t			mbuf_size;
-	uint32_t			pkt_num;
-	std::array<uint8_t, UPID_MDATA_BUF_SIZE> mbuf;
-};
-
-#ifdef DXX_BUILD_DESCENT
-// structure to store MDATA to maybe resend
-struct UDP_mdata_store : prohibit_void_ptr<>
-{
-	fix64				pkt_initial_timestamp;			// initial timestamp to see if packet is outdated
-	per_player_array<fix64>		pkt_timestamp;		// Packet timestamp
-	per_player_array<uint32_t>	pkt_num;			// Packet number
-	sbyte				used;
-	ubyte				Player_num;				// sender of this packet
-	uint16_t			data_size;
-	player_acknowledgement_mask player_ack;		// 0 if player has not ACK'd this packet, 1 if ACK'd or not connected
-	std::array<uint8_t, UPID_MDATA_BUF_SIZE> data;		// extra data of a packet - contains all multibuf data we don't want to loose
-};
-#endif
-
-// structure to keep track of MDATA packets we already got, which we expect from another player and the pkt_num for the next packet we want to send to another player
-struct UDP_mdata_check : public prohibit_void_ptr<>
-{
-	std::array<uint32_t, UDP_MDATA_STOR_QUEUE_SIZE>			pkt_num; 	// all those we got just recently, so we can ignore them if we get them again
-	int				cur_slot; 				// index we can use for a new pkt_num
-	uint32_t			pkt_num_torecv; 			// the next pkt_num we await for this player
-	uint32_t			pkt_num_tosend; 			// the next pkt_num we want to send to another player
-};

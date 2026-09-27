@@ -5516,6 +5516,7 @@ class DXXProgram(DXXCommon):
 	)),
 		__get_objects_use_udp=DXXCommon.create_lazy_object_states_getter((LazyObjectState(sources=(
 'similar/main/net_udp.cpp',
+'similar/main/net_v2.cpp',
 ),
 		transform_env= _apply_env_version_seq,
 		transform_target=_apply_target_name,

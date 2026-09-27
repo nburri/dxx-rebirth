@@ -10,6 +10,7 @@
 #include <type_traits>
 #include "dxxerror.h"
 #include "net_udp.h"
+#include "net_v2.h"
 #include "object.h"
 #include "powerup.h"
 #include "serial.h"

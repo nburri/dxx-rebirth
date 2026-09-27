@@ -1152,24 +1152,11 @@ window_event_result multi_do_frame()
 namespace {
 
 template <multiplayer_command_t C>
-#ifndef __clang__
-/* udp::dispatch_table::send_data_direct copies `buf` into a buffer sized from
- * `UDP_mdata_info`.  Require that no overflow will occur.
- *
- * Guard this with `#ifndef __clang__` because clang-14 rejects this constraint
- * with the error:
-
-similar/main/multi.cpp:1068:22: note: because '(std::size(buf) + 6 <= sizeof(UDP_mdata_info))' would be invalid: constraint variable 'buf' cannot be used in an evaluated context
-
- * gcc accepts this requires() constraint and enforces it as intended.  Raising
- * the `6` to `6000` correctly provokes a rejection.
+/* udp::dispatch_table::send_data_direct sends `buf` as one reliable message
+ * of the v2 transport, preceded by the originator's player number.  Require
+ * that it fits.
  */
-requires(
-	requires(multi_command<C> buf) {
-		requires(std::size(buf) + 6 <= sizeof(UDP_mdata_info));
-	}
-)
-#endif
+requires(command_length<C> + 1 <= ::dcx::net_v2::NET_V2_MAX_MESSAGE)
 static inline void multi_send_data_direct(const multi_command<C> &buf, const playernum_t pnum, const int priority)
 {
 	multi::dispatch->send_data_direct(buf, pnum, priority);
@@ -4078,7 +4065,7 @@ void multi_send_guided_final_position(const object_base &miss)
 
 bool multi_send_guided_frame()
 {
-	/* Called by do_protocol_frame at the pdata rate (Netgame.PacketsPerSec),
+	/* Called by do_protocol_frame at the network tick rate (Netgame.TickRate),
 	 * never from a forced call, and the caller sends the mdata packet at
 	 * once, together with the thief position if the pdata tick is in the
 	 * same frame.  The receiver (multi_do_guided) warps its copy of the
@@ -6731,7 +6718,7 @@ void show_netgame_info(const netgame_info &netgame)
 			array_snprintf(lines[bright_player_ships], "Bright Player Ships\t  %s", netgame.BrightPlayers?TXT_YES:TXT_NO);
 			array_snprintf(lines[enemy_names_on_hud], "Enemy Names On Hud\t  %s", netgame.ShowEnemyNames?TXT_YES:TXT_NO);
 			array_snprintf(lines[friendly_fire], "Friendly Fire (Team, Coop)\t  %s", netgame.NoFriendlyFire?TXT_NO:TXT_YES);
-			array_snprintf(lines[packets_per_second], "Packets Per Second\t  %i", netgame.PacketsPerSec);
+			array_snprintf(lines[packets_per_second], "Tick Rate\t  %i Hz", netgame.TickRate);
 		}
 	};
 	struct netgame_info_menu : netgame_info_menu_items, passive_newmenu
