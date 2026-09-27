@@ -630,7 +630,7 @@ game, `peer_token` = 0, `player_id` = 0xFF.
 | 10 | 4 | `client_nonce` (random `u32`, identifies this join attempt across retries) |
 | 14 | 9 | callsign (NUL-padded, lower-cased by the receiver) |
 | 23 | 1 | rank (`player_rank`, 0–9) |
-| 24 | 4 | `Current_level_num` of the client (i32; used only to pick the right kick reason) |
+| 24 | 4 | `Current_level_num` of the client (i32; informational: the client asks before it loads the host's level, so the host does not judge it; `LEVEL_READY` carries the level that counts) |
 | 28 | 4 | `client_time` (client's local clock, for the first RTT sample) |
 
 The client sends it every 500 ms until it receives `JOIN_ACCEPT` or
@@ -754,7 +754,13 @@ and mapped. If `obj_allocate` fails, the join is aborted with
 `LEAVE(snapshot_failed)` and the menu shows `TXT_NET_SYNC_FAILED` (v1 silently
 misparsed). `SNAPSHOT_END` counts and `crc32` must match; otherwise the same
 abort. The host also aborts (with `KICK(snapshot_failed)`) if `CLIENT_READY`
-does not arrive within 30 s.
+does not arrive within 30 s (`NET_V2_JOIN_SYNC_TIMEOUT`, counted from
+`JOIN_ACCEPT` for a joiner that never sends `LEVEL_READY`, and from the
+snapshot for one that never sends `CLIENT_READY`), and the client gives up
+waiting for the snapshot and `LEVEL_GO` 30 s after its `LEVEL_READY` with a
+message, so a join in progress can never hang either end. While a peer is
+syncing it gets no best-effort `EVENT_U`: the client applies nothing but the
+snapshot's reliable stream until `LEVEL_GO`.
 
 ### 4.5 `GAME_SETTINGS` and `PLAYER_LIST`
 
@@ -1608,7 +1614,26 @@ The implementation (`similar/main/net_v2.cpp`, `common/main/net_v2_game.h`,
   a client that restarts during its own join replaces the stale attempt.
   Game data (`LEGACY_MDATA`, `EVENT_U`, `INPUT`, the endlevel status) is
   accepted and relayed only from a peer in the `playing` phase, not from one
-  still joining or syncing, nor from one closing.
+  still joining or syncing, nor from one closing. A `JOIN_REQUEST` with a
+  new nonce is never a retry of an existing connection, whatever that
+  connection's state: a client that left (or was killed) and asks again
+  from the same address is judged by the admission table (rejoin, or
+  replace of its stale connection); a closing connection never answers its
+  old nonce again. `JOIN_REQUEST`'s level number is not checked (the
+  client has not loaded the host's level yet; a restarted client says 1),
+  `LEVEL_READY`'s is. (Playtest fix: a restarted client was refused with
+  "wrong level" on any level but the first.)
+- **Joins in progress are bounded** (§4.4): the host removes a peer still
+  joining or syncing after 30 s with `KICK(snapshot_failed)`, which also
+  ends the join serialisation it held; the client leaves its level wait 30 s
+  after `LEVEL_READY` without `LEVEL_GO` ("The host did not send the game
+  state in time"). ESC in the join menus cancels the attempt
+  (`client_cancel_join`), sending `LEAVE(cancelled)` if the host accepted
+  meanwhile. When a player's connection ends, the host stops its extras run
+  and forgets its queued run, so a new connection in the slot gets a run of
+  its own. After leaving a game the client is back in the `menu` state, so a
+  manual join's `GAME_INFO` is accepted again (it was ignored as long as the
+  state still said `playing`: "No response by host").
 - **Lobby** (`starting`): slots are never renumbered, since every peer's
   player id is fixed by its `JOIN_ACCEPT`. Instead the lobby admits players
   only into slots below `max_numplayers` (holes first, then the next slot;
@@ -1640,7 +1665,19 @@ The implementation (`similar/main/net_v2.cpp`, `common/main/net_v2_game.h`,
   net ids of §6.1 come with stage 3. The other snapshot parts of §4.4 (walls,
   triggers, lights, markers, inventory) are still the v1 "extras", sent as
   reliable `MULTI_*` records after `CLIENT_READY`. A failed snapshot sends
-  `LEAVE(snapshot_failed)` and shows `TXT_NET_SYNC_FAILED`. A new player is
+  `LEAVE(snapshot_failed)` and shows `TXT_NET_SYNC_FAILED`. Best-effort
+  `EVENT_U` goes only to peers in the `playing` phase (the host's own and
+  relayed ones), and a client applies events only while `playing` or at the
+  level end, never in its level wait. (Playtest fix: the host sent its
+  events to a peer that was syncing, and the client applied them in the
+  middle of the snapshot. An event that creates an object - an afterburner
+  blob, an explosion - took its number from a free list that still held the
+  numbers the snapshot had placed (`init_objects` frees all; placement does
+  not allocate), and overwrote a placed object: a player ship, which failed
+  the snapshot's player check with "You are missing packets", or an object
+  linked into a segment, whose lists then crossed and hung the client.
+  Whether it happened depended on what the host did during the transfer:
+  a rejoin hung, the next attempt failed, the one after worked.) A new player is
   counted by the host only at its `CLIENT_READY`, so the `GAME_SETTINGS` and
   `SNAPSHOT_GAME` of its snapshot count its slot in `numplayers` and carry
   zero scores for it (as `new_player` then sets them); the client also never

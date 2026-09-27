@@ -114,6 +114,13 @@ constexpr net_clock NET_V2_JOIN_REQUEST_INTERVAL{net_seconds(1) / 20};
 constexpr net_clock NET_V2_JOIN_RETRY_INTERVAL{net_milliseconds(500)};
 constexpr net_clock NET_V2_JOIN_TIMEOUT{net_seconds(10)};
 constexpr net_clock NET_V2_JOIN_HOLEPUNCH_AFTER{net_seconds(4)};
+/* Section 4.4: a join in progress, from JOIN_ACCEPT (host) or LEVEL_READY
+ * (client) to LEVEL_GO, must finish within this time.  The host kicks a
+ * peer still joining or syncing after it (the joins are serialised, so a
+ * stuck joiner would otherwise block every later join); the client gives
+ * up waiting for the snapshot with a message instead of waiting forever.
+ */
+constexpr net_clock NET_V2_JOIN_SYNC_TIMEOUT{net_seconds(30)};
 
 /* Section 4.6: how long a LEAVE, KICK or HOST_SHUTDOWN is retransmitted
  * before the connection is dropped.
@@ -597,13 +604,38 @@ constexpr unsigned player_count_including(const unsigned numplayers, const unsig
 	return numplayers > slot ? numplayers : slot + 1;
 }
 
+/* The session phase of a peer (net_v2.cpp keeps one per player slot). */
+enum class peer_phase : std::uint8_t
+{
+	none,
+	/* JOIN_ACCEPT sent (host) or received (client); a join in progress
+	 * awaits the client's LEVEL_READY.
+	 */
+	joining,
+	/* The level snapshot was queued; awaiting CLIENT_READY. */
+	syncing,
+	playing,
+	/* LEAVE, KICK or HOST_SHUTDOWN queued; the connection lingers for
+	 * NET_V2_CLOSE_LINGER so that it can be retransmitted.
+	 */
+	closing,
+};
+
 /* Section 4.2: a JOIN_REQUEST compared with an existing connection.  A
  * request carrying the nonce of the connection's own join attempt, from
  * its address, is a retry: while the connection is still `connecting` the
  * JOIN_ACCEPT was lost and is sent again; once the connection is
  * established the retry was merely delayed or reordered and is ignored.
  * It must never be admitted as a new join, which would give the same
- * client a second slot or replace its live connection.
+ * client a second slot or replace its live connection.  A connection that
+ * is closing (the peer left or was kicked) never answers its old attempt
+ * again: the client retries, and is judged afresh once the linger is over.
+ *
+ * Anything else is not a retry of this connection, whatever state the
+ * connection is in: a client that left (or was killed) and joins again
+ * from the same address draws a new nonce, and that request is a new join
+ * (or replaces the stale connection by the admission table), never a
+ * duplicate to be ignored.
  */
 enum class duplicate_join : std::uint8_t
 {
@@ -614,12 +646,78 @@ enum class duplicate_join : std::uint8_t
 };
 
 [[nodiscard]]
-constexpr duplicate_join classify_duplicate_join(const bool same_address, const std::uint32_t connection_nonce, const std::uint32_t request_nonce, const bool connecting)
+constexpr duplicate_join classify_duplicate_join(const bool same_address, const std::uint32_t connection_nonce, const std::uint32_t request_nonce, const bool connecting, const bool closing = false)
 {
 	if (!same_address || connection_nonce != request_nonce)
 		return duplicate_join::none;
+	if (closing)
+		return duplicate_join::ignore;
 	return connecting ? duplicate_join::resend_accept : duplicate_join::ignore;
 }
+
+/* Section 4.2: the host serves one join in progress at a time.  A peer
+ * joining or syncing blocks the others, except when it is at the address
+ * of the requester (the same client asking again; the request replaces
+ * the stale attempt).  A peer that is gone, closing or playing never
+ * blocks: the serialisation ends with the peer, however it ends.
+ * `extras_pending` is the host's extras run (or a queued one), which is
+ * part of the join as in v1.
+ */
+struct join_peer_view
+{
+	peer_phase phase{peer_phase::none};
+	bool same_address{};
+};
+
+[[nodiscard]]
+constexpr bool join_in_progress(const std::span<const join_peer_view> peers, const bool extras_pending)
+{
+	if (extras_pending)
+		return true;
+	for (const auto &p : peers)
+		if ((p.phase == peer_phase::joining || p.phase == peer_phase::syncing) && !p.same_address)
+			return true;
+	return false;
+}
+
+/* Section 4.4: the host's bound on a join in progress.  `since` is when
+ * the peer entered its current phase.
+ */
+[[nodiscard]]
+constexpr bool join_stalled(const peer_phase phase, const net_clock since, const net_clock now)
+{
+	return (phase == peer_phase::joining || phase == peer_phase::syncing) && now - since >= NET_V2_JOIN_SYNC_TIMEOUT;
+}
+
+/* Section 4.4, the client: the wait for the level snapshot of a join in
+ * progress, from LEVEL_READY to LEVEL_GO.  It is bounded, so that a host
+ * that never completes the join cannot hold the client forever.  A client
+ * waiting for a fresh level start (lobby, next level) is not bounded: it
+ * waits for the host and the other players, as in v1.
+ */
+class join_sync_wait
+{
+	std::optional<net_clock> m_started;
+public:
+	constexpr void begin(const net_clock now)
+	{
+		m_started = now;
+	}
+	constexpr void end()
+	{
+		m_started.reset();
+	}
+	[[nodiscard]]
+	constexpr bool active() const
+	{
+		return m_started.has_value();
+	}
+	[[nodiscard]]
+	constexpr bool expired(const net_clock now) const
+	{
+		return m_started && now - *m_started >= NET_V2_JOIN_SYNC_TIMEOUT;
+	}
+};
 
 /* Section 4.2, the client: whether a JOIN_DENY is an answer to us.  A
  * denial of the running join attempt carries its nonce and comes from the

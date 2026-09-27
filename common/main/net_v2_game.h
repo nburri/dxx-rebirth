@@ -119,12 +119,22 @@ void client_begin_join(const _sockaddr &host, uint32_t session_id
 [[nodiscard]]
 join_status client_join_status();
 void client_end_join();
+/* The user gave up the join (ESC in the join menu): stop sending
+ * JOIN_REQUEST, and leave again should the host have accepted meanwhile.
+ */
+void client_cancel_join();
 
 /* Level start, client side (section 4.3): tell the host the level is
  * loaded; leave the game while waiting for it to start.
  */
 void client_send_level_ready();
 void client_send_leave(kick_player_reason reason);
+/* Joining a game in progress (section 4.4): true once the host has not
+ * completed the join (snapshot and LEVEL_GO) within
+ * NET_V2_JOIN_SYNC_TIMEOUT of LEVEL_READY.  The level wait gives up then.
+ */
+[[nodiscard]]
+bool client_sync_timed_out();
 
 /* Host side. */
 /* Choose a session id and become the host of a new session. */

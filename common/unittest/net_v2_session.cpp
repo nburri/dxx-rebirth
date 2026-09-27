@@ -9,8 +9,9 @@
  * UNCONNECTED datagram framing and its validation order, the handshake
  * message layouts, the admission table of section 4.2, the lobby slot
  * choice, the player count a joining player sees, the recognition of
- * retried join requests and of join denials, the client's join schedule
- * and the rate limiter.
+ * retried join requests and of join denials, the serialisation of joins
+ * in progress and their bounds, the client's join schedule and the rate
+ * limiter.
  *
  * Build and run with SCons:
  *
@@ -328,6 +329,87 @@ void test_duplicate_join()
 	 * second admission.
 	 */
 	CHECK(classify_duplicate_join(true, 7, 7, false) == duplicate_join::ignore);
+	/* A closing connection (the peer left or was kicked) never answers its
+	 * old attempt again, not even with the accept it may have lost.
+	 */
+	CHECK(classify_duplicate_join(true, 7, 7, true, true) == duplicate_join::ignore);
+	CHECK(classify_duplicate_join(true, 7, 7, false, true) == duplicate_join::ignore);
+	/* Rejoin: the client left (or was killed and restarted) and asks again
+	 * from the same address, with a new nonce.  Whatever state the old
+	 * connection is in - still connecting, established, or closing - the
+	 * request is a new join (admitted or replacing by the admission
+	 * table), never a duplicate to be ignored.
+	 */
+	CHECK(classify_duplicate_join(true, 7, 8, true, false) == duplicate_join::none);
+	CHECK(classify_duplicate_join(true, 7, 8, false, false) == duplicate_join::none);
+	CHECK(classify_duplicate_join(true, 7, 8, false, true) == duplicate_join::none);
+	CHECK(classify_duplicate_join(true, 7, 8, true, true) == duplicate_join::none);
+}
+
+void test_join_serialisation()
+{
+	using p = peer_phase;
+	const auto view{[](const peer_phase ph, const bool same) {
+		return join_peer_view{.phase = ph, .same_address = same};
+	}};
+	/* Nobody joining. */
+	{
+		const std::array<join_peer_view, 3> v{{view(p::none, false), view(p::playing, false), view(p::none, true)}};
+		CHECK(!join_in_progress(v, false));
+		/* An extras run (or a queued one) is part of the join. */
+		CHECK(join_in_progress(v, true));
+	}
+	/* Another client joining or syncing blocks. */
+	{
+		const std::array<join_peer_view, 2> v{{view(p::playing, false), view(p::joining, false)}};
+		CHECK(join_in_progress(v, false));
+	}
+	{
+		const std::array<join_peer_view, 2> v{{view(p::syncing, false), view(p::none, false)}};
+		CHECK(join_in_progress(v, false));
+	}
+	/* The requester's own stale attempt does not block it: the request
+	 * replaces it.
+	 */
+	{
+		const std::array<join_peer_view, 2> v{{view(p::syncing, true), view(p::joining, true)}};
+		CHECK(!join_in_progress(v, false));
+	}
+	/* The serialisation ends with the joining peer: once it is closing
+	 * (left, kicked, or removed after the join timeout) or gone (its
+	 * connection timed out), it blocks nobody.
+	 */
+	{
+		const std::array<join_peer_view, 2> v{{view(p::closing, false), view(p::none, false)}};
+		CHECK(!join_in_progress(v, false));
+	}
+	/* The host's bound on a join in progress. */
+	CHECK(!join_stalled(p::joining, net_seconds(5), net_seconds(5) + NET_V2_JOIN_SYNC_TIMEOUT - 1));
+	CHECK(join_stalled(p::joining, net_seconds(5), net_seconds(5) + NET_V2_JOIN_SYNC_TIMEOUT));
+	CHECK(join_stalled(p::syncing, 0, NET_V2_JOIN_SYNC_TIMEOUT + net_seconds(1)));
+	/* Nobody else is ever removed by it. */
+	CHECK(!join_stalled(p::playing, 0, NET_V2_JOIN_SYNC_TIMEOUT * 10));
+	CHECK(!join_stalled(p::closing, 0, NET_V2_JOIN_SYNC_TIMEOUT * 10));
+	CHECK(!join_stalled(p::none, 0, NET_V2_JOIN_SYNC_TIMEOUT * 10));
+}
+
+void test_join_sync_wait()
+{
+	join_sync_wait w;
+	/* Not waiting (a fresh level start is not bounded). */
+	CHECK(!w.active());
+	CHECK(!w.expired(NET_V2_JOIN_SYNC_TIMEOUT * 10));
+	w.begin(net_seconds(100));
+	CHECK(w.active());
+	CHECK(!w.expired(net_seconds(100) + NET_V2_JOIN_SYNC_TIMEOUT - 1));
+	CHECK(w.expired(net_seconds(100) + NET_V2_JOIN_SYNC_TIMEOUT));
+	/* LEVEL_GO ends the wait. */
+	w.end();
+	CHECK(!w.active());
+	CHECK(!w.expired(net_seconds(1000)));
+	/* A new join starts a fresh bound. */
+	w.begin(net_seconds(1000));
+	CHECK(!w.expired(net_seconds(1001)));
 }
 
 void test_join_deny()
@@ -415,6 +497,8 @@ int main()
 	test_lobby_slot();
 	test_player_count_including();
 	test_duplicate_join();
+	test_join_serialisation();
+	test_join_sync_wait();
 	test_join_deny();
 	test_join_attempt();
 	test_rate_limiter();
