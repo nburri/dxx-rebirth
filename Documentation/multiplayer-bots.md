@@ -1,6 +1,7 @@
 # Multiplayer bots (design)
 
-Status: design; stage B0 (the pilot refactor, §3.2.1) is implemented. Target branch: `experimental-netcode`
+Status: design; stage B0 (the pilot refactor, §3.2.1) and stage B1 (the
+first bot with its setup menus, §9.1) are implemented. Target branch: `experimental-netcode`
 (protocol v2, `Documentation/network-protocol-v2.md`, cited as "v2 §n").
 D2X-Rebirth only (v2 decision 6). Line numbers are omitted; function names are
 the anchors.
@@ -781,6 +782,142 @@ and one PR per change.
 
 B1 is shippable on its own for playtesting against "target practice" bots.
 B1–B3 make a fun anarchy bot.
+
+### 9.1 B1 as implemented
+
+**Files.** `common/main/bot_vec.h` (the double-precision vector and frame
+of the pure logic), `common/main/bot_nav.h` (graph, A*, string pulling,
+path following, stuck detector, edge penalties), `common/main/bot_brain.h`
+(tick layers, skill and style tables, the bot's RNG, intercept solver, aim
+error, reaction delay line, memory, target scoring, steering and velocity
+controllers, strafing, trigger discipline, the B1 primary choice),
+`common/main/bot.h` (the game interface and the setup), `similar/main/bot.cpp`
+(the bots on the host) and `similar/main/bot_menu.cpp` (the setup and its
+menus). Tests: `test-bot-nav` and `test-bot-brain` (§8.1; the `.ngp` parser
+and the dodge predictor come with B2 and B4).
+
+**Setup (§6.1–§6.3).** "Bots..." follows "Maximum players" in the host
+setup menu; its label is `Bots: none...`, `Bots: 3 (Hotshot)...` (or
+`(mixed)`), or `Bots: not in this mode` outside anarchy, team anarchy and
+bounty. The Bots screen has the count slider (0 to max players − 1), the
+default skill and style, one line per bot, "Set all bots to default skill"
+(and style), "New random names" and "Done". It is rebuilt whenever the list
+changes, so its lines always match the list. The per-bot screen edits the
+name, skill, style and (in team modes) team, and removes the bot. Names are
+stored lower case like every callsign. Not yet: the "Humans replace bots"
+checkbox and the `.ngp` persistence (B2), the in-game screen (B5). The
+developer switch `-bots N` sets the initial count of the setup menu.
+
+**Every bot plays Hotshot in B1**, whatever its skill and style fields say
+(decision 5); the presets and styles take effect in B2.
+
+**Slots (§2.3).** `bots_allocate_slots` runs in `net_udp_select_players`
+after the lobby closes (the host may start alone): each configured bot takes
+the lowest slot below `max_numplayers` that has no player, gets a callsign
+unique in the game (`havoc` → `havoc2`), `rank = None`, a zero address, and
+`connected = playing`. If they do not all fit, the host is told. The team
+menu starts with the bots' team preferences. A game that does not start,
+and the end of a session (`net_v2::session_reset`), frees the bot slots.
+
+**Every host loop over slots (risk R2).**
+
+| Loop | Bots |
+|---|---|
+| `host_begin_level_wait`, the level wait (`net_udp_request_poll` counts `Players`) | a bot slot is `playing` at once; otherwise the host waited for ever |
+| kicks in `net_udp_send_sync`, `net_udp_select_players` (team menu abort), `net_udp_wait_for_requests` | skip bots (they have no address) |
+| `host_send_level_start`, `host_end_level` (`KICK(endlevel)`), `send_endlevel_status`, the extras queue, `join_stalled`, the per-connection timeouts and ping statistics, `set_state_for_peer` | iterate `S.peers` and need a connection: bots are never touched |
+| `build_common_bundle` | the bot takes the host's own branch (pose from the object, `dying` from its death state, ghost when dead), §2.2 |
+| the score screen (`kmatrix`) waits for every player still in the level | `bots_level_end` sets the bots `end_menu` in `multi_endlevel_score` and `dispatch_table::end_current_level` |
+| join in progress | the snapshot carries the bots' ships and scores; the extras' `net_objects_send_all_inventories` sends the host's copies, which are kept current (below) |
+| admission | a bot slot is occupied and connected: never given to a joiner; a joiner with a bot's name is refused as a duplicate (humans replacing bots is B2) |
+
+**Brain (§4).** The tick is a `tick_accumulator` at 60 Hz driven by
+`GameTime64`, so a paused game pauses the bots; perception runs at 20 Hz
+and strategy at 5 Hz, staggered by slot. Perception: LOS by fvi with
+`FQ_TRANSWALL`, awareness radius, field of view (skipped for the player
+that hit the bot in the last 3 s), cloaked players only within 40 units.
+The reaction delay line holds one percept per perception tick; the tactics
+layer dead-reckons the target from the state it saw a reaction time ago
+(a straight flight is tracked, a turn is noticed late), then aims with
+lead `ℓ` and the drifting aim error. Target choice with 20 % hysteresis,
+revenge, weak targets and the bounty. The engagement keeps a 35–95 unit
+band and strafes (flip every 0.4–1.2 s). A hit tells the bot the attacker's
+position ±20 units.
+
+**Steering (deviation).** The design's `axis = angle_error / (max_turn_rate
+× FrameTime)` depends on knowing the ship's turn rate and ignores its
+rotational inertia. B1 asks physics for the ship's real response
+(`compute_rotation_response` / `compute_thrust_response` in `physics.cpp`,
+from the frame-rate-independent drag model) and uses a cascaded
+controller: the wanted rate is proportional to the error (critically
+damped for the ship's time constant) and capped at `turn_cap` × the ship's
+maximum; the axis is the feed-forward plus rate feedback. It uses only the
+current state, so it is frame-rate independent (the test settles a 90°
+turn in the same time at frame lengths from 2 to 50 ms). The thrust axes
+come from a velocity controller in all six directions, as a human flies.
+The steering works in the frame without the turn roll, as
+`do_physics_sim_rot` does.
+
+**Navigation (§4.3).** At level start the host caches segment centres and
+side centres and builds the child graph (cost through the side centre).
+A* expands at most 4000 segments and returns a partial path toward the goal
+otherwise. Passable: `WALL_IS_DOORWAY … fly`, or a door that is not locked
+and whose key the bot holds. Path points: side centre, then segment
+centre; the last point is the goal position when known. String pulling
+tries the next 4 points with an fvi of 2/3 of the ship's radius, furthest
+first. Stuck: less than 3 units of progress in 90 ticks; 0.5 s of backing
+off with a random sidestep; the edge gets a 200-unit penalty; replan; after
+3 failures a new goal. A wall probe along the velocity (0.4 s) pushes the
+bot off walls. Goals: none (direct engagement), hunt (the target's last
+seen segment, replanned every 2 s) and roam (a random segment). Doors open
+through `bot_hit_wall` in `collide_player_and_wall`, the door part of
+`wall_hit_process` without its HUD text.
+
+**Weapons (B1).** Only the primaries the ship was granted at spawn (no
+pickups yet): helix, plasma, spreadfire, then gauss or vulcan with
+ammunition (first when energy is below 10), phoenix, the laser. Fusion
+(needs the human's charge trigger) and omega (its charge model is the
+human's) are not used. A switch costs `REARM_TIME`. `do_laser_firing_player`
+runs the human's autoselect and the rapid fire cheat only for
+`Local_pilot`; `do_laser_firing` sends `MULTI_FIRE` for a bot's ship with
+the bot as originator. The trigger needs the aim within the fire cone, the
+range and a clear line of fire: fvi with objects, blocked by a wall, a
+teammate, the reactor (decision 6) or a robot, not by a shot in flight.
+Bots have no homing weapon, missile or guided missile in B1, so the homing
+target acquisition, the missile camera and the HUD are never theirs.
+
+**Damage, death, respawn (§4.8, §7.1).** `apply_damage_to_player` hands a
+bot's ship to `bot_take_damage` first, so a bot takes damage while the
+host is dead. Friendly fire is judged by the victim's team
+(`multi_maybe_disable_friendly_fire` takes the victim). The death starts
+in the next frame, outside the collision handling, as the human's does:
+`multi_send_kill` computes the kill on the host and sends
+`MULTI_KILL_HOST` — from the host now for every victim (B0 sent it with
+the victim as originator, which clients drop). The tumble lasts 2 s with
+`MULTI_CREATE_EXPLOSION` fireballs as the bot (it was always sent as the
+host). Then `multi_send_player_deres(deres_explode, bot)` first brings the
+host's copy of the bot's inventory up to date and sends it; the host drops
+the eggs from that copy (`net_objects_host_drop_player_eggs`), explodes the
+ship and makes it a ghost. After 1–2.5 s (the bot's RNG) it respawns with
+`choose_spawn` / `place_player`, `multi_make_ghost_player` (spawn grants),
+the spawn invulnerability (which the bot code also expires) and
+`MULTI_REAPPEAR` as the bot. No respawn during the reactor countdown.
+
+**Inventory.** `net_objects_host_own_ship_inventory(pid, force)` keeps the
+host's copy (`A.mirrors`) equal to the bot's ship and sends `INVENTORY`
+when it changes (rate limited like a client's report; forced at spawn and
+death). So death drops, joiners' extras and `MultiLevelInv` see the real
+inventory.
+
+**Messages.** `multi_send_fire`, `multi_send_player_deres`,
+`multi_send_reappear`, `multi_send_cloak` and `multi_send_decloak` have no
+`Player_num` default any more; every caller names the player.
+
+**Not in B1:** pickups, fuel centres and energy (a bot that runs dry can
+only fire ammunition weapons until it dies; B3), secondaries, afterburner,
+dodging (B4), wall, force field and lava damage to bots, triggers, the
+presets and styles, the `PLAYER_LIST` bot flag, `.ngp` persistence and
+humans replacing bots (B2), adding and removing bots in game (B5).
 
 ---
 
