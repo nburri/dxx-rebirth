@@ -1,6 +1,6 @@
 # Multiplayer bots (design)
 
-Status: design only, nothing implemented. Target branch: `experimental-netcode`
+Status: design; stage B0 (the pilot refactor, §3.2.1) is implemented. Target branch: `experimental-netcode`
 (protocol v2, `Documentation/network-protocol-v2.md`, cited as "v2 §n").
 D2X-Rebirth only (v2 decision 6). Line numbers are omitted; function names are
 the anchors.
@@ -169,6 +169,63 @@ frame. The HUD, palette flashes, sounds, cockpit and demo recording would all
 fire for the bot, and one missed restore corrupts the local player. Many of
 these functions change anyway in stages 3 and 4 (host-side pickups and damage
 need a `pid`), so the refactor above is work v2 needs regardless.
+
+### 3.2.1 B0 as implemented
+
+B0 changes no behaviour: every human call site passes `Local_pilot`,
+`Player_num` or the local ship, so the random number sequence, the wire
+records and the demo records are unchanged. Where the code differed from
+the table above:
+
+- **`struct pilot`** (`common/main/pilot.h`) holds `dead_state`,
+  `missile_firing_count` (was `Global_missile_firing_count`) and, in D2,
+  `afterburner_charge`, `rate_dividers` (the type `local_player_rate_dividers`
+  is now `pilot_rate_dividers`) and `drop_afterburner_blob_flag`. The human's
+  is `Local_pilot`. The old global names stay as *references* to its
+  members. They are used by code that only ever concerns the human (HUD,
+  cockpit, death camera, demo, savegame, weapon selection UI), so those
+  call sites are untouched. Code that a bot will run takes a `pilot &`.
+- **Fire timers and the weapon selection** already live in `player_info`
+  (`Next_laser_fire_time`, `Primary_weapon`, …), so they did not move.
+- **Controls**: `apply_pilot_controls(object &, pilot &, const control_info &)`
+  holds the body of `read_flying_controls`, which is now the human's
+  wrapper (the `Player_num` check, then `Local_pilot`). The guided missile
+  it steers is the one of `get_player_id(obj)`.
+- **Firing**: `do_laser_firing_player(pilot &, vmobjptridx_t)`,
+  `do_missile_firing(pilot &, …)`, `omega_charge_frame(pilot &, player_info &)`
+  and `allowed_to_fire_laser(pilot &, …)`. Still human-specific inside and
+  left for B1: `auto_select_primary_weapon` (`PlayerCfg` order, HUD text),
+  `cheats.rapidfire`, `do_laser_firing` sending `MULTI_FIRE` only when the
+  shooter is the local ship, `Laser_player_fire` finding a homing target
+  only for `ConsoleObject`, and `release_local_guided_missile` setting
+  `Missile_viewer`.
+- **Messages**: `multi_send_fire`, `multi_send_player_deres`,
+  `multi_send_reappear`, `multi_send_cloak`, `multi_send_decloak` and
+  `multi_send_sound_function` take a `playernum_t pnum = Player_num`;
+  `multi_send_drop_blobs` already had one. `multi_send_kill` takes the pid
+  from the dead ship it is given. `multi_send_player_inventory` does not
+  exist any more on this branch (stage 3 replaced it with the inventory
+  messages of `net_objects.cpp`). `multi_send_player_deres` flushes the
+  inventory and ends the life in `net_objects` only for `Player_num`; for a
+  ship the host flies itself, B1/B3 must make the host's inventory copy
+  (`A.mirrors[pid]`, read by `net_objects_host_drop_player_eggs`) current.
+- **Originator**: `dispatch_table::send_data(data, priority, originator)`;
+  `multi_send_data` defaults it to `Player_num`. An `EVENT_U` names one
+  originator, so a record of another originator flushes the pending events
+  first, and a reliable record only takes pending events of its own
+  originator along.
+- **Spawn**: `choose_spawn(vmobjptr, pid, random_flag)` returns a
+  `spawn_choice` (`none`: no usable site, leave the ship; `in_place`:
+  deathmatch level start, reset only; `site`: move to `Player_init[site]`),
+  and `place_player(vmsegptridx, plrobj, spawn)` applies it.
+  `InitPlayerPosition` is `reset_cruise()` plus these two for `Player_num`.
+  The ranking and the draw are pure functions in `common/main/spawn_site.h`,
+  which `test-spawn-site` checks against a verbatim copy of the old code.
+  `choose_spawn` still reseeds and draws the global `d_rand` (as the human
+  does); only bot *decisions* use the bot's own RNG (§3.4).
+- **Not moved** (human-only presentation, bots get their own in B1/B3):
+  the afterburner sound state of `do_afterburner_stuff`, the fusion charge
+  sound and palette flash in `FireLaser`, the headlight drain.
 
 ### 3.3 Order within a host frame
 

@@ -92,8 +92,13 @@ void Laser_do_weapon_sequence(const d_robot_info_array &Robot_info, vmobjptridx_
 void Flare_create(vmobjptridx_t obj);
 bool laser_are_related(vcobjptridx_t o1, vcobjptridx_t o2);
 
-void do_laser_firing_player(object &);
-void do_missile_firing(const secondary_weapon_index weapon, const vmobjptridx_t plrobjidx);
+struct pilot;
+/* Fire the primary weapon of the player ship `plrobj`, flown by `p`. */
+void do_laser_firing_player(pilot &p, vmobjptridx_t plrobj);
+/* Fire (or drop) one `weapon` from the player ship `plrobjidx`, flown by
+ * `p`; in D2 first releases the ship's guided missile, if any.
+ */
+void do_missile_firing(pilot &p, const secondary_weapon_index weapon, const vmobjptridx_t plrobjidx);
 
 // Fires a laser-type weapon (a Primary weapon)
 // Fires from object objnum, weapon type weapon_id.

@@ -2111,14 +2111,19 @@ void flush_events()
 	S.event_buffer.clear();
 }
 
-void queue_event_record(const std::span<const uint8_t> record)
+/* One EVENT_U names one originator (byte 1), so a record from another
+ * originator than the pending ones starts a new EVENT_U.  Only the host
+ * originates records for more than one player (its own and those of the
+ * ships it flies itself); everyone else always passes Player_num.
+ */
+void queue_event_record(const std::span<const uint8_t> record, const playernum_t originator)
 {
-	if (!S.event_buffer.empty() && S.event_buffer.size() + record.size() > NET_V2_MAX_EVENT)
+	if (!S.event_buffer.empty() && (S.event_buffer[1] != originator || S.event_buffer.size() + record.size() > NET_V2_MAX_EVENT))
 		flush_events();
 	if (S.event_buffer.empty())
 	{
 		S.event_buffer.push_back(static_cast<uint8_t>(event_kind::legacy));
-		S.event_buffer.push_back(Player_num);
+		S.event_buffer.push_back(originator);
 	}
 	S.event_buffer.insert(S.event_buffer.end(), record.begin(), record.end());
 }
@@ -4871,7 +4876,7 @@ namespace udp {
 
 const dispatch_table dispatch{};
 
-void dispatch_table::send_data(const std::span<const uint8_t> buf, const multiplayer_data_priority priority) const
+void dispatch_table::send_data(const std::span<const uint8_t> buf, const multiplayer_data_priority priority, const playernum_t originator) const
 {
 	assert(Game_mode & GM_MULTI);
 	if (!(Game_mode & GM_NETWORK) || !UDP_Socket[0] || buf.empty())
@@ -4881,7 +4886,7 @@ void dispatch_table::send_data(const std::span<const uint8_t> buf, const multipl
 #endif
 	if (net_v2::legacy_record_is_event(buf[0], priority))
 	{
-		net_v2::queue_event_record(buf);
+		net_v2::queue_event_record(buf, originator);
 		if (priority != multiplayer_data_priority::_0)
 			net_v2::flush_events();
 		return;
@@ -4891,13 +4896,16 @@ void dispatch_table::send_data(const std::span<const uint8_t> buf, const multipl
 	 * along, reliably.
 	 */
 	auto &pending = net_v2::S.event_buffer;
+	/* Pending events of another originator go on their own, as events. */
+	if (pending.size() > 2 && pending[1] != originator)
+		net_v2::flush_events();
 	std::vector<uint8_t> records;
 	records.reserve(pending.size() + buf.size());
 	if (pending.size() > 2)
 		records.insert(records.end(), pending.begin() + 2, pending.end());
 	pending.clear();
 	records.insert(records.end(), buf.begin(), buf.end());
-	net_v2::send_legacy_reliable(Player_num, records);
+	net_v2::send_legacy_reliable(originator, records);
 }
 
 void dispatch_table::send_data_direct(const std::span<const uint8_t> data, const playernum_t pnum, int) const

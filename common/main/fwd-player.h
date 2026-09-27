@@ -95,7 +95,8 @@ void player_rw_swap(player_rw *p, physfsx_endian swap);
 int allowed_to_fire_missile(const player_info &);
 #if DXX_BUILD_DESCENT == 2
 fix get_omega_energy_consumption(fix delta_charge);
-void omega_charge_frame(player_info &);
+struct pilot;
+void omega_charge_frame(pilot &, player_info &);
 #endif
 }
 #endif

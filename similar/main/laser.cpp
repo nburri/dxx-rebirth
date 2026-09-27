@@ -548,7 +548,7 @@ static bool create_omega_blobs(d_level_unique_object_state &LevelUniqueObjectSta
 
 #define	MIN_OMEGA_CHARGE	(MAX_OMEGA_CHARGE/8)
 #define	OMEGA_CHARGE_SCALE	4			//	FrameTime / OMEGA_CHARGE_SCALE added to Omega_charge every frame.
-static_assert(decltype(local_player_rate_dividers::omega_charge)::divisor == OMEGA_CHARGE_SCALE);
+static_assert(decltype(pilot_rate_dividers::omega_charge)::divisor == OMEGA_CHARGE_SCALE);
 
 fix get_omega_energy_consumption(const fix delta_charge)
 {
@@ -561,11 +561,11 @@ fix get_omega_energy_consumption(const fix delta_charge)
 
 // ---------------------------------------------------------------------------------
 //	Call this every frame to recharge the Omega Cannon.
-void omega_charge_frame(player_info &player_info)
+void omega_charge_frame(pilot &p, player_info &player_info)
 {
 	if (!(player_info.primary_weapon_flags & HAS_PRIMARY_FLAG(primary_weapon_index::omega)))
 		return;
-	auto &omega_charge_divider = Local_player_rate_dividers.omega_charge;
+	auto &omega_charge_divider = p.rate_dividers.omega_charge;
 	auto &Omega_charge = player_info.Omega_charge;
 	if (Omega_charge >= MAX_OMEGA_CHARGE)
 	{
@@ -573,7 +573,7 @@ void omega_charge_frame(player_info &player_info)
 		return;
 	}
 
-	if (Player_dead_state != player_dead_state::no)
+	if (p.dead_state != player_dead_state::no)
 		return;
 
 	//	Don't charge while firing. Wait 1/3 second after firing before recharging
@@ -1822,16 +1822,16 @@ static inline int sufficient_ammo(int ammo_used, int uses_vulcan_ammo, ushort vu
 namespace dsx {
 
 //	--------------------------------------------------------------------------------------------------
-// Assumption: This is only called by the actual console player, not for network players
+// Assumption: This is only called for a ship flown on this machine (`p`), not for network players
 
-void do_laser_firing_player(object &plrobj)
+void do_laser_firing_player(pilot &p, const vmobjptridx_t plrobjidx)
 {
-	auto &Objects = LevelUniqueObjectState.Objects;
-	auto &vmobjptridx = Objects.vmptridx;
 	int rval{0};
 
-	if (Player_dead_state != player_dead_state::no)
+	if (p.dead_state != player_dead_state::no)
 		return;
+
+	auto &plrobj = *plrobjidx;
 
 	auto &player_info = plrobj.ctype.player_info;
 	const auto Primary_weapon{player_info.Primary_weapon};
@@ -1899,7 +1899,7 @@ void do_laser_firing_player(object &plrobj)
 #endif
 			}
 
-			const auto shot_fired{do_laser_firing(vmobjptridx(get_local_player().objnum), Primary_weapon, laser_level, flags, plrobj.orient.fvec, object_none)};
+			const auto shot_fired{do_laser_firing(plrobjidx, Primary_weapon, laser_level, flags, plrobj.orient.fvec, object_none)};
 			if (!shot_fired)
 				break;
 			rval += shot_fired;
@@ -2315,7 +2315,7 @@ void release_remote_guided_missile(d_level_unique_object_state &LevelUniqueObjec
 
 //	-------------------------------------------------------------------------------------------
 //changed on 31/3/10 by kreatordxx to distinguish between drop bomb and secondary fire
-void do_missile_firing(const secondary_weapon_index weapon, const vmobjptridx_t plrobjidx)
+void do_missile_firing(pilot &p, const secondary_weapon_index weapon, const vmobjptridx_t plrobjidx)
 {
 	int gun_flag{0};
 	fix fire_frame_overhead{0};
@@ -2327,16 +2327,17 @@ void do_missile_firing(const secondary_weapon_index weapon, const vmobjptridx_t 
 		fire_frame_overhead = GameTime64 - Next_missile_fire_time;
 
 #if DXX_BUILD_DESCENT == 2
-	const auto &&gimobj = LevelUniqueObjectState.Guided_missile.get_player_active_guided_missile(LevelUniqueObjectState.Objects.vmptr, Player_num);
+	const auto pnum{get_player_id(plrobj)};
+	const auto &&gimobj = LevelUniqueObjectState.Guided_missile.get_player_active_guided_missile(LevelUniqueObjectState.Objects.vmptr, pnum);
 	if (gimobj != nullptr)
 	{
-		release_local_guided_missile(LevelUniqueObjectState, Player_num, *gimobj);
+		release_local_guided_missile(LevelUniqueObjectState, pnum, *gimobj);
 		Next_missile_fire_time = GameTime64 + Weapon_info[Secondary_weapon_to_weapon_info[weapon]].fire_wait - fire_frame_overhead;
 		return;
 	}
 #endif
 
-	if (Player_dead_state != player_dead_state::no)
+	if (p.dead_state != player_dead_state::no)
 		return;
 	if (auto &secondary_weapon_ammo = player_info.secondary_ammo[weapon])
 	{
@@ -2400,7 +2401,7 @@ void do_missile_firing(const secondary_weapon_index weapon, const vmobjptridx_t 
 				|| weapon == secondary_weapon_index::guided
 #endif
 			};
-			multi_send_fire(plrobj.orient, underlying_value(weapon) + MISSILE_ADJUST, laser_level::_1	/* unused */, gun_flag, obj.ctype.laser_info.track_goal, send_objnum ? objnum : object_none);
+			multi_send_fire(plrobj.orient, underlying_value(weapon) + MISSILE_ADJUST, laser_level::_1	/* unused */, gun_flag, obj.ctype.laser_info.track_goal, send_objnum ? objnum : object_none, get_player_id(plrobj));
 		}
 
 		// don't autoselect if dropping prox and prox not current weapon

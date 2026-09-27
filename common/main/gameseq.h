@@ -146,5 +146,34 @@ void EnterSecretLevel(void);
 void init_player_stats_new_ship(playernum_t pnum);
 void copy_defaults_to_robot(const d_robot_info_array &Robot_info, object_base &objp);
 void gameseq_remove_unused_players(const d_robot_info_array &Robot_info);
+
+/* Where a player ship (re)spawns (Documentation/multiplayer-bots.md
+ * section 3.2).
+ */
+struct spawn_choice
+{
+	enum class kind : uint8_t
+	{
+		/* Deathmatch respawn without a usable site: leave the ship alone. */
+		none,
+		/* Deathmatch level start: the sync packet placed the ship; only
+		 * reset it.
+		 */
+		in_place,
+		/* Move the ship to Player_init[site], then reset it. */
+		site,
+	};
+	kind what;
+	unsigned site;
+};
+/* Choose the spawn of player `pnum`: its own start site outside
+ * deathmatch; in deathmatch with `random_flag` == 1 a random site among
+ * the Netgame.SecludedSpawns + 1 farthest from the other ships (this
+ * reseeds and draws d_rand).
+ */
+[[nodiscard]]
+spawn_choice choose_spawn(fvmobjptr &vmobjptr, playernum_t pnum, int random_flag);
+/* Put the player ship `plrobj` where `spawn` says and reset it. */
+void place_player(fvmsegptridx &vmsegptridx, vmobjptridx_t plrobj, spawn_choice spawn);
 }
 #endif

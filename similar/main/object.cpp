@@ -1460,9 +1460,10 @@ void obj_delete(d_level_unique_object_state &LevelUniqueObjectState, segment_arr
 #define	DEATH_SEQUENCE_EXPLODE_TIME	(F1_0*2)
 
 object *Dead_player_camera;	//	Object index of object watching deader.
+pilot Local_pilot;
 }
 namespace dcx {
-player_dead_state Player_dead_state = player_dead_state::no;			//	If !0, then player is dead, but game continues so he can watch.
+player_dead_state &Player_dead_state{::dsx::Local_pilot.dead_state};			//	If !0, then player is dead, but game continues so he can watch.
 namespace {
 static int Player_flags_save;
 static fix Camera_to_player_dist_goal = F1_0*4;
@@ -1917,7 +1918,7 @@ void d_guided_missile_indices::clear_player_active_guided_missile(const playernu
 	i = object_none;
 }
 
-int Drop_afterburner_blob_flag;		//ugly hack
+int &Drop_afterburner_blob_flag{Local_pilot.drop_afterburner_blob_flag};		//ugly hack
 //see if wall is volatile, and if so, cause damage to player
 //returns true if player is in lava
 #endif

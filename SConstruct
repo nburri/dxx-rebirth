@@ -5015,6 +5015,11 @@ class DXXArchive(DXXCommon):
 		RuntimeTest('test-net-v2-authority', (
 			'common/unittest/net_v2_authority.cpp',
 			)),
+		# Test of the deathmatch spawn site choice (spawn_site.h) against
+		# the code it was extracted from.
+		RuntimeTest('test-spawn-site', (
+			'common/unittest/spawn_site.cpp',
+			)),
 			)
 	del RuntimeTest
 

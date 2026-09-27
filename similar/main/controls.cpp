@@ -58,24 +58,30 @@ using std::max;
 namespace dsx {
 
 #if DXX_BUILD_DESCENT == 2
-fix Afterburner_charge;
-local_player_rate_dividers Local_player_rate_dividers;
-static_assert(decltype(local_player_rate_dividers::afterburner_drain)::divisor == AFTERBURNER_USE_SECS);
-static_assert(decltype(local_player_rate_dividers::afterburner_recharge)::divisor == AFTERBURNER_RECHARGE_SECS);
+fix &Afterburner_charge{Local_pilot.afterburner_charge};
+pilot_rate_dividers &Local_player_rate_dividers{Local_pilot.rate_dividers};
+static_assert(decltype(pilot_rate_dividers::afterburner_drain)::divisor == AFTERBURNER_USE_SECS);
+static_assert(decltype(pilot_rate_dividers::afterburner_recharge)::divisor == AFTERBURNER_RECHARGE_SECS);
 #endif
 
 void read_flying_controls(object &obj, control_info &Controls)
+{
+#if DXX_BUILD_DESCENT == 2
+	if (obj.type != object_type::OBJ_PLAYER || get_player_id(obj) != Player_num)
+		return;	//references to player_ship require that this obj be the player
+#endif
+	apply_pilot_controls(obj, Local_pilot, Controls);
+}
+
+void apply_pilot_controls(object &obj, pilot &p, const control_info &Controls)
 {
 	fix	forward_thrust_time;
 
 	Assert(FrameTime > 0); 		//Get MATT if hit this!
 
 #if DXX_BUILD_DESCENT == 2
-	if (obj.type != object_type::OBJ_PLAYER || get_player_id(obj) != Player_num)
-		return;	//references to player_ship require that this obj be the player
-
 	const auto control_guided_missile = [&] {
-		const auto &&gimobj = LevelUniqueObjectState.Guided_missile.get_player_active_guided_missile(LevelUniqueObjectState.Objects.vmptr, Player_num);
+		const auto &&gimobj = LevelUniqueObjectState.Guided_missile.get_player_active_guided_missile(LevelUniqueObjectState.Objects.vmptr, get_player_id(obj));
 		if (gimobj == nullptr)
 			return false;
 		auto &gmobj = *gimobj;
@@ -133,29 +139,29 @@ void read_flying_controls(object &obj, control_info &Controls)
 				int old_count,new_count;
 	
 				//add in value from 0..1
-				afterburner_scale = f1_0 + min(f1_0/2,Afterburner_charge) * 2;
+				afterburner_scale = f1_0 + min(f1_0/2,p.afterburner_charge) * 2;
 	
 				forward_thrust_time = fixmul(FrameTime,afterburner_scale);	//based on full thrust
 	
-				old_count = (Afterburner_charge / (DROP_DELTA_TIME/AFTERBURNER_USE_SECS));
+				old_count = (p.afterburner_charge / (DROP_DELTA_TIME/AFTERBURNER_USE_SECS));
 
 				/* Carry the remainder of the division into the next
 				 * frame, so that the drain rate does not depend on the
 				 * frame rate.  Discard it when the charge runs out.
 				 */
-				auto &afterburner_drain = Local_player_rate_dividers.afterburner_drain;
-				Afterburner_charge -= afterburner_drain.take(FrameTime);
+				auto &afterburner_drain = p.rate_dividers.afterburner_drain;
+				p.afterburner_charge -= afterburner_drain.take(FrameTime);
 
-				if (Afterburner_charge <= 0)
+				if (p.afterburner_charge <= 0)
 				{
-					Afterburner_charge = 0;
+					p.afterburner_charge = 0;
 					afterburner_drain.reset();
 				}
 
-				new_count = (Afterburner_charge / (DROP_DELTA_TIME/AFTERBURNER_USE_SECS));
+				new_count = (p.afterburner_charge / (DROP_DELTA_TIME/AFTERBURNER_USE_SECS));
 
 				if (old_count != new_count)
-					Drop_afterburner_blob_flag = 1;	//drop blob (after physics called)
+					p.drop_afterburner_blob_flag = 1;	//drop blob (after physics called)
 			}
 		}
 		else {
@@ -167,9 +173,9 @@ void read_flying_controls(object &obj, control_info &Controls)
 			 * rate.  Discard it when the charge is limited by the
 			 * maximum or by the available energy.
 			 */
-			auto &afterburner_recharge = Local_player_rate_dividers.afterburner_recharge;
+			auto &afterburner_recharge = p.rate_dividers.afterburner_recharge;
 			const fix wanted_charge_up{afterburner_recharge.take(FrameTime)};	//recharge over 8 seconds
-			charge_up = min(wanted_charge_up, f1_0 - Afterburner_charge);
+			charge_up = min(wanted_charge_up, f1_0 - p.afterburner_charge);
 	
 			auto &energy = player_info.energy;
 			cur_energy = max(energy - i2f(10), 0);	//don't drop below 10
@@ -179,7 +185,7 @@ void read_flying_controls(object &obj, control_info &Controls)
 			if (charge_up < wanted_charge_up)
 				afterburner_recharge.reset();
 	
-			Afterburner_charge += charge_up;
+			p.afterburner_charge += charge_up;
 	
 			energy -= charge_up * 100 / 10;	//full charge uses 10% of energy
 		}
@@ -229,7 +235,7 @@ void read_flying_controls(object &obj, control_info &Controls)
 	}
 
 	// moved here by WraithX
-	if (Player_dead_state != player_dead_state::no)
+	if (p.dead_state != player_dead_state::no)
 	{
 		obj.mtype.phys_info.thrust = {};  // don't let dead players move, changed by WraithX
 		return;

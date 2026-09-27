@@ -2439,7 +2439,7 @@ uint8_t multi_guided_generation(const playernum_t pnum)
 }
 #endif
 
-void multi_send_fire(const vms_matrix &orient, int laser_gun, const laser_level level, int laser_flags, objnum_t laser_track, const imobjptridx_t is_bomb_objnum)
+void multi_send_fire(const vms_matrix &orient, int laser_gun, const laser_level level, int laser_flags, objnum_t laser_track, const imobjptridx_t is_bomb_objnum, const playernum_t pnum)
 {
 #if DXX_BUILD_DESCENT == 2
 	/* A guided missile: bits 1-7 of the flags are its generation (only
@@ -2447,7 +2447,7 @@ void multi_send_fire(const vms_matrix &orient, int laser_gun, const laser_level 
 	 */
 	if (laser_gun == underlying_value(secondary_weapon_index::guided) + MISSILE_ADJUST)
 	{
-		auto &gen = Guided_generation[Player_num];
+		auto &gen = Guided_generation[pnum];
 		gen = static_cast<uint8_t>((gen + 1) % ::dcx::net_v2::NET_V2_GUIDED_GEN_MODULO);
 		laser_flags = (laser_flags & 1) | (gen << 1);
 	}
@@ -2476,7 +2476,7 @@ void multi_send_fire(const vms_matrix &orient, int laser_gun, const laser_level 
 		new(&multibuf.multibomb) multi_command<multiplayer_command_t::MULTI_FIRE_BOMB>();
 	else
 		new(&multibuf.multifire) multi_command<multiplayer_command_t::MULTI_FIRE>();
-	multibuf.multifire[1] = static_cast<char>(Player_num);
+	multibuf.multifire[1] = static_cast<char>(pnum);
 	multibuf.multifire[2] = static_cast<char>(laser_gun);
 	multibuf.multifire[3] = static_cast<uint8_t>(level);
 	multibuf.multifire[4] = static_cast<char>(laser_flags);
@@ -2502,16 +2502,16 @@ void multi_send_fire(const vms_matrix &orient, int laser_gun, const laser_level 
 		}
 		else
 			PUT_INTEL_SHORT(&multibuf.multitrack[20], uint16_t{0xffff});
-		multi_send_data(multibuf.multitrack, multiplayer_data_priority::_1);
+		multi_send_data(multibuf.multitrack, multiplayer_data_priority::_1, pnum);
 	}
 	else if (is_bomb_objnum != object_none)
 	{
 		map_objnum_local_to_local(is_bomb_objnum);
 		PUT_INTEL_SHORT(&multibuf.multibomb[17], is_bomb_objnum.operator objnum_t());
-		multi_send_data(multibuf.multibomb, multiplayer_data_priority::_1);
+		multi_send_data(multibuf.multibomb, multiplayer_data_priority::_1, pnum);
 	}
 	else
-		multi_send_data(multibuf.multifire, multiplayer_data_priority::_1);
+		multi_send_data(multibuf.multifire, multiplayer_data_priority::_1, pnum);
 }
 
 void multi_send_destroy_controlcen(const objnum_t objnum, const playernum_t player)
@@ -2589,18 +2589,21 @@ void multi_send_endlevel_start()
 	}
 }
 
-void multi_send_player_deres(deres_type_t type)
+void multi_send_player_deres(deres_type_t type, const playernum_t pnum)
 {
 	auto &Objects = LevelUniqueObjectState.Objects;
 	auto &vmobjptr = Objects.vmptr;
-	/* The inventory goes first: the host drops the eggs from it, the
-	 * others arm the mines from it (protocol v2 stage 3).
+	/* The local player's inventory goes first: the host drops the eggs
+	 * from it, the others arm the mines from it (protocol v2 stage 3).
+	 * The host's copy of a ship it flies itself is already current.
 	 */
-	net_objects_flush_inventory();
+	const auto local_player{pnum == Player_num};
+	if (local_player)
+		net_objects_flush_inventory();
 	multi_command<multiplayer_command_t::MULTI_PLAYER_DERES> multibuf;
-	multibuf[1] = Player_num;
+	multibuf[1] = pnum;
 	multibuf[2] = type;
-	auto &player_info = get_local_plrobj().ctype.player_info;
+	auto &player_info = vmobjptr(vcplayerptr(pnum)->objnum)->ctype.player_info;
 	/* The mines every machine arms, as this machine does
 	 * (drop_player_armed_bombs).
 	 */
@@ -2610,11 +2613,12 @@ void multi_send_player_deres(deres_type_t type)
 	multibuf[3] = 0;
 #endif
 	multibuf[4] = player_info.secondary_ammo[secondary_weapon_index::proximity];
-	multi_send_data(multibuf, multiplayer_data_priority::_2);
-	net_objects_own_deres();
+	multi_send_data(multibuf, multiplayer_data_priority::_2, pnum);
+	if (local_player)
+		net_objects_own_deres();
 	if (+(player_info.powerup_flags & player_flag::cloaked))
-		multi_send_decloak();
-	multi_strip_robots(Player_num);
+		multi_send_decloak(pnum);
+	multi_strip_robots(pnum);
 }
 
 }
@@ -2636,30 +2640,32 @@ void multi_send_message()
 
 }
 
-void multi_send_reappear()
+void multi_send_reappear(const playernum_t pnum)
 {
-	auto &plr = get_local_player();
+	auto &plr = *vcplayerptr(pnum);
 	multi_command<multiplayer_command_t::MULTI_REAPPEAR> multibuf;
-	multibuf[1] = static_cast<char>(Player_num);
+	multibuf[1] = static_cast<char>(pnum);
 	PUT_INTEL_SHORT(&multibuf[2], plr.objnum);
 
-	multi_send_data(multibuf, multiplayer_data_priority::_2);
-	::dsx::net_objects_player_reappeared(Player_num);
+	multi_send_data(multibuf, multiplayer_data_priority::_2, pnum);
+	::dsx::net_objects_player_reappeared(pnum);
 }
 
 namespace dsx {
 
 /* 
  * I was killed. If I am host, send this info to everyone and compute kill. If I am just a Client I'll only send the kill but not compute it for me. I (Client) will wait for Host to send me my kill back together with updated game_mode related variables which are important for me to compute consistent kill.
+ * `objnum` is the ship that died: the local player's, or on the host, a
+ * ship the host flies itself (then the host path below is taken).
  */
 void multi_send_kill(const vmobjptridx_t objnum)
 {
 	auto &Objects = LevelUniqueObjectState.Objects;
 	auto &imobjptridx = Objects.imptridx;
-	auto &vmobjptr = Objects.vmptr;
 	// I died, tell the world.
-	Assert(get_player_id(objnum) == Player_num);
-	const auto killer_objnum = get_local_plrobj().ctype.player_info.killer_objnum;
+	const auto pnum{get_player_id(objnum)};
+	Assert(pnum == Player_num || multi_i_am_master());
+	const auto killer_objnum = objnum->ctype.player_info.killer_objnum;
 
 	// do it with variable since INTEL_SHORT won't work on return val from function.
 	const auto &&[remote_owner, remote_objnum] = killer_objnum != object_none
@@ -2685,19 +2691,19 @@ void multi_send_kill(const vmobjptridx_t objnum)
 	/* The player who died.  Clients read it from MULTI_KILL_HOST, because
 	 * the host also relays other players' deaths in that message.
 	 */
-	multibuf.h[1] = Player_num;
+	multibuf.h[1] = pnum;
 	multibuf.h[4] = remote_owner;
 	PUT_INTEL_SHORT(&multibuf.h[2], remote_objnum);
 	// I am host - I know what's going on so attach game_mode related info which might be vital for correct kill computation
 	if (local_is_host)
 	{
 		multi_compute_kill(LevelSharedRobotInfoState.Robot_info, imobjptridx(killer_objnum), objnum);
-		multi_send_data(multibuf.h, multiplayer_data_priority::_2);
+		multi_send_data(multibuf.h, multiplayer_data_priority::_2, pnum);
 	}
 	else
 		multi_send_data_direct(multibuf.c, multi_who_is_master(), 2); // I am just a client so I'll only send my kill but not compute it, yet. I'll get response from host so I can compute it correctly
 
-	multi_strip_robots(Player_num);
+	multi_strip_robots(pnum);
 
 	if (+(Game_mode & GM_BOUNTY) && multi_i_am_master()) // update in case if needed... we could attach this to this packet but... meh...
 		multi_send_bounty();
@@ -2734,27 +2740,26 @@ void multi_send_quit()
 
 }
 
-void multi_send_cloak()
+void multi_send_cloak(const playernum_t pnum)
 {
 	// Broadcast a change in our pflags (made to support cloaking)
 
 	multi_command<multiplayer_command_t::MULTI_CLOAK> multibuf;
-	const auto pnum{Player_num};
 	multibuf[1] = pnum;
 
-	multi_send_data(multibuf, multiplayer_data_priority::_2);
+	multi_send_data(multibuf, multiplayer_data_priority::_2, pnum);
 
 	multi_strip_robots(pnum);
 }
 
-void multi_send_decloak()
+void multi_send_decloak(const playernum_t pnum)
 {
 	// Broadcast a change in our pflags (made to support cloaking)
 
 	multi_command<multiplayer_command_t::MULTI_DECLOAK> multibuf;
-	multibuf[1] = Player_num;
+	multibuf[1] = pnum;
 
-	multi_send_data(multibuf, multiplayer_data_priority::_2);
+	multi_send_data(multibuf, multiplayer_data_priority::_2, pnum);
 }
 
 }
@@ -3931,7 +3936,7 @@ void multi_send_drop_blobs (const playernum_t pnum)
 	multi_command<multiplayer_command_t::MULTI_DROP_BLOB> multibuf;
 	multibuf[1]=pnum;
 
-	multi_send_data(multibuf, multiplayer_data_priority::_0);
+	multi_send_data(multibuf, multiplayer_data_priority::_0, pnum);
 }
 
 namespace {
@@ -3943,13 +3948,13 @@ static void multi_do_drop_blob(fvmobjptr &vmobjptr, const playernum_t pnum)
 
 }
 
-void multi_send_sound_function (char whichfunc, char sound)
+void multi_send_sound_function (char whichfunc, char sound, const playernum_t pnum)
 {
 	multi_command<multiplayer_command_t::MULTI_SOUND_FUNCTION> multibuf;
-	multibuf[1]=Player_num;
+	multibuf[1]=pnum;
 	multibuf[2]=whichfunc;
 	multibuf[3] = sound;       // this would probably work on the PC as well.  Jason?
-	multi_send_data(multibuf, multiplayer_data_priority::_2);
+	multi_send_data(multibuf, multiplayer_data_priority::_2, pnum);
 }
 
 #define AFTERBURNER_LOOP_START  20098
