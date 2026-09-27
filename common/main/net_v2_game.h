@@ -27,6 +27,13 @@
 
 #if DXX_USE_MULTIPLAYER
 
+/* net_interp.h, which is not included here: it declares namespace
+ * dcx::net_v2, which would make `net_v2` ambiguous in net_udp.cpp.
+ */
+namespace dcx::net_interp {
+struct snapshot;
+}
+
 namespace dcx {
 
 [[nodiscard]]
@@ -160,6 +167,38 @@ void tracker_unregister();
 void tracker_request_games();
 void tracker_request_holepunch(tracker_game_id id);
 #endif
+
+}
+
+/* Implemented by net_interp.cpp for net_v2.cpp (stage 2, section 5.4):
+ * the snapshots of the remote ships and guided missiles.  Times are the
+ * local clock (`now`, timer_query) and the host clock
+ * (::dcx::net_interp::host_clock, the local clock plus the offset given
+ * to set_clock).
+ */
+namespace net_v2::interp {
+
+/* The estimated host clock is the local clock plus `offset` once `valid`
+ * (on the host: always, offset 0).  `tick_period` is the base of every
+ * entity's interpolation delay.  Call every frame.
+ */
+void set_clock(bool valid, std::int64_t offset, std::int64_t tick_period);
+/* A snapshot of player `pnum`'s ship, received at `now`. */
+void receive_ship(playernum_t pnum, const ::dcx::net_interp::snapshot &s, std::int64_t now);
+/* Player `pnum` is dead or not spawned: forget its snapshots. */
+void receive_ghost(playernum_t pnum);
+/* A snapshot of player `pnum`'s guided missile, `id` the owner's object
+ * number of it.
+ */
+void receive_guided(playernum_t pnum, uint16_t id, const ::dcx::net_interp::snapshot &s, std::int64_t now);
+/* How old player `pnum`'s newest state was at the host (lag marker). */
+void set_lag_age(playernum_t pnum, std::int64_t age);
+/* How far in the past the host's own entities are shown: the `view_time`
+ * of INPUT is its sample time minus this.  Zero on the host.
+ */
+[[nodiscard]]
+std::int64_t view_delay();
+void reset_player(playernum_t pnum);
 
 }
 

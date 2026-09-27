@@ -2385,7 +2385,17 @@ void do_missile_firing(const secondary_weapon_index weapon, const vmobjptridx_t 
 		if (+(Game_mode & GM_MULTI))
 		{
 			const object &obj = *objnum;
-			multi_send_fire(plrobj.orient, underlying_value(weapon) + MISSILE_ADJUST, laser_level::_1	/* unused */, gun_flag, obj.ctype.laser_info.track_goal, weapon_index_is_player_bomb(weapon) ? objnum : object_none);
+			/* Bombs, and in D2 guided missiles, go with their object
+			 * number, so that the receivers map it to their copy: the
+			 * state bundle names a guided missile by its owner's object
+			 * number.
+			 */
+			const bool send_objnum{weapon_index_is_player_bomb(weapon)
+#if DXX_BUILD_DESCENT == 2
+				|| weapon == secondary_weapon_index::guided
+#endif
+			};
+			multi_send_fire(plrobj.orient, underlying_value(weapon) + MISSILE_ADJUST, laser_level::_1	/* unused */, gun_flag, obj.ctype.laser_info.track_goal, send_objnum ? objnum : object_none);
 		}
 
 		// don't autoselect if dropping prox and prox not current weapon

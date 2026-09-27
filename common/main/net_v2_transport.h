@@ -858,6 +858,21 @@ public:
 	{
 		return to_net_time(local + m_clock.offset());
 	}
+	/* Section 2.2: whether the offset is known yet, and its value (peer
+	 * clock ~= local clock + offset, modulo 2^32 as above: `local +
+	 * clock_offset()` is a 64-bit peer clock that is consistent with
+	 * itself, and wire stamps are widened against it).
+	 */
+	[[nodiscard]]
+	bool clock_valid() const
+	{
+		return m_clock.valid();
+	}
+	[[nodiscard]]
+	net_clock clock_offset() const
+	{
+		return m_clock.offset();
+	}
 };
 
 }

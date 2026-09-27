@@ -3271,7 +3271,7 @@ void test_header_layout()
 	std::array<std::uint8_t, NET_V2_HEADER_SIZE> buf{};
 	h.write(buf.data());
 	const std::array<std::uint8_t, NET_V2_HEADER_SIZE> expected{{
-		100, 0,
+		NET_V2_PROTO_VERSION, 0,
 		1, 2, 3, 4,
 		5, 6, 7, 8,
 		7,
@@ -3286,10 +3286,11 @@ void test_header_layout()
 	CHECK(buf == expected);
 	const auto back{packet_header::read(buf)};
 	CHECK(back.has_value());
-	CHECK(back->proto == 100 && back->session_id == h.session_id && back->peer_token == h.peer_token && back->player_id == 7 && back->flags == 3 && back->seq == h.seq && back->ack == h.ack && back->ack_bits == h.ack_bits && back->send_time == h.send_time && back->echo_time == h.echo_time && back->echo_delay == h.echo_delay);
+	CHECK(back->proto == NET_V2_PROTO_VERSION && back->session_id == h.session_id && back->peer_token == h.peer_token && back->player_id == 7 && back->flags == 3 && back->seq == h.seq && back->ack == h.ack && back->ack_bits == h.ack_bits && back->send_time == h.send_time && back->echo_time == h.echo_time && back->echo_delay == h.echo_delay);
 	CHECK(!packet_header::read(std::span{buf}.first(NET_V2_HEADER_SIZE - 1)).has_value());
-	/* A packet that a v1 build would parse: first byte 100 is not a
-	 * valid upid.  A v2 build drops anything without proto 100.
+	/* A packet that a v1 build would parse: a first byte of 100 or more
+	 * is not a valid upid.  A v2 build drops anything without its own
+	 * proto.
 	 */
 	buf[1] = 1;
 	connection c{host_side, 0};

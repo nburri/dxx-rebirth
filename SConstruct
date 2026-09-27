@@ -5516,6 +5516,7 @@ class DXXProgram(DXXCommon):
 		__get_objects_multiplayer=DXXCommon.create_lazy_object_states_getter((LazyObjectState(sources=(
 'similar/main/multi.cpp',
 'similar/main/multibot.cpp',
+'similar/main/net_interp.cpp',
 ),
 		transform_target=_apply_target_name,
 	),

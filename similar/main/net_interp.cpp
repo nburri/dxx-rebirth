@@ -1,0 +1,378 @@
+/*
+ * This file is part of the DXX-Rebirth project <https://github.com/dxx-rebirth/dxx-rebirth/>.
+ * It is copyright by its individual contributors, as recorded in the
+ * project's Git history.  See COPYING.txt at the top level for license
+ * terms and a link to the Git history.
+ */
+/*
+ * Multiplayer network protocol v2, stage 2: receiver-side interpolation
+ * of remote ships and guided missiles (Documentation/network-protocol-v2.md,
+ * sections 2.5 and 5.4).
+ *
+ * The network layer (net_v2.cpp) feeds timestamped snapshots per remote
+ * player; once per frame, before any object moves, net_interp_apply_all
+ * writes each remote ship's (and guided missile's) pose at its render
+ * time into the object: position, orientation, velocities and segment.
+ * The object *is* the interpolated pose, so the renderer, collisions,
+ * sounds and HUD all see one position.  object_move_one skips the
+ * physics of every object written here this frame (net_interp_drives).
+ *
+ * The math (rings, Hermite, nlerp, delay estimation) is game-independent
+ * and tested on its own: common/main/net_interp.h.
+ */
+
+#include "dxxsconf.h"
+
+#if DXX_USE_MULTIPLAYER
+
+#include <algorithm>
+#include <array>
+
+#include "net_interp.h"
+#include "net_v2_game.h"
+#include "multi.h"
+#include "object.h"
+#include "player.h"
+#include "gameseg.h"
+#include "segment.h"
+#include "physics.h"
+#include "newdemo.h"
+#include "timer.h"
+#include "game.h"
+#include "laser.h"
+#include "d_levelstate.h"
+
+namespace dsx {
+
+namespace {
+
+using ::dcx::net_interp::entity_track;
+using ::dcx::net_interp::host_clock;
+using ::dcx::net_interp::lag_indicator;
+using ::dcx::net_interp::pose;
+using ::dcx::net_interp::pose_kind;
+using ::dcx::net_interp::snapshot;
+using ::dcx::net_v2::net_clock;
+
+#if DXX_BUILD_DESCENT == 2
+struct guided_track
+{
+	entity_track track;
+	/* The owner's object number of the missile the snapshots describe. */
+	uint16_t id{};
+	bool active{};
+	/* The local copy the snapshots were last compared with: when it
+	 * changes (a new missile, possibly in a reused object slot, so with
+	 * the same `id`), the snapshots of the previous one are dropped.
+	 */
+	objnum_t local{object_none};
+};
+#endif
+
+struct interp_state
+{
+	/* The estimated host clock is the local clock plus `offset` (zero on
+	 * the host), once `clock_valid`.
+	 */
+	bool clock_valid{};
+	net_clock offset{};
+	net_clock tick_period{::dcx::net_v2::net_seconds(1) / 60};
+	per_player_array<entity_track> ships{};
+	per_player_array<lag_indicator> lag{};
+	per_player_array<net_clock> lag_age{};
+	/* The objects written this frame; object_move_one leaves them alone. */
+	per_player_array<objnum_t> driven_ship{};
+#if DXX_BUILD_DESCENT == 2
+	per_player_array<guided_track> guided{};
+	per_player_array<objnum_t> driven_guided{};
+#endif
+};
+
+interp_state I;
+
+void clear_driven()
+{
+	I.driven_ship.fill(object_none);
+#if DXX_BUILD_DESCENT == 2
+	I.driven_guided.fill(object_none);
+#endif
+}
+
+[[nodiscard]]
+bool point_in_segment(fvcvertptr &vcvertptr, const vms_vector &pos, const shared_segment &seg)
+{
+	return get_seg_masks(vcvertptr, pos, seg, 0).centermask == sidemask_t{};
+}
+
+/* Section 5.4, step 2: the segment containing `pos`, looked for in
+ * `start` and in the segments at most two sides away from it.  An
+ * interpolated ship moves at most a few units per snapshot, so it can
+ * only be that close to the segment of the nearer snapshot; the bound
+ * keeps the search cheap at any frame rate and keeps a point outside the
+ * mine (between snapshots on either side of a corner) from being traced
+ * into some far segment.  Short tunnel segments are the reason for depth
+ * 2 rather than 1: a ship that crosses a segment shorter than one
+ * snapshot's travel is two sides away from both snapshots' segments.
+ */
+[[nodiscard]]
+segnum_t find_segment_near(const vms_vector &pos, const segnum_t start)
+{
+	auto &LevelSharedVertexState = LevelSharedSegmentState.get_vertex_state();
+	auto &vcvertptr = LevelSharedVertexState.get_vertices().vcptr;
+	auto &vcsegptr = LevelSharedSegmentState.get_segments().vcptr;
+	const shared_segment &s0 = *vcsegptr(start);
+	if (point_in_segment(vcvertptr, pos, s0))
+		return start;
+	for (const auto c1 : s0.children)
+		if (IS_CHILD(c1) && point_in_segment(vcvertptr, pos, *vcsegptr(c1)))
+			return c1;
+	for (const auto c1 : s0.children)
+	{
+		if (!IS_CHILD(c1))
+			continue;
+		for (const auto c2 : vcsegptr(c1)->shared_segment::children)
+			if (IS_CHILD(c2) && c2 != start && point_in_segment(vcvertptr, pos, *vcsegptr(c2)))
+				return c2;
+	}
+	return segment_none;
+}
+
+/* Write a pose into an object.  Returns false if the object was left
+ * where it was (an extrapolation that left the mine).
+ */
+bool write_pose(const vmobjptridx_t obj, const pose &p)
+{
+	const vms_vector pos{p.pos.x, p.pos.y, p.pos.z};
+	auto seg{find_segment_near(pos, segnum_t{p.segment})};
+	if (seg == segment_none && p.other_segment != p.segment)
+		seg = find_segment_near(pos, segnum_t{p.other_segment});
+	if (seg == segment_none && obj->segnum != segnum_t{p.segment} && obj->segnum != segnum_t{p.other_segment})
+		seg = find_segment_near(pos, obj->segnum);
+	if (seg == segment_none)
+	{
+		/* Step 3: an extrapolation never goes where no segment is
+		 * (through a wall the ship never touched); it stops.
+		 */
+		if (p.kind == pose_kind::extrapolated || p.kind == pose_kind::stale)
+		{
+			obj->mtype.phys_info.velocity = {};
+			obj->mtype.phys_info.rotvel = {};
+			return false;
+		}
+		/* A snapshot's own position may lie a little outside its segment
+		 * (the owner's physics allows the ship's centre past a side
+		 * while it scrapes); the nearer snapshot's segment is what the
+		 * owner said.
+		 */
+		seg = segnum_t{p.segment};
+	}
+	obj->pos = pos;
+	obj->orient = vms_matrix_from_quaternion(vms_quaternion{p.orient.w, p.orient.x, p.orient.y, p.orient.z});
+	obj->mtype.phys_info.velocity = vms_vector{p.vel.x, p.vel.y, p.vel.z};
+	obj->mtype.phys_info.rotvel = vms_vector{p.rotvel.x, p.rotvel.y, p.rotvel.z};
+	if (obj->segnum != seg)
+	{
+		auto &Objects = LevelUniqueObjectState.Objects;
+		obj_relink(Objects.vmptr, vmsegptr, obj, vmsegptridx(seg));
+	}
+	return true;
+}
+
+[[nodiscard]]
+bool segment_valid(const uint16_t s)
+{
+	return s < LevelSharedSegmentState.get_segments().get_count();
+}
+
+[[nodiscard]]
+host_clock est_host_now(const net_clock now)
+{
+	return now + I.offset;
+}
+
+}
+
+namespace net_v2 {
+
+namespace interp {
+
+void set_clock(const bool valid, const net_clock offset, const net_clock tick_period)
+{
+	I.clock_valid = valid;
+	I.offset = offset;
+	if (tick_period != I.tick_period)
+	{
+		I.tick_period = tick_period;
+		for (auto &t : I.ships)
+			t.delay.set_base(tick_period);
+#if DXX_BUILD_DESCENT == 2
+		for (auto &g : I.guided)
+			g.track.delay.set_base(tick_period);
+#endif
+	}
+}
+
+void receive_ship(const playernum_t pnum, const snapshot &s, const net_clock now)
+{
+	if (pnum >= MAX_PLAYERS || !segment_valid(s.segment))
+		return;
+	I.ships[pnum].receive(s, now, est_host_now(now));
+}
+
+void receive_ghost(const playernum_t pnum)
+{
+	if (pnum >= MAX_PLAYERS)
+		return;
+	/* A dead or unspawned player: the next record starts afresh (and the
+	 * ship is placed there directly), however far it is.  The delay
+	 * estimate survives.
+	 */
+	I.ships[pnum].ring.clear();
+}
+
+void receive_guided(const playernum_t pnum, const uint16_t id, const snapshot &s, const net_clock now)
+{
+#if DXX_BUILD_DESCENT == 2
+	if (pnum >= MAX_PLAYERS || !segment_valid(s.segment))
+		return;
+	auto &g = I.guided[pnum];
+	if (!g.active || g.id != id)
+	{
+		g.track.ring.clear();
+		g.id = id;
+		g.active = true;
+	}
+	g.track.receive(s, now, est_host_now(now));
+#else
+	(void)pnum;
+	(void)id;
+	(void)s;
+	(void)now;
+#endif
+}
+
+void set_lag_age(const playernum_t pnum, const net_clock age)
+{
+	if (pnum < MAX_PLAYERS)
+		I.lag_age[pnum] = age;
+}
+
+net_clock view_delay()
+{
+	/* The delay of the host's own ship: the host-stamped entities are
+	 * shown this far in the past.
+	 */
+	return multi_i_am_master() ? 0 : I.ships[0].delay.delay();
+}
+
+void reset_player(const playernum_t pnum)
+{
+	if (pnum >= MAX_PLAYERS)
+		return;
+	I.ships[pnum].reset(I.tick_period);
+	I.lag[pnum].reset();
+	I.lag_age[pnum] = 0;
+#if DXX_BUILD_DESCENT == 2
+	I.guided[pnum] = {};
+	I.guided[pnum].track.reset(I.tick_period);
+#endif
+}
+
+}
+
+}
+
+void net_interp_reset()
+{
+	for (playernum_t i = 0; i < MAX_PLAYERS; ++i)
+		net_v2::interp::reset_player(i);
+	clear_driven();
+}
+
+bool net_interp_drives(const vcobjidx_t obj)
+{
+	const objnum_t o{obj};
+	if (std::ranges::find(I.driven_ship, o) != I.driven_ship.end())
+		return true;
+#if DXX_BUILD_DESCENT == 2
+	if (std::ranges::find(I.driven_guided, o) != I.driven_guided.end())
+		return true;
+#endif
+	return false;
+}
+
+bool net_interp_player_lagging(const playernum_t pnum)
+{
+	return pnum < MAX_PLAYERS && pnum != Player_num && I.lag[pnum].lagging();
+}
+
+void net_interp_apply_all()
+{
+	clear_driven();
+	if (!(Game_mode & GM_NETWORK) || Newdemo_state == ND_STATE_PLAYBACK || !I.clock_valid)
+		return;
+	if (Network_status != network_state::playing && Network_status != network_state::endlevel)
+		return;
+	auto &Objects = LevelUniqueObjectState.Objects;
+	auto &vmobjptridx = Objects.vmptridx;
+	const net_clock now{timer_query()};
+	const host_clock est{est_host_now(now)};
+	const unsigned n{std::min<unsigned>(N_players, MAX_PLAYERS)};
+	for (playernum_t i = 0; i < n; ++i)
+	{
+		I.lag[i].update(I.lag_age[i]);
+		if (i == Player_num)
+			continue;
+		auto &plr = *vcplayerptr(i);
+		if (plr.connected != player_connection_status::playing)
+			continue;
+		auto &t = I.ships[i];
+		t.delay.update(now);
+		if (!t.ring.empty())
+		{
+			const auto &&obj = vmobjptridx(plr.objnum);
+			if (obj->type == object_type::OBJ_PLAYER)
+				if (const auto p{sample(t.ring, t.render_time(est))})
+				{
+					if (write_pose(obj, *p))
+						set_thrust_from_velocity(obj);
+					I.driven_ship[i] = obj;
+				}
+		}
+#if DXX_BUILD_DESCENT == 2
+		auto &g = I.guided[i];
+		g.track.delay.update(now);
+		const auto &&gim = LevelUniqueObjectState.Guided_missile.get_player_active_guided_missile(vmobjptridx, i);
+		const objnum_t local{gim == nullptr ? objnum_t{object_none} : gim.get_unchecked_index()};
+		if (g.local != local)
+		{
+			g.local = local;
+			g.active = false;
+			g.track.ring.clear();
+		}
+		if (gim == nullptr || !g.active || g.track.ring.empty())
+			continue;
+		/* Only the missile the snapshots describe (MULTI_FIRE_BOMB and
+		 * MULTI_FIRE_TRACK map the owner's object number to the copy).
+		 */
+		if (local != objnum_remote_to_local(g.id, static_cast<int8_t>(i)))
+			continue;
+		const auto p{sample(g.track.ring, g.track.render_time(est))};
+		/* Before its first snapshot (just launched) and after the records
+		 * stopped for longer than the extrapolation limit (the owner's
+		 * missile hit something, or the release is on its way), the copy
+		 * flies by its own physics, which also lets it hit what the
+		 * owner's missile hit.
+		 */
+		if (!p || p->kind == pose_kind::early || p->kind == pose_kind::stale)
+			continue;
+		const vmobjptridx_t missile = gim;
+		write_pose(missile, *p);
+		I.driven_guided[i] = missile;
+#endif
+	}
+}
+
+}
+
+#endif

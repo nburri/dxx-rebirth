@@ -5,11 +5,12 @@
  * terms and a link to the Git history.
  */
 /*
- * Multiplayer network protocol v2, stage 1
- * (Documentation/network-protocol-v2.md, section 8 "Stage 1"): the UDP
- * sockets, the session layer of section 4 (discovery, join handshake, one
- * transport connection per peer, level start, level snapshot for a join
- * in progress, leave and kick), and the mapping of the unchanged v1
+ * Multiplayer network protocol v2, stages 1 and 2
+ * (Documentation/network-protocol-v2.md, section 8): the UDP sockets, the
+ * session layer of section 4 (discovery, join handshake, one transport
+ * connection per peer, level start, level snapshot for a join in
+ * progress, leave and kick), the network tick, the client's INPUT and the
+ * host's state bundle of section 5, and the mapping of the remaining v1
  * gameplay messages onto the transport (section 6.10, "stage 1" column).
  *
  * The menus and the level start flow stayed in net_udp.cpp; the two files
@@ -45,6 +46,8 @@
 #include "net_v2_transport.h"
 #include "net_v2_session.h"
 #include "net_v2_game.h"
+#include "net_v2_state.h"
+#include "net_interp.h"
 #include "game.h"
 #include "multi.h"
 #include "multiinternal.h"
@@ -571,12 +574,6 @@ constexpr std::size_t SNAPSHOT_END_SIZE{8};
 constexpr std::size_t SNAPSHOT_OBJECT_ENTRY_SIZE{4 + 1 + 4 + sizeof(object_rw)};
 constexpr unsigned SNAPSHOT_OBJECTS_PER_MESSAGE{3};
 constexpr std::size_t SNAPSHOT_GAME_SIZE{2 + (MAX_PLAYERS * MAX_PLAYERS * 2) + (MAX_PLAYERS * 2) + (MAX_PLAYERS * 2) + (MAX_PLAYERS * 4) + 4 + 1 + 1 + MAX_PLAYERS + 4 + 2 + 10 + 4 + MAX_PLAYERS};
-/* A position record: player id, connection state, quaternionpos. */
-constexpr std::size_t POSITION_RECORD_SIZE{2 + quaternionpos::packed_size::value};
-/* The STATE chunk starts with the host's ping list, one u16 in ms per
- * slot, then position records.
- */
-constexpr std::size_t STATE_PING_SIZE{MAX_PLAYERS * 2};
 /* v1 endlevel_h without the upid byte; endlevel_c without upid and player
  * number.
  */
@@ -642,18 +639,19 @@ struct peer
 	fix64 close_at{};
 	std::deque<queued_message> backlog;
 	std::size_t backlog_bytes{};
-	/* Per source player, the sequence of the last position record relayed
-	 * to this peer in a STATE chunk.
-	 */
-	per_player_array<uint32_t> relayed_position{};
+	/* Host: when this peer's bundle next carries the ping list. */
+	fix64 next_pings{};
 	fix64 next_stats{};
 };
 
-/* The newest position record known per player (own or received). */
-struct position_record
+/* Host: the newest INPUT accepted from a player (section 5.5, step 6). */
+struct accepted_input
 {
-	uint32_t seq{};
-	std::array<uint8_t, POSITION_RECORD_SIZE> bytes{};
+	bool valid{};
+	::dcx::net_v2::input_chunk input;
+	/* The sample time, clamped (see apply_input), on the host clock. */
+	::dcx::net_interp::host_clock time{};
+	fix64 arrival{};
 };
 
 struct session_state
@@ -662,7 +660,16 @@ struct session_state
 	/* Client: the token the host assigned. */
 	uint32_t my_token{};
 	per_player_array<peer> peers{};
-	per_player_array<position_record> positions{};
+	/* Stage 2 (section 5).  Host: the newest INPUT per player and the
+	 * session's tick counter (section 2.3).  Client: the sequence of its
+	 * INPUT chunks and the newest bundle header applied.
+	 */
+	per_player_array<accepted_input> inputs{};
+	::dcx::net_interp::tick_accumulator tick;
+	uint16_t input_seq{};
+	bool have_bundle{};
+	uint32_t bundle_tick{};
+	::dcx::net_interp::host_clock bundle_time{};
 	/* Pending best-effort v1 records (originator: the local player):
 	 * event kind byte, player id, records.
 	 */
@@ -1013,7 +1020,7 @@ void drop_peer(peer &p)
 	p.backlog_bytes = 0;
 	p.has_ready = false;
 	p.in_level = false;
-	p.relayed_position = {};
+	p.next_pings = 0;
 }
 
 /* Reliable messages to a peer.  Messages beyond the connection's
@@ -1557,13 +1564,31 @@ bool apply_snapshot_game(const std::span<const uint8_t> payload)
 	return r.done();
 }
 
-/* Positions (section 5, stage 1 minimal form): the v1 pdata record, as
- * the client's INPUT chunk and, relayed with the host's own record, as
- * the STATE chunk to every client.
+/* State synchronisation (section 5, stage 2): the client's INPUT chunk at
+ * every tick, the host's state bundle (STATE chunk) to every client at
+ * every tick, and the snapshots both feed to the interpolation of the
+ * remote ships and guided missiles (net_interp.cpp).  The host accepts
+ * every INPUT (the checks of section 5.5 are stage 4), so it never sends
+ * a correction yet; the client applies one if it gets it (section 5.6).
  */
 
+using ::dcx::net_v2::state_bundle;
+using ::dcx::net_v2::input_chunk;
+using ::dcx::net_v2::player_record;
+using ::dcx::net_v2::guided_record;
+using ::dcx::net_v2::net_pose;
+using ::dcx::net_v2::net_vec;
+using ::dcx::net_v2::net_quat;
+using ::dcx::net_v2::state_flag;
+using ::dcx::net_v2::player_record_flag;
+using ::dcx::net_v2::input_flag;
+using ::dcx::net_v2::flag_bit;
+using ::dcx::net_v2::net_clock;
+using ::dcx::net_interp::host_clock;
+using ::dcx::net_interp::snapshot;
+
 [[nodiscard]]
-bool position_sending_allowed()
+bool state_sending_allowed()
 {
 	if (!(Game_mode & GM_NETWORK))
 		return false;
@@ -1572,153 +1597,434 @@ bool position_sending_allowed()
 	return Network_status == network_state::playing || Network_status == network_state::endlevel;
 }
 
-void build_own_position_record()
+[[nodiscard]]
+bool state_receiving_allowed()
 {
-	auto &Objects = LevelUniqueObjectState.Objects;
-	auto &vmobjptr = Objects.vmptr;
-	auto &plr = get_local_player();
-	auto &rec = S.positions[Player_num];
-	writer w{rec.bytes.data()};
-	w.u8(Player_num);
-	w.u8(underlying_value(plr.connected));
-	const auto qpp{build_quaternionpos(vmobjptr(plr.objnum))};
-	w.u16(static_cast<uint16_t>(qpp.orient.w));
-	w.u16(static_cast<uint16_t>(qpp.orient.x));
-	w.u16(static_cast<uint16_t>(qpp.orient.y));
-	w.u16(static_cast<uint16_t>(qpp.orient.z));
-	multi_put_vector(&rec.bytes[w.pos], qpp.pos);
-	w.pos += 12;
-	PUT_INTEL_SEGNUM(&rec.bytes[w.pos], qpp.segment);
-	w.pos += 2;
-	multi_put_vector(&rec.bytes[w.pos], qpp.vel);
-	w.pos += 12;
-	multi_put_vector(&rec.bytes[w.pos], qpp.rotvel);
-	w.pos += 12;
-	assert(w.pos == POSITION_RECORD_SIZE);
-	++rec.seq;
+	return +(Game_mode & GM_NETWORK) && (Network_status == network_state::playing || Network_status == network_state::endlevel);
 }
 
-/* The v1 net_udp_read_pdata_packet: a position record from `from_slot`
- * (the host, on a client).
- */
-void apply_position_record(const std::span<const uint8_t> data, const playernum_t from_slot)
+[[nodiscard]]
+bool segment_valid(const uint16_t s)
 {
-	auto &Objects = LevelUniqueObjectState.Objects;
-	auto &vmobjptridx = Objects.vmptridx;
-	if (data.size() != POSITION_RECORD_SIZE)
-		return;
-	if (!(+(Game_mode & GM_NETWORK) && (Network_status == network_state::playing || Network_status == network_state::endlevel)))
-		return;
-	const playernum_t pnum{data[0]};
-	if (pnum >= MAX_PLAYERS)
-		return;
-	if (multi_i_am_master() ? pnum != from_slot : pnum == Player_num)
-		return;
-	const player_connection_status connected{data[1]};
-	quaternionpos qpp;
-	reader r{data};
-	r.take(2);
-	qpp.orient.w = static_cast<int16_t>(r.u16());
-	qpp.orient.x = static_cast<int16_t>(r.u16());
-	qpp.orient.y = static_cast<int16_t>(r.u16());
-	qpp.orient.z = static_cast<int16_t>(r.u16());
-	qpp.pos = multi_get_vector(data.subspan<2 + 8, 12>());
-	r.take(12);
-	if (const auto s{vmsegidx_t::check_nothrow_index(r.u16())})
-		qpp.segment = *s;
-	else
-		return;
-	qpp.vel = multi_get_vector(data.subspan<2 + 8 + 12 + 2, 12>());
-	qpp.rotvel = multi_get_vector(data.subspan<2 + 8 + 12 + 2 + 12, 12>());
-
-	auto &tplr = *vmplayerptr(pnum);
-	if (multi_i_am_master())
-	{
-		// we say that guy is disconnected so we do not want him/her in game
-		if (tplr.connected == player_connection_status::disconnected)
-			return;
-		/* Keep the newest record for the STATE chunk to the other clients. */
-		auto &rec = S.positions[pnum];
-		std::ranges::copy(data, rec.bytes.begin());
-		++rec.seq;
-	}
-	else
-	{
-		// only by reading a position a client can know if a player reconnected. So do that here.
-		if (tplr.connected == player_connection_status::disconnected && connected == player_connection_status::playing)
-		{
-			tplr.connected = player_connection_status::playing;
-
-			if (Newdemo_state == ND_STATE_RECORDING)
-				newdemo_record_multi_reconnect(pnum);
-
-			digi_play_sample( sound_effect::SOUND_HUD_MESSAGE, F1_0);
-			const auto &&rankstr = GetRankStringWithSpace(Netgame.players[pnum].rank);
-			HUD_init_message(HM_MULTI, "%s%s'%s' %s", rankstr.first, rankstr.second, static_cast<const char *>(tplr.callsign), TXT_REJOIN);
-
-			multi_send_score();
-		}
-		/* A player that was late for the level start (the host started
-		 * without waiting) entered as a join in progress.
-		 */
-		else if (tplr.connected == player_connection_status::waiting && connected == player_connection_status::playing && Network_status == network_state::playing && !LevelUniqueObjectState.ControlCenterState.Control_center_destroyed)
-			tplr.connected = player_connection_status::playing;
-	}
-
-	if (tplr.connected != player_connection_status::playing || pnum == Player_num)
-		return;
-
-	if (!multi_quit_game && (pnum >= N_players))
-	{
-		if (Network_status != network_state::waiting)
-			con_printf(CON_VERBOSE, "net: position of P#%u beyond N_players %u ignored", pnum, N_players);
-		return;
-	}
-
-	Netgame.players[pnum].LastPacketTime = timer_query();
-
-	// do not read the packet unless the level is loaded.
-	if (vcplayerptr(Player_num)->connected == player_connection_status::disconnected || vcplayerptr(Player_num)->connected == player_connection_status::waiting)
-		return;
-	//------------ Read the player's ship's object info ----------------------
-	const auto TheirObj = vmobjptridx(tplr.objnum);
-	extract_quaternionpos(Objects.vmptr, vmsegptr, TheirObj, qpp);
-	if (TheirObj->movement_source == object::movement_type::physics)
-		set_thrust_from_velocity(TheirObj);
+	return s < LevelSharedSegmentState.get_segments().get_count();
 }
 
-/* Host: the STATE chunk for peer `p` at this tick: the ping list and every
- * position record newer than the one last relayed to `p`.
- */
-void set_state_for_peer(peer &p)
+[[nodiscard]]
+net_vec to_net_vec(const vms_vector &v)
 {
-	std::array<uint8_t, STATE_PING_SIZE + MAX_PLAYERS * POSITION_RECORD_SIZE> buf;
-	writer w{buf.data()};
-	for (auto &np : Netgame.players)
-		w.u16(static_cast<uint16_t>(std::clamp<fix>(np.ping, 0, 65535)));
+	return {v.x, v.y, v.z};
+}
+
+/* An object's pose as it goes on the wire (velocities quantised, so that
+ * the sender's snapshots equal the receivers').
+ */
+[[nodiscard]]
+net_pose pose_of(const object_base &obj)
+{
+	const auto q{build_quaternionpos(obj)};
+	return net_pose{
+		.orient = net_quat{q.orient.w, q.orient.x, q.orient.y, q.orient.z},
+		.pos = to_net_vec(q.pos),
+		.segment = static_cast<uint16_t>(q.segment),
+		.vel = ::dcx::net_v2::quantised_velocity(to_net_vec(q.vel)),
+		.rotvel = ::dcx::net_v2::quantised_rotvel(to_net_vec(q.rotvel)),
+	};
+}
+
+[[nodiscard]]
+snapshot snapshot_of(const host_clock t, const net_pose &p, const bool alive)
+{
+	return snapshot{
+		.time = t,
+		.pos = p.pos,
+		.orient = p.orient,
+		.segment = p.segment,
+		.vel = p.vel,
+		.rotvel = p.rotvel,
+		.alive = alive,
+	};
+}
+
+[[nodiscard]]
+snapshot snapshot_of(const host_clock t, const guided_record &g)
+{
+	return snapshot{
+		.time = t,
+		.pos = g.pos,
+		.orient = g.orient,
+		.segment = g.segment,
+		.vel = g.vel,
+		.rotvel = {},
+		.alive = true,
+	};
+}
+
+[[nodiscard]]
+bool local_ship_alive()
+{
+	auto &vmobjptr = LevelUniqueObjectState.Objects.vmptr;
+	return get_local_plrobj().type == object_type::OBJ_PLAYER && Player_dead_state == player_dead_state::no;
+}
+
+#if DXX_BUILD_DESCENT == 2
+/* The guided missile player `pnum` steers on this machine, if any. */
+[[nodiscard]]
+std::optional<guided_record> local_guided_record(const playernum_t pnum)
+{
+	auto &Objects = LevelUniqueObjectState.Objects;
+	const auto &&gim = LevelUniqueObjectState.Guided_missile.get_player_active_guided_missile(Objects.vmptridx, pnum);
+	if (gim == nullptr)
+		return std::nullopt;
+	const auto p{pose_of(*gim)};
+	return guided_record{
+		.pid = static_cast<uint8_t>(pnum),
+		.id = gim.get_unchecked_index(),
+		.orient = p.orient,
+		.pos = p.pos,
+		.segment = p.segment,
+		.vel = p.vel,
+	};
+}
+#endif
+
+/* Client: the INPUT chunk of this tick (section 5.3).  Nothing is sent
+ * before the clock offset is known, since `sample_time` would be
+ * meaningless; that is one round trip after the connection opened.
+ */
+void set_input_for_host(peer &p)
+{
+	auto &c = *p.conn;
+	if (!c.clock_valid())
+		return;
+	auto &vmobjptr = LevelUniqueObjectState.Objects.vmptr;
+	const auto &plrobj = get_local_plrobj();
+	auto &player_info = plrobj.ctype.player_info;
+	input_chunk in;
+	in.seq = ++S.input_seq;
+	const host_clock est{S.now + c.clock_offset()};
+	in.sample_time = ::dcx::net_v2::to_net_time(est);
+	in.view_time = ::dcx::net_v2::to_net_time(est - interp::view_delay());
+	if (local_ship_alive())
+		in.flags |= flag_bit(input_flag::alive);
+#if DXX_BUILD_DESCENT == 2
+	if (+(player_info.powerup_flags & player_flag::headlight_on))
+		in.flags |= flag_bit(input_flag::headlight);
+#endif
+	in.pose = pose_of(plrobj);
+	in.weapon = static_cast<uint8_t>((underlying_value(player_info.Primary_weapon.get_active()) & 0x0f) | ((underlying_value(player_info.Secondary_weapon.get_active()) & 0x0f) << 4));
+#if DXX_BUILD_DESCENT == 2
+	in.guided = local_guided_record(Player_num);
+#endif
+	std::array<uint8_t, ::dcx::net_v2::NET_V2_MAX_INPUT_SIZE> buf;
+	const auto n{::dcx::net_v2::write_input(buf, in)};
+	c.set_unreliable_state(chunk_type::input, std::span<const uint8_t>(buf).first(n));
+}
+
+/* Host: an INPUT chunk from the peer in slot `p` (section 5.5 step 6,
+ * without the checks of steps 1 to 4: every INPUT is accepted).  Only the
+ * newest `input_seq` counts; the stored time is the sample time, clamped
+ * into the last second and after the previous one, so that the history
+ * stays ordered whatever the client's clock says.
+ */
+void apply_input(peer &p, const std::span<const uint8_t> payload)
+{
+	if (!state_receiving_allowed())
+		return;
+	auto in{::dcx::net_v2::read_input(payload)};
+	if (!in)
+		return;
 	const auto slot{peer_slot(p)};
-	for (auto &&[i, rec] : enumerate(S.positions))
-	{
-		if (i == slot || !rec.seq || rec.seq == p.relayed_position[i])
-			continue;
-		const auto &plr = *vcplayerptr(static_cast<playernum_t>(i));
-		if (plr.connected == player_connection_status::disconnected || plr.connected == player_connection_status::waiting)
-			continue;
-		p.relayed_position[i] = rec.seq;
-		w.bytes(rec.bytes);
-	}
-	p.conn->set_unreliable_state(chunk_type::state, std::span<const uint8_t>(buf).first(w.pos));
+	if (slot == Player_num || slot >= N_players || slot >= MAX_PLAYERS)
+		return;
+	auto &st = S.inputs[slot];
+	if (st.valid && ::dcx::net_v2::seq_diff(in->seq, st.input.seq) <= 0)
+		return;
+	if (!segment_valid(in->pose.segment))
+		return;
+	if (vcplayerptr(slot)->connected != player_connection_status::playing)
+		return;
+	if (in->guided && (in->guided->pid != slot || !segment_valid(in->guided->segment)))
+		in->guided.reset();
+	host_clock t{::dcx::net_interp::unwrap(in->sample_time, S.now)};
+	t = std::clamp<host_clock>(t, S.now - ::dcx::net_v2::net_seconds(1), S.now);
+	if (st.valid && t <= st.time)
+		t = st.time + 1;
+	st.valid = true;
+	st.input = *in;
+	st.time = t;
+	st.arrival = S.now;
+	Netgame.players[slot].LastPacketTime = S.now;
+	if (in->has_flag(input_flag::alive))
+		interp::receive_ship(slot, snapshot_of(t, in->pose, true), S.now);
+	else
+		interp::receive_ghost(slot);
+	if (in->guided)
+		interp::receive_guided(slot, in->guided->id, snapshot_of(t, *in->guided), S.now);
 }
 
-void apply_state_chunk(const std::span<const uint8_t> payload)
+/* The flags and inventory fields of a player record from this machine's
+ * copy of the player's object (section 5.2).  In stage 2 the receivers
+ * only read `alive`: shields, energy, cloak and the rest are still the
+ * owner's and reach the others through the v1 messages (stage 4).
+ */
+void fill_record_status(player_record &rec, const object &obj, const uint8_t primary)
 {
-	if (payload.size() < STATE_PING_SIZE || (payload.size() - STATE_PING_SIZE) % POSITION_RECORD_SIZE)
+	auto &player_info = obj.ctype.player_info;
+	const auto &pf = player_info.powerup_flags;
+	if (+(pf & player_flag::cloaked))
+		rec.flags |= flag_bit(player_record_flag::cloaked);
+	if (+(pf & player_flag::invulnerable))
+		rec.flags |= flag_bit(player_record_flag::invulnerable);
+#if DXX_BUILD_DESCENT == 2
+	if (+(pf & player_flag::headlight_on))
+		rec.flags |= flag_bit(player_record_flag::headlight);
+	if (+(pf & player_flag::has_team_flag))
+		rec.flags |= flag_bit(player_record_flag::flag_or_orbs);
+#endif
+	rec.shields = obj.shields;
+	rec.energy = player_info.energy;
+	rec.weapon = static_cast<uint8_t>((static_cast<unsigned>(player_info.laser_level) & 0x07) | (+(pf & player_flag::quad_lasers) ? 0x08 : 0) | ((primary & 0x0f) << 4));
+}
+
+/* Host: the parts of the bundle that are the same for every recipient. */
+void build_common_bundle(state_bundle &s)
+{
+	auto &Objects = LevelUniqueObjectState.Objects;
+	auto &vcobjptr = Objects.vcptr;
+	s.tick = S.tick.tick();
+	s.host_time = ::dcx::net_v2::to_net_time(S.now);
+	s.level_time = static_cast<int32_t>(ThisLevelTime.count());
+	if (LevelUniqueObjectState.ControlCenterState.Control_center_destroyed)
+		s.your_flags |= flag_bit(state_flag::countdown);
+	const auto period{local_tick_period().units()};
+	const unsigned n{std::min<unsigned>(N_players, MAX_PLAYERS)};
+	for (playernum_t i = 0; i < n; ++i)
+	{
+		auto &plr = *vcplayerptr(i);
+		if (plr.connected != player_connection_status::playing)
+			continue;
+		auto &obj = *vcobjptr(plr.objnum);
+		player_record rec;
+		if (i == Player_num)
+		{
+			if (!local_ship_alive())
+			{
+				rec.flags = flag_bit(player_record_flag::ghost);
+				s.players[i] = rec;
+				continue;
+			}
+			rec.pose = pose_of(obj);
+			rec.flags = flag_bit(player_record_flag::alive);
+			fill_record_status(rec, obj, underlying_value(obj.ctype.player_info.Primary_weapon.get_active()));
+		}
+		else
+		{
+			auto &st = S.inputs[i];
+			if (!st.valid)
+			{
+				rec.flags = flag_bit(player_record_flag::ghost);
+				s.players[i] = rec;
+				interp::set_lag_age(i, 0);
+				continue;
+			}
+			/* Section 5.2: `input_age` in ticks since the INPUT arrived;
+			 * `sample_age` since it was sampled, which also counts the
+			 * player's uplink: that is what the lag marker shows.
+			 */
+			const auto sample_age{std::max<net_clock>(S.now - st.time, 0)};
+			const auto input_age{std::max<net_clock>(S.now - st.arrival, 0)};
+			interp::set_lag_age(i, std::max(sample_age, input_age));
+			if (!st.input.has_flag(input_flag::alive))
+			{
+				rec.flags = flag_bit(player_record_flag::ghost);
+				s.players[i] = rec;
+				continue;
+			}
+			rec.pose = st.input.pose;
+			rec.flags = flag_bit(player_record_flag::alive);
+			rec.sample_age = static_cast<uint16_t>(std::min<net_clock>(sample_age, 65535));
+			rec.input_age = static_cast<uint8_t>(std::min<net_clock>(input_age / period, 255));
+			fill_record_status(rec, obj, st.input.weapon & 0x0f);
+		}
+		s.players[i] = rec;
+	}
+#if DXX_BUILD_DESCENT == 2
+	for (playernum_t i = 0; i < n; ++i)
+	{
+		if (vcplayerptr(i)->connected != player_connection_status::playing)
+			continue;
+		std::optional<guided_record> g;
+		if (i == Player_num)
+			g = local_guided_record(i);
+		else if (auto &st = S.inputs[i]; st.valid && st.input.has_flag(input_flag::alive))
+			g = st.input.guided;
+		if (g)
+			s.guided[s.n_guided++] = *g;
+	}
+#endif
+	for (auto &&[i, np] : enumerate(Netgame.players))
+		s.pings[i] = ::dcx::net_v2::quantise_ping(i == Player_num ? 0u : static_cast<unsigned>(std::max<fix>(np.ping, 0)));
+}
+
+/* Host: the STATE chunk for peer `p` at this tick. */
+void set_state_for_peer(peer &p, const state_bundle &common)
+{
+	auto s{common};
+	const auto slot{peer_slot(p)};
+	if (auto &st = S.inputs[slot]; st.valid)
+		s.input_ack = st.input.seq;
+	/* Section 5.2: the pings once per second. */
+	if (S.now >= p.next_pings)
+	{
+		s.your_flags |= flag_bit(state_flag::has_pings);
+		p.next_pings = S.now + F1_0;
+	}
+	/* Its own guided missile is not sent back to its owner. */
+	unsigned kept{0};
+	for (unsigned i = 0; i < s.n_guided; ++i)
+		if (s.guided[i].pid != slot)
+			s.guided[kept++] = s.guided[i];
+	s.n_guided = kept;
+	std::array<uint8_t, ::dcx::net_v2::NET_V2_MAX_STATE_SIZE> buf;
+	const auto n{::dcx::net_v2::write_state(buf, s)};
+	p.conn->set_unreliable_state(chunk_type::state, std::span<const uint8_t>(buf).first(n));
+}
+
+/* Client: the host's CORRECTION (section 5.6): the local ship snaps to the
+ * host's accepted state, physics remainders reset.
+ */
+void apply_correction(const player_record &rec)
+{
+	if (!segment_valid(rec.pose.segment) || !local_ship_alive())
 		return;
-	reader r{payload};
-	for (auto &np : Netgame.players)
-		np.ping = r.u16();
-	for (std::size_t pos = STATE_PING_SIZE; pos < payload.size(); pos += POSITION_RECORD_SIZE)
-		apply_position_record(payload.subspan(pos, POSITION_RECORD_SIZE), 0);
+	auto &Objects = LevelUniqueObjectState.Objects;
+	quaternionpos qpp{
+		.orient = vms_quaternion{rec.pose.orient.w, rec.pose.orient.x, rec.pose.orient.y, rec.pose.orient.z},
+		.pos = vms_vector{rec.pose.pos.x, rec.pose.pos.y, rec.pose.pos.z},
+		.segment = segnum_t{rec.pose.segment},
+		.vel = vms_vector{rec.pose.vel.x, rec.pose.vel.y, rec.pose.vel.z},
+		.rotvel = vms_vector{rec.pose.rotvel.x, rec.pose.rotvel.y, rec.pose.rotvel.z},
+	};
+	extract_quaternionpos(Objects.vmptr, vmsegptr, Objects.vmptridx(get_local_player().objnum), qpp);
+	con_puts(CON_VERBOSE, "net: position corrected by the host");
+}
+
+/* Client: the header of the newest bundle (latest wins, section 5.4). */
+void apply_bundle_header(const state_bundle &s, const host_clock est, const host_clock host_time)
+{
+	if (s.has_flag(state_flag::has_pings))
+		for (auto &&[i, np] : enumerate(Netgame.players))
+			np.ping = static_cast<fix>(s.pings[i] * ::dcx::net_v2::NET_V2_PING_STEP_MS);
+	/* The level time replaces MULTI_HEARTBEAT: the host's, advanced by the
+	 * bundle's age.  Small differences are left alone so that the clock
+	 * on the HUD does not twitch.  Like the game loop, which advances it,
+	 * and v1, which sent it, only with a time limit.
+	 */
+	if (Network_status == network_state::playing && Netgame.PlayTimeAllowed.count())
+	{
+		const auto lt{static_cast<int64_t>(s.level_time) + (est - host_time)};
+		if (lt >= 0 && std::abs(lt - static_cast<int64_t>(ThisLevelTime.count())) > F1_0 / 20)
+			ThisLevelTime = d_time_fix(static_cast<uint32_t>(lt));
+	}
+	if (s.has_flag(state_flag::correction))
+		if (const auto &own{s.players[Player_num]}; own && !own->is_ghost())
+			apply_correction(*own);
+}
+
+/* Client: a player's record says it is in the level.  A client learns
+ * that a player came back only from the host's records (as v1 did from
+ * the position packets).
+ */
+void notice_player_in_level(const playernum_t pnum)
+{
+	auto &tplr = *vmplayerptr(pnum);
+	if (tplr.connected == player_connection_status::disconnected)
+	{
+		tplr.connected = player_connection_status::playing;
+		if (Newdemo_state == ND_STATE_RECORDING)
+			newdemo_record_multi_reconnect(pnum);
+		digi_play_sample(sound_effect::SOUND_HUD_MESSAGE, F1_0);
+		const auto &&rankstr = GetRankStringWithSpace(Netgame.players[pnum].rank);
+		HUD_init_message(HM_MULTI, "%s%s'%s' %s", rankstr.first, rankstr.second, static_cast<const char *>(tplr.callsign), TXT_REJOIN);
+		multi_send_score();
+	}
+	/* A player that was late for the level start (the host started
+	 * without waiting) entered as a join in progress.
+	 */
+	else if (tplr.connected == player_connection_status::waiting && Network_status == network_state::playing && !LevelUniqueObjectState.ControlCenterState.Control_center_destroyed)
+		tplr.connected = player_connection_status::playing;
+}
+
+/* Client: a STATE chunk from the host. */
+void apply_state(peer &p, const std::span<const uint8_t> payload)
+{
+	if (!state_receiving_allowed())
+		return;
+	const auto s{::dcx::net_v2::read_state(payload)};
+	if (!s)
+		return;
+	auto &c = *p.conn;
+	if (!c.clock_valid())
+		return;
+	const host_clock est{S.now + c.clock_offset()};
+	const host_clock host_time{::dcx::net_interp::unwrap(s->host_time, est)};
+	/* Snapshots are ordered by their own times whatever the order of the
+	 * bundles (the rings sort them); only the header is latest-wins, by
+	 * tick and, for two bundles of one tick, by time.
+	 */
+	const auto tick_ahead{static_cast<int32_t>(s->tick - S.bundle_tick)};
+	const bool newest{!S.have_bundle || tick_ahead > 0 || (tick_ahead == 0 && host_time > S.bundle_time)};
+	if (newest)
+	{
+		S.have_bundle = true;
+		S.bundle_tick = s->tick;
+		S.bundle_time = host_time;
+		apply_bundle_header(*s, est, host_time);
+	}
+	const auto period{local_tick_period().units()};
+	const bool in_level{get_local_player().connected != player_connection_status::disconnected && get_local_player().connected != player_connection_status::waiting};
+	for (playernum_t i = 0; i < MAX_PLAYERS; ++i)
+	{
+		const auto &rec{s->players[i]};
+		if (!rec || i == Player_num)
+			continue;
+		if (newest)
+			notice_player_in_level(i);
+		if (vcplayerptr(i)->connected != player_connection_status::playing)
+			continue;
+		if (i >= N_players)
+		{
+			if (!multi_quit_game && Network_status != network_state::waiting)
+				con_printf(CON_VERBOSE, "net: record of P#%u beyond N_players %u ignored", i, N_players);
+			continue;
+		}
+		Netgame.players[i].LastPacketTime = S.now;
+		if (!in_level)
+			continue;
+		if (rec->is_ghost())
+		{
+			interp::receive_ghost(i);
+			if (newest)
+				interp::set_lag_age(i, 0);
+			continue;
+		}
+		const host_clock t{host_time - rec->sample_age};
+		interp::receive_ship(i, snapshot_of(t, rec->pose, rec->flags & flag_bit(player_record_flag::alive)), S.now);
+		if (newest)
+			interp::set_lag_age(i, std::max<net_clock>(rec->sample_age, rec->input_age * period));
+	}
+	if (!in_level)
+		return;
+	for (unsigned k = 0; k < s->n_guided; ++k)
+	{
+		const auto &g{s->guided[k]};
+		if (g.pid == Player_num || g.pid >= N_players || vcplayerptr(g.pid)->connected != player_connection_status::playing)
+			continue;
+		/* The missile was sampled with its owner's ship. */
+		const auto &owner{s->players[g.pid]};
+		const host_clock t{owner && !owner->is_ghost() ? host_time - owner->sample_age : host_time};
+		interp::receive_guided(g.pid, g.id, snapshot_of(t, g), S.now);
+	}
 }
 
 /* The v1 MULTI_* records (section 6.10, stage 1 column).  Everything
@@ -1730,18 +2036,16 @@ void apply_state_chunk(const std::span<const uint8_t> payload)
 bool legacy_record_is_event(const uint8_t command, const multiplayer_data_priority priority)
 {
 	/* A message the sender marked important (priority 2) is reliable
-	 * whatever its type: the scheduled MULTI_HEARTBEAT and the inventory
+	 * whatever its type: the guided missile release and the inventory
 	 * sent to a joining player.
 	 */
 	if (priority == multiplayer_data_priority::_2)
 		return false;
 	switch (static_cast<multiplayer_command_t>(command))
 	{
-		case multiplayer_command_t::MULTI_POSITION:
 		case multiplayer_command_t::MULTI_PLAY_SOUND:
 		case multiplayer_command_t::MULTI_CREATE_EXPLOSION:
 		case multiplayer_command_t::MULTI_ROBOT_POSITION:
-		case multiplayer_command_t::MULTI_HEARTBEAT:
 		case multiplayer_command_t::MULTI_TYPING_STATE:
 		case multiplayer_command_t::MULTI_GMODE_UPDATE:
 		case multiplayer_command_t::MULTI_PLAYER_INV:
@@ -2277,6 +2581,12 @@ void apply_level_go_internal()
 
 	get_local_plrobj().type = object_type::OBJ_PLAYER;
 
+	/* The INPUTs and snapshots of the previous level describe other
+	 * places.
+	 */
+	S.inputs = {};
+	net_interp_reset();
+
 	Network_status = network_state::playing;
 	multi_sort_kill_list();
 }
@@ -2391,11 +2701,6 @@ void send_extras()
 	if (!Network_sending_extras)
 	{
 		Player_joining_extras=-1;
-		/* The snapshot does not include ThisLevelTime; the joining player
-		 * learns it only from MULTI_HEARTBEAT.  Send it in the next frame
-		 * instead of up to one second later.
-		 */
-		multi_schedule_heartbeat();
 		/* The next player whose extras waited, if still in the game. */
 		while (!S.extras_queue.empty())
 		{
@@ -3738,11 +4043,11 @@ void handle_unreliable(peer &p, const ::dcx::net_v2::unreliable_view &u)
 	{
 		case chunk_type::state:
 			if (!multi_i_am_master() && peer_sends_game_data(p))
-				apply_state_chunk(u.payload);
+				apply_state(p, u.payload);
 			break;
 		case chunk_type::input:
 			if (multi_i_am_master() && peer_sends_game_data(p))
-				apply_position_record(u.payload, peer_slot(p));
+				apply_input(p, u.payload);
 			break;
 		case chunk_type::event_u:
 			receive_event(p, u.payload);
@@ -3948,13 +4253,31 @@ void frame(const bool listen)
 	S.in_frame = true;
 	S.now = timer_update();
 
+	/* Section 2.3: the session's tick counter, and the clock the
+	 * interpolation shows the remote objects by (the host's own; on a
+	 * client, its estimate of the host's).
+	 */
+	const auto tick_rate{local_tick_period()};
+	S.tick.set_rate(static_cast<unsigned>(tick_rate.denominator));
+	S.tick.advance(S.now);
+	if (multi_i_am_master())
+		interp::set_clock(true, 0, tick_rate.units());
+	else if (const auto &hc{S.peers[0].conn})
+		interp::set_clock(hc->clock_valid(), hc->clock_offset(), tick_rate.units());
+	else
+		interp::set_clock(false, 0, tick_rate.units());
+
 	if (listen)
 		read_sockets();
 
 	client_join_frame();
 
-	bool position_built{false};
-	const bool send_positions{position_sending_allowed()};
+	/* Each connection paces its own packets (connection::begin_tick); a
+	 * connection's tick carries the newest state.  The host builds the
+	 * common part of the bundle once per frame at most.
+	 */
+	std::optional<state_bundle> common_bundle;
+	const bool send_state{state_sending_allowed()};
 	for (auto &p : S.peers)
 	{
 		if (!p.conn)
@@ -3963,17 +4286,16 @@ void frame(const bool listen)
 		if (c.begin_tick(S.now))
 		{
 			flush_events();
-			if (send_positions && (p.ph == peer::phase::playing || p.ph == peer::phase::syncing))
+			if (send_state && (p.ph == peer::phase::playing || p.ph == peer::phase::syncing))
 			{
-				if (!position_built)
-				{
-					build_own_position_record();
-					position_built = true;
-				}
 				if (multi_i_am_master())
-					set_state_for_peer(p);
+				{
+					if (!common_bundle)
+						build_common_bundle(common_bundle.emplace());
+					set_state_for_peer(p, *common_bundle);
+				}
 				else
-					c.set_unreliable_state(chunk_type::input, S.positions[Player_num].bytes);
+					set_input_for_host(p);
 			}
 		}
 		pump_peer(p);
@@ -4060,7 +4382,13 @@ void session_reset()
 		drop_peer(p);
 	S.session_id = 0;
 	S.my_token = 0;
-	S.positions = {};
+	S.inputs = {};
+	S.tick = {};
+	S.input_seq = 0;
+	S.have_bundle = false;
+	S.bundle_tick = 0;
+	S.bundle_time = 0;
+	net_interp_reset();
 	S.event_buffer.clear();
 	S.join.end();
 	S.join_result = join_status::idle;
@@ -4398,13 +4726,14 @@ void dispatch_table::do_protocol_frame(int, int listen) const
 		multi_send_robot_frame();
 	}
 #if DXX_BUILD_DESCENT == 2
-	/* The thief and guided missile positions, at the tick rate. */
+	/* The thief's position, at the tick rate (a legacy record until the
+	 * host owns robots; guided missiles travel in the state bundle).
+	 */
 	static fix64 last_thief_time;
 	if (now >= last_thief_time + F1_0 / net_v2::local_tick_period().denominator)
 	{
 		last_thief_time = now;
 		multi_send_thief_frame();
-		multi_send_guided_frame();
 	}
 #endif
 	if (now >= S.last_endlevel + net_v2::ENDLEVEL_INTERVAL && LevelUniqueControlCenterState.Control_center_destroyed)
@@ -4455,6 +4784,8 @@ void dispatch_table::disconnect_player(int playernum) const
 		return;
 	}
 	auto &S = net_v2::S;
+	/* Its snapshots describe a ship that is gone. */
+	net_v2::interp::reset_player(playernum);
 	if (multi_i_am_master())
 	{
 		const std::array<uint8_t, 2> buf{{static_cast<uint8_t>(playernum), underlying_value(S.left_reason)}};
@@ -4471,7 +4802,7 @@ void dispatch_table::disconnect_player(int playernum) const
 			p.close_at = timer_query() + ::dcx::net_v2::NET_V2_CLOSE_LINGER;
 		}
 		Netgame.players[playernum].LastPacketTime = timer_query();
-		S.positions[playernum].seq = 0;
+		S.inputs[playernum] = {};
 	}
 	else if (playernum == 0)
 		net_v2::drop_peer(S.peers[0]);

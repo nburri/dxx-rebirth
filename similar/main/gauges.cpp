@@ -3631,7 +3631,13 @@ static void hud_show_kill_list(fvcobjptr &vcobjptr, grs_canvas &canvas, const ga
                                 x2 = SWIDTH - (fspacx64/2);
                         else
                                 x2 = x0 + fspacx64;
-			gr_printf(canvas, game_font, x2, y, "%4dms", Netgame.players[player_num].ping);
+			/* The ping comes with the host's state bundle once per second;
+			 * a player whose state reaches the host late is marked.
+			 */
+			if (net_interp_player_lagging(player_num))
+				gr_string(canvas, game_font, x2, y, " LAG");
+			else
+				gr_printf(canvas, game_font, x2, y, "%4dms", Netgame.players[player_num].ping);
                 }
 
 		y += line_spacing;
@@ -3733,7 +3739,9 @@ void show_HUD_names(const d_robot_info_array &Robot_info, grs_canvas &canvas, co
 							? ", Typing"
 							: m == msgsend_state::automap
 								? ", Map"
-								: nullptr;
+								: net_interp_player_lagging(pnum)
+									? ", Lag"
+									: nullptr;
 							})
 						: nullptr;
 					/* If both `name` and `trailer` are present, then
