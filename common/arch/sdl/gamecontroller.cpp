@@ -221,8 +221,52 @@ static void gc_load_controller_db()
 #endif
 }
 
+/* Decide whether a device is used through the gamecontroller layer
+ * (fixed gamepad layout: A/B/X/Y, shoulders, triggers, sticks) or as a
+ * plain joystick (all of its own buttons, axes and hats).
+ *
+ * SDL reports every device that has a mapping, including the community
+ * mappings from gamecontrollerdb.txt, as a gamecontroller.  That list also
+ * maps flight sticks, throttles and wheels onto the gamepad layout, which
+ * renames their buttons to A/B/X/Y and drops every button, hat and axis the
+ * mapping does not cover.  Only devices that SDL identifies as an actual
+ * gamepad model (Xbox, PlayStation, Switch, ...) are therefore opened as
+ * gamecontrollers; everything else stays a joystick.  Each device is opened
+ * through exactly one of the two layers, so a hat press still arrives once.
+ */
+}
+
+bool gamecontroller_use_for_device(const int device_index)
+{
+	if (!SDL_IsGameController(device_index))
+		return false;
+	switch (SDL_JoystickGetDeviceType(device_index))
+	{
+		case SDL_JOYSTICK_TYPE_WHEEL:
+		case SDL_JOYSTICK_TYPE_ARCADE_STICK:
+		case SDL_JOYSTICK_TYPE_FLIGHT_STICK:
+		case SDL_JOYSTICK_TYPE_THROTTLE:
+			return false;
+		default:
+			break;
+	}
+#if SDL_VERSION_ATLEAST(2, 0, 12)
+	if (SDL_GameControllerTypeForIndex(device_index) == SDL_CONTROLLER_TYPE_UNKNOWN)
+		return false;
+#endif
+	return true;
+}
+
+namespace {
+
 static void gc_open_controller(int device_index)
 {
+	if (!gamecontroller_use_for_device(device_index))
+	{
+		const char *const name{SDL_JoystickNameForIndex(device_index)};
+		con_printf(CON_NORMAL, "gamecontroller: device %d (%s) is not a known gamepad, using it as a joystick", device_index, name ? name : "Unknown");
+		return;
+	}
 	// Check if already open (SDL2 may fire ADDED for already-connected devices)
 	const auto instance_id = SDL_JoystickGetDeviceInstanceID(device_index);
 	for (int i = 0; i < num_controllers; i++)
@@ -332,8 +376,7 @@ void gamecontroller_init()
 	con_printf(CON_NORMAL, "gamecontroller: %d joystick(s) detected", n_js);
 	for (int i = 0; i < n_js; i++)
 	{
-		if (SDL_IsGameController(i))
-			gc_open_controller(i);
+		gc_open_controller(i);
 	}
 }
 
