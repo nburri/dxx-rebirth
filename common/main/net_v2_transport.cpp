@@ -28,6 +28,10 @@ constexpr std::uint16_t NET_V2_ECHO_DELAY_SATURATED{0xffff};
 constexpr unsigned NET_V2_TICK_GRANT_MAX{2};
 /* RTT samples above this are noise (wrapped or stalled clocks). */
 constexpr net_clock NET_V2_RTT_SAMPLE_MAX{net_seconds(10)};
+/* How long the RTO keeps covering the largest delay a bound reported
+ * after the last bound, before that excess fades.
+ */
+constexpr net_clock NET_V2_BOUND_HOLD{net_seconds(1)};
 /* Smoothing of the loss estimate, per resolved packet: 1/64, about one
  * second of packets at 60 pps.
  */
@@ -90,6 +94,24 @@ void rtt_estimator::add_bound(const net_clock r)
 		return;
 	const auto err{m_srtt > r ? m_srtt - r : r - m_srtt};
 	m_rttvar = std::max((3 * m_rttvar + err) / 4, m_hold_period / 4);
+	/* Any bound, however small, says that delays are still being seen:
+	 * the largest of them stays covered.
+	 */
+	if (r > m_srtt)
+		m_bound_excess = std::max(m_bound_excess, r - m_srtt);
+	m_bound_age = 0;
+}
+
+void rtt_estimator::advance_tick()
+{
+	if (m_bound_excess == 0)
+		return;
+	m_bound_age += m_tick_period;
+	if (m_bound_age <= NET_V2_BOUND_HOLD)
+		return;
+	m_bound_excess -= m_bound_excess / 16;
+	if (m_bound_excess < 16)
+		m_bound_excess = 0;
 }
 
 
@@ -98,9 +120,10 @@ net_clock rtt_estimator::rto() const
 	if (!m_valid)
 		return NET_V2_RTO_MAX;
 	/* The samples exclude the two tick holds, so they are added to the
-	 * variance term, not weighed against it.
+	 * variance term, not weighed against it.  A delay seen lately is
+	 * covered even once rttvar has forgotten it.
 	 */
-	return std::clamp(m_srtt + 4 * m_rttvar + m_hold_period + m_tick_period, NET_V2_RTO_MIN, NET_V2_RTO_MAX);
+	return std::clamp(m_srtt + std::max(4 * m_rttvar, m_bound_excess) + m_hold_period + m_tick_period, NET_V2_RTO_MIN, NET_V2_RTO_MAX);
 }
 
 /* clock_sync (§2.2) */
@@ -425,14 +448,17 @@ void connection::check_timeouts(const net_clock now)
 		close_with(close_reason::timeout);
 		return;
 	}
-	/* Only the oldest unacked message matters. */
-	for (const auto &m : m_messages)
+	/* Only the oldest unacked message matters, and it is the front:
+	 * acked messages are popped from the front as soon as they are
+	 * acked (pop_acked_messages), the ones held behind an unacked front
+	 * are not the oldest.
+	 */
+	if (!m_messages.empty())
 	{
-		if (m.acked)
-			continue;
+		const auto &m{m_messages.front()};
+		assert(!m.acked);
 		if (m.sent && now - m.first_sent >= NET_V2_UNACKED_TIMEOUT)
 			close_with(close_reason::unacked_timeout);
-		break;
 	}
 	/* The receive side of the same limit: messages held out of order
 	 * whose gap the peer never fills although it keeps sending.
@@ -511,6 +537,7 @@ void connection::grant_ticks(const net_clock now)
 	 * cannot go out more often anyway.
 	 */
 	check_timeouts(now);
+	m_rtt.advance_tick();
 	detect_rto_losses(now);
 }
 
@@ -608,18 +635,24 @@ std::span<const std::uint8_t> connection::build_outgoing(const net_clock now)
 		 * empty packet for it, or the caller's send loop would not end.
 		 */
 		return {};
+	/* §3.6 allows max_packets_per_tick; a bundle that needs more than
+	 * one packet (§3.8) gets one packet more than it needs, so that a
+	 * blocked head message never displaces a part.  Judged on every
+	 * packet of the tick, not only its first, so parts set after the
+	 * first packet still fit the tick; the limit only ever grows within
+	 * a tick.
+	 */
+	const auto needed{plan.packets};
+	const auto budget_now{std::max(m_config.max_packets_per_tick, needed > 1 ? needed + 1 : 0u)};
 	if (opens_tick)
 	{
 		--m_tick_credit;
 		m_tick_open = true;
 		m_tick_packets = 0;
-		/* §3.6 allows max_packets_per_tick; a bundle that needs more
-		 * than one packet (§3.8) gets one packet more than it needs, so
-		 * that a blocked head message never displaces a part.
-		 */
-		const auto needed{plan.packets};
-		m_tick_budget = std::max(m_config.max_packets_per_tick, needed > 1 ? needed + 1 : 0u);
+		m_tick_budget = budget_now;
 	}
+	else
+		m_tick_budget = std::max(m_tick_budget, budget_now);
 
 	/* Header is written last; chunks first. */
 	auto *const buf{m_outgoing.data()};
@@ -812,8 +845,9 @@ void connection::pop_acked_messages()
 }
 
 /* The caller has checked that `ack` names a packet we sent.  The echo
- * fields are the RTT measurement of choice (they account for the peer's
- * hold); an ack measures a packet only when no echo ever came for it.
+ * fields are the RTT measurement (they account for the peer's hold); an
+ * ack bounds the round trip of a packet that no echo will ever measure,
+ * and only bounds it: srtt comes from echoes alone.
  */
 void connection::process_acks(const std::uint16_t ack, const std::uint64_t ack_bits, const net_clock now, const bool newest_carrier, const bool echo_before_valid, const std::uint16_t echo_before)
 {
@@ -843,20 +877,21 @@ void connection::process_acks(const std::uint16_t ack, const std::uint64_t ack_b
 			/* A later packet of ours was already echoed before this one
 			 * was first acknowledged: it arrived out of order at the
 			 * peer, which echoes only its newest, so no echo will ever
-			 * measure it.  Its ack is the one measurement of that long
-			 * round trip, exactly what the RTO must cover.  A packet
-			 * merely left unechoed because the peer sends fewer packets
-			 * than we do is not measured this way: that ack would carry
-			 * the peer's hold at full weight into srtt, the HUD ping and
-			 * the host's rewind.  Nor is one whose first ack rides a
-			 * reordered older peer packet: that ack carries the peer
-			 * packet's own delay.
+			 * measure it.  Its ack is the one word about that long round
+			 * trip, exactly what the RTO must cover, so it widens rttvar
+			 * (once).  It is a bound, not a sample: an ack includes the
+			 * peer's hold, and a peer may hold ack bits back at will, so
+			 * it never moves srtt (the HUD ping and the host's rewind).
+			 * A packet merely left unechoed because the peer sends fewer
+			 * packets than we do is not bounded either, nor one whose
+			 * first ack rides a reordered older peer packet, which
+			 * carries that packet's own delay.
 			 */
 			const auto r{now - e.sent_at};
-			if (r >= 0 && r <= NET_V2_RTT_SAMPLE_MAX)
+			if (r >= 0 && r <= NET_V2_RTT_SAMPLE_MAX && m_rtt.valid())
 			{
 				e.echoed = true;
-				m_rtt.add_sample(r);
+				m_rtt.add_bound(r);
 			}
 		}
 		resolve_packet(e, true);
@@ -1207,28 +1242,42 @@ receive_report connection::on_receive(const std::span<const std::uint8_t> datagr
 		if (e.valid && e.seq == h.ack && !e.echoed && to_net_time(e.sent_at) == h.echo_time)
 		{
 			const net_clock rtt{now - e.sent_at - h.echo_delay};
-			/* A sample out of range (a hostile or absurd echo_delay) is
-			 * rejected without spending the packet's one sample or
-			 * moving the echo mark, which would make older packets look
-			 * reordered.
-			 */
-			if (rtt >= 0 && rtt <= NET_V2_RTT_SAMPLE_MAX && !newest)
+			if (rtt < 0 || rtt > NET_V2_RTT_SAMPLE_MAX)
 			{
-				e.echoed = true;
-				m_rtt.add_bound(rtt);
+				/* Out of range (a hostile or absurd echo_delay): rejected
+				 * without spending the packet's one sample or moving the
+				 * echo mark, which would make older packets look
+				 * reordered.
+				 */
 			}
-			else if (rtt >= 0 && rtt <= NET_V2_RTT_SAMPLE_MAX)
+			else if (!newest)
+			{
+				/* A bound needs a sample to bound; the packet keeps its
+				 * sample until there is one.
+				 */
+				if (m_rtt.valid())
+				{
+					e.echoed = true;
+					m_rtt.add_bound(rtt);
+				}
+			}
+			else if (!m_echo_sampled_any || seq_diff(h.ack, m_echo_sampled_seq) > 0)
 			{
 				e.echoed = true;
-				if (!m_echo_sampled_any || seq_diff(h.ack, m_echo_sampled_seq) > 0)
-				{
-					m_echo_sampled_any = true;
-					m_echo_sampled_seq = h.ack;
-				}
+				m_echo_sampled_any = true;
+				m_echo_sampled_seq = h.ack;
 				m_rtt.add_sample(rtt);
 				const net_time peer_now{h.send_time + static_cast<net_time>(rtt / 2)};
 				m_clock.add_sample(now, rtt, net_time_diff(peer_now, to_net_time(now)));
 			}
+			/* Else the peer's newest packet echoes a packet older than
+			 * the one last echoed.  A conforming peer echoes the newest
+			 * packet it received, so this is no measurement at all, and
+			 * it is ignored: five packets in six go unechoed against a
+			 * peer sending a sixth of our rate, and a hostile peer could
+			 * otherwise name a seconds-old one with echo_delay 0 and
+			 * drive srtt to seconds.
+			 */
 		}
 	}
 	process_acks(h.ack, h.ack_bits, now, newest, echo_before_valid, echo_before);

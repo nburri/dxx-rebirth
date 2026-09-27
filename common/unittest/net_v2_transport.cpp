@@ -931,6 +931,168 @@ void test_unreliable_chunks_per_packet()
 	std::printf("    two STATE chunks in one packet both delivered; an older packet's STATE dropped, its EVENT_U kept\n");
 }
 
+/* Twelfth review round. */
+
+/* 1. The peer's newest packet echoing a packet of ours older than the one
+ * last echoed is no measurement: a conforming peer echoes the newest
+ * packet it received.  A 60 pps host against a 10 pps client leaves five
+ * packets in six unechoed; a hostile client naming a seconds-old one with
+ * echo_delay 0 must not move srtt (nor rttvar, nor the clock).
+ */
+void test_echo_of_old_unechoed_packet()
+{
+	begin("echo of an old unechoed packet");
+	connection_config hc{host_side}, cc{client_side};
+	hc.peer_tick = {net_seconds(1), 10};
+	cc.tick = {net_seconds(1), 10};
+	connection a{hc, 0};
+	connection b{cc, 0};
+	const std::array<std::uint8_t, 8> x{};
+	const net_clock latency{net_milliseconds(30)};
+	std::vector<net_clock> sent_at;
+	std::uint16_t client_seq{};
+	/* 4 s: the host sends every tick, the client every sixth. */
+	for (unsigned i{}; i != 240; ++i)
+	{
+		const net_clock t{net_clock{i} * TICK};
+		a.set_unreliable_state(chunk_type::state, x);
+		const auto p{a.build_outgoing(t)};
+		CHECK(!p.empty());
+		CHECK(packet_header::read(p)->seq == sent_at.size() + 1);
+		sent_at.push_back(t);
+		CHECK(b.on_receive(p, t + latency).status == receive_status::accepted);
+		if (i % 6 == 5)
+		{
+			b.set_unreliable_state(chunk_type::input, x);
+			const auto q{b.build_outgoing(t + latency + 100)};
+			CHECK(!q.empty());
+			client_seq = packet_header::read(q)->seq;
+			CHECK(a.on_receive(q, t + 2 * latency + 100).status == receive_status::accepted);
+		}
+	}
+	const auto before{a.stats()};
+	CHECK_MSG(before.rtt_valid && before.srtt == 2 * latency, "srtt " + std::to_string(before.srtt));
+	/* Packet 61 went out 3 s ago and was never echoed (the client echoed
+	 * 60 and 66).  A forged newest client packet names it with its true
+	 * send_time and echo_delay 0.
+	 */
+	const std::uint16_t old_seq{61};
+	CHECK((old_seq - 1) % 6 != 5);
+	const net_clock now{net_clock{240} * TICK};
+	packet_header h;
+	h.session_id = host_side.session_id;
+	h.peer_token = host_side.peer_token;
+	h.player_id = host_side.remote_player_id;
+	h.flags = static_cast<std::uint8_t>(packet_flag::keepalive);
+	h.seq = static_cast<std::uint16_t>(client_seq + 1);
+	h.send_time = to_net_time(now);
+	h.ack = old_seq;
+	h.ack_bits = 0;
+	h.echo_time = to_net_time(sent_at[old_seq - 1]);
+	h.echo_delay = 0;
+	std::array<std::uint8_t, NET_V2_HEADER_SIZE> d{};
+	h.write(d.data());
+	CHECK(a.on_receive(d, now).status == receive_status::accepted);
+	const auto after{a.stats()};
+	CHECK_MSG(after.srtt == before.srtt, "srtt " + std::to_string(to_ms(after.srtt)) + " ms after the forged echo, was " + std::to_string(to_ms(before.srtt)));
+	CHECK_MSG(after.rttvar == before.rttvar, "rttvar " + std::to_string(after.rttvar) + " vs " + std::to_string(before.rttvar));
+	CHECK(after.clock_offset_target == before.clock_offset_target);
+	std::printf("    60 pps host, 10 pps client: a forged echo of the 3 s old unechoed packet 61 leaves srtt at %.1f ms\n", to_ms(after.srtt));
+}
+
+/* 2. A bound (a delayed round trip reported by a late ack) is covered by
+ * the RTO for as long as bounds keep coming and for a second after the
+ * last, however many samples rttvar has had to forget it; then it fades
+ * and the RTO returns to its steady value.  srtt never moves on a bound.
+ */
+void test_bound_excess()
+{
+	begin("bound excess in the RTO");
+	rtt_estimator e;
+	const net_clock hold{NET_V2_DEFAULT_TICK_PERIOD}, slack{2 * hold};
+	const net_clock rtt{net_milliseconds(80)}, held{net_milliseconds(130)};
+	for (unsigned i{}; i != 100; ++i)
+		e.add_sample(rtt);
+	const auto steady{e.rto()};
+	CHECK_MSG(steady == rtt + 4 * (hold / 4) + slack, "steady rto " + std::to_string(steady));
+	e.add_bound(held);
+	CHECK_MSG(e.rto() >= held + slack, "rto " + std::to_string(e.rto()) + " right after the bound");
+	/* 100 samples later rttvar has forgotten the bound; the excess has
+	 * not, and srtt has not moved.
+	 */
+	for (unsigned i{}; i != 100; ++i)
+		e.add_sample(rtt);
+	CHECK_MSG(e.rto() >= held + slack, "rto " + std::to_string(e.rto()) + " 100 samples after the bound");
+	/* Two seconds of smaller bounds every 10 ticks, the last on the last
+	 * tick: the largest stays.
+	 */
+	for (unsigned i{}; i != 120; ++i)
+	{
+		e.advance_tick();
+		e.add_sample(rtt);
+		if (i % 10 == 9)
+			e.add_bound(net_milliseconds(100));
+	}
+	CHECK_MSG(e.rto() >= held + slack, "rto " + std::to_string(e.rto()) + " while smaller bounds keep coming");
+	/* Just short of a second after the last bound: still covered. */
+	for (unsigned i{}; i != 59; ++i)
+	{
+		e.advance_tick();
+		e.add_sample(rtt);
+	}
+	CHECK_MSG(e.rto() >= held + slack, "rto " + std::to_string(e.rto()) + " a second after the last bound");
+	/* Two seconds more: faded, back to the steady value. */
+	for (unsigned i{}; i != 120; ++i)
+	{
+		e.advance_tick();
+		e.add_sample(rtt);
+	}
+	CHECK_MSG(e.rto() == steady, "rto " + std::to_string(e.rto()) + " after the excess faded, steady " + std::to_string(steady));
+	std::printf("    80 ms samples, a 130 ms bound: rto covers it through 100 samples and a second of quiet, then returns to %.1f ms\n", to_ms(steady));
+}
+
+/* 4. Parts set after the tick's first packet still fit the tick: the
+ * packet budget follows the bundle plan on every packet, not only on the
+ * tick's first.
+ */
+void test_parts_after_first_packet()
+{
+	begin("parts set after the tick's first packet");
+	connection a{host_side, 0};
+	connection b{client_side, 0};
+	const datagram big(NET_V2_MAX_MESSAGE), small(40), part(900);
+	CHECK(a.enqueue_reliable(9, big) == enqueue_result::ok);
+	CHECK(a.enqueue_reliable(9, big) == enqueue_result::ok);
+	a.set_unreliable_state(chunk_type::state, small);
+	/* Packet 1: the state and the first message; the second is backlog. */
+	const auto p1{a.build_outgoing(0)};
+	CHECK(!p1.empty() && packet_header::read(p1)->has_flag(packet_flag::has_reliable));
+	CHECK(b.on_receive(p1, 1).status == receive_status::accepted);
+	/* A two-part bundle appears: two packets more than the budget of two
+	 * allows for, and the message does not fit beside a part.
+	 */
+	a.set_unreliable_state(chunk_type::state, 0, 2, part);
+	a.set_unreliable_state(chunk_type::state, 1, 2, part);
+	unsigned parts{};
+	for (unsigned k{}; k != 2; ++k)
+	{
+		const auto p{a.build_outgoing(0)};
+		CHECK_MSG(!p.empty(), "packet " + std::to_string(k + 2) + " of the tick was not built");
+		const auto report{b.on_receive(p, 1)};
+		CHECK(report.status == receive_status::accepted);
+		for (const auto &u : report.unreliable)
+			if (u.type == chunk_type::state && u.part_count == 2)
+				++parts;
+	}
+	CHECK_MSG(parts == 2, "parts delivered in the tick " + std::to_string(parts));
+	/* The tick is spent; the second message waits for the next one. */
+	CHECK(a.build_outgoing(0).empty());
+	const auto p4{a.build_outgoing(TICK)};
+	CHECK(!p4.empty() && packet_header::read(p4)->has_flag(packet_flag::has_reliable));
+	CHECK(a.stats().unreliable_dropped == 0);
+	std::printf("    state + message, then a 2 x 900-byte bundle: three packets in the tick, both parts delivered, the second message on the next tick\n");
+}
+
 /* Eleventh review round. */
 
 /* 1. The documented frame-rate pattern works in any call order: update()
@@ -1383,8 +1545,9 @@ void test_frame_rate_caller()
 
 /* Eighth review round. */
 
-/* 1. Packets held back (not lost) must not be resent by the RTO: their
- * echoes, arriving out of order, still feed the estimator once each.
+/* 1. Packets held back (not lost) must not be resent by the RTO: acked
+ * only after later packets were echoed, they are never echoed themselves,
+ * and their acks bound rttvar once each.
  */
 void test_held_packets(const std::uint64_t seed)
 {
@@ -2124,10 +2287,10 @@ void test_reordered_echo()
 	CHECK(s.rtt_valid);
 	/* Packet 2's echo is the exact 2000.  Packet 1 is acked in the same
 	 * peer packet, so nothing of ours had been echoed before it was
-	 * acked: it is not measured by its ack (that would carry the peer's
-	 * hold), and srtt stays exact.
+	 * acked: its ack is no bound either (that would carry the peer's
+	 * hold), and srtt and rttvar stay exact.
 	 */
-	CHECK_MSG(s.srtt == 2000, "srtt " + std::to_string(s.srtt) + " units, expected 2000");
+	CHECK_MSG(s.srtt == 2000 && s.rttvar == 1000, "srtt " + std::to_string(s.srtt) + " units, expected 2000, rttvar " + std::to_string(s.rttvar));
 	std::printf("    late packet 1 after packet 2: echo names 2, srtt exact (2000 units)\n");
 }
 
@@ -2667,6 +2830,9 @@ int main(const int argc, char **const argv)
 	test_bounds(seed);
 	test_timeouts(seed);
 	test_replay(seed);
+	test_echo_of_old_unechoed_packet();
+	test_bound_excess();
+	test_parts_after_first_packet();
 	test_frame_rate_caller_update_first();
 	test_event_beside_backlog(seed);
 	test_late_peer_packet_no_sample();

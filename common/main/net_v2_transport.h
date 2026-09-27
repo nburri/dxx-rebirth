@@ -160,8 +160,9 @@ enum class receive_status : std::uint8_t
 	 * even the header's acks or echo (a corrupt ack bit would otherwise
 	 * acknowledge a message that was never delivered), and it is not
 	 * acknowledged, so a conforming peer retransmits.  One protocol
-	 * error is counted per distinct `seq`, and an intact copy of the
-	 * same `seq` arriving later is accepted normally.
+	 * error is counted per distinct `seq` (16 within 10 s close the
+	 * connection with close_reason::protocol_error), and an intact copy
+	 * of the same `seq` arriving later is accepted normally.
 	 */
 	malformed_chunk,
 	bad_length,
@@ -176,12 +177,16 @@ enum class receive_status : std::uint8_t
 	bad_player,
 	/* `ack` names a packet we have not sent.  Nothing is applied; one
 	 * protocol error is counted per distinct `seq`, as for a malformed
-	 * packet.
+	 * packet, and may close the connection the same way.
 	 */
 	bad_ack,
 	/* Already seen, or older than the 64-packet reorder window. */
 	duplicate,
-	/* The connection is closed. */
+	/* The connection is closed.  Checked after the identity checks
+	 * (bad_session .. bad_player) and before the replay window, so a
+	 * packet for a closed connection is reported as such, not as a
+	 * duplicate.
+	 */
 	closed,
 };
 
@@ -274,7 +279,17 @@ struct connection_stats
  * variance term rather than weighed against it.  rttvar is floored at
  * hold / 4 so that it cannot collapse to zero on a steady link.
  *
- *	rto = clamp(srtt + 4 rttvar + hold + tick, NET_V2_RTO_MIN, NET_V2_RTO_MAX)
+ * A bound (a delayed round trip that did happen, known from a late ack
+ * or from the echo of a reordered peer packet) widens rttvar like a
+ * sample and leaves srtt alone.  rttvar is a mean deviation, though, and
+ * forgets a bound within a handful of samples, while the next packet
+ * may well be held just as long; so the largest excess of a bound over
+ * srtt is kept for as long as bounds keep coming and for a second after
+ * the last (NET_V2_BOUND_HOLD), then fades by 1/16 per tick, and the
+ * RTO covers that excess whenever it is more than the variance term: a
+ * loss is not declared before a delay that was just seen.
+ *
+ *	rto = clamp(srtt + max(4 rttvar, excess) + hold + tick, NET_V2_RTO_MIN, NET_V2_RTO_MAX)
  */
 class rtt_estimator
 {
@@ -283,6 +298,11 @@ class rtt_estimator
 	bool m_valid{};
 	net_clock m_srtt{};
 	net_clock m_rttvar{};
+	/* The largest recent bound above srtt, and the time since the last
+	 * bound (in ticks of m_tick_period).
+	 */
+	net_clock m_bound_excess{};
+	net_clock m_bound_age{};
 public:
 	explicit rtt_estimator(const net_clock tick_period = NET_V2_DEFAULT_TICK_PERIOD, const net_clock hold_period = NET_V2_DEFAULT_TICK_PERIOD) :
 		m_tick_period{tick_period},
@@ -292,10 +312,14 @@ public:
 	void add_sample(net_clock r);
 	/* A bound on a round trip rather than a measurement of it (the echo
 	 * of a reordered peer packet, which carries that packet's own
-	 * delay): it widens rttvar, so that the RTO covers such a delay, but
-	 * never moves srtt.  Ignored before the first real sample.
+	 * delay, or the ack of a packet that will never be echoed, which
+	 * carries the peer's hold): it widens rttvar, so that the RTO covers
+	 * such a delay, but never moves srtt.  Ignored before the first real
+	 * sample; the caller checks valid() to know.
 	 */
 	void add_bound(net_clock r);
+	/* Once per tick: ages the bound excess. */
+	void advance_tick();
 	/* The hold term changed (the peer's tick became known). */
 	void set_hold_period(const net_clock hold_period)
 	{
@@ -509,7 +533,9 @@ class connection
 	bool m_tick_open{};
 	unsigned m_tick_packets{};
 	/* Packets allowed in the open tick: max_packets_per_tick, or one
-	 * more than a pending bundle needs when it needs more than one.
+	 * more than a pending bundle needs when it needs more than one;
+	 * raised on every packet of the tick, so parts set after its first
+	 * packet still fit.
 	 */
 	unsigned m_tick_budget{};
 	/* Reliable messages were due but did not fit in the last packet. */
@@ -521,9 +547,12 @@ class connection
 	/* The outgoing latest-wins bundles, [0] state and [1] input. */
 	std::array<state_bundle, 2> m_state_out{};
 	std::deque<pending_event> m_pending_events;
-	/* The newest of our packets sampled through an echo.  A packet acked
+	/* The newest of our packets sampled through an echo.  Samples
+	 * progress: a conforming peer echoes the newest packet it received,
+	 * so an echo of an older packet in the peer's newest packet is not a
+	 * measurement (and a hostile peer's lever otherwise).  A packet acked
 	 * only after a later one was already echoed arrived out of order at
-	 * the peer, so its ack is its one measurement.
+	 * the peer, so its ack is its one bound.
 	 */
 	bool m_echo_sampled_any{};
 	std::uint16_t m_echo_sampled_seq{};
