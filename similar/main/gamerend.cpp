@@ -60,6 +60,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "compiler-range_for.h"
 #include "d_levelstate.h"
 #include "d_range.h"
+#include "frame_probe.h"
 
 #if DXX_USE_OGL
 #include "ogl_init.h"
@@ -191,6 +192,19 @@ static void show_framerate(grs_canvas &canvas)
 	const auto &&[w, h] = gr_get_string_size(game_font, buf);
 	const auto bm_h = canvas.cv_bitmap.bm_h;
 	gr_string(canvas, game_font, FSPACX(318) - w, bm_h - line_displacement, buf, w, h);
+	/* With -verbose, show where the frame time went (averages over the
+	 * last second, in ms) above the frame rate.
+	 */
+	std::array<std::array<char, 64>, 3> probe_lines;
+	if (const auto n = frame_probe::hud_lines(probe_lines[0], probe_lines[1], probe_lines[2]))
+	{
+		for (unsigned i{0}; i != n; ++i)
+		{
+			const auto &line = probe_lines[i];
+			const auto &&[lw, lh] = gr_get_string_size(game_font, line.data());
+			gr_string(canvas, game_font, FSPACX(318) - lw, bm_h - line_displacement - (n - i) * line_spacing, line.data(), lw, lh);
+		}
+	}
 }
 
 }

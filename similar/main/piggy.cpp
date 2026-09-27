@@ -61,6 +61,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "d_range.h"
 #include "d_zip.h"
 #include "partial_range.h"
+#include "frame_probe.h"
 #include <memory>
 
 #if DXX_BUILD_DESCENT == 1
@@ -1285,6 +1286,8 @@ void piggy_bitmap_page_in(GameBitmaps_array &GameBitmaps, const bitmap_index ent
 			/* `Piggy_fp` will only be `nullptr` if a game data file is missing. */
 			return;
 		pause_game_world_time p;
+		++frame_probe::counters.texture_pageins;
+		const frame_probe::event_scope probe{frame_probe::phase::tex, frame_probe::event_kind::texture_pagein, i, bmp->bm_w};
 
 	ReDoIt:
 		PHYSFS_seek(Piggy_fp, static_cast<unsigned>(GameBitmapOffset[xlat_bitmap_index]));

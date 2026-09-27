@@ -39,6 +39,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "d_range.h"
 #include "d_underlying_value.h"
 #include "partial_range.h"
+#include "frame_probe.h"
 
 #if DXX_USE_OGL
 #include "ogl_init.h"
@@ -253,6 +254,8 @@ grs_bitmap &texmerge_get_cached_bitmap(GameBitmaps_array &GameBitmaps, const Tex
 
 	//---- Page out the LRU bitmap;
 	cache_misses++;
+	++frame_probe::counters.texmerge_misses;
+	const frame_probe::event_scope probe{frame_probe::phase::tex, frame_probe::event_kind::texmerge, underlying_value(texture_bottom), underlying_value(texture_top)};
 
 	// Make sure the bitmaps are paged in...
 

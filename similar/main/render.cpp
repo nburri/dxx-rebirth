@@ -75,6 +75,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "editor/esegment.h"
 #endif
 #include <utility>
+#include "frame_probe.h"
 
 using std::min;
 using std::max;
@@ -1262,6 +1263,7 @@ namespace dsx {
 //renders onto current canvas
 void render_frame(grs_canvas &canvas, fix eye_offset, window_rendered_data &window)
 {
+	const frame_probe::scope probe{frame_probe::phase::world};
 	auto &Objects = LevelUniqueObjectState.Objects;
 	auto &vcobjptridx = Objects.vcptridx;
 	if (Endlevel_sequence) {
@@ -1589,17 +1591,27 @@ void render_mine(grs_canvas &canvas, const vms_vector &Viewer_eye, const vcsegid
 	//else
 	#endif
 		//NOTE LINK TO ABOVE!!	-Link killed by kreatordxx to get editor selection working again
+	{
+		const frame_probe::scope probe{frame_probe::phase::vis};
 		build_segment_list(rstate, Viewer_eye, visited, first_terminal_seg, start_seg_num);		//fills in Render_list & N_render_segs
+	}
+	frame_probe::note_render_list(rstate.N_render_segs, underlying_value(segnum_t{start_seg_num}));
 
 	const auto &&render_range = partial_const_range(rstate.Render_list, rstate.N_render_segs);
 	const auto &&reversed_render_range = render_range.reversed();
 	//render away
 
 	//if (!(_search_mode))
+	{
+		const frame_probe::scope probe{frame_probe::phase::vis};
 		build_object_lists(Objects, vcsegptr, Viewer_eye, rstate);
+	}
 
 	if (eye_offset<=0) // Do for left eye or zero.
+	{
+		const frame_probe::scope probe{frame_probe::phase::light};
 		set_dynamic_light(LevelSharedRobotInfoState.Robot_info, rstate);
+	}
 
 	if (reversed_render_range.empty())
 		/* Impossible, but later code has undefined behavior if this

@@ -43,6 +43,7 @@
 #include "d_underlying_value.h"
 #include "d_uspan.h"
 #include "d_zip.h"
+#include "frame_probe.h"
 
 #define MIX_DIGI_DEBUG 0
 
@@ -510,7 +511,10 @@ static Mix_Chunk &mixdigi_convert_sound(const sound_effect i)
 		const auto freq{GameArg.SndDigiSampleRate};
 #endif
 		//proceed only if not converted yet
+		++frame_probe::counters.sound_conversions;
+		frame_probe::event_scope probe{frame_probe::phase::sound, frame_probe::event_kind::sound_conversion, underlying_value(i), 0};
 		mixdigi_convert_sound(i, sci, gs, freq);
+		probe.detail = sci.alen;
 	}
 	return sci;
 }
@@ -545,6 +549,7 @@ sound_channel digi_mixer_start_sound(sound_effect soundnum, const fix volume, co
 #endif
 
 	const int mix_loop = looping * -1;
+	const frame_probe::mixer_scope probe;
 	Mix_PlayChannel(channel, &(SoundChunks[soundnum]), mix_loop);
 	Mix_SetPanning(channel, 255-mix_pan, mix_pan);
 	Mix_SetDistance(channel, UINT8_MAX - fix2byte(volume));
@@ -559,12 +564,14 @@ namespace dcx {
 void digi_mixer_set_channel_volume(const sound_channel channel, const int volume)
 {
 	if (!digi_initialised) return;
+	const frame_probe::mixer_scope probe;
 	Mix_SetDistance(underlying_value(channel), UINT8_MAX - fix2byte(volume));
 }
 
 void digi_mixer_set_channel_pan(const sound_channel channel, const sound_pan pan)
 {
 	int mix_pan = fix2byte(static_cast<fix>(pan));
+	const frame_probe::mixer_scope probe;
 	Mix_SetPanning(underlying_value(channel), 255 - mix_pan, mix_pan);
 }
 
@@ -575,7 +582,10 @@ void digi_mixer_stop_sound(const sound_channel channel)
 #if MIX_DIGI_DEBUG
 	con_printf(CON_DEBUG, "%s:%u: %d", __FUNCTION__, __LINE__, c);
 #endif
-	Mix_HaltChannel(c);
+	{
+		const frame_probe::mixer_scope probe;
+		Mix_HaltChannel(c);
+	}
 	channels.reset(channel);
 }
 

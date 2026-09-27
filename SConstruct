@@ -5051,6 +5051,7 @@ class DXXArchive(DXXCommon):
 'common/main/cli.cpp',
 'common/main/cmd.cpp',
 'common/main/cvar.cpp',
+'common/main/frame_probe.cpp',
 'common/main/net_v2_transport.cpp',
 'common/main/piggy.cpp',
 'common/maths/rand.cpp',

@@ -20,6 +20,7 @@
 #include "config.h"
 #include "game.h"
 #include "multi.h"
+#include "frame_probe.h"
 
 namespace dcx {
 
@@ -135,6 +136,7 @@ fix64 timer_wait_frame(const fix64 deadline)
 	 */
 	const auto may_sleep{!CGameArg.SysNoNiceFPS};
 	auto timer_value{timer_update()};
+	const auto wait_start{timer_value};
 	/* Process packets on the first pass of a wait, as before, and then
 	 * at most once per frame_wait_multi_interval.
 	 */
@@ -143,7 +145,10 @@ fix64 timer_wait_frame(const fix64 deadline)
 	{
 		if (multiplayer && timer_value >= next_multi_frame)
 		{
-			multi_do_frame(); // during long wait, keep packets flowing
+			{
+				const frame_probe::scope probe{frame_probe::phase::multi};
+				multi_do_frame(); // during long wait, keep packets flowing
+			}
 			next_multi_frame = timer_value + frame_wait_multi_interval;
 		}
 		if (may_sleep)
@@ -156,10 +161,29 @@ fix64 timer_wait_frame(const fix64 deadline)
 			 * SDL_Delay(0) yields on Windows (Sleep(0)) and sleeps
 			 * for the timer slack (about 50 us on Linux) elsewhere.
 			 */
-			SDL_Delay(deadline - timer_value >= frame_wait_sleep_margin ? 1 : 0);
+			if (deadline - timer_value >= frame_wait_sleep_margin)
+			{
+				const auto sleep_start{frame_probe::enabled ? frame_probe::now() : 0};
+				SDL_Delay(1);
+				++frame_probe::counters.limiter_sleeps;
+				if (sleep_start)
+				{
+					const auto slept{frame_probe::now() - sleep_start};
+					if (frame_probe::counters.limiter_max_sleep_ticks < slept)
+						frame_probe::counters.limiter_max_sleep_ticks = slept;
+				}
+			}
+			else
+			{
+				SDL_Delay(0);
+				++frame_probe::counters.limiter_yields;
+			}
 		}
 		timer_value = timer_update();
 	}
+	if (deadline > wait_start)
+		frame_probe::counters.limiter_requested += deadline - wait_start;
+	frame_probe::counters.limiter_actual += timer_value - wait_start;
 	return timer_value;
 }
 

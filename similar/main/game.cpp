@@ -119,6 +119,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "compiler-range_for.h"
 #include "partial_range.h"
 #include "segiter.h"
+#include "frame_probe.h"
 
 d_time_fix ThisLevelTime;
 
@@ -1815,9 +1816,14 @@ window_event_result game_window::event_handler(const d_event &event)
 			return ReadControls(LevelSharedRobotInfoState, event, Controls);
 
 		case event_type::window_draw:
+			frame_probe::frame_mark();
 			if (!time_paused)
 			{
-				calc_frame_time();
+				{
+					const frame_probe::scope probe{frame_probe::phase::wait};
+					calc_frame_time();
+				}
+				const frame_probe::scope probe{frame_probe::phase::game};
 				result = GameProcessFrame(LevelSharedRobotInfoState);
 			}
 
@@ -1827,6 +1833,7 @@ window_event_result game_window::event_handler(const d_event &event)
 					init_cockpit();
 					force_cockpit_redraw=0;
 				}
+				const frame_probe::scope probe{frame_probe::phase::hud};
 				game_render_frame(LevelSharedRobotInfoState.Robot_info, Controls);
 			}
 			break;
@@ -2040,7 +2047,10 @@ window_event_result GameProcessFrame(const d_level_shared_robot_info_state &Leve
 #if DXX_USE_MULTIPLAYER
 	if (+(Game_mode & GM_MULTI))
 	{
-		result = std::max(multi_do_frame(), result);
+		{
+			const frame_probe::scope probe{frame_probe::phase::multi};
+			result = std::max(multi_do_frame(), result);
+		}
 		if (Netgame.PlayTimeAllowed.count())
 		{
 			if (ThisLevelTime >= Netgame.PlayTimeAllowed)
@@ -2059,10 +2069,16 @@ window_event_result GameProcessFrame(const d_level_shared_robot_info_state &Leve
 #if DXX_BUILD_DESCENT == 2
 	process_super_mines_frame();
 	do_seismic_stuff();
-	do_ambient_sounds(vcsegptr(ConsoleObject->segnum)->s2_flags);
+	{
+		const frame_probe::scope probe{frame_probe::phase::sound};
+		do_ambient_sounds(vcsegptr(ConsoleObject->segnum)->s2_flags);
+	}
 #endif
 
-	digi_sync_sounds();
+	{
+		const frame_probe::scope probe{frame_probe::phase::sound};
+		digi_sync_sounds();
+	}
 
 	if (Endlevel_sequence) {
 		result = std::max(do_endlevel_frame(LevelSharedRobotInfoState), result);
@@ -2098,14 +2114,20 @@ window_event_result GameProcessFrame(const d_level_shared_robot_info_state &Leve
 #ifndef NEWHOMER
 		player_info.homing_object_dist = -1; // Assume not being tracked.  Laser_do_weapon_sequence modifies this.
 #endif
-		result = std::max(game_move_all_objects(LevelSharedRobotInfoState), result);
+		{
+			const frame_probe::scope probe{frame_probe::phase::objects};
+			result = std::max(game_move_all_objects(LevelSharedRobotInfoState), result);
+		}
 		powerup_grab_cheat_all();
 
 		if (Endlevel_sequence)	//might have been started during move
 			return result;
 
 		fuelcen_update_all(LevelSharedRobotInfoState.Robot_info);
-		do_ai_frame_all(LevelSharedRobotInfoState.Robot_info);
+		{
+			const frame_probe::scope probe{frame_probe::phase::objects};
+			do_ai_frame_all(LevelSharedRobotInfoState.Robot_info);
+		}
 
 		auto laser_firing_count = FireLaser(player_info, Controls);
 		if (auto &Auto_fire_fusion_cannon_time = player_info.Auto_fire_fusion_cannon_time)

@@ -27,6 +27,7 @@
 #include "joy.h"
 #include "args.h"
 #include "partial_range.h"
+#include "frame_probe.h"
 
 namespace dcx {
 
@@ -260,7 +261,10 @@ window_event_result event_process(void)
 
 	timer_update();
 
-	highest_result = event_poll();	// send input events first
+	{
+		const frame_probe::scope probe{frame_probe::phase::input};
+		highest_result = event_poll();	// send input events first
+	}
 
 	cmd_queue_process();
 
@@ -292,7 +296,10 @@ window_event_result event_process(void)
 		wind = window_get_next(*wind);
 	}
 
-	gr_flip();
+	{
+		const frame_probe::scope probe{frame_probe::phase::swap};
+		gr_flip();
+	}
 
 	return highest_result;
 }
