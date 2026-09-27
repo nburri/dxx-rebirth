@@ -309,7 +309,6 @@ class connection
 	{
 		std::uint16_t seq{};
 		std::uint8_t type{};
-		std::uint8_t sends{};
 		bool sent{};
 		bool acked{};
 		bool resend{};
@@ -385,10 +384,22 @@ class connection
 	 * peer's ack bitfield unacked.
 	 */
 	std::uint16_t m_lost_scan_seq{1};
+	/* The newest of our packets the peer has echoed; echoes never go
+	 * backwards, so an older one is stale or forged.
+	 */
+	bool m_echo_seen{};
+	std::uint16_t m_last_echoed_seq{};
 	net_clock m_last_sent{};
-	bool m_tick_started{};
+	/* Tick budget (see begin_tick): the origin of the last granted
+	 * period, the ticks granted but not yet started, and the packets
+	 * built in the tick currently open.
+	 */
 	net_clock m_tick_start{};
+	unsigned m_tick_credit{};
+	bool m_tick_open{};
 	unsigned m_tick_packets{};
+	/* Reliable messages were due but did not fit in the last packet. */
+	bool m_tick_backlog{};
 	bool m_ack_owed{};
 	packet_buffer m_outgoing{};
 	std::vector<out_msg *> m_carried;
@@ -401,8 +412,17 @@ class connection
 	std::uint16_t m_highest_seen{};
 	std::uint64_t m_ack_bits{};
 	net_clock m_last_heard{};
+	/* The newest packet received, which our headers echo. */
+	std::uint16_t m_last_recv_seq{};
 	net_time m_last_recv_send_time{};
 	net_clock m_last_recv_local_time{};
+	/* Sequences of malformed packets seen recently.  They are not in
+	 * the replay window (never acknowledged), so replays of them are
+	 * recognised here instead and do not count again.
+	 */
+	std::array<std::uint16_t, 16> m_malformed_seqs{};
+	std::size_t m_malformed_count{};
+	std::size_t m_malformed_next{};
 	std::uint16_t m_next_expected{};
 	std::array<recv_slot, NET_V2_RECV_WINDOW> m_recv_window{};
 	std::size_t m_recv_window_pending{};
@@ -431,6 +451,9 @@ class connection
 	bool any_message_due() const;
 	[[nodiscard]]
 	bool count_protocol_error(net_clock now);
+	[[nodiscard]]
+	bool seen_malformed(std::uint16_t seq) const;
+	void remember_malformed(std::uint16_t seq);
 	/* §3.7 step 8.  Fills m_parsed_messages and m_parsed_chunks. */
 	[[nodiscard]]
 	bool validate_chunks(std::span<const std::uint8_t> payload, std::uint8_t flags);
@@ -459,12 +482,17 @@ public:
 	 */
 	bool send_unreliable(chunk_type type, std::span<const std::uint8_t> payload);
 
-	/* Open a new packet budget of config.max_packets_per_tick if at
-	 * least config.tick_period has passed since the last tick started
-	 * (always for the first call).  build_outgoing calls this itself, so
-	 * a caller that only calls build_outgoing, at whatever rate, still
-	 * gets one budget per tick period; calling it explicitly at the tick
-	 * merely documents the tick.
+	/* Grant one tick for every full config.tick_period that has elapsed
+	 * since the last grant, keeping the tick phase (the origin advances
+	 * by whole periods, it is not reset to `now`), so a caller at any
+	 * rate gets exactly one tick per period and a frame that spans two
+	 * ticks gets both.  A grant replaces whatever was left of the
+	 * previous one and is capped at two ticks, so unused ticks never
+	 * pile up into a spare and a long stall does not end in a burst.
+	 * Within a tick, §3.6 allows one packet, and further ones up to
+	 * config.max_packets_per_tick only while reliable messages remain
+	 * that did not fit.  build_outgoing calls this itself; calling it
+	 * explicitly at the tick merely documents the tick.
 	 */
 	void begin_tick(net_clock now);
 

@@ -115,13 +115,19 @@ Pain points from the fork changelog (`Documentation/fork-changelog.md`):
   low 32 bits. The host's `GameTime64` and `ThisLevelTime` are derived from the
   same source, so the bundle header can carry level time as a tick-aligned
   value for free (§5.2).
-- Every packet header carries `send_time`, `echo_time` and `echo_delay` (§3.1).
-  From each received host packet, a client computes
+- Every packet header carries `send_time`, `echo_time`, `echo_delay` and
+  `echo_seq` (§3.1). From each received host packet, a client computes
 
   ```
-  rtt     = now - echo_time - echo_delay          (all in fix, wrapping i32)
+  rtt     = now - sent_at[echo_seq] - echo_delay  (sent_at from the local packet log)
   offset  = send_time + rtt/2 - now               (host_time ≈ local + offset)
   ```
+
+  but only if `echo_seq` names a packet still in the local packet log whose
+  recorded `send_time` equals `echo_time`, and `echo_seq` is not older than
+  the last echo taken. Anything else is ignored: the host later rewinds
+  hits by the client's RTT, so a peer must not be able to steer it with
+  numbers unrelated to real packets.
 
   and keeps the last 2 s of samples. The target offset is the sample with the
   smallest `rtt` in that window (minimum filter: queueing delay only ever adds
@@ -214,7 +220,7 @@ Files (new): `common/main/net_v2.h` (constants, wire structs, message ids),
 tested), `similar/main/net_v2.cpp` (socket I/O, session, packet dispatch;
 replaces most of `net_udp.cpp`).
 
-### 3.1 Packet header (34 bytes)
+### 3.1 Packet header (36 bytes)
 
 Every UDP datagram, connected or not, starts with this header.
 
@@ -231,6 +237,7 @@ Every UDP datagram, connected or not, starts with this header.
 | 24 | 4 | `send_time` | Sender's local clock (net time units) when the packet was built. |
 | 28 | 4 | `echo_time` | `send_time` of the most recent packet received from the peer, or 0. |
 | 32 | 2 | `echo_delay` | Time between receiving that packet and sending this one, in net time units, saturated at 65535 (1 s). Peers send at least every 100 ms (§3.6), so saturation only happens on a stalled link and the RTT sample is then discarded. |
+| 34 | 2 | `echo_seq` | `seq` of the packet whose `send_time` is echoed, or 0. The receiver of the echo verifies `echo_seq`/`echo_time` against its packet log before taking a sample (§2.2). The echo fields follow only the newest packet received, never a reordered older one. |
 
 Maximum UDP payload: `NET_V2_MAX_PACKET` = 1200 bytes (header included). This
 is below the 1280-byte IPv6 minimum MTU minus headers, so no path in practice
@@ -245,7 +252,7 @@ datagram:
 | Offset | Size | Field |
 |---|---|---|
 | 0 | 1 | `chunk_type` |
-| 1 | 2 | `chunk_len` (bytes that follow, 0–1163) |
+| 1 | 2 | `chunk_len` (bytes that follow, 0–1161) |
 | 3 | `chunk_len` | chunk payload |
 
 A chunk that does not fit in the remaining bytes invalidates the whole packet
@@ -313,7 +320,7 @@ packet_log:  ring[256] of { u16 packet_seq; fix64 sent_at; vector<u16> msg_seqs;
 
 on_tick(build packet):
     header.seq = ++local_seq; header.ack/ack_bits = receiver state (below)
-    budget = 1200 - 34 - space reserved for the STATE/INPUT chunk of this tick
+    budget = 1200 - 36 - space reserved for the STATE/INPUT chunk of this tick
     first put messages marked RESEND (oldest first), then new messages from send_queue,
     each message only if 3 + msg_len fits in budget; stop at the first that does not fit
     (order is preserved: a message that does not fit blocks later ones, so a large
@@ -415,7 +422,7 @@ address with an implausible `seq` is dropped.
 
 ### 3.7 Validation order (every received datagram)
 
-1. Length ≥ 34 and ≤ 1200, else drop.
+1. Length ≥ 36 and ≤ 1200, else drop.
 2. `proto == 100`, else drop silently (a v1 build or noise).
 3. `flags` reserved bits are 0, else drop.
 4. If `flags.UNCONNECTED`: `session_id` must be 0 (discovery) or the local
@@ -431,7 +438,9 @@ address with an implausible `seq` is dropped.
    packets): drop. This is done before any chunk is parsed, so a replayed
    packet never reaches the game layer twice.
 7. Update the peer's `last_heard`, RTT sample from `echo_*` if
-   `echo_time != 0` and `echo_delay < 65535`.
+   `echo_seq` names a logged packet whose `send_time` is `echo_time`,
+   `echo_delay < 65535`, and the echo is not older than the last one
+   taken (§2.2).
 8. Walk the chunks. Every chunk must fit; every `RELIABLE` message must fit
    its chunk; every `STATE`/`INPUT` record must have the exact size for its
    flags. The first violation drops the *rest* of the packet but keeps the
@@ -525,7 +534,7 @@ program dictates them). The version string in `UPID_TRACKER_REGISTER` and
 `UPID_TRACKER_REQGAMES` becomes `"D2XR<major>.<minor>.<micro>.100"`, so a v2
 client never receives v1 games from the tracker and vice versa. The `z=` blob
 in `UPID_TRACKER_REGISTER` and `tracker_gameinfo` is a complete v2
-`GAME_INFO_LITE` datagram (34-byte header with `UNCONNECTED`, one `SESSION`
+`GAME_INFO_LITE` datagram (36-byte header with `UNCONNECTED`, one `SESSION`
 chunk). Hole punching (opcode 26) is unchanged. This assumes the tracker
 stores the blob opaquely, which is how the v1 client parses it (it looks for
 `z=` and hands the rest to the normal packet parser); see §9.
@@ -1335,7 +1344,7 @@ direction checks of §3.7 are table-driven like v1's `command_length`.
 
 ## 7. Bandwidth estimate (8 players, 60 Hz, D2 anarchy)
 
-Sizes from §3.1 (header 34), §3.2 (chunk header 3), §5.2 (bundle header 18,
+Sizes from §3.1 (header 36), §3.2 (chunk header 3), §5.2 (bundle header 18,
 player record 41), §5.3 (`INPUT` 46). "On wire" adds 28 bytes IPv4+UDP (48
 for IPv6).
 
@@ -1344,7 +1353,7 @@ reliable messages due):
 
 | Part | Bytes |
 |---|---|
-| Packet header | 34 |
+| Packet header | 36 |
 | `STATE` chunk header | 3 |
 | Bundle header | 18 |
 | 8 × player record | 328 |
@@ -1366,7 +1375,7 @@ reliable volume (e.g. 5 % loss → +75 B/s).
 
 | Part | Bytes |
 |---|---|
-| Packet header | 34 |
+| Packet header | 36 |
 | `INPUT` chunk header | 3 |
 | `INPUT` record | 46 |
 | **Payload** | **83** |
@@ -1382,8 +1391,8 @@ upstream per client. Host downstream from 7 clients: 46 620 B/s ≈ 46 KiB/s ≈
 |---|---|---|---|
 | 8 | 60 Hz | 1.38 Mbit/s | 197 kbit/s |
 | 8 | 30 Hz | 0.69 Mbit/s | 99 kbit/s |
-| 4 | 60 Hz | 3 × (34+3+18+164+28) × 60 = 44 460 B/s ≈ 356 kbit/s | 119 kbit/s |
-| 2 | 60 Hz | (34+3+18+82+28) × 60 = 9 900 B/s ≈ 79 kbit/s | 79 kbit/s |
+| 4 | 60 Hz | 3 × (36+3+18+164+28) × 60 = 44 820 B/s ≈ 359 kbit/s | 119 kbit/s |
+| 2 | 60 Hz | (36+3+18+82+28) × 60 = 10 020 B/s ≈ 80 kbit/s | 79 kbit/s |
 
 Comparison with v1 at 30 pps (default) and 8 players: the host relays 7
 `pdata` (49 + 28 bytes) per tick to each of 7 clients plus its own, i.e.

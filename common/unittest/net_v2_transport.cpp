@@ -873,6 +873,224 @@ void test_unreliable_chunks_per_packet()
 	std::printf("    two STATE chunks in one packet both delivered; an older packet's STATE dropped, its EVENT_U kept\n");
 }
 
+/* Third review round. */
+
+/* 1. Echo fields that do not name one of our packets with its true
+ * send_time, or that go backwards, leave the estimators untouched.
+ */
+void test_echo_authentication(const std::uint64_t seed)
+{
+	begin("echo authentication");
+	rng r{seed};
+	sim_world w{r, link_params{.latency = net_milliseconds(30)}};
+	w.run(120, [&](const unsigned i) { w.set_state(i); });
+	const auto before{w.peers[0].conn.stats()};
+	CHECK(before.rtt_valid && before.clock_offset_valid);
+	auto &a{w.peers[0].conn};
+	const auto now{w.peers[0].clock(w.now)};
+	/* Forge client packets: valid header, new seq, hostile echo. */
+	std::uint16_t forged_seq{2000};
+	const auto forge{[&](const std::uint16_t echo_seq, const net_time echo_time, const std::uint16_t echo_delay) {
+		packet_header h;
+		h.session_id = host_side.session_id;
+		h.peer_token = host_side.peer_token;
+		h.player_id = host_side.remote_player_id;
+		h.flags = static_cast<std::uint8_t>(packet_flag::keepalive);
+		h.seq = ++forged_seq;
+		h.send_time = to_net_time(now);
+		h.echo_seq = echo_seq;
+		h.echo_time = echo_time;
+		h.echo_delay = echo_delay;
+		std::array<std::uint8_t, NET_V2_HEADER_SIZE> d{};
+		h.write(d.data());
+		CHECK(a.on_receive(d, now).status == receive_status::accepted);
+	}};
+	const auto latest_seq{static_cast<std::uint16_t>(before.packets_sent)};	/* seqs start at 1 and never skipped here */
+	for (unsigned i{}; i != 19; ++i)
+	{
+		/* The probe: a real seq with a send_time 9 s in the past. */
+		forge(latest_seq, to_net_time(now - net_seconds(9)), 0);
+		/* A seq we never sent. */
+		forge(static_cast<std::uint16_t>(latest_seq + 1000), to_net_time(now - net_milliseconds(1)), 0);
+		/* Our very first packet, correct send_time, but older than the
+		 * echo already seen.
+		 */
+		forge(1, to_net_time(w.peers[0].clock(TICK)), 0);
+		/* echo_seq 0 with a plausible time: no packet named. */
+		forge(0, to_net_time(now - net_milliseconds(60)), 0);
+	}
+	const auto after{a.stats()};
+	CHECK_MSG(after.srtt == before.srtt && after.rttvar == before.rttvar && after.rto == before.rto, "srtt " + std::to_string(to_ms(after.srtt)) + " ms vs " + std::to_string(to_ms(before.srtt)));
+	CHECK(after.clock_offset_target == before.clock_offset_target);
+	CHECK(after.state == connection_state::connected);
+	CHECK(after.packets_received == before.packets_received + 19 * 4);
+	std::printf("    76 forged echoes: srtt stays %.1f ms, offset target unchanged\n", to_ms(after.srtt));
+}
+
+/* 2. The tick origin advances by whole periods: a caller at another
+ * rate gets one budget per period, and a frame spanning two ticks gets
+ * both.
+ */
+void test_tick_credit()
+{
+	begin("tick credit");
+	{
+		connection a{host_side, 0};
+		connection b{client_side, 0};
+		const net_clock frame{net_milliseconds(10)};
+		const std::array<std::uint8_t, 16> msg{};
+		for (unsigned f{}; f != 1000; ++f)
+		{
+			const net_clock now{f * frame};
+			CHECK(a.enqueue_reliable(1, msg) == enqueue_result::ok);
+			for (;;)
+			{
+				const auto p{a.build_outgoing(now)};
+				if (p.empty())
+					break;
+				CHECK(b.on_receive(p, now + 1).status == receive_status::accepted);
+			}
+			const auto ack{b.build_outgoing(now + 1)};
+			if (!ack.empty())
+				CHECK(a.on_receive(ack, now + 2).status == receive_status::accepted);
+		}
+		const auto sent{a.stats().packets_sent};
+		CHECK_MSG(sent >= 595 && sent <= 605, "100 Hz caller sent " + std::to_string(sent) + " packets in 10 s");
+		std::printf("    100 Hz caller, 60 Hz tick: %llu packets in 10 s\n", static_cast<unsigned long long>(sent));
+	}
+	{
+		connection a{host_side, 0};
+		const datagram big(NET_V2_MAX_MESSAGE);
+		for (unsigned k{}; k != 6; ++k)
+			CHECK(a.enqueue_reliable(9, big) == enqueue_result::ok);
+		unsigned first{};
+		while (!a.build_outgoing(0).empty())
+			++first;
+		CHECK(first == NET_V2_DEFAULT_MAX_PACKETS_PER_TICK);
+		/* A hitch: the next frame comes two ticks later. */
+		unsigned after_hitch{};
+		while (!a.build_outgoing(2 * TICK).empty())
+			++after_hitch;
+		CHECK_MSG(after_hitch == 2 * NET_V2_DEFAULT_MAX_PACKETS_PER_TICK, "after a two-tick hitch: " + std::to_string(after_hitch));
+		/* But a long stall does not release a burst beyond two ticks. */
+		for (unsigned k{}; k != 10; ++k)
+			CHECK(a.enqueue_reliable(9, big) == enqueue_result::ok);
+		unsigned after_stall{};
+		while (!a.build_outgoing(60 * TICK).empty())
+			++after_stall;
+		CHECK_MSG(after_stall == 2 * NET_V2_DEFAULT_MAX_PACKETS_PER_TICK, "after a 1 s stall: " + std::to_string(after_stall));
+		std::printf("    hitch of two ticks: %u packets; stall of 60 ticks: %u packets\n", after_hitch, after_stall);
+	}
+}
+
+/* 4. A reordered (older) packet does not move the echo fields, so the
+ * peer's RTT sample is not inflated by the reorder delay.
+ */
+void test_reordered_echo()
+{
+	begin("reordered packet does not move the echo");
+	connection a{host_side, 0};
+	connection b{client_side, 0};
+	const std::array<std::uint8_t, 2> x{};
+	a.set_unreliable_state(chunk_type::state, x);
+	const datagram p1{[&] { const auto p{a.build_outgoing(0)}; return datagram{p.begin(), p.end()}; }()};
+	a.set_unreliable_state(chunk_type::state, x);
+	const datagram p2{[&] { const auto p{a.build_outgoing(TICK)}; return datagram{p.begin(), p.end()}; }()};
+	CHECK(b.on_receive(p2, TICK + 1000).status == receive_status::accepted);
+	CHECK(b.on_receive(p1, TICK + 1500).status == receive_status::accepted);
+	b.set_unreliable_state(chunk_type::input, x);
+	const auto ack{b.build_outgoing(TICK + 2000)};
+	const auto h{*packet_header::read(ack)};
+	CHECK_MSG(h.echo_seq == 2, "echoed seq " + std::to_string(h.echo_seq));
+	CHECK(h.echo_time == to_net_time(TICK) && h.echo_delay == 1000);
+	CHECK(a.on_receive(ack, TICK + 3000).status == receive_status::accepted);
+	const auto s{a.stats()};
+	CHECK(s.rtt_valid);
+	CHECK_MSG(s.srtt == 2000, "srtt " + std::to_string(s.srtt) + " units, expected 2000");
+	std::printf("    late packet 1 after packet 2: echo names 2, RTT sample exact (2000 units)\n");
+}
+
+/* 5. After a long ack blackout the loss scan is still in range: packets
+ * that fall out of the bitfield are counted within 64 packets.
+ */
+void test_long_blackout_scan()
+{
+	begin("loss scan after a long blackout");
+	connection a{host_side, 0};
+	connection b{client_side, 0};
+	const std::array<std::uint8_t, 2> x{};
+	net_clock t{};
+	const auto step{[&](const bool acks, const bool deliver) {
+		t += TICK;
+		a.set_unreliable_state(chunk_type::state, x);
+		const auto pa{a.build_outgoing(t)};
+		CHECK(!pa.empty());
+		if (deliver)
+			CHECK(b.on_receive(pa, t + 1).status == receive_status::accepted);
+		b.set_unreliable_state(chunk_type::input, x);
+		const auto pb{b.build_outgoing(t + 2)};
+		CHECK(!pb.empty());
+		datagram d{pb.begin(), pb.end()};
+		if (!acks)
+			std::fill(d.begin() + 14, d.begin() + 24, 0);
+		CHECK(a.on_receive(d, t + 3).status == receive_status::accepted);
+	}};
+	for (unsigned i{}; i != 200; ++i)
+		step(true, true);
+	/* More than half the sequence space without a single ack. */
+	for (unsigned i{}; i != 34000; ++i)
+		step(false, true);
+	for (unsigned i{}; i != 20; ++i)
+		step(true, true);
+	const auto lost_before{a.stats().packets_lost};
+	/* Now every other packet of ours is lost while the peer's acks keep
+	 * coming: the bitfield rule must count the lost ones within 64
+	 * packets, long before their log slots are reused.
+	 */
+	for (unsigned i{}; i != 150; ++i)
+		step(true, i % 2 == 0);
+	const auto lost_after{a.stats().packets_lost};
+	CHECK_MSG(lost_after - lost_before >= 30, "lost counted after the blackout: " + std::to_string(lost_after - lost_before));
+	CHECK(a.state() == connection_state::connected);
+	std::printf("    34000 unacked packets, then acks resume with 50%% loss: %llu of 75 lost packets counted within 150 packets\n",
+		static_cast<unsigned long long>(lost_after - lost_before));
+}
+
+/* 6. Replays of one malformed datagram count one protocol error. */
+void test_malformed_replay()
+{
+	begin("malformed replay");
+	connection a{host_side, 0};
+	connection b{client_side, 0};
+	const std::array<std::uint8_t, 4> x{{1, 2, 3, 4}};
+	CHECK(a.enqueue_reliable(5, x) == enqueue_result::ok);
+	datagram d{[&] { const auto p{a.build_outgoing(TICK)}; return datagram{p.begin(), p.end()}; }()};
+	d[NET_V2_HEADER_SIZE + 1] = 0xff;
+	d[NET_V2_HEADER_SIZE + 2] = 0x0f;
+	CHECK(b.on_receive(d, TICK + 1).status == receive_status::malformed_chunk);
+	for (unsigned i{}; i != 19; ++i)
+		CHECK(b.on_receive(d, TICK + 2 + i).status == receive_status::duplicate);
+	const auto s{b.stats()};
+	CHECK(s.protocol_errors == 1);
+	CHECK(s.packets_received == 1);
+	CHECK(s.packets_rejected == 19);
+	CHECK(s.state == connection_state::connected);
+	/* The retransmission in a fresh packet is still taken. */
+	CHECK(a.on_receive(b.build_outgoing(2 * TICK), 2 * TICK).status == receive_status::accepted);
+	unsigned resent{};
+	for (net_clock t{3 * TICK}; resent == 0 && t < 100 * TICK; t += TICK)
+	{
+		const auto p{a.build_outgoing(t)};
+		if (p.empty())
+			continue;
+		const auto report{b.on_receive(p, t + 1)};
+		CHECK(report.status == receive_status::accepted);
+		resent += static_cast<unsigned>(report.reliable.size());
+	}
+	CHECK(resent == 1);
+	std::printf("    20 copies of one corrupted datagram: 1 protocol error, 19 duplicates, message arrives by retransmission\n");
+}
+
 /* Second review round. */
 
 /* 1. A packet with a malformed chunk is not acknowledged, so the sender
@@ -925,6 +1143,9 @@ void test_hostile_echo()
 {
 	begin("hostile echo fields");
 	connection c{host_side, 0};
+	/* One real packet, so that echo_seq 1 names a logged packet. */
+	c.set_unreliable_state(chunk_type::state, std::array<std::uint8_t, 1>{{1}});
+	CHECK(!c.build_outgoing(0).empty());
 	std::uint16_t seq{};
 	for (const auto &[echo_time, echo_delay, now] : {
 		std::tuple{net_time{0x7fffffff}, std::uint16_t{100}, net_clock{0}},
@@ -940,6 +1161,7 @@ void test_hostile_echo()
 		h.player_id = host_side.remote_player_id;
 		h.flags = static_cast<std::uint8_t>(packet_flag::keepalive);
 		h.seq = ++seq;
+		h.echo_seq = 1;
 		h.echo_time = echo_time;
 		h.echo_delay = echo_delay;
 		std::array<std::uint8_t, NET_V2_HEADER_SIZE> d{};
@@ -948,7 +1170,7 @@ void test_hostile_echo()
 		CHECK(report.status == receive_status::accepted);
 	}
 	const auto s{c.stats()};
-	CHECK_MSG(!s.rtt_valid || (s.srtt >= 0 && s.srtt <= net_seconds(10)), "srtt " + std::to_string(s.srtt));
+	CHECK_MSG(!s.rtt_valid, "srtt " + std::to_string(s.srtt));
 	std::printf("    extreme echo_time/echo_delay/now combinations: no overflow, no bogus sample\n");
 }
 
@@ -1217,7 +1439,8 @@ void test_clock(const std::uint64_t seed)
 	const auto host_offset{w.peers[0].conn.stats().clock_offset};
 	const auto host_err{host_offset + truth()};
 	CHECK((host_err < 0 ? -host_err : host_err) < net_milliseconds(5));
-	CHECK(w.peers[1].conn.to_peer_time(w.peers[1].clock(w.now)) - w.peers[0].clock(w.now) < net_milliseconds(5));
+	const auto peer_time_err{w.peers[1].conn.to_peer_time(w.peers[1].clock(w.now)) - w.peers[0].clock(w.now)};
+	CHECK((peer_time_err < 0 ? -peer_time_err : peer_time_err) < net_milliseconds(5));
 	/* A 300 ms step of the client clock is followed within one window. */
 	w.peers[1].bias += net_milliseconds(300);
 	w.run(150, [&](const unsigned i) { w.set_state(i); });
@@ -1234,7 +1457,8 @@ void test_clock(const std::uint64_t seed)
 	const auto during_slew{s.clock_offset - truth()};
 	std::printf("    20 ms step: applied error %.2f ms after 1 s (slewing at %.0f ms/s)\n", to_ms(during_slew), to_ms(NET_V2_CLOCK_SLEW_PER_SECOND));
 	CHECK(during_slew < 0 ? -during_slew > net_milliseconds(10) : during_slew > net_milliseconds(10));
-	w.run(240, [&](const unsigned i) { w.set_state(i); });
+	/* 20 ms at 5 ms/s is 4 s; allow for the estimate noise on top. */
+	w.run(360, [&](const unsigned i) { w.set_state(i); });
 	s = w.peers[1].conn.stats();
 	const auto after_slew{s.clock_offset - truth()};
 	CHECK((after_slew < 0 ? -after_slew : after_slew) < net_milliseconds(5));
@@ -1246,8 +1470,8 @@ void test_clock(const std::uint64_t seed)
 void test_header_layout()
 {
 	begin("header layout");
-	static_assert(NET_V2_HEADER_SIZE == 34);
-	static_assert(NET_V2_MAX_CHUNK_PAYLOAD == 1163);
+	static_assert(NET_V2_HEADER_SIZE == 36);
+	static_assert(NET_V2_MAX_CHUNK_PAYLOAD == 1161);
 	packet_header h;
 	h.session_id = 0x04030201;
 	h.peer_token = 0x08070605;
@@ -1259,6 +1483,7 @@ void test_header_layout()
 	h.send_time = 0x18171615;
 	h.echo_time = 0x1c1b1a19;
 	h.echo_delay = 0x1e1d;
+	h.echo_seq = 0x201f;
 	std::array<std::uint8_t, NET_V2_HEADER_SIZE> buf{};
 	h.write(buf.data());
 	const std::array<std::uint8_t, NET_V2_HEADER_SIZE> expected{{
@@ -1273,12 +1498,13 @@ void test_header_layout()
 		21, 22, 23, 24,
 		25, 26, 27, 28,
 		29, 30,
+		31, 32,
 	}};
 	CHECK(buf == expected);
 	const auto back{packet_header::read(buf)};
 	CHECK(back.has_value());
-	CHECK(back->proto == 100 && back->session_id == h.session_id && back->peer_token == h.peer_token && back->player_id == 7 && back->flags == 3 && back->seq == h.seq && back->ack == h.ack && back->ack_bits == h.ack_bits && back->send_time == h.send_time && back->echo_time == h.echo_time && back->echo_delay == h.echo_delay);
-	CHECK(!packet_header::read(std::span{buf}.first(33)).has_value());
+	CHECK(back->proto == 100 && back->session_id == h.session_id && back->peer_token == h.peer_token && back->player_id == 7 && back->flags == 3 && back->seq == h.seq && back->ack == h.ack && back->ack_bits == h.ack_bits && back->send_time == h.send_time && back->echo_time == h.echo_time && back->echo_delay == h.echo_delay && back->echo_seq == h.echo_seq);
+	CHECK(!packet_header::read(std::span{buf}.first(NET_V2_HEADER_SIZE - 1)).has_value());
 	/* A packet that a v1 build would parse: first byte 100 is not a
 	 * valid upid.  A v2 build drops anything without proto 100.
 	 */
@@ -1292,7 +1518,7 @@ void test_header_layout()
 	CHECK(c.on_receive(buf, 0).status == receive_status::unconnected);
 	buf[11] = 0x02;
 	CHECK(c.on_receive(buf, 0).status == receive_status::bad_session);
-	std::printf("    34-byte header round-trips with the documented offsets\n");
+	std::printf("    36-byte header round-trips with the documented offsets\n");
 }
 
 }
@@ -1308,6 +1534,11 @@ int main(const int argc, char **const argv)
 	test_bounds(seed);
 	test_timeouts(seed);
 	test_replay(seed);
+	test_echo_authentication(seed);
+	test_tick_credit();
+	test_reordered_echo();
+	test_long_blackout_scan();
+	test_malformed_replay();
 	test_malformed_not_acked(seed);
 	test_hostile_echo();
 	test_high_rate_caller();
