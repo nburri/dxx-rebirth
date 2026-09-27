@@ -714,8 +714,8 @@ and one PR per change.
 | PR | Content | Depends on | Size |
 |---|---|---|---|
 | **B0** | Pilot refactor (§3.2) with no behaviour change: `struct pilot`, `apply_pilot_controls`, `pid`/originator parameters on the `multi_send_*` functions a bot needs, `send_data(..., originator)`, `choose_spawn`/`place_player` split. Human play unchanged. | — | M |
-| **B1** | **First bot**: slot allocation at game start (count only, fixed Hotshot, default names). Bundle branch, bot tick, perception (LOS and FOV), A* nav with string pulling and stuck recovery, aim with lead and error, primary fire with spawn-granted weapons, damage to and from bots, kill/deres/reappear as the bot, respawn. No pickups, secondaries or menus; bot count from the `-bots N` command line. `test-bot-nav`, `test-bot-brain` (solver, aim, reaction, tick). | B0 | L |
-| **B2** | Setup UI (§6.1–6.3), `.ngp` persistence, five skill presets, styles, `PLAYER_LIST` bot flag and `BOT` in the kill list, humans replace bots. | B1 | M |
+| **B1** | **First bot**: slot allocation at game start (count only, fixed Hotshot, default names). Bundle branch, bot tick, perception (LOS and FOV), A* nav with string pulling and stuck recovery, aim with lead and error, primary fire with spawn-granted weapons, damage to and from bots, kill/deres/reappear as the bot, respawn. Setup UI (§6.1–§6.3, decision 1): Bots item in the host setup menu, Bots screen, per-bot screen (name; skill and style fields present, presets filled in B2). No pickups or secondaries. `test-bot-nav`, `test-bot-brain` (solver, aim, reaction, tick). | B0 | L |
+| **B2** | `.ngp` persistence, five skill presets, styles, `PLAYER_LIST` bot flag and `BOT` in the kill list, humans replace bots. | B1 | M |
 | **B3** | Pickups and resources: `powerup_apply` for bots, collect and retreat goals, fuel centres, death drops from the bot's inventory, weapon choice tables, afterburner. | B1 and v2 stage 3 | M |
 | **B4** | Secondaries and mines, dodge, strafe patterns, cloak/invul behaviour, converter. `-botarena` test mode. | B3 | M |
 | **B5** | In-game bot menu, chat commands, add/remove during play, join in progress with bots (extras inventory until stage 5). | B2 | S |
@@ -741,23 +741,18 @@ B1–B3 make a fun anarchy bot.
 
 ---
 
-## 11. Open questions (with recommended defaults)
+## 11. Decisions (user, 2026-09-27)
 
-1. **First PR scope.** Should B1 ship with a `-bots N` command-line switch
-   only, and the UI in B2? *Recommended: yes*, so that the bot's behaviour is
-   play-tested before UI work.
-2. **Client-visible bot marker.** Should `PLAYER_LIST` carry a bot flag, so
-   clients show `BOT` and `[B]` (a protocol bump), or should bots look
-   exactly like humans? *Recommended: flag it.* Honest scoreboards, and it
-   protects rejoin-by-callsign.
-3. **Humans replace bots when the game is full.** *Recommended: on*, which
-   removes the most recently added bot.
-4. **Powerup map knowledge.** Should bots know the level's initial powerup
-   layout (scaled by skill), or only what they have seen? *Recommended:
-   scaled by skill*, as in §5.1. Humans know their maps.
-5. **Default skill for new bots.** *Recommended: Hotshot.*
-6. **Bots attacking the reactor.** *Recommended: never*, because destroying
-   it ends anarchy levels early. Revisit for coop/robot modes.
-7. **Game data for testing.** The offline arena test needs hog files, so it
-   stays a local tool rather than CI. *Recommended: accept that*; CI covers
-   the pure logic.
+1. **First PR scope: menus from the start.** B1 already contains the setup
+   UI (§6.1–§6.3: Bots item in the host setup menu, Bots screen, per-bot
+   screen). A `-bots N` switch may exist as a developer shortcut, but the
+   menus are how bots are added.
+2. **Client-visible bot marker: yes.** `PLAYER_LIST` carries a bot flag
+   (protocol bump); clients show `BOT` in the player list and score screens.
+3. **Humans replace bots when the game is full: yes**, removing the most
+   recently added bot.
+4. **Powerup map knowledge: scaled by skill** (§5.1).
+5. **Default skill for new bots: Hotshot.**
+6. **Bots attacking the reactor: never.**
+7. **Game data for testing:** the offline arena test is a local tool; CI
+   covers the pure logic.
