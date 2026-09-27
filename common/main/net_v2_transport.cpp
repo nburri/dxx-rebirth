@@ -44,12 +44,6 @@ constexpr std::size_t chunk_wire_size(const std::size_t payload_size)
 }
 
 [[nodiscard]]
-constexpr std::size_t latest_index(const chunk_type type)
-{
-	return static_cast<std::size_t>(type) & 7;
-}
-
-[[nodiscard]]
 constexpr bool is_latest_wins(const chunk_type type)
 {
 	return type == chunk_type::state || type == chunk_type::input;
@@ -149,7 +143,10 @@ connection_config sanitized(connection_config config)
 	 * could never send.
 	 */
 	config.tick_period = std::max<net_clock>(config.tick_period, 1);
-	config.max_packets_per_tick = std::max(config.max_packets_per_tick, 1u);
+	/* Two at least: the second packet of a tick is what carries a
+	 * reliable message that does not fit beside the state chunk.
+	 */
+	config.max_packets_per_tick = std::max(config.max_packets_per_tick, 2u);
 	return config;
 }
 
@@ -243,10 +240,10 @@ bool connection::window_allows(const out_msg &m) const
 	/* The queue head is the oldest message that is unacked or unsent
 	 * (acked heads are popped).  The peer's window starts at its next
 	 * expected sequence, which is at or after that, so staying within
-	 * 256 of the head is always safe, and it also bounds what one packet
-	 * can select when nothing is in flight yet.
+	 * the window of the head is always safe, and it also bounds what one
+	 * packet can select when nothing is in flight yet.
 	 */
-	return seq_diff(m.seq, m_messages.front().seq) < static_cast<std::int16_t>(NET_V2_RECV_WINDOW);
+	return seq_diff(m.seq, m_messages.front().seq) < static_cast<std::int16_t>(NET_V2_MAX_IN_FLIGHT);
 }
 
 bool connection::any_message_due() const
@@ -274,6 +271,11 @@ void connection::check_timeouts(const net_clock now)
 			close_with(close_reason::unacked_timeout);
 		break;
 	}
+	/* The receive side of the same limit: messages held out of order
+	 * whose gap the peer never fills although it keeps sending.
+	 */
+	if (m_recv_window_pending != 0 && now - m_recv_gap_since >= NET_V2_UNACKED_TIMEOUT)
+		close_with(close_reason::stream_stalled);
 }
 
 void connection::flag_resend(out_msg &m)
@@ -302,9 +304,8 @@ void connection::detect_rto_losses(const net_clock now)
 
 void connection::update(const net_clock now)
 {
-	check_timeouts(now);
 	m_clock.update(now);
-	detect_rto_losses(now);
+	begin_tick(now);
 }
 
 void connection::begin_tick(const net_clock now)
@@ -318,6 +319,11 @@ void connection::begin_tick(const net_clock now)
 	/* Whatever was left of the previous tick is not carried on top. */
 	m_tick_open = false;
 	m_tick_packets = 0;
+	/* Timeouts and the RTO are judged once per tick: a retransmission
+	 * cannot go out more often anyway.
+	 */
+	check_timeouts(now);
+	detect_rto_losses(now);
 }
 
 std::span<const std::uint8_t> connection::build_outgoing(const net_clock now)
@@ -349,11 +355,8 @@ std::span<const std::uint8_t> connection::build_outgoing(const net_clock now)
 	 * selection is recorded as runs of consecutive sequences, one
 	 * RELIABLE chunk each, so that the budget and the layout agree.
 	 */
-	const std::size_t state_size{m_pending_state ? chunk_wire_size(m_pending_state->payload.size()) : 0};
-	std::size_t budget{NET_V2_MAX_PACKET - NET_V2_HEADER_SIZE - state_size};
+	std::size_t budget{};
 	std::size_t resend_bytes{};
-	m_carried.clear();
-	m_runs.clear();
 	const auto try_add{[&](out_msg &m, const bool is_resend) {
 		const auto msg_size{message_wire_size(m.payload.size())};
 		/* The resend budget is cumulative; the first resent message of a
@@ -376,23 +379,38 @@ std::span<const std::uint8_t> connection::build_outgoing(const net_clock now)
 		m_carried.push_back(&m);
 		return true;
 	}};
-	if (m_resend_pending != 0)
-	{
-		for (std::size_t i{}; i != m_sent_count; ++i)
+	const auto select{[&](const std::size_t reserved) {
+		budget = NET_V2_MAX_PACKET - NET_V2_HEADER_SIZE - reserved;
+		resend_bytes = 0;
+		m_carried.clear();
+		m_runs.clear();
+		if (m_resend_pending != 0)
+		{
+			for (std::size_t i{}; i != m_sent_count; ++i)
+			{
+				auto &m{m_messages[i]};
+				if (m.acked || !m.resend)
+					continue;
+				if (!try_add(m, true))
+					break;
+			}
+		}
+		for (auto i{m_sent_count}; i != m_messages.size(); ++i)
 		{
 			auto &m{m_messages[i]};
-			if (m.acked || !m.resend)
-				continue;
-			if (!try_add(m, true))
+			if (!window_allows(m) || !try_add(m, false))
 				break;
 		}
-	}
-	for (auto i{m_sent_count}; i != m_messages.size(); ++i)
-	{
-		auto &m{m_messages[i]};
-		if (!window_allows(m) || !try_add(m, false))
-			break;
-	}
+	}};
+	const std::size_t state_size{m_pending_state ? chunk_wire_size(m_pending_state->payload.size()) : 0};
+	select(state_size);
+	/* A head message that does not fit beside the state chunk must not
+	 * wait forever: this packet carries it without the state, which
+	 * stays pending and resumes with the next packet or tick.
+	 */
+	const bool omit_state{m_carried.empty() && messages_due && state_size != 0};
+	if (omit_state)
+		select(0);
 	if (!header_due && m_carried.empty())
 		/* Something is due but did not fit this time; never emit an
 		 * empty packet for it, or the caller's send loop would not end.
@@ -456,7 +474,7 @@ std::span<const std::uint8_t> connection::build_outgoing(const net_clock now)
 		}
 		chunk_header{.type = static_cast<std::uint8_t>(chunk_type::reliable), .length = static_cast<std::uint16_t>(pos - chunk_at - NET_V2_CHUNK_HEADER_SIZE)}.write(buf + chunk_at);
 	}
-	if (m_pending_state)
+	if (m_pending_state && !omit_state)
 	{
 		const auto &s{*m_pending_state};
 		chunk_header{.type = static_cast<std::uint8_t>(s.type), .length = static_cast<std::uint16_t>(s.payload.size())}.write(buf + pos);
@@ -622,24 +640,30 @@ void connection::process_acks(const std::uint16_t ack, const std::uint64_t ack_b
 	}
 }
 
-bool connection::seen_malformed(const std::uint16_t seq) const
+bool connection::count_protocol_error(const std::uint16_t seq, const net_clock now)
 {
-	for (std::size_t i{}; i != m_malformed_count; ++i)
-		if (m_malformed_seqs[i] == seq)
-			return true;
-	return false;
-}
-
-void connection::remember_malformed(const std::uint16_t seq)
-{
-	m_malformed_seqs[m_malformed_next] = seq;
-	m_malformed_next = (m_malformed_next + 1) % m_malformed_seqs.size();
-	if (m_malformed_count != m_malformed_seqs.size())
-		++m_malformed_count;
-}
-
-bool connection::count_protocol_error(const net_clock now)
-{
+	auto &r{m_recent_malformed};
+	/* Sequences older than the reorder window cannot be replayed into
+	 * acceptance anyway; forget them so the list follows the stream.
+	 */
+	for (std::size_t i{}; i != r.count;)
+	{
+		if (m_any_received && seq_diff(m_highest_seen, r.seqs[i]) > static_cast<std::int16_t>(NET_V2_ACK_BITS))
+		{
+			r.seqs[i] = r.seqs[--r.count];
+			r.next = r.count % r.seqs.size();
+		}
+		else
+			++i;
+	}
+	for (std::size_t i{}; i != r.count; ++i)
+		if (r.seqs[i] == seq)
+			/* A replay of a packet already counted. */
+			return false;
+	r.seqs[r.next] = seq;
+	r.next = (r.next + 1) % r.seqs.size();
+	if (r.count != r.seqs.size())
+		++r.count;
 	++m_stats.protocol_errors;
 	m_protocol_error_times.push_back(now);
 	while (m_protocol_error_times.front() + NET_V2_PROTOCOL_ERROR_WINDOW <= now)
@@ -730,10 +754,11 @@ bool connection::validate_chunks(const std::span<const std::uint8_t> payload, co
 	return true;
 }
 
-void connection::deliver_reliable(receive_report &report)
+void connection::deliver_reliable(const net_clock now, receive_report &report)
 {
 	if (m_parsed_messages.empty())
 		return;
+	const bool had_pending{m_recv_window_pending != 0};
 	for (const auto &pm : m_parsed_messages)
 	{
 		if (seq_diff(pm.seq, m_next_expected) < 0)
@@ -759,7 +784,17 @@ void connection::deliver_reliable(receive_report &report)
 		++m_next_expected;
 		++m_stats.messages_delivered;
 	}
+	/* The stall clock restarts whenever the window was empty before or
+	 * the stream advanced now.
+	 */
+	if (!had_pending || !report.reliable.empty())
+		m_recv_gap_since = now;
 	m_ack_owed = true;
+}
+
+connection::latest_packet &connection::latest_for(const chunk_type type)
+{
+	return type == chunk_type::state ? m_latest_state : m_latest_input;
 }
 
 void connection::deliver_unreliable(const std::uint16_t packet_seq, receive_report &report)
@@ -768,7 +803,7 @@ void connection::deliver_unreliable(const std::uint16_t packet_seq, receive_repo
 	{
 		if (is_latest_wins(c.type))
 		{
-			auto &latest{m_latest_packet[latest_index(c.type)]};
+			auto &latest{latest_for(c.type)};
 			/* The last packet that carried this type is a reference only
 			 * while it is inside the reorder window; anything older has
 			 * been superseded by every packet since, and its sequence
@@ -783,11 +818,8 @@ void connection::deliver_unreliable(const std::uint16_t packet_seq, receive_repo
 				 * delivered.
 				 */
 				continue;
-			if (!reference || seq_diff(packet_seq, latest.seq) >= 0)
-			{
-				latest.valid = true;
-				latest.seq = packet_seq;
-			}
+			latest.valid = true;
+			latest.seq = packet_seq;
 		}
 		report.unreliable.push_back({.type = c.type, .payload = {c.payload.begin(), c.payload.end()}});
 	}
@@ -847,25 +879,28 @@ receive_report connection::on_receive(const std::span<const std::uint8_t> datagr
 			new_ack_bits = m_ack_bits | bit;
 		}
 	}
-	/* A replay of a packet we refused to acknowledge (malformed or with
-	 * a bad ack) is not in the replay window; it must not count again.
-	 */
-	if (seen_malformed(h.seq))
-		return reject(receive_status::duplicate);
 	/* An ack of a packet we have not sent is a protocol error, and it
 	 * would drive the loss scan and the gap rule over everything in
-	 * flight on every packet.
+	 * flight on every packet.  Counted once per sequence; a replay of
+	 * the datagram is rejected the same way but counts no more.
 	 */
 	if (!(h.ack == 0 && h.ack_bits == 0) && seq_diff(h.ack, m_local_seq) > 0)
 	{
-		remember_malformed(h.seq);
-		if (count_protocol_error(now))
+		if (count_protocol_error(h.seq, now))
 			close_with(close_reason::protocol_error);
 		return reject(receive_status::bad_ack);
 	}
-	/* Step 7: header effects.  These hold even if the chunks turn out
-	 * to be malformed: the header itself validated.
+	/* Step 8: walk the chunks.  Nothing of the datagram is applied
+	 * before it is proven well-formed: a corrupt datagram's ack bits
+	 * could otherwise acknowledge messages that were never delivered.
 	 */
+	if (!validate_chunks(datagram.subspan(NET_V2_HEADER_SIZE), h.flags))
+	{
+		if (count_protocol_error(h.seq, now))
+			close_with(close_reason::protocol_error);
+		return reject(receive_status::malformed_chunk);
+	}
+	/* Step 7: header effects */
 	if (m_state == connection_state::connecting)
 		m_state = connection_state::connected;
 	m_last_heard = now;
@@ -873,12 +908,17 @@ receive_report connection::on_receive(const std::span<const std::uint8_t> datagr
 	if (h.echo_seq != 0 && h.echo_delay != NET_V2_ECHO_DELAY_SATURATED)
 	{
 		/* Only an echo of a packet we really sent, with the send_time
-		 * we really wrote, and not older than the last echo, may feed
-		 * the estimators: the game will rewind hits by this RTT.  The
-		 * sample itself comes from our own log, in 64 bits.
+		 * we really wrote, may feed the estimators: the game will rewind
+		 * hits by this RTT.  A conforming peer echoes the packet it also
+		 * names in `ack` (both are its newest), and every packet of ours
+		 * is echoed once: a repeated echo_seq is the same measurement
+		 * held longer, not a new one, so it yields no sample.  Together
+		 * these stop a peer from pinning one old packet with a small
+		 * delay to steer srtt and the clock.  The sample itself comes
+		 * from our own log, in 64 bits.
 		 */
 		const auto &e{m_packet_log[h.echo_seq % NET_V2_RECV_WINDOW]};
-		if (e.valid && e.seq == h.echo_seq && to_net_time(e.sent_at) == h.echo_time && (!m_echo_seen || seq_diff(h.echo_seq, m_last_echoed_seq) >= 0))
+		if (h.echo_seq == h.ack && e.valid && e.seq == h.echo_seq && to_net_time(e.sent_at) == h.echo_time && (!m_echo_seen || seq_diff(h.echo_seq, m_last_echoed_seq) > 0))
 		{
 			const net_clock rtt{now - e.sent_at - h.echo_delay};
 			if (rtt >= 0 && rtt <= NET_V2_RTT_SAMPLE_MAX)
@@ -891,20 +931,7 @@ receive_report connection::on_receive(const std::span<const std::uint8_t> datagr
 			}
 		}
 	}
-	/* Step 8: walk the chunks */
-	const bool well_formed{validate_chunks(datagram.subspan(NET_V2_HEADER_SIZE), h.flags)};
 	process_acks(h.ack, h.ack_bits);
-	if (!well_formed)
-	{
-		/* Not acknowledged and nothing delivered, so that a conforming
-		 * peer retransmits and its messages are never half-applied.
-		 */
-		report.status = receive_status::malformed_chunk;
-		remember_malformed(h.seq);
-		if (count_protocol_error(now))
-			close_with(close_reason::protocol_error);
-		return report;
-	}
 	/* Step 9: record and apply.  Only the newest packet moves the echo
 	 * fields: echoing a late, reordered packet would inflate the peer's
 	 * RTT sample by the reorder delay.
@@ -919,7 +946,7 @@ receive_report connection::on_receive(const std::span<const std::uint8_t> datagr
 		m_last_recv_send_time = h.send_time;
 		m_last_recv_local_time = now;
 	}
-	deliver_reliable(report);
+	deliver_reliable(now, report);
 	deliver_unreliable(h.seq, report);
 	report.status = receive_status::accepted;
 	return report;

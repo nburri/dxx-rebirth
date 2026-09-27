@@ -192,6 +192,12 @@ public:
 		{
 			if (mangle[dest])
 				mangle[dest](q.bytes);
+			if (q.bytes.empty())
+			{
+				/* A mangler that empties the datagram drops it. */
+				++dropped;
+				continue;
+			}
 			++delivered;
 			f(q.bytes, q.arrival);
 		}
@@ -873,6 +879,223 @@ void test_unreliable_chunks_per_packet()
 	std::printf("    two STATE chunks in one packet both delivered; an older packet's STATE dropped, its EVENT_U kept\n");
 }
 
+/* Fifth review round. */
+
+/* 1. Pinning one real old packet in echo_seq with echo_delay 0 forever
+ * must not steer the estimators.
+ */
+void test_echo_pinning(const std::uint64_t seed)
+{
+	begin("echo pinning");
+	rng r{seed};
+	sim_world w{r, link_params{.latency = net_milliseconds(30)}};
+	w.run(120, [&](const unsigned i) { w.set_state(i); });
+	auto &a{w.peers[0].conn};
+	const auto before{a.stats()};
+	CHECK(before.rtt_valid);
+	const auto latest_seq{static_cast<std::uint16_t>(before.packets_sent)};
+	const auto pinned{static_cast<std::uint16_t>(latest_seq - 5)};
+	const auto pinned_time{to_net_time(w.peers[0].clock(net_clock{pinned} * TICK))};
+	std::uint16_t forged_seq{3000};
+	const auto forge{[&](const std::uint16_t ack, const std::uint16_t echo_seq, const net_clock at) {
+		packet_header h;
+		h.session_id = host_side.session_id;
+		h.peer_token = host_side.peer_token;
+		h.player_id = host_side.remote_player_id;
+		h.flags = static_cast<std::uint8_t>(packet_flag::keepalive);
+		h.seq = ++forged_seq;
+		h.send_time = to_net_time(at);
+		h.ack = ack;
+		h.echo_seq = echo_seq;
+		h.echo_time = pinned_time;
+		h.echo_delay = 0;
+		std::array<std::uint8_t, NET_V2_HEADER_SIZE> d{};
+		h.write(d.data());
+		CHECK(a.on_receive(d, at).status == receive_status::accepted);
+	}};
+	/* Pinned for 5 s of "growing" RTT: real seq, true time, delay 0. */
+	for (unsigned i{}; i != 300; ++i)
+	{
+		const auto at{w.peers[0].clock(w.now) + net_clock{i + 1} * TICK};
+		forge(pinned, pinned, at);
+		/* Also the variant where ack moves on but the echo stays. */
+		forge(latest_seq, pinned, at);
+	}
+	const auto after{a.stats()};
+	CHECK_MSG(after.srtt == before.srtt && after.rttvar == before.rttvar, "srtt " + std::to_string(to_ms(after.srtt)) + " ms vs " + std::to_string(to_ms(before.srtt)));
+	CHECK(after.clock_offset_target == before.clock_offset_target);
+	CHECK(after.state == connection_state::connected);
+	std::printf("    600 packets pinning one old echo over 5 s: srtt stays %.1f ms, offset target unchanged\n", to_ms(after.srtt));
+}
+
+/* 2a. The acks of a corrupt datagram are not applied: a lost packet
+ * whose message a corrupt packet falsely acks is still retransmitted.
+ */
+void test_corrupt_ack_not_applied(const std::uint64_t seed)
+{
+	begin("corrupt datagram's acks not applied");
+	rng r{seed};
+	sim_world w{r, link_params{.latency = net_milliseconds(40)}};
+	w.run(10, [&](const unsigned i) { w.set_state(i); });
+	std::optional<std::uint16_t> dropped_seq;
+	bool forged{};
+	w.link.mangle[1] = [&](datagram &d) {
+		if (dropped_seq || d.size() < NET_V2_HEADER_SIZE)
+			return;
+		const auto h{*packet_header::read(d)};
+		if (!h.has_flag(packet_flag::has_reliable))
+			return;
+		dropped_seq = h.seq;
+		d.clear();	/* lost on the wire */
+	};
+	w.link.mangle[0] = [&](datagram &d) {
+		if (!dropped_seq || forged || d.size() < NET_V2_HEADER_SIZE + NET_V2_CHUNK_HEADER_SIZE)
+			return;
+		/* The client's next packet: falsely ack the lost packet and
+		 * corrupt its chunk so that it is detectably malformed.
+		 */
+		net_put_le16(d.data() + 14, *dropped_seq);
+		d[NET_V2_HEADER_SIZE + 1] = 0xff;
+		d[NET_V2_HEADER_SIZE + 2] = 0x0f;
+		forged = true;
+	};
+	w.run(300, [&](const unsigned i) {
+		w.set_state(i);
+		if (i == 0)
+			for (unsigned k{}; k != 2 && w.peers[0].sent.size() < 200; ++k)
+				w.enqueue_random_message(0, 40);
+	});
+	CHECK(dropped_seq && forged);
+	check_delivery(w, 0);
+	const auto host{w.peers[0].conn.stats()};
+	const auto client{w.peers[1].conn.stats()};
+	CHECK_MSG(host.protocol_errors == 1, "host protocol errors " + std::to_string(host.protocol_errors));
+	CHECK_MSG(host.message_resends >= 1, "the lost packet's messages must be resent");
+	CHECK(host.state == connection_state::connected && client.state == connection_state::connected);
+	CHECK(client.recv_window_pending == 0 && host.in_flight == 0);
+	std::printf("    lost packet %u falsely acked by a corrupt datagram: %llu message(s) resent, all 200 delivered\n", *dropped_seq, static_cast<unsigned long long>(host.message_resends));
+}
+
+/* 2b. A window that never advances while the peer keeps talking closes
+ * as stream_stalled, not as the peer's protocol error.
+ */
+void test_stream_stalled()
+{
+	begin("stream stalled");
+	connection a{host_side, 0};
+	connection b{client_side, 0};
+	/* A hand-made packet with message 1 but never message 0. */
+	packet_header h;
+	h.session_id = host_side.session_id;
+	h.peer_token = host_side.peer_token;
+	h.player_id = host_side.local_player_id;
+	h.flags = static_cast<std::uint8_t>(packet_flag::has_reliable);
+	h.seq = 60000;
+	datagram d(NET_V2_HEADER_SIZE + NET_V2_CHUNK_HEADER_SIZE + NET_V2_RELIABLE_RUN_HEADER_SIZE + NET_V2_MESSAGE_HEADER_SIZE);
+	h.write(d.data());
+	auto *p{d.data() + NET_V2_HEADER_SIZE};
+	chunk_header{.type = static_cast<std::uint8_t>(chunk_type::reliable), .length = NET_V2_RELIABLE_RUN_HEADER_SIZE + NET_V2_MESSAGE_HEADER_SIZE}.write(p);
+	net_put_le16(p + 3, 1);
+	p[5] = 1;
+	p[6] = 7;
+	net_put_le16(p + 7, 0);
+	const auto r1{b.on_receive(d, TICK)};
+	CHECK(r1.status == receive_status::accepted && r1.reliable.empty());
+	CHECK(b.stats().recv_window_pending == 1);
+	/* Both peers keep talking, but the gap is never filled. */
+	net_clock t{TICK};
+	while (b.state() != connection_state::closed)
+	{
+		t += TICK;
+		CHECK_MSG(t < 12 * net_seconds(1), "did not close");
+		a.set_unreliable_state(chunk_type::state, std::array<std::uint8_t, 1>{{1}});
+		const auto pa{a.build_outgoing(t)};
+		CHECK(!pa.empty());
+		CHECK(b.on_receive(pa, t + 1).status == receive_status::accepted);
+		b.set_unreliable_state(chunk_type::input, std::array<std::uint8_t, 1>{{2}});
+		const auto pb{b.build_outgoing(t + 2)};
+		if (!pb.empty())
+			CHECK(a.on_receive(pb, t + 3).status == receive_status::accepted);
+	}
+	CHECK(a.state() == connection_state::connected);
+	CHECK(b.closed_because() == close_reason::stream_stalled);
+	CHECK_MSG(t >= NET_V2_UNACKED_TIMEOUT + TICK && t < NET_V2_UNACKED_TIMEOUT + 3 * TICK, "closed at " + std::to_string(to_ms(t)) + " ms");
+	std::printf("    gap never filled while the peer keeps sending: stream_stalled after %.0f ms\n", to_ms(t - TICK));
+}
+
+/* 3a. An intact copy of a sequence whose corrupted copy came first is
+ * accepted.
+ */
+void test_malformed_then_intact()
+{
+	begin("corrupted then intact copy");
+	connection a{host_side, 0};
+	connection b{client_side, 0};
+	const std::array<std::uint8_t, 4> x{{1, 2, 3, 4}};
+	CHECK(a.enqueue_reliable(5, x) == enqueue_result::ok);
+	const datagram intact{[&] { const auto p{a.build_outgoing(TICK)}; return datagram{p.begin(), p.end()}; }()};
+	datagram corrupt{intact};
+	corrupt[NET_V2_HEADER_SIZE + 1] = 0xff;
+	corrupt[NET_V2_HEADER_SIZE + 2] = 0x0f;
+	CHECK(b.on_receive(corrupt, TICK + 1).status == receive_status::malformed_chunk);
+	const auto r{b.on_receive(intact, TICK + 2)};
+	CHECK(r.status == receive_status::accepted);
+	CHECK(r.reliable.size() == 1 && r.reliable[0].type == 5 && std::ranges::equal(r.reliable[0].payload, x));
+	CHECK(b.stats().protocol_errors == 1);
+	std::printf("    corrupted copy counted once, the intact copy delivered\n");
+}
+
+/* 3b. A corrupted seq byte pointing at a future sequence does not
+ * blackhole the real packet with that sequence.
+ */
+void test_corrupted_future_seq()
+{
+	begin("corrupted future seq");
+	connection a{host_side, 0};
+	connection b{client_side, 0};
+	const std::array<std::uint8_t, 2> x{};
+	a.set_unreliable_state(chunk_type::state, x);
+	datagram corrupt{[&] { const auto p{a.build_outgoing(TICK)}; return datagram{p.begin(), p.end()}; }()};
+	net_put_le16(corrupt.data() + 12, 3);	/* seq 1 read as 3 */
+	corrupt[NET_V2_HEADER_SIZE + 1] = 0xff;
+	CHECK(b.on_receive(corrupt, TICK + 1).status == receive_status::malformed_chunk);
+	for (std::uint16_t s{2}; s != 5; ++s)
+	{
+		a.set_unreliable_state(chunk_type::state, x);
+		const auto p{a.build_outgoing(net_clock{s} * TICK)};
+		CHECK(packet_header::read(p)->seq == s);
+		CHECK_MSG(b.on_receive(p, net_clock{s} * TICK + 1).status == receive_status::accepted, "real packet " + std::to_string(s) + " rejected");
+	}
+	std::printf("    corrupt datagram claiming seq 3: the real packets 2, 3 and 4 all accepted\n");
+}
+
+/* 4. A head message that does not fit beside the state chunk goes out
+ * without it, and the budget is at least two packets per tick.
+ */
+void test_state_omitted_for_big_message()
+{
+	begin("state omitted for a big head message");
+	connection_config h{host_side};
+	h.max_packets_per_tick = 1;
+	connection a{h, 0};
+	CHECK(a.config().max_packets_per_tick == 2);
+	const datagram big(NET_V2_MAX_MESSAGE), state(1100);
+	CHECK(a.enqueue_reliable(9, big) == enqueue_result::ok);
+	a.set_unreliable_state(chunk_type::state, state);
+	/* Built at the construction time, so exactly one tick is granted. */
+	const auto p1{a.build_outgoing(0)};
+	CHECK_MSG(p1.size() == NET_V2_HEADER_SIZE + 6 + 3 + NET_V2_MAX_MESSAGE, "first packet " + std::to_string(p1.size()) + " bytes");
+	CHECK(packet_header::read(p1)->has_flag(packet_flag::has_reliable));
+	/* Nothing more due in this tick; the state is still pending and
+	 * goes out with the next tick.
+	 */
+	CHECK(a.build_outgoing(0).empty());
+	const auto p2{a.build_outgoing(TICK)};
+	CHECK_MSG(p2.size() == NET_V2_HEADER_SIZE + 3 + 1100, "second packet " + std::to_string(p2.size()) + " bytes");
+	CHECK(a.stats().unreliable_dropped == 0);
+	std::printf("    1 KiB message beside an 1100-byte state: message alone first, state with the next tick\n");
+}
+
 /* Fourth review round: the coordinator's probe cases. */
 
 /* 1. Latest-wins does not wedge after 32 768 packets without that
@@ -965,8 +1188,8 @@ void test_hostile_ack()
 	CHECK(after.loss_estimate == before.loss_estimate);
 	CHECK(after.protocol_errors == 1 && after.packets_received == before.packets_received);
 	CHECK(after.state == connection_state::connecting);
-	/* A replay of it is a duplicate, not a second error. */
-	CHECK(a.on_receive(d, 11 * TICK).status == receive_status::duplicate);
+	/* A replay of it is rejected the same way but not counted again. */
+	CHECK(a.on_receive(d, 11 * TICK).status == receive_status::bad_ack);
 	CHECK(a.stats().protocol_errors == 1);
 	/* An ack of exactly the last packet we sent is fine. */
 	h.seq = 2;
@@ -1014,10 +1237,10 @@ void test_zero_tick_period()
 	h.tick_period = 0;
 	h.max_packets_per_tick = 0;
 	connection a{h, 0};
-	CHECK(a.config().tick_period == 1 && a.config().max_packets_per_tick == 1);
+	CHECK(a.config().tick_period == 1 && a.config().max_packets_per_tick == 2);
 	a.set_unreliable_state(chunk_type::state, std::array<std::uint8_t, 1>{{1}});
 	CHECK(!a.build_outgoing(1).empty());
-	std::printf("    tick_period 0 and max_packets_per_tick 0 are clamped to 1\n");
+	std::printf("    tick_period 0 and max_packets_per_tick 0 are clamped to 1 and 2\n");
 }
 
 /* Third review round. */
@@ -1045,6 +1268,7 @@ void test_echo_authentication(const std::uint64_t seed)
 		h.flags = static_cast<std::uint8_t>(packet_flag::keepalive);
 		h.seq = ++forged_seq;
 		h.send_time = to_net_time(now);
+		h.ack = echo_seq;
 		h.echo_seq = echo_seq;
 		h.echo_time = echo_time;
 		h.echo_delay = echo_delay;
@@ -1057,8 +1281,10 @@ void test_echo_authentication(const std::uint64_t seed)
 	{
 		/* The probe: a real seq with a send_time 9 s in the past. */
 		forge(latest_seq, to_net_time(now - net_seconds(9)), 0);
-		/* A seq we never sent. */
-		forge(static_cast<std::uint16_t>(latest_seq + 1000), to_net_time(now - net_milliseconds(1)), 0);
+		/* A real seq, its true time, but named twice (see the pinning
+		 * test for the full case).
+		 */
+		forge(static_cast<std::uint16_t>(latest_seq - 5), to_net_time(w.peers[0].clock(net_clock{latest_seq - 5} * TICK)), 0);
 		/* Our very first packet, correct send_time, but older than the
 		 * echo already seen.
 		 */
@@ -1216,12 +1442,12 @@ void test_malformed_replay()
 	d[NET_V2_HEADER_SIZE + 2] = 0x0f;
 	CHECK(b.on_receive(d, TICK + 1).status == receive_status::malformed_chunk);
 	for (unsigned i{}; i != 19; ++i)
-		CHECK(b.on_receive(d, TICK + 2 + i).status == receive_status::duplicate);
+		CHECK(b.on_receive(d, TICK + 2 + i).status == receive_status::malformed_chunk);
 	const auto s{b.stats()};
 	CHECK(s.protocol_errors == 1);
-	CHECK(s.packets_received == 1);
-	CHECK(s.packets_rejected == 19);
-	CHECK(s.state == connection_state::connected);
+	CHECK(s.packets_received == 0);
+	CHECK(s.packets_rejected == 20);
+	CHECK(s.state == connection_state::connecting);
 	/* The retransmission in a fresh packet is still taken. */
 	CHECK(a.on_receive(b.build_outgoing(2 * TICK), 2 * TICK).status == receive_status::accepted);
 	unsigned resent{};
@@ -1235,7 +1461,7 @@ void test_malformed_replay()
 		resent += static_cast<unsigned>(report.reliable.size());
 	}
 	CHECK(resent == 1);
-	std::printf("    20 copies of one corrupted datagram: 1 protocol error, 19 duplicates, message arrives by retransmission\n");
+	std::printf("    20 copies of one corrupted datagram: 1 protocol error, message arrives by retransmission\n");
 }
 
 /* Second review round. */
@@ -1308,6 +1534,7 @@ void test_hostile_echo()
 		h.player_id = host_side.remote_player_id;
 		h.flags = static_cast<std::uint8_t>(packet_flag::keepalive);
 		h.seq = ++seq;
+		h.ack = 1;
 		h.echo_seq = 1;
 		h.echo_time = echo_time;
 		h.echo_delay = echo_delay;
@@ -1681,6 +1908,12 @@ int main(const int argc, char **const argv)
 	test_bounds(seed);
 	test_timeouts(seed);
 	test_replay(seed);
+	test_echo_pinning(seed);
+	test_corrupt_ack_not_applied(seed);
+	test_stream_stalled();
+	test_malformed_then_intact();
+	test_corrupted_future_seq();
+	test_state_omitted_for_big_message();
 	test_latest_wins_wrap();
 	test_grant_closes_tick();
 	test_hostile_ack();

@@ -77,8 +77,10 @@ struct connection_config
 	std::uint8_t remote_player_id{NET_V2_PLAYER_ID_NONE};
 	/* The network tick.  A packet budget of max_packets_per_tick opens
 	 * once per tick_period (see begin_tick), and the RTO is padded by
-	 * it for the peer's ack hold time.  Both are clamped to at least 1
-	 * by the connection.
+	 * it for the peer's ack hold time.  The connection clamps the period
+	 * to at least 1 and the budget to at least 2: with one packet per
+	 * tick and a state chunk every tick, a reliable message larger than
+	 * the space beside the state could never go out.
 	 */
 	net_clock tick_period{NET_V2_DEFAULT_TICK_PERIOD};
 	unsigned max_packets_per_tick{NET_V2_DEFAULT_MAX_PACKETS_PER_TICK};
@@ -103,6 +105,11 @@ enum class close_reason : std::uint8_t
 	queue_overflow,
 	/* NET_V2_PROTOCOL_ERROR_LIMIT malformed packets within the window. */
 	protocol_error,
+	/* Reliable messages were held out of order for NET_V2_UNACKED_TIMEOUT
+	 * without the gap before them ever being filled, although the peer
+	 * kept talking: the stream cannot advance.
+	 */
+	stream_stalled,
 	/* connection::close() was called. */
 	local,
 };
@@ -125,11 +132,12 @@ enum class receive_status : std::uint8_t
 {
 	/* Header applied, every chunk delivered. */
 	accepted,
-	/* A chunk was malformed.  The header's acks, RTT sample and
-	 * last_heard were applied, but nothing was delivered and the packet
-	 * is not acknowledged (its ack bit stays clear), so a conforming
-	 * peer retransmits its reliable messages.  A protocol error was
-	 * counted.
+	/* A chunk was malformed.  Nothing of the datagram was applied, not
+	 * even the header's acks or echo (a corrupt ack bit would otherwise
+	 * acknowledge a message that was never delivered), and it is not
+	 * acknowledged, so a conforming peer retransmits.  One protocol
+	 * error is counted per distinct `seq`, and an intact copy of the
+	 * same `seq` arriving later is accepted normally.
 	 */
 	malformed_chunk,
 	bad_length,
@@ -142,9 +150,9 @@ enum class receive_status : std::uint8_t
 	bad_session,
 	bad_token,
 	bad_player,
-	/* `ack` names a packet we have not sent.  Nothing is applied; a
-	 * protocol error is counted and the sequence is remembered like a
-	 * malformed packet's.
+	/* `ack` names a packet we have not sent.  Nothing is applied; one
+	 * protocol error is counted per distinct `seq`, as for a malformed
+	 * packet.
 	 */
 	bad_ack,
 	/* Already seen, or older than the 64-packet reorder window. */
@@ -358,6 +366,16 @@ class connection
 		bool valid{};
 		std::uint16_t seq{};
 	};
+	/* Sequences of malformed packets already counted as a protocol
+	 * error; a replay of one counts no further error.  Never used to
+	 * reject anything: an intact copy of the sequence is accepted.
+	 */
+	struct recent_malformed
+	{
+		std::array<std::uint16_t, 16> seqs{};
+		std::size_t count{};
+		std::size_t next{};
+	};
 	struct pending_event
 	{
 		unreliable_chunk chunk;
@@ -433,17 +451,16 @@ class connection
 	std::uint16_t m_last_recv_seq{};
 	net_time m_last_recv_send_time{};
 	net_clock m_last_recv_local_time{};
-	/* Sequences of malformed packets seen recently.  They are not in
-	 * the replay window (never acknowledged), so replays of them are
-	 * recognised here instead and do not count again.
-	 */
-	std::array<std::uint16_t, 16> m_malformed_seqs{};
-	std::size_t m_malformed_count{};
-	std::size_t m_malformed_next{};
 	std::uint16_t m_next_expected{};
 	std::array<recv_slot, NET_V2_RECV_WINDOW> m_recv_window{};
 	std::size_t m_recv_window_pending{};
-	std::array<latest_packet, 8> m_latest_packet{};
+	/* When the window last went from empty to holding out-of-order
+	 * messages, or last advanced; the stream_stalled clock.
+	 */
+	net_clock m_recv_gap_since{};
+	latest_packet m_latest_state{};
+	latest_packet m_latest_input{};
+	recent_malformed m_recent_malformed{};
 	std::deque<net_clock> m_protocol_error_times;
 	std::vector<parsed_message> m_parsed_messages;
 	std::vector<parsed_chunk> m_parsed_chunks;
@@ -466,15 +483,17 @@ class connection
 	bool window_allows(const out_msg &m) const;
 	[[nodiscard]]
 	bool any_message_due() const;
+	/* Count a protocol error for `seq` unless one was already counted
+	 * for it; returns true if the limit is reached.
+	 */
 	[[nodiscard]]
-	bool count_protocol_error(net_clock now);
+	bool count_protocol_error(std::uint16_t seq, net_clock now);
 	[[nodiscard]]
-	bool seen_malformed(std::uint16_t seq) const;
-	void remember_malformed(std::uint16_t seq);
+	latest_packet &latest_for(chunk_type type);
 	/* §3.7 step 8.  Fills m_parsed_messages and m_parsed_chunks. */
 	[[nodiscard]]
 	bool validate_chunks(std::span<const std::uint8_t> payload, std::uint8_t flags);
-	void deliver_reliable(receive_report &report);
+	void deliver_reliable(net_clock now, receive_report &report);
 	void deliver_unreliable(std::uint16_t packet_seq, receive_report &report);
 	[[nodiscard]]
 	std::uint16_t next_local_seq();
@@ -533,7 +552,8 @@ public:
 	[[nodiscard]]
 	receive_report on_receive(std::span<const std::uint8_t> datagram, net_clock now);
 
-	/* Run the timeouts and the clock slew without building a packet.
+	/* Advance the clock slew and, once per tick period, the timeouts
+	 * and the RTO loss detection (begin_tick), without building a packet.
 	 * build_outgoing does this too.
 	 */
 	void update(net_clock now);
