@@ -117,9 +117,10 @@ struct link_params
 	double loss{};
 	double duplication{};
 	/* Probability that a packet is held back by an extra
-	 * [1, reorder_delay] so that later packets overtake it.
+	 * [reorder_min, reorder_delay] so that later packets overtake it.
 	 */
 	double reorder{};
+	net_clock reorder_min{1};
 	net_clock reorder_delay{3 * TICK};
 };
 
@@ -174,7 +175,7 @@ public:
 			if (params.jitter)
 				delay += m_rng.range(-params.jitter, params.jitter);
 			if (m_rng.chance(params.reorder))
-				delay += m_rng.range(1, params.reorder_delay);
+				delay += m_rng.range(params.reorder_min, params.reorder_delay);
 			if (delay < 1)
 				delay = 1;
 			m_queue.push_back({.arrival = now + delay, .order = m_order++, .dest = dest, .bytes = {bytes.begin(), bytes.end()}});
@@ -563,20 +564,35 @@ void test_rtt(const std::uint64_t seed)
 			CHECK(s.rtt_valid);
 			const auto expected{2 * latency};
 			const auto err{s.srtt > expected ? s.srtt - expected : expected - s.srtt};
-			CHECK_MSG(err * 10 < expected, "srtt " + std::to_string(to_ms(s.srtt)) + " ms vs " + std::to_string(to_ms(expected)) + " ms");
+			/* Within 10 % on a clean link.  Under 30 % loss a third of the
+			 * packets lose their echo and are measured by their ack, which
+			 * waits for the next surviving carrier: within 20 % then.
+			 */
+			const net_clock parts{loss > 0 ? 5 : 10};
+			CHECK_MSG(err * parts < expected, "srtt " + std::to_string(to_ms(s.srtt)) + " ms vs " + std::to_string(to_ms(expected)) + " ms at " + std::to_string(loss * 100) + "% loss");
 			CHECK(s.rto >= s.srtt);
 			CHECK(s.rto >= NET_V2_RTO_MIN && s.rto <= NET_V2_RTO_MAX);
-			CHECK(s.rttvar < net_milliseconds(30));
+			/* Under loss the packets measured by their acks widen rttvar. */
+			CHECK(s.rttvar < net_milliseconds(loss > 0 ? 50 : 30));
 		}
 	}
-	/* The clamp: a 2 ms link must give RTO_MIN, a 700 ms link RTO_MAX. */
-	for (const auto &[one_way, expected_rto] : {std::pair{net_milliseconds(1), NET_V2_RTO_MIN}, std::pair{net_milliseconds(700), NET_V2_RTO_MAX}})
+	/* The formula and its clamp: a 700 ms link gives RTO_MAX; a 1 ms
+	 * link gives the formula's value (about 52 ms with the floor and the
+	 * two tick holds), clamped from below at RTO_MIN.
+	 */
+	for (const auto &[one_way, expected_rto] : {std::pair{net_milliseconds(1), net_clock{}}, std::pair{net_milliseconds(700), NET_V2_RTO_MAX}})
 	{
 		rng r{seed};
 		sim_world w{r, link_params{.latency = one_way}};
 		w.run(300, [&](const unsigned i) { w.set_state(i); });
 		const auto s{w.peers[0].conn.stats()};
-		CHECK_MSG(s.rto == expected_rto, "rto " + std::to_string(to_ms(s.rto)) + " ms for one-way " + std::to_string(to_ms(one_way)) + " ms");
+		const auto tick{w.peers[0].conn.config().tick.units()};
+		const auto formula{std::clamp(s.srtt + 4 * s.rttvar + tick + tick, NET_V2_RTO_MIN, NET_V2_RTO_MAX)};
+		CHECK_MSG(s.rto == formula, "rto " + std::to_string(to_ms(s.rto)) + " ms vs formula " + std::to_string(to_ms(formula)) + " ms for one-way " + std::to_string(to_ms(one_way)) + " ms");
+		if (expected_rto != 0)
+			CHECK(s.rto == expected_rto);
+		else
+			CHECK(s.rto >= NET_V2_RTO_MIN && s.rto < net_milliseconds(60) && s.rttvar == tick / 4);
 	}
 	std::printf("    RTO clamps to [%.0f, %.0f] ms\n", to_ms(NET_V2_RTO_MIN), to_ms(NET_V2_RTO_MAX));
 }
@@ -910,6 +926,48 @@ void test_unreliable_chunks_per_packet()
 	std::printf("    two STATE chunks in one packet both delivered; an older packet's STATE dropped, its EVENT_U kept\n");
 }
 
+/* Eighth review round. */
+
+/* 1. Packets held back (not lost) must not be resent by the RTO: their
+ * echoes, arriving out of order, still feed the estimator once each.
+ */
+void test_held_packets(const std::uint64_t seed)
+{
+	begin("held-back packets");
+	rng r{seed};
+	sim_world w{r, link_params{.latency = net_milliseconds(40), .reorder = 0.20, .reorder_min = net_milliseconds(33), .reorder_delay = net_milliseconds(50)}};
+	w.run(600, [&](const unsigned i) {
+		w.set_state(i);
+		if (i == 0)
+			for (unsigned k{}; k != 2 && w.peers[0].sent.size() < 1200; ++k)
+				w.enqueue_random_message(0, 60);
+	});
+	w.run(20, [&](const unsigned i) { w.set_state(i); });
+	check_delivery(w, 0);
+	const auto s{w.peers[0].conn.stats()};
+	print_stats("host", s);
+	CHECK_MSG(s.resends_by_rto <= 12, "RTO resends " + std::to_string(s.resends_by_rto) + " of 1200 messages");
+	CHECK(s.rttvar >= w.peers[0].conn.config().tick.units() / 4);
+	std::printf("    lossless 40 ms link, 20%% of packets held 33-50 ms: %llu of 1200 messages resent by RTO (%llu by the gap rule), srtt %.1f ms, rttvar %.1f ms\n",
+		static_cast<unsigned long long>(s.resends_by_rto), static_cast<unsigned long long>(s.resends_by_gap), to_ms(s.srtt), to_ms(s.rttvar));
+}
+
+/* 3. A closed connection takes no unreliable data. */
+void test_closed_refuses_unreliable()
+{
+	begin("closed connection refuses unreliable data");
+	connection a{host_side, 0};
+	a.close();
+	const std::array<std::uint8_t, 4> x{{1, 2, 3, 4}};
+	CHECK(!a.send_unreliable(chunk_type::event_u, x));
+	a.set_unreliable_state(chunk_type::state, x);
+	a.set_unreliable_state(chunk_type::state, 1, 2, x);
+	CHECK(a.enqueue_reliable(1, x) == enqueue_result::closed);
+	CHECK(a.build_outgoing(TICK).empty());
+	CHECK(a.stats().unreliable_dropped == 0);
+	std::printf("    send_unreliable false, set_unreliable_state ignored, nothing built\n");
+}
+
 /* Seventh review round. */
 
 /* 1. A two-part bundle (§3.8) leaves the transport every tick: the
@@ -1085,8 +1143,10 @@ void test_echo_pinning(const std::uint64_t seed)
 	{
 		const auto at{w.peers[0].clock(w.now) + net_clock{i + 1} * TICK};
 		forge(pinned, pinned, at);
-		/* Also the variant where ack moves on but the echo stays. */
-		forge(latest_seq, pinned, at);
+		/* Also the variant where ack moves on but the echo stays (the
+		 * ack names a packet long acked, so it measures nothing either).
+		 */
+		forge(static_cast<std::uint16_t>(pinned + 1), pinned, at);
 	}
 	const auto after{a.stats()};
 	CHECK_MSG(after.srtt == before.srtt && after.rttvar == before.rttvar, "srtt " + std::to_string(to_ms(after.srtt)) + " ms vs " + std::to_string(to_ms(before.srtt)));
@@ -1506,8 +1566,10 @@ void test_echo_authentication(const std::uint64_t seed)
 	const auto latest_seq{static_cast<std::uint16_t>(before.packets_sent)};	/* seqs start at 1 and never skipped here */
 	for (unsigned i{}; i != 19; ++i)
 	{
-		/* The probe: a real seq with a send_time 9 s in the past. */
-		forge(latest_seq, to_net_time(now - net_seconds(9)), 0);
+		/* The probe: a real (and long acked) seq with a send_time 9 s in
+		 * the past.
+		 */
+		forge(static_cast<std::uint16_t>(latest_seq - 6), to_net_time(now - net_seconds(9)), 0);
 		/* A real seq, its true time, but named twice (see the pinning
 		 * test for the full case).
 		 */
@@ -1606,8 +1668,12 @@ void test_reordered_echo()
 	CHECK(a.on_receive(ack, TICK + 3000).status == receive_status::accepted);
 	const auto s{a.stats()};
 	CHECK(s.rtt_valid);
-	CHECK_MSG(s.srtt == 2000, "srtt " + std::to_string(s.srtt) + " units, expected 2000");
-	std::printf("    late packet 1 after packet 2: echo names 2, RTT sample exact (2000 units)\n");
+	/* Packet 2's echo is the exact 2000; packet 1, never echoed, is then
+	 * measured once by its ack, TICK + 3000 including its reorder delay.
+	 */
+	const auto expected_srtt{(7 * 2000 + (TICK + 3000)) / 8};
+	CHECK_MSG(s.srtt == expected_srtt, "srtt " + std::to_string(s.srtt) + " units, expected " + std::to_string(expected_srtt));
+	std::printf("    late packet 1 after packet 2: echo names 2 (exact 2000 units); packet 1 measured once by its ack\n");
 }
 
 /* 5. After a long ack blackout the loss scan is still in range: packets
@@ -1771,7 +1837,10 @@ void test_hostile_echo()
 		CHECK(report.status == receive_status::accepted);
 	}
 	const auto s{c.stats()};
-	CHECK_MSG(!s.rtt_valid, "srtt " + std::to_string(s.srtt));
+	/* The only sample is packet 1's own ack (0 units at time 0); none of
+	 * the forged echo values got in.
+	 */
+	CHECK_MSG(s.rtt_valid && s.srtt == 0, "srtt " + std::to_string(s.srtt));
 	std::printf("    extreme echo_time/echo_delay/now combinations: no overflow, no bogus sample\n");
 }
 
@@ -2138,6 +2207,8 @@ int main(const int argc, char **const argv)
 	test_bounds(seed);
 	test_timeouts(seed);
 	test_replay(seed);
+	test_held_packets(seed);
+	test_closed_refuses_unreliable();
 	test_state_parts(seed);
 	test_state_parts_reorder();
 	test_first_grant_single();

@@ -67,18 +67,28 @@ void rtt_estimator::add_sample(const net_clock r)
 		m_valid = true;
 		m_srtt = r;
 		m_rttvar = r / 2;
-		return;
 	}
-	const auto err{m_srtt > r ? m_srtt - r : r - m_srtt};
-	m_rttvar = (3 * m_rttvar + err) / 4;
-	m_srtt = (7 * m_srtt + r) / 8;
+	else
+	{
+		const auto err{m_srtt > r ? m_srtt - r : r - m_srtt};
+		m_rttvar = (3 * m_rttvar + err) / 4;
+		m_srtt = (7 * m_srtt + r) / 8;
+	}
+	/* Never quite zero: a link that has been perfectly steady still
+	 * needs room for its next hiccup.
+	 */
+	m_rttvar = std::max(m_rttvar, m_hold_period / 4);
 }
+
 
 net_clock rtt_estimator::rto() const
 {
 	if (!m_valid)
 		return NET_V2_RTO_MAX;
-	return std::clamp(m_srtt + std::max(4 * m_rttvar, m_hold_period) + m_tick_period, NET_V2_RTO_MIN, NET_V2_RTO_MAX);
+	/* The samples exclude the two tick holds, so they are added to the
+	 * variance term, not weighed against it.
+	 */
+	return std::clamp(m_srtt + 4 * m_rttvar + m_hold_period + m_tick_period, NET_V2_RTO_MIN, NET_V2_RTO_MAX);
 }
 
 /* clock_sync (§2.2) */
@@ -227,6 +237,8 @@ void connection::set_unreliable_state(const chunk_type type, const std::span<con
 
 void connection::set_unreliable_state(const chunk_type type, const unsigned part, const unsigned part_count, const std::span<const std::uint8_t> payload)
 {
+	if (m_state == connection_state::closed)
+		return;
 	if (!is_latest_wins(type) || part_count < 1 || part_count > NET_V2_STATE_MAX_PARTS || part >= part_count || payload.size() > NET_V2_MAX_STATE_PART)
 	{
 		++m_stats.unreliable_dropped;
@@ -306,6 +318,8 @@ void connection::write_state_parts(std::uint8_t *const buf, std::size_t &pos)
 
 bool connection::send_unreliable(const chunk_type type, const std::span<const std::uint8_t> payload)
 {
+	if (m_state == connection_state::closed)
+		return false;
 	if (is_latest_wins(type) || payload.size() > NET_V2_MAX_CHUNK_PAYLOAD)
 	{
 		++m_stats.unreliable_dropped;
@@ -638,6 +652,7 @@ std::span<const std::uint8_t> connection::build_outgoing(const net_clock now)
 	log.valid = true;
 	log.acked = false;
 	log.lost = false;
+	log.echoed = false;
 	log.seq = seq;
 	log.sent_at = now;
 	m_last_sent = now;
@@ -698,12 +713,11 @@ void connection::pop_acked_messages()
 	}
 }
 
-/* The caller has checked that `ack` names a packet we sent.  No RTT is
- * taken from acks: the ack for a packet is held until the peer's next
- * tick and may ride a reordered packet, so only the echo fields, which
- * account for the hold, feed the estimator.
+/* The caller has checked that `ack` names a packet we sent.  The echo
+ * fields are the RTT measurement of choice (they account for the peer's
+ * hold); an ack measures a packet only when no echo ever came for it.
  */
-void connection::process_acks(const std::uint16_t ack, const std::uint64_t ack_bits)
+void connection::process_acks(const std::uint16_t ack, const std::uint64_t ack_bits, const net_clock now)
 {
 	if (ack == 0 && ack_bits == 0)
 		/* The peer has not received anything from us yet. */
@@ -716,6 +730,23 @@ void connection::process_acks(const std::uint16_t ack, const std::uint64_t ack_b
 		auto &e{m_packet_log[s % NET_V2_RECV_WINDOW]};
 		if (!e.valid || e.seq != s || e.acked || e.lost)
 			continue;
+		if (!e.echoed)
+		{
+			/* The echo path missed this packet: the peer received it
+			 * out of order and echoed a newer one instead, or the echo's
+			 * carrier was lost.  Its ack is the only measurement left:
+			 * it includes the peer's hold and the wait for the next
+			 * surviving carrier, and is exactly the long round trip the
+			 * RTO must cover.  It is a real observation of how long this
+			 * packet took to be acknowledged, so it counts in full; under
+			 * heavy loss or reordering srtt therefore reads a few percent
+			 * high.  Once, like an echo.
+			 */
+			e.echoed = true;
+			const auto r{now - e.sent_at};
+			if (r >= 0 && r <= NET_V2_RTT_SAMPLE_MAX)
+				m_rtt.add_sample(r);
+		}
 		resolve_packet(e, true);
 	}
 	/* Packets that fell out of the ack bitfield unacked are lost.  Scan
@@ -881,6 +912,16 @@ void connection::deliver_reliable(const net_clock now, receive_report &report)
 		if (seq_diff(pm.seq, m_next_expected) < 0)
 			/* Already delivered. */
 			continue;
+		if (m_recv_window_pending == 0 && pm.seq == m_next_expected)
+		{
+			/* The common case, in order with nothing held: straight
+			 * into the report, not through a window slot.
+			 */
+			report.reliable.push_back({.type = pm.type, .payload = {pm.payload.begin(), pm.payload.end()}});
+			++m_next_expected;
+			++m_stats.messages_delivered;
+			continue;
+		}
 		auto &slot{m_recv_window[pm.seq % NET_V2_RECV_WINDOW]};
 		if (slot.filled)
 			continue;
@@ -950,10 +991,15 @@ receive_report connection::on_receive(const std::span<const std::uint8_t> datagr
 		report.status = status;
 		return std::move(report);
 	}};
-	/* §3.7 steps 1–5 */
-	if (datagram.size() < NET_V2_HEADER_SIZE || datagram.size() > NET_V2_MAX_PACKET)
+	/* §3.7 steps 1–5.  read() fails on a datagram shorter than the
+	 * header; that is the lower length check.
+	 */
+	if (datagram.size() > NET_V2_MAX_PACKET)
 		return reject(receive_status::bad_length);
-	const auto h{*packet_header::read(datagram)};
+	const auto header{packet_header::read(datagram)};
+	if (!header)
+		return reject(receive_status::bad_length);
+	const auto &h{*header};
 	if (h.proto != NET_V2_PROTO_VERSION)
 		return reject(receive_status::bad_proto);
 	if (h.flags & static_cast<std::uint8_t>(packet_flag::reserved_mask))
@@ -1027,28 +1073,28 @@ receive_report connection::on_receive(const std::span<const std::uint8_t> datagr
 		/* Only an echo of a packet we really sent, with the send_time
 		 * we really wrote, may feed the estimators: the game will rewind
 		 * hits by this RTT.  A conforming peer echoes the packet it also
-		 * names in `ack` (both are its newest), and every packet of ours
-		 * is echoed once: a repeated echo_seq is the same measurement
-		 * held longer, not a new one, so it yields no sample.  Together
-		 * these stop a peer from pinning one old packet with a small
-		 * delay to steer srtt and the clock.  The sample itself comes
-		 * from our own log, in 64 bits.
+		 * names in `ack` (both are its newest), and each packet of ours
+		 * yields one sample at most, whichever of the peer's packets
+		 * carries its echo first: a reordered echo still counts once, a
+		 * repeated one (the same measurement held longer) not at all.
+		 * Together these stop a peer from pinning one old packet with a
+		 * small delay to steer srtt and the clock.  The sample itself
+		 * comes from our own log, in 64 bits.
 		 */
-		const auto &e{m_packet_log[h.echo_seq % NET_V2_RECV_WINDOW]};
-		if (h.echo_seq == h.ack && e.valid && e.seq == h.echo_seq && to_net_time(e.sent_at) == h.echo_time && (!m_echo_seen || seq_diff(h.echo_seq, m_last_echoed_seq) > 0))
+		auto &e{m_packet_log[h.echo_seq % NET_V2_RECV_WINDOW]};
+		if (h.echo_seq == h.ack && e.valid && e.seq == h.echo_seq && !e.echoed && to_net_time(e.sent_at) == h.echo_time)
 		{
+			e.echoed = true;
 			const net_clock rtt{now - e.sent_at - h.echo_delay};
 			if (rtt >= 0 && rtt <= NET_V2_RTT_SAMPLE_MAX)
 			{
-				m_echo_seen = true;
-				m_last_echoed_seq = h.echo_seq;
 				m_rtt.add_sample(rtt);
 				const net_time peer_now{h.send_time + static_cast<net_time>(rtt / 2)};
 				m_clock.add_sample(now, rtt, net_time_diff(peer_now, to_net_time(now)));
 			}
 		}
 	}
-	process_acks(h.ack, h.ack_bits);
+	process_acks(h.ack, h.ack_bits, now);
 	/* Step 9: record and apply.  Only the newest packet moves the echo
 	 * fields: echoing a late, reordered packet would inflate the peer's
 	 * RTT sample by the reorder delay.

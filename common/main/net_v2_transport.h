@@ -269,11 +269,12 @@ struct connection_stats
 /* Section 3.5: Jacobson/Karels with RFC 6298 constants, plus slack for
  * the tick.  The peer holds its ack until its next tick (`hold`, its
  * tick period) and we look for losses only at ours (`tick`), so an ack
- * for a lossless packet can arrive up to hold + tick after srtt; without
- * the slack every message on a jitter-free link would be resent as soon
- * as rttvar decays to zero.
+ * for a lossless packet arrives up to hold + tick after the round trip
+ * the echo samples measure; the two holds are therefore added to the
+ * variance term rather than weighed against it.  rttvar is floored at
+ * hold / 4 so that it cannot collapse to zero on a steady link.
  *
- *	rto = clamp(srtt + max(4 rttvar, hold) + tick, NET_V2_RTO_MIN, NET_V2_RTO_MAX)
+ *	rto = clamp(srtt + 4 rttvar + hold + tick, NET_V2_RTO_MIN, NET_V2_RTO_MAX)
  */
 class rtt_estimator
 {
@@ -384,6 +385,11 @@ class connection
 		bool valid{};
 		bool acked{};
 		bool lost{};
+		/* Its RTT was sampled: every packet yields one sample at most,
+		 * from whichever of the peer's packets echoes it first, or from
+		 * its ack if no echo ever comes.
+		 */
+		bool echoed{};
 		std::uint16_t seq{};
 		net_clock sent_at{};
 		std::vector<std::uint16_t> msg_seqs;
@@ -478,11 +484,6 @@ class connection
 	 * peer's ack bitfield unacked.
 	 */
 	std::uint16_t m_lost_scan_seq{1};
-	/* The newest of our packets the peer has echoed; echoes never go
-	 * backwards, so an older one is stale or forged.
-	 */
-	bool m_echo_seen{};
-	std::uint16_t m_last_echoed_seq{};
 	net_clock m_last_sent{};
 	/* Tick budget (see begin_tick): the origin of the last granted
 	 * period in units scaled by the period's denominator (exact
@@ -543,7 +544,7 @@ class connection
 	void check_timeouts(net_clock now);
 	void detect_rto_losses(net_clock now);
 	void flag_resend(out_msg &m);
-	void process_acks(std::uint16_t ack, std::uint64_t ack_bits);
+	void process_acks(std::uint16_t ack, std::uint64_t ack_bits, net_clock now);
 	void resolve_packet(packet_log_entry &e, bool acked);
 	void pop_acked_messages();
 	[[nodiscard]]
@@ -587,7 +588,8 @@ public:
 	 * same part again before that replaces it.  Parts that do not fit
 	 * beside each other open the tick's second packet, like a reliable
 	 * backlog does.  Payloads above NET_V2_MAX_STATE_PART, and invalid
-	 * part numbers, are ignored and counted as dropped.
+	 * part numbers, are ignored and counted as dropped; on a closed
+	 * connection nothing is taken.
 	 */
 	void set_unreliable_state(chunk_type type, std::span<const std::uint8_t> payload);
 	void set_unreliable_state(chunk_type type, unsigned part, unsigned part_count, std::span<const std::uint8_t> payload);
