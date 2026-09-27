@@ -48,7 +48,7 @@ namespace {
 namespace b = ::dcx::bot;
 
 /* Closing codes of the Bots screen's callback (newmenu closes a
- * callback menu on a value below -1).
+ * callback menu on a value below -1, for a change event too).
  */
 constexpr int MENU_DONE{-2};
 constexpr int MENU_REBUILD{-3};
@@ -248,6 +248,11 @@ struct bots_menu
 	unsigned opt_count{0}, opt_skill{1}, opt_style{2};
 	unsigned opt_set_all{}, opt_names{}, opt_done{};
 	unsigned nitems{};
+	/* The bots listed on this screen: the item indices are taken from
+	 * it, not from Bot_setup, which a change may alter before the screen
+	 * is rebuilt.
+	 */
+	unsigned listed{};
 	std::array<newmenu_item, first_line + MAX_BOTS + 4> m;
 	char count_text[40]{};
 	char skill_text[40]{};
@@ -269,7 +274,8 @@ struct bots_menu
 		nm_set_item_slider(m[n++], style_text, static_cast<unsigned>(Bot_setup.default_style), 0, b::BOT_STYLE_COUNT - 1, style_saved);
 		nm_set_item_text(m[n++], "(new bots take the default skill and style)");
 		nm_set_item_text(m[n++], "");
-		for (unsigned i = 0; i < Bot_setup.count; ++i)
+		listed = Bot_setup.count;
+		for (unsigned i = 0; i < listed; ++i)
 		{
 			auto &c{Bot_setup.bots[i]};
 			std::snprintf(lines[i].data(), lines[i].size(), "%u. %-8s  %s  %s", i + 1, static_cast<const char *>(c.name), skill_name(c.skill), style_name(c.style));
@@ -302,7 +308,14 @@ int bots_menu_handler(newmenu *, const d_event &event, bots_menu *const bm)
 					Bot_setup.count = v;
 				else
 					set_count(v);
-				return MENU_REBUILD;
+				/* The list has a different length: close the screen so
+				 * that bots_setup_menu rebuilds it (newmenu honours a
+				 * close requested by a change).
+				 */
+				if (Bot_setup.count != bm->listed)
+					return MENU_REBUILD;
+				bm->update_labels();
+				return 0;
 			}
 			if (citem == bm->opt_skill)
 				Bot_setup.default_skill = b::bot_skill{static_cast<uint8_t>(bm->m[bm->opt_skill].value)};
@@ -314,7 +327,7 @@ int bots_menu_handler(newmenu *, const d_event &event, bots_menu *const bm)
 		case event_type::newmenu_selected:
 		{
 			const auto citem{static_cast<unsigned>(static_cast<const d_select_event &>(event).citem)};
-			if (citem >= bots_menu::first_line && citem < bots_menu::first_line + Bot_setup.count)
+			if (citem >= bots_menu::first_line && citem < bots_menu::first_line + bm->listed && citem - bots_menu::first_line < Bot_setup.count)
 				return MENU_EDIT_BOT_BASE - static_cast<int>(citem - bots_menu::first_line);
 			if (citem == bm->opt_set_all)
 				return MENU_SET_ALL_SKILL;

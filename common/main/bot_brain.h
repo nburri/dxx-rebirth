@@ -695,4 +695,43 @@ inline primary choose_primary(const primary_view &v)
 	return primary::laser;
 }
 
+/* Section 2.3: a player slot as the bots' slot allocation sees it. */
+struct slot_view
+{
+	/* A player is in the slot (connected, or a bot already placed). */
+	bool occupied{};
+	/* The slot has a connection, even one that is closing (a lobby
+	 * player left out of the game, a kicked player's linger): the
+	 * connection's end would disconnect whoever is in the slot.
+	 */
+	bool has_peer{};
+	/* A lobby player's callsign still holds the slot. */
+	bool reserved{};
+};
+
+/* The lowest slot a bot can take below the player limit (slot 0 is the
+ * host's), or none.
+ */
+[[nodiscard]]
+constexpr std::optional<unsigned> choose_bot_slot(const std::span<const slot_view> slots, const unsigned limit)
+{
+	const auto n{std::min<std::size_t>(slots.size(), limit)};
+	for (unsigned i = 1; i < n; ++i)
+	{
+		const auto &v{slots[i]};
+		if (!v.occupied && !v.has_peer && !v.reserved)
+			return i;
+	}
+	return std::nullopt;
+}
+
+/* The host flies the ship in a slot only if a bot was placed there and
+ * no human has a connection for it: a slot with a peer is never a bot.
+ */
+[[nodiscard]]
+constexpr bool slot_flown_by_bot(const bool bot_placed, const bool has_peer)
+{
+	return bot_placed && !has_peer;
+}
+
 }

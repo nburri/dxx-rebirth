@@ -3023,6 +3023,8 @@ void deny_join(const _sockaddr &to, const uint32_t nonce, const kick_player_reas
  */
 void accept_peer(const playernum_t slot, const ::dcx::net_v2::join_request &req, const callsign_t &callsign, const netplayer_info::player_rank rank, const _sockaddr &from, const peer::phase ph, const bool is_new)
 {
+	/* A human takes the slot: whatever bot was there is gone. */
+	bot_slot_released(slot);
 	auto &p = S.peers[slot];
 	drop_peer(p);
 	drop_extras_for(slot);
@@ -4836,6 +4838,25 @@ void host_end_level()
 		}
 	}
 	cancel_extras();
+}
+
+bool host_slot_has_peer(const playernum_t slot)
+{
+	return slot < MAX_PLAYERS && S.peers[slot].ph != peer::phase::none;
+}
+
+void host_remove_player(const playernum_t slot, const kick_player_reason why)
+{
+	if (!multi_i_am_master() || !slot || slot >= MAX_PLAYERS || vcplayerptr(slot)->connected == player_connection_status::disconnected)
+		return;
+	S.now = timer_query();
+	S.left_reason = why;
+	multi_disconnect_player(slot);
+	if (Network_status == network_state::starting)
+	{
+		vacate_slot(slot);
+		host_send_netgame_update();
+	}
 }
 
 void apply_level_go()

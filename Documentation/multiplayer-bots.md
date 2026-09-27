@@ -802,7 +802,11 @@ setup menu; its label is `Bots: none...`, `Bots: 3 (Hotshot)...` (or
 bounty. The Bots screen has the count slider (0 to max players − 1), the
 default skill and style, one line per bot, "Set all bots to default skill"
 (and style), "New random names" and "Done". It is rebuilt whenever the list
-changes, so its lines always match the list. The per-bot screen edits the
+changes, so its lines always match the list: moving the count slider closes
+the screen from its change event (newmenu now honours a close that a
+callback requests from `newmenu_changed`, which no other menu does) and
+`bots_setup_menu` reopens it with the new list; the item indices are taken
+from the list as displayed. The per-bot screen edits the
 name, skill, style and (in team modes) team, and removes the bot. Names are
 stored lower case like every callsign. Not yet: the "Humans replace bots"
 checkbox and the `.ngp` persistence (B2), the in-game screen (B5). The
@@ -813,9 +817,16 @@ developer switch `-bots N` sets the initial count of the setup menu.
 
 **Slots (§2.3).** `bots_allocate_slots` runs in `net_udp_select_players`
 after the lobby closes (the host may start alone): each configured bot takes
-the lowest slot below `max_numplayers` that has no player, gets a callsign
+the lowest slot below `max_numplayers` that has no player, no lobby
+callsign and no connection (`host_slot_has_peer`: a lobby player left out of
+the game is kicked with a 1 s linger, whose end would disconnect the slot;
+the rule is `choose_bot_slot` in `bot_brain.h`, tested), gets a callsign
 unique in the game (`havoc` → `havoc2`), `rank = None`, a zero address, and
-`connected = playing`. If they do not all fit, the host is told. The team
+`connected = playing`. If they do not all fit, the host is told. A slot
+with a connection is never a bot (`bot_is_local`), and a bot is forgotten
+(`bot_slot_released`) when its slot is disconnected (`multi_disconnect_player`)
+or given to a human (`accept_peer`), so a joiner that takes a former bot's
+slot is never flown by the host. The team
 menu starts with the bots' team preferences. A game that does not start,
 and the end of a session (`net_v2::session_reset`), frees the bot slots.
 
@@ -901,7 +912,10 @@ the eggs from that copy (`net_objects_host_drop_player_eggs`), explodes the
 ship and makes it a ghost. After 1–2.5 s (the bot's RNG) it respawns with
 `choose_spawn` / `place_player`, `multi_make_ghost_player` (spawn grants),
 the spawn invulnerability (which the bot code also expires) and
-`MULTI_REAPPEAR` as the bot. No respawn during the reactor countdown.
+`MULTI_REAPPEAR` as the bot. No respawn during the reactor countdown. A bot
+killed during the countdown (D2 marks it `died_in_mine` with the kill)
+still tumbles and explodes (deres, eggs, ghost), as a human does; its
+brain stops.
 
 **Inventory.** `net_objects_host_own_ship_inventory(pid, force)` keeps the
 host's copy (`A.mirrors`) equal to the bot's ship and sends `INVENTORY`
@@ -912,6 +926,14 @@ inventory.
 **Messages.** `multi_send_fire`, `multi_send_player_deres`,
 `multi_send_reappear`, `multi_send_cloak` and `multi_send_decloak` have no
 `Player_num` default any more; every caller names the player.
+
+**`/kick`.** `/kick <botname>` (or `#n`) removes the bot: a bot still
+tumbling explodes first, otherwise the host's copy of its inventory is
+brought up to date; then `net_v2::host_remove_player` disconnects the slot
+(`multi_disconnect_player`: "has left the game", the eggs dropped from the
+host's copy, the ghost, and `player_left` to the clients with reason
+`kicked`) and the bot is forgotten. The setup keeps the bot for the next
+game.
 
 **Not in B1:** pickups, fuel centres and energy (a bot that runs dry can
 only fire ammunition weapons until it dies; B3), secondaries, afterburner,

@@ -1031,7 +1031,12 @@ static window_event_result newmenu_mouse(const d_event &event, newmenu *menu, co
 			}
 			if (changed)
 			{
-				menu->event_handler(d_change_event{menu->citem});
+				/* The callback may close the menu on a change (a value
+				 * below -1, see callback_newmenu::event_handler), e.g.
+				 * to rebuild a menu whose items depend on the value.
+				 */
+				if (menu->event_handler(d_change_event{menu->citem}) == window_event_result::close)
+					return window_event_result::close;
 			}
 			break;
 		}
@@ -1326,7 +1331,9 @@ static window_event_result newmenu_key_command(const d_event &event, newmenu *co
 
 	if (changed)
 	{
-		menu->event_handler(d_change_event{menu->citem});
+		/* As in newmenu_mouse: the callback may close the menu. */
+		if (menu->event_handler(d_change_event{menu->citem}) == window_event_result::close)
+			return window_event_result::close;
 	}
 
 	return rval;

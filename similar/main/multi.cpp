@@ -1317,10 +1317,14 @@ namespace dsx {
 
 namespace {
 
-static void kick_player(const player &plr, netplayer_info &nplr)
+static void kick_player(const playernum_t pnum)
 {
-	multi::dispatch->kick_player(nplr.protocol.udp.addr, kick_player_reason::kicked);
-	HUD_init_message(HM_MULTI, "Dumping %s...", static_cast<const char *>(plr.callsign));
+	/* A bot has no connection to kick: the host removes it from the
+	 * game itself.
+	 */
+	if (!bots_kick(pnum))
+		multi::dispatch->kick_player(Netgame.players[pnum].protocol.udp.addr, kick_player_reason::kicked);
+	HUD_init_message(HM_MULTI, "Dumping %s...", static_cast<const char *>(vcplayerptr(pnum)->callsign));
 	multi_message_index = 0;
 	multi_sending_message[Player_num] = msgsend_state::none;
 #if DXX_BUILD_DESCENT == 2
@@ -1461,7 +1465,7 @@ static void multi_send_message_end(const d_robot_info_array &Robot_info, fvmobjp
 				const auto i = players[listpos];
 				if (i != Player_num && vcplayerptr(i)->connected != player_connection_status::disconnected)
 				{
-					kick_player(*vcplayerptr(i), Netgame.players[i]);
+					kick_player(i);
 					return;
 				}
 			}
@@ -1479,7 +1483,7 @@ static void multi_send_message_end(const d_robot_info_array &Robot_info, fvmobjp
 		for (unsigned i = 0; i < N_players; i++)
 			if (i != Player_num && vcplayerptr(i)->connected != player_connection_status::disconnected && !d_strnicmp(static_cast<const char *>(vcplayerptr(i)->callsign), &Network_message[name_index], nlen - name_index))
 			{
-				kick_player(*vcplayerptr(i), Netgame.players[i]);
+				kick_player(static_cast<playernum_t>(i));
 				return;
 			}
 	}
@@ -1987,6 +1991,10 @@ void multi_disconnect_player(const playernum_t pnum)
 
 	vmplayerptr(pnum)->connected = player_connection_status::disconnected;
 	Netgame.players[pnum].connected = player_connection_status::disconnected;
+	/* A bot that leaves the game is gone for good: its slot may be a
+	 * human's next.
+	 */
+	bot_slot_released(pnum);
 
 	multi::dispatch->disconnect_player(pnum);
 

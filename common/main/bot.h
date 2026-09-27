@@ -90,9 +90,17 @@ bool bots_allowed_in_mode(network_game_type mode);
 unsigned bots_allocate_slots();
 /* The team menu's starting teams: bots with a team preference. */
 void bots_apply_team_preferences(unsigned &team_vector, unsigned num_players);
-/* Player `pnum` is a bot this machine flies (the host). */
+/* Player `pnum` is a bot this machine flies (the host).  A slot with a
+ * connection is never a bot.
+ */
 [[nodiscard]]
 bool bot_is_local(playernum_t pnum);
+/* Slot `pnum` was disconnected or given to a human: forget its bot. */
+void bot_slot_released(playernum_t pnum);
+/* `/kick` of player `pnum`: if it is a bot, remove it from the game (the
+ * others see it leave, the host drops what it carried) and return true.
+ */
+bool bots_kick(playernum_t pnum);
 /* The bot's ship is in its death tumble (the bundle's `dying`). */
 [[nodiscard]]
 bool bot_ship_dying(playernum_t pnum);

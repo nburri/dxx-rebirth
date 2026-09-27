@@ -38,6 +38,7 @@
 #include "bot.h"
 #include "bot_nav.h"
 #include "net_interp.h"
+#include "net_v2_game.h"
 #include "pilot.h"
 #include "multi.h"
 #include "object.h"
@@ -264,9 +265,20 @@ bots_state B;
 [[nodiscard]]
 bot_state *find_bot(const playernum_t pnum)
 {
-	if (pnum >= MAX_PLAYERS || !B.bots[pnum])
+	if (pnum >= MAX_PLAYERS)
 		return nullptr;
-	return &*B.bots[pnum];
+	auto &o{B.bots[pnum]};
+	if (!o)
+		return nullptr;
+	/* A human's connection for the slot: the bot is gone (the slot was
+	 * released without the hooks, which must not happen).
+	 */
+	if (!b::slot_flown_by_bot(true, net_v2::host_slot_has_peer(pnum)))
+	{
+		o.reset();
+		return nullptr;
+	}
+	return &*o;
 }
 
 [[nodiscard]]
@@ -1005,6 +1017,38 @@ bool bot_is_local(const playernum_t pnum)
 	return find_bot(pnum) != nullptr;
 }
 
+void bot_slot_released(const playernum_t pnum)
+{
+	if (pnum < MAX_PLAYERS && B.bots[pnum])
+	{
+		con_printf(CON_VERBOSE, "bots: P#%u is no longer a bot", pnum);
+		B.bots[pnum].reset();
+	}
+}
+
+bool bots_kick(const playernum_t pnum)
+{
+	const auto bs{find_bot(pnum)};
+	if (!bs || !multi_i_am_master())
+		return false;
+	auto &obj{ship_of(pnum)};
+	if (obj.type == object_type::OBJ_PLAYER)
+	{
+		/* Killed and still tumbling: it explodes now (the deres, its
+		 * eggs), as it would have.  Otherwise the host's copy of its
+		 * inventory is brought up to date, and multi_disconnect_player
+		 * drops the eggs from it.
+		 */
+		if (bs->life == bot_life::dying && Network_status == network_state::playing)
+			explode(*bs, obj, LevelSharedRobotInfoState.Robot_info);
+		else
+			net_objects_host_own_ship_inventory(pnum, true);
+	}
+	net_v2::host_remove_player(pnum, kick_player_reason::kicked);
+	B.bots[pnum].reset();
+	return true;
+}
+
 bool bot_ship_dying(const playernum_t pnum)
 {
 	const auto bs{find_bot(pnum)};
@@ -1041,19 +1085,23 @@ unsigned bots_allocate_slots()
 	const unsigned limit{std::min<unsigned>(Netgame.max_numplayers, MAX_PLAYERS)};
 	for (unsigned k = 0; k < Bot_setup.count; ++k)
 	{
-		/* Section 2.3: the lowest free slot below the player limit. */
-		playernum_t slot{MAX_PLAYERS};
-		for (playernum_t s = 1; s < limit; ++s)
+		/* Section 2.3: the lowest free slot below the player limit.  A
+		 * slot whose connection still exists (a lobby player left out of
+		 * the game, whose kick lingers) is not free: the end of that
+		 * connection would disconnect the slot.
+		 */
+		per_player_array<b::slot_view> views{};
+		for (auto &&[s, v] : enumerate(views))
 		{
-			if (B.bots[s] || vcplayerptr(s)->connected != player_connection_status::disconnected)
-				continue;
-			if (s < N_players && Netgame.players[s].callsign[0u])
-				continue;
-			slot = s;
-			break;
+			const auto pn{static_cast<playernum_t>(s)};
+			v.occupied = B.bots[pn].has_value() || vcplayerptr(pn)->connected != player_connection_status::disconnected;
+			v.has_peer = net_v2::host_slot_has_peer(pn);
+			v.reserved = pn < N_players && Netgame.players[pn].callsign[0u];
 		}
-		if (slot >= MAX_PLAYERS)
+		const auto chosen{b::choose_bot_slot(views, limit)};
+		if (!chosen)
 			break;
+		const playernum_t slot{static_cast<playernum_t>(*chosen)};
 		const auto &cfg{Bot_setup.bots[k]};
 		const auto name{unique_callsign(cfg.name, slot)};
 		auto &np{Netgame.players[slot]};
@@ -1156,9 +1204,17 @@ void bots_frame(const d_robot_info_array &Robot_info)
 		if (!o)
 			continue;
 		auto &bs{*o};
-		if (vcplayerptr(bs.pid)->connected != player_connection_status::playing)
+		const auto connected{vcplayerptr(bs.pid)->connected};
+		if (connected != player_connection_status::playing)
 		{
 			bs.ctl = {};
+			bs.fire = false;
+			/* Killed during the countdown (D2 marks it died in the mine
+			 * with the kill): the death sequence still runs to the
+			 * explosion, as the human's does; it does not respawn.
+			 */
+			if (connected == player_connection_status::died_in_mine && bs.life != bot_life::alive)
+				life_frame(bs, ship_of(bs.pid), Robot_info);
 			continue;
 		}
 		auto &obj{ship_of(bs.pid)};

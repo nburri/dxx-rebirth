@@ -11,7 +11,7 @@
  * target memory and scoring, the steering and velocity controllers at
  * different frame lengths, the tick schedule (the decisions are the same
  * for frame times from 2 ms to 100 ms), the skill and style tables and
- * the primary choice.
+ * the primary choice, and the slot a bot takes (section 2.3).
  *
  * Build and run with SCons:
  *
@@ -19,6 +19,7 @@
  *	build/common/test-bot-brain
  */
 
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -481,6 +482,42 @@ void test_primary_choice()
 			}
 }
 
+/* Section 2.3: the slot a bot takes, and who flies a slot. */
+void test_slot_allocation()
+{
+	std::array<slot_view, 8> v{};
+	v[0].occupied = true;
+	/* The lowest free slot, above the host's. */
+	CHECK(choose_bot_slot(v, 8) == 1u);
+	v[1].occupied = true;
+	CHECK(choose_bot_slot(v, 8) == 2u);
+	/* A lobby player left out of the game: its connection lingers, the
+	 * slot is not free although it is disconnected.
+	 */
+	v[2].has_peer = true;
+	CHECK(choose_bot_slot(v, 8) == 3u);
+	/* A lobby player's callsign holds its slot. */
+	v[3].reserved = true;
+	CHECK(choose_bot_slot(v, 8) == 4u);
+	/* The player limit. */
+	CHECK(choose_bot_slot(v, 4) == std::nullopt);
+	CHECK(choose_bot_slot(v, 5) == 4u);
+	CHECK(choose_bot_slot(v, 1) == std::nullopt);
+	CHECK(choose_bot_slot(v, 0) == std::nullopt);
+	/* A limit above the table is the table. */
+	for (auto &x : v)
+		x.occupied = true;
+	CHECK(choose_bot_slot(v, 16) == std::nullopt);
+	/* The linger over: free again. */
+	v[2] = {};
+	CHECK(choose_bot_slot(v, 16) == 2u);
+	/* A slot with a connection is never a bot's. */
+	CHECK(slot_flown_by_bot(true, false));
+	CHECK(!slot_flown_by_bot(true, true));
+	CHECK(!slot_flown_by_bot(false, false));
+	CHECK(!slot_flown_by_bot(false, true));
+}
+
 }
 
 int main()
@@ -493,6 +530,7 @@ int main()
 	test_tick_schedule();
 	test_tables();
 	test_primary_choice();
+	test_slot_allocation();
 	std::puts("test-bot-brain: all checks passed");
 	return 0;
 }
