@@ -14,6 +14,7 @@
  *  -- MD2211 (2006-10-12)
  */
 
+#include <algorithm>
 #include <bitset>
 #include <span>
 #include <stdlib.h>
@@ -618,4 +619,17 @@ void digi_mixer_stop_all_channels()
 	Mix_HaltChannel(-1);
 }
 
+}
+
+unsigned dcx::frame_probe::stats::mixer_channels_busy()
+{
+	unsigned n{0};
+	for (std::size_t i{0}; i != ::dcx::channels.size(); ++i)
+		n += ::dcx::channels[static_cast<::dcx::sound_channel>(i)];
+	return n;
+}
+
+unsigned dcx::frame_probe::stats::mixer_sounds_converted()
+{
+	return std::ranges::count_if(::dsx::SoundChunks, [](const Mix_Chunk &c) { return c.abuf != nullptr; });
 }

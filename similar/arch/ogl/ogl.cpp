@@ -125,6 +125,11 @@ unsigned last_width=~0u,last_height=~0u;
 int GL_TEXTURE_2D_enabled=-1;
 
 static int r_texcount = 0, r_cachedtexcount = 0;
+
+unsigned frame_probe::stats::ogl_textures()
+{
+	return r_texcount;
+}
 #if DXX_USE_OGLES
 static int ogl_rgba_internalformat = GL_RGBA;
 static int ogl_rgb_internalformat = GL_RGB;

@@ -24,6 +24,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
  */
 
 
+#include <algorithm>
 #include "gr.h"
 #include "dxxerror.h"
 #include "fmtcheck.h"
@@ -341,4 +342,9 @@ tmapinfo_flags get_side_combined_tmapinfo_flags(const d_level_unique_tmap_info_s
 	return tmap1_flags;
 }
 
+}
+
+unsigned dcx::frame_probe::stats::texmerge_entries()
+{
+	return std::ranges::count_if(::dcx::Cache, [](const ::dcx::TEXTURE_CACHE &c) { return c.bitmap != nullptr; });
 }

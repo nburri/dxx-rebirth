@@ -2262,3 +2262,13 @@ void bitmap_index_read_n(const NamedPHYSFS_File fp, const std::ranges::subrange<
 }
 
 }
+
+unsigned dcx::frame_probe::stats::piggy_cache_used()
+{
+	return Piggy_bitmap_cache_next;
+}
+
+unsigned dcx::frame_probe::stats::piggy_cache_size()
+{
+	return Piggy_bitmap_cache_size;
+}

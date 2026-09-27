@@ -18,8 +18,10 @@
 #endif
 #ifdef _WIN32
 #include <windows.h>
+#include <psapi.h>
 #elif defined(__linux__)
 #include <sched.h>
+#include <unistd.h>
 #endif
 
 #include "frame_probe.h"
@@ -129,6 +131,8 @@ struct probe_state
 	/* Running average of the frame time, in ms. */
 	double average_ms{};
 	int last_cpu{-1};
+	uint64_t last_session_report{};
+	bool session_report_pending{};
 	/* Snapshot shown on the HUD. */
 	std::array<std::array<char, 64>, 3> hud{};
 	bool hud_valid{};
@@ -380,12 +384,73 @@ void frame_mark()
 	state.last_mark = t;
 	state.last_cpu = cpu;
 	reset_frame();
+	if (!state.last_session_report)
+		state.last_session_report = t;
+	else if (ticks_to_ms(t - state.last_session_report) >= 10000.)
+	{
+		state.last_session_report = t;
+		state.session_report_pending = true;
+	}
 	if (ticks_to_ms(t - state.window_start) >= 1000.)
 	{
 		close_window(t);
 		state.window_start = t;
 		state.window = {};
 	}
+}
+
+bool session_report_due()
+{
+	if (!enabled || !state.session_report_pending)
+		return false;
+	state.session_report_pending = false;
+	return true;
+}
+
+process_memory_info process_memory()
+{
+#ifdef _WIN32
+	/* K32GetProcessMemoryInfo is in kernel32 since Windows 7; older
+	 * systems have GetProcessMemoryInfo only in psapi.dll, which is not
+	 * linked.  Look it up at run time.
+	 */
+	using get_process_memory_info_t = BOOL (WINAPI *)(HANDLE, PPROCESS_MEMORY_COUNTERS, DWORD);
+	static const auto get_process_memory_info = []() -> get_process_memory_info_t {
+		const auto kernel32{GetModuleHandleA("kernel32.dll")};
+		if (!kernel32)
+			return nullptr;
+		union {
+			FARPROC proc;
+			get_process_memory_info_t result;
+		};
+		proc = GetProcAddress(kernel32, "K32GetProcessMemoryInfo");
+		return result;
+	}();
+	if (get_process_memory_info)
+	{
+		PROCESS_MEMORY_COUNTERS_EX pmc{};
+		pmc.cb = sizeof(pmc);
+		if (get_process_memory_info(GetCurrentProcess(), reinterpret_cast<PPROCESS_MEMORY_COUNTERS>(&pmc), sizeof(pmc)))
+			return {pmc.WorkingSetSize, pmc.PrivateUsage};
+	}
+	return {};
+#elif defined(__linux__)
+	/* statm: size resident shared text lib data dt, in pages. */
+	if (const auto f{std::fopen("/proc/self/statm", "r")})
+	{
+		unsigned long size{}, resident{}, shared{}, text{}, lib{}, data{};
+		const auto n{std::fscanf(f, "%lu %lu %lu %lu %lu %lu", &size, &resident, &shared, &text, &lib, &data)};
+		std::fclose(f);
+		if (n == 6)
+		{
+			const uint64_t page{static_cast<uint64_t>(sysconf(_SC_PAGESIZE))};
+			return {resident * page, data * page};
+		}
+	}
+	return {};
+#else
+	return {};
+#endif
 }
 
 unsigned hud_lines(const std::span<char> line0, const std::span<char> line1, const std::span<char> line2)

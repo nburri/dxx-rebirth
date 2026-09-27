@@ -4502,6 +4502,27 @@ void frame(const bool listen)
 
 /* Public interface (net_v2_game.h) */
 
+void probe_report()
+{
+	unsigned peers{0};
+	std::size_t queue_messages{0}, queue_bytes{0}, in_flight{0}, recv_pending{0}, backlog{0}, backlog_bytes{0};
+	for (const auto &p : S.peers)
+	{
+		if (!p.conn)
+			continue;
+		++peers;
+		const auto st{p.conn->stats()};
+		queue_messages += st.queue_messages;
+		queue_bytes += st.queue_bytes;
+		in_flight += st.in_flight;
+		recv_pending += st.recv_window_pending;
+		backlog += p.backlog.size();
+		backlog_bytes += p.backlog_bytes;
+	}
+	con_printf(CON_VERBOSE, "session: net peers %u, reliable queue %zu msgs %zu B, in flight %zu, recv pending %zu, backlog %zu msgs %zu B, event buffer %zu B (capacity %zu), extras queue %zu",
+		peers, queue_messages, queue_bytes, in_flight, recv_pending, backlog, backlog_bytes, S.event_buffer.size(), S.event_buffer.capacity(), S.extras_queue.size());
+}
+
 bool open_socket(const unsigned index, const uint16_t port)
 {
 	return udp_open_socket(UDP_Socket[index], port) == 0;

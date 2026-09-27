@@ -120,6 +120,9 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "partial_range.h"
 #include "segiter.h"
 #include "frame_probe.h"
+#if DXX_USE_UDP
+#include "net_udp.h"
+#endif
 
 d_time_fix ThisLevelTime;
 
@@ -1760,6 +1763,46 @@ game_window *game_setup()
 	return game_wind;
 }
 
+namespace {
+
+/* With -verbose, every 10 seconds: counters that would grow if something
+ * accumulated over a long session (several games and levels).
+ */
+static void log_session_stats()
+{
+	const auto mem{frame_probe::process_memory()};
+	auto &Objects = LevelUniqueObjectState.Objects;
+	unsigned live_objects{0};
+	for (const object_base &o : Objects.vcptr)
+		if (o.type != object_type::OBJ_NONE)
+			++live_objects;
+	con_printf(CON_VERBOSE, "session: memory resident %llu KiB private %llu KiB | objects highest %u live %u allocated %u | sound objects %u"
+#if DXX_USE_SDLMIXER
+		", mixer channels busy %u, sounds converted %u"
+#endif
+		" | textures: OpenGL %u, texmerge %u, piggy cache %u/%u KiB | game time %.1f s",
+		static_cast<unsigned long long>(mem.resident_bytes / 1024), static_cast<unsigned long long>(mem.private_bytes / 1024),
+		static_cast<unsigned>(Highest_object_index), live_objects, static_cast<unsigned>(LevelUniqueObjectState.num_objects),
+		frame_probe::stats::active_sound_objects(),
+#if DXX_USE_SDLMIXER
+		frame_probe::stats::mixer_channels_busy(), frame_probe::stats::mixer_sounds_converted(),
+#endif
+#if DXX_USE_OGL
+		frame_probe::stats::ogl_textures(),
+#else
+		0u,
+#endif
+		frame_probe::stats::texmerge_entries(),
+		frame_probe::stats::piggy_cache_used() / 1024, frame_probe::stats::piggy_cache_size() / 1024,
+		static_cast<double>(GameTime64) / F1_0);
+#if DXX_USE_UDP
+	if (+(Game_mode & GM_NETWORK))
+		net_udp_probe_report();
+#endif
+}
+
+}
+
 // Event handler for the game
 window_event_result game_window::event_handler(const d_event &event)
 {
@@ -1817,6 +1860,8 @@ window_event_result game_window::event_handler(const d_event &event)
 
 		case event_type::window_draw:
 			frame_probe::frame_mark();
+			if (frame_probe::session_report_due())
+				log_session_stats();
 			if (!time_paused)
 			{
 				{

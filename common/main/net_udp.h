@@ -55,6 +55,8 @@ using udp::dispatch;
 }
 
 window_event_result net_udp_setup_game(const d_select_event &);
+/* Sizes of the network session's queues, for the -verbose frame probe. */
+void net_udp_probe_report();
 }
 #endif
 void net_udp_manual_join_game();

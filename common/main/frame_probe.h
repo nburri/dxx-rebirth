@@ -196,6 +196,34 @@ inline void note_render_list(const unsigned n_render_segs, const unsigned start_
  */
 void frame_mark();
 
+/* True once every 10 seconds while the probe is on: time to log the
+ * session growth counters (see log_session_stats in game.cpp).
+ */
+bool session_report_due();
+
+/* Resident set / working set and private bytes of the process, 0 if
+ * unknown.
+ */
+struct process_memory_info
+{
+	uint64_t resident_bytes;
+	uint64_t private_bytes;
+};
+process_memory_info process_memory();
+
+/* Counters of other subsystems for the session report, implemented next
+ * to the state they read.
+ */
+namespace stats {
+unsigned ogl_textures();		// OpenGL textures alive (ogl.cpp)
+unsigned piggy_cache_used();		// bytes of the bitmap page cache in use (piggy.cpp)
+unsigned piggy_cache_size();
+unsigned active_sound_objects();	// digiobj.cpp
+unsigned mixer_channels_busy();		// digi_mixer.cpp
+unsigned mixer_sounds_converted();
+unsigned texmerge_entries();		// texmerge.cpp
+}
+
 /* Text for the HUD, updated once per second.  Returns the number of
  * lines filled (0 if the probe is off or has no data yet).
  */
