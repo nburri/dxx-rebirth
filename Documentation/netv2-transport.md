@@ -82,6 +82,9 @@ exits with status 1; success ends with `all tests passed`.
 | frame-rate caller | – | 5000 frames at 500 Hz setting the state only when `begin_tick` opened a tick: 600 ticks, 600 states delivered, none dropped. |
 | update() first | – | The same pattern with `update()` called before `begin_tick`: 600 ticks still reported, none twice, 600 states delivered. |
 | event beside backlog | 30 ms | A 300-byte event per tick beside a standing backlog of 900-byte reliable messages: 60 of 60 events delivered, none dropped. |
+| send_unreliable types | – | `state`, `input`, `reliable`, `session` and an unknown type are refused (false, counted in `unreliable_dropped`); only `event_u` is queued. |
+| held message view | – | Message 2 arrives first and is held, its datagram buffer is overwritten, then message 1: both delivered intact, message 1 as a view into its own datagram. |
+| to_peer_time wrap | 30 ms | Client clock 2^32 units + 3 s ahead of the host: `to_peer_time` is within 5 ms of the host's wire stamp under `net_time_diff`. |
 | echo of an old unechoed packet | 30 ms | 60 pps host against a 10 pps client (five packets in six unechoed): a forged newest client packet echoing the 3 s old packet 61 with its true `send_time` and `echo_delay` 0 leaves `srtt`, `rttvar` and the offset target unchanged. |
 | bound excess | – | The estimator alone: 80 ms samples, then a 130 ms bound; the RTO covers 130 ms plus the slack right away, still after 100 more samples, while smaller bounds keep coming and for a second after the last, and is back at its steady value two seconds later. |
 | parts after the first packet | – | A state and a message in the tick's first packet, then a 2 × 900-byte bundle: the budget follows, both parts go out in the same tick (three packets), the second message on the next. |
@@ -102,7 +105,7 @@ exits with status 1; success ends with `all tests passed`.
 | unaligned peers | 1–100 ms, no jitter, no loss | Six rounds with random tick phases: zero retransmissions, `rto ≥ srtt + tick`. |
 | ack blackout | 30 ms, acks zeroed | 500 packets without an ack: more than 200 counted lost once their log slots are reused, loss estimate above 0.9. |
 | echo_delay clamp | – | A packet built 100 units before the receive stamp carries `echo_delay` 0 and the peer's RTT sample is the true value. |
-| unreliable chunks per packet | – | Two `state` chunks in one packet are both delivered; a reordered older packet's `state` is dropped while its `event_u` is kept. |
+| unreliable chunks per packet | – | Two `state` chunks in one packet are both delivered; a reordered older packet's `state` is dropped while its `event_u` is kept; `send_unreliable` refuses every type but `event_u`. |
 | f: fuzz | – | 200 000 random datagrams are all rejected without effect; 100 000 packets with a valid header and random chunk bytes, and 100 000 mutations of captured real packets, never crash and a malformed packet delivers nothing; 16 malformed packets close the connection with `protocol_error`. |
 | g: clock | 50 ± 20 ms, host clock about to wrap, client 1234 s behind | The client's offset target is within 20 ms after 8 packets and within 5 ms after 2 s; the host's estimate is the negative; a 300 ms clock step is followed within 2.5 s; after a 20 ms step the applied error shrinks by 5 ± 1.5 ms over the second following the window's expiry (slewed, not jumped) and settles. |
 
@@ -118,8 +121,12 @@ connection c{{.session_id = sid, .peer_token = tok, .local_player_id = 0, .remot
 // connection_config also has tick (a period as numerator/denominator net
 // units, default 65536/60 = exactly 1/60 s), max_packets_per_tick
 // (default 2, at least 2) and peer_tick (default: same as tick; stage 1
-// sets it from the handshake).  report.unreliable holds views into
-// `datagram`, valid while it is, with the §3.8 part index/count.
+// sets it from the handshake).  report.reliable and report.unreliable hold
+// views: into `datagram` (valid while it is; unreliable ones with the §3.8
+// part index/count), or, for a message that had been held out of order,
+// into storage the connection keeps until its next on_receive.  Copy what
+// must outlive that.  to_peer_time(local) is a wire stamp (net_time): the
+// offset is known modulo 2^32 only; compare with net_time_diff.
 // begin_tick returns the ticks granted since it was last asked (0 when
 // none); update() and build_outgoing grant ticks too but never consume that
 // report, so any call order works.  A game loop that runs faster than the
@@ -290,14 +297,14 @@ the connection neither sends nor accepts anything.
   updates `ack_bits` at step 6 and keeps the header effects after a failed
   chunk walk; both would let a corrupt datagram acknowledge messages that
   were never delivered.
-- RTT samples come from the echo fields; an ack measures a packet only when
-  no echo ever came for it (received out of order by the peer, or the echo
-  carrier lost), so that a delayed packet's long round trip is still seen,
-  once. The design feeds every ack into the estimator; those samples
-  include the peer's hold, which the echo excludes, so restricting them to
-  packets the echo missed keeps `srtt` honest on a clean link and only a
-  few percent high under heavy loss or reordering. Karn's rule is moot:
-  packets are never retransmitted, only messages are.
+- The design text as first written fed every ack into the estimator; those
+  samples include the peer's hold, which the echo excludes, and a peer can
+  hold ack bits back at will. Acks are therefore never samples: an ack
+  bounds `rttvar` (once) only for a packet the echo can no longer measure
+  (acked after a later packet was echoed, so it arrived out of order at
+  the peer), so that a delayed packet's long round trip is still seen; see
+  the previous bullet for the bound excess. Karn's rule is moot: packets
+  are never retransmitted, only messages are.
 - `ack` ahead of the last packet sent is a protocol error (`bad_ack`), not
   a silently ignored value: it would otherwise drive the loss scan and the
   gap rule over everything in flight on every packet.
