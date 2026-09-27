@@ -285,7 +285,11 @@ struct dispatch_table
 	{
 		return this;
 	}
-	virtual void send_data(std::span<const uint8_t> data, multiplayer_data_priority) const = 0;
+	/* Send gameplay records that `originator` caused.  The local player
+	 * is `Player_num`; the host also originates records for the ships it
+	 * flies itself (Documentation/multiplayer-bots.md).
+	 */
+	virtual void send_data(std::span<const uint8_t> data, multiplayer_data_priority, playernum_t originator) const = 0;
 	virtual void send_data_direct(std::span<const uint8_t> data, playernum_t pnum, int needack) const = 0;
 	virtual void do_protocol_frame(int force, int listen) const = 0;
 	virtual window_event_result level_sync() const = 0;
@@ -450,7 +454,7 @@ int multi_maybe_disable_friendly_fire(const object_base *attacker);
 
 namespace dsx {
 
-void multi_send_fire(const vms_matrix &orient, int laser_gun, laser_level, int laser_flags, objnum_t laser_track, imobjptridx_t is_bomb_objnum);
+void multi_send_fire(const vms_matrix &orient, int laser_gun, laser_level, int laser_flags, objnum_t laser_track, imobjptridx_t is_bomb_objnum, playernum_t pnum = Player_num);
 void multi_send_destroy_controlcen(objnum_t objnum, playernum_t player);
 void multi_send_kill(vmobjptridx_t objnum);
 void multi_send_remobj(vmobjidx_t objnum);
@@ -507,15 +511,15 @@ static inline void multi_send_endlevel_start(multi_endlevel_type)
 	multi_send_endlevel_start();
 }
 #endif
-void multi_send_player_deres(deres_type_t type);
+void multi_send_player_deres(deres_type_t type, playernum_t pnum = Player_num);
 }
 void multi_send_play_sound(sound_effect sound_num, fix volume, sound_stack once);
-void multi_send_reappear();
+void multi_send_reappear(playernum_t pnum = Player_num);
 void multi_send_create_explosion(playernum_t);
 void multi_send_controlcen_fire(const vms_vector &to_target, int gun_num, objnum_t objnum);
 namespace dcx {
-void multi_send_cloak(void);
-void multi_send_decloak(void);
+void multi_send_cloak(playernum_t pnum = Player_num);
+void multi_send_decloak(playernum_t pnum = Player_num);
 }
 void multi_digi_play_sample(sound_effect sndnum, fix max_volume);
 void multi_digi_play_sample_once(sound_effect soundnum, fix max_volume);
@@ -744,7 +748,7 @@ void multi_send_capture_bonus (playernum_t pnum);
 int multi_all_players_alive(const fvcobjptr &, std::ranges::subrange<const player *>);
 void multi_send_seismic(fix);
 void multi_send_drop_blobs(playernum_t);
-void multi_send_sound_function (char,char);
+void multi_send_sound_function (char,char, playernum_t pnum = Player_num);
 void DropFlag();
 void multi_send_finish_game ();
 void init_hoard_data(d_vclip_array &Vclip);

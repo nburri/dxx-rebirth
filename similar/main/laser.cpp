@@ -2401,7 +2401,7 @@ void do_missile_firing(pilot &p, const secondary_weapon_index weapon, const vmob
 				|| weapon == secondary_weapon_index::guided
 #endif
 			};
-			multi_send_fire(plrobj.orient, underlying_value(weapon) + MISSILE_ADJUST, laser_level::_1	/* unused */, gun_flag, obj.ctype.laser_info.track_goal, send_objnum ? objnum : object_none);
+			multi_send_fire(plrobj.orient, underlying_value(weapon) + MISSILE_ADJUST, laser_level::_1	/* unused */, gun_flag, obj.ctype.laser_info.track_goal, send_objnum ? objnum : object_none, get_player_id(plrobj));
 		}
 
 		// don't autoselect if dropping prox and prox not current weapon
