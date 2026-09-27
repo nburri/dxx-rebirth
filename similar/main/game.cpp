@@ -2028,8 +2028,6 @@ window_event_result GameProcessFrame(const d_level_shared_robot_info_state &Leve
 		{
 			headlight_drain.reset();
 			pl_flags &= ~player_flag::headlight_on;
-			if (+(Game_mode & GM_MULTI))
-				multi_send_flags(Player_num);
 		}
 	}
 #endif

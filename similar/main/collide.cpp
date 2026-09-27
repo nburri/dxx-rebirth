@@ -2024,7 +2024,10 @@ static void maybe_drop_primary_omega_weapon(const object &playerobj)
 {
 	maybe_drop_primary_weapon_with_adjustment(playerobj, primary_weapon_index::omega,
 		[&playerobj](object &weapon) {
-			weapon.ctype.powerup_info.count = (get_player_id(playerobj) == Player_num) ? playerobj.ctype.player_info.Omega_charge : MAX_OMEGA_CHARGE;
+			/* In a network game the host knows every player's charge
+			 * (INVENTORY, protocol v2 stage 3).
+			 */
+			weapon.ctype.powerup_info.count = (get_player_id(playerobj) == Player_num || +(Game_mode & GM_NETWORK)) ? playerobj.ctype.player_info.Omega_charge : MAX_OMEGA_CHARGE;
 		}
 	);
 }
@@ -2044,11 +2047,57 @@ static void drop_missile_1_or_4(const object &playerobj, const secondary_weapon_
 
 }
 
+void drop_player_armed_bombs(const vmobjptridx_t playerobj)
+{
+	if (playerobj->type != object_type::OBJ_PLAYER && playerobj->type != object_type::OBJ_GHOST)
+		return;
+	// Seed the random number generator so in net play the mines are
+	// always armed the same way
+	if (+(Game_mode & GM_MULTI))
+		d_srand(5483L);
+#if DXX_BUILD_DESCENT == 2
+	auto &secondary_ammo = playerobj->ctype.player_info.secondary_ammo;
+	//	If the player had smart mines, maybe arm one of them.
+	const auto drop_armed_bomb = [&](uint8_t mines, weapon_id_type id) {
+		mines %= 4;
+		for (int rthresh = 30000; mines && d_rand() < rthresh; rthresh /= 2)
+	{
+		const auto randvec = make_random_vector();
+		const auto tvec = vm_vec_build_add(playerobj->pos, randvec);
+		const auto &&newseg{find_point_seg(LevelSharedSegmentState, LevelUniqueSegmentState, tvec, Segments.vmptridx(playerobj->segnum) DXX_lighting_hack_pass_parameter)};
+		if (newseg != segment_none)
+		{
+			-- mines;
+			/* As a special case, decrease the count of mines regardless of
+			 * whether the object creation succeeds.  These mines will be
+			 * lost at the end of the death sequence if they are not
+			 * dropped here, so there is no need to count them accurately.
+			 */
+			Laser_create_new(randvec, tvec, newseg, playerobj, id, weapon_sound_flag::silent);
+		}
+	}
+	};
+	drop_armed_bomb(secondary_ammo[secondary_weapon_index::smart_mine], weapon_id_type::SUPERPROX_ID);
+
+	//	If the player had proximity bombs, maybe arm one of them.
+	if (+(Game_mode & GM_MULTI))
+		drop_armed_bomb(secondary_ammo[secondary_weapon_index::proximity], weapon_id_type::PROXIMITY_ID);
+#endif
+}
+
 void drop_player_eggs(const vmobjptridx_t playerobj)
 {
+	/* The mines use the random numbers first, as they always did: the
+	 * granted items that drop_player_powerup_eggs subtracts first do not
+	 * use any.
+	 */
+	drop_player_armed_bombs(playerobj);
+	drop_player_powerup_eggs(playerobj);
+}
+
+void drop_player_powerup_eggs(const vmobjptridx_t playerobj)
+{
 	if ((playerobj->type == object_type::OBJ_PLAYER) || (playerobj->type == object_type::OBJ_GHOST)) {
-		// Seed the random number generator so in net play the eggs will always
-		// drop the same way
 		if (+(Game_mode & GM_MULTI))
 		{
 			Net_create_loc = 0;
@@ -2056,17 +2105,15 @@ void drop_player_eggs(const vmobjptridx_t playerobj)
 		auto &player_info = playerobj->ctype.player_info;
 		auto &plr_laser_level = player_info.laser_level;
 		/* The granted lasers and vulcan ammo are subtracted below to decide
-		 * what to drop, then restored.  The player's own machine sends
-		 * these values in MULTI_PLAYER_DERES after calling this function,
-		 * and every receiver calls this function on them again.  If the
-		 * subtraction were kept, receivers would subtract the grant a
-		 * second time and drop fewer items than the dying player's
-		 * machine.  The granted flags do not need to be restored, since
-		 * clearing them twice has no further effect.
+		 * what to drop, then restored.  In a network game only the host
+		 * drops, once, from its copy of the dead player's inventory
+		 * (protocol v2 stage 3), and the copy must keep the grant for its
+		 * level inventory count.  The granted flags do not need to be
+		 * restored, since clearing them twice has no further effect.
 		 */
 		const auto original_laser_level{plr_laser_level};
 		const auto original_vulcan_ammo{player_info.vulcan_ammo};
-		if (const auto GrantedItems{+(Game_mode & GM_MULTI) ? (d_srand(5483L), Netgame.SpawnGrantedItems) : netgrant_flag::None})
+		if (const auto GrantedItems{+(Game_mode & GM_MULTI) ? Netgame.SpawnGrantedItems : netgrant_flag::None})
 		{
 			if (const auto granted_laser_level = map_granted_flags_to_laser_level(GrantedItems); granted_laser_level != laser_level::_1)
 			{
@@ -2105,34 +2152,6 @@ void drop_player_eggs(const vmobjptridx_t playerobj)
 		}
 
 		auto &secondary_ammo = playerobj->ctype.player_info.secondary_ammo;
-#if DXX_BUILD_DESCENT == 2
-		//	If the player had smart mines, maybe arm one of them.
-		const auto drop_armed_bomb = [&](uint8_t mines, weapon_id_type id) {
-			mines %= 4;
-			for (int rthresh = 30000; mines && d_rand() < rthresh; rthresh /= 2)
-		{
-			const auto randvec = make_random_vector();
-			const auto tvec = vm_vec_build_add(playerobj->pos, randvec);
-			const auto &&newseg{find_point_seg(LevelSharedSegmentState, LevelUniqueSegmentState, tvec, Segments.vmptridx(playerobj->segnum) DXX_lighting_hack_pass_parameter)};
-			if (newseg != segment_none)
-			{
-				-- mines;
-				/* As a special case, decrease the count of mines regardless of
-				 * whether the object creation succeeds.  These mines will be
-				 * lost at the end of the death sequence if they are not
-				 * dropped here, so there is no need to count them accurately.
-				 */
-				Laser_create_new(randvec, tvec, newseg, playerobj, id, weapon_sound_flag::silent);
-			}
-		}
-		};
-		drop_armed_bomb(secondary_ammo[secondary_weapon_index::smart_mine], weapon_id_type::SUPERPROX_ID);
-
-		//	If the player had proximity bombs, maybe arm one of them.
-		if (+(Game_mode & GM_MULTI))
-			drop_armed_bomb(secondary_ammo[secondary_weapon_index::proximity], weapon_id_type::PROXIMITY_ID);
-#endif
-
 		//	If the player dies and he has powerful lasers, create the powerups here.
 
 		if (plr_laser_level != laser_level::_1)
@@ -2463,6 +2482,12 @@ void collide_robot_and_materialization_center(const d_robot_info_array &Robot_in
 
 void collide_live_local_player_and_powerup(const vmobjptridx_t powerup)
 {
+	/* In a network game the host decides (protocol v2 stage 3); only an
+	 * object without a net id (a robot's egg in a robot game) is still
+	 * taken here and removed with MULTI_REMOVE_OBJECT.
+	 */
+	if (net_objects_touch(powerup))
+		return;
 	if (do_powerup(powerup))
 	{
 		powerup->flags |= OF_SHOULD_BE_DEAD;

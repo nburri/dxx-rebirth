@@ -1607,43 +1607,61 @@ void DropCurrentWeapon (player_info &player_info)
 		drop_type = Primary_weapon_to_powerup[Primary_weapon];
 	}
 
-	const auto seed{d_rand()};
-	const auto objnum{spit_powerup(LevelUniqueObjectState, LevelSharedSegmentState, LevelUniqueSegmentState, Vclip, *ConsoleObject, drop_type, seed)};
-	if (objnum == object_none)
+	/* What the dropped weapon carries: ammunition for the vulcan and
+	 * gauss cannons, the charge for the omega cannon.
+	 */
+	std::optional<uint32_t> count;
+	uint16_t vulcan_ammo_dropped{};
+	if (weapon_index_uses_vulcan_ammo(Primary_weapon)) {
+
+		//if it's one of these, drop some ammo with the weapon
+		auto ammo{player_info.vulcan_ammo};
+#if DXX_BUILD_DESCENT == 2
+		const auto HAS_VULCAN_AND_GAUSS_FLAGS{HAS_VULCAN_FLAG | HAS_GAUSS_FLAG};
+		if ((player_info.primary_weapon_flags & HAS_VULCAN_AND_GAUSS_FLAGS) == HAS_VULCAN_AND_GAUSS_FLAGS)
+			ammo /= 2;		//if both vulcan & gauss, drop half
+#endif
+		vulcan_ammo_dropped = ammo;
+		count = ammo;
+	}
+#if DXX_BUILD_DESCENT == 2
+	else if (Primary_weapon == primary_weapon_index::omega) {
+
+		//dropped weapon has current energy
+		count = static_cast<uint32_t>(player_info.Omega_charge);
+	}
+#endif
+
+	/* A client asks the host to create it (protocol v2 stage 3); the host
+	 * and a game without the network create it here.
+	 */
+	if (net_objects_active() && !multi_i_am_master())
 	{
-		HUD_init_message(HM_DEFAULT, "Failed to drop %s!", weapon_name);
-		return;
+		if (!net_objects_request_drop(drop_type, count.value_or(0)))
+		{
+			HUD_init_message(HM_DEFAULT, "Failed to drop %s!", weapon_name);
+			return;
+		}
+	}
+	else
+	{
+		const auto seed{d_rand()};
+		const auto objnum{spit_powerup(LevelUniqueObjectState, LevelSharedSegmentState, LevelUniqueSegmentState, Vclip, *ConsoleObject, drop_type, seed)};
+		if (objnum == object_none)
+		{
+			HUD_init_message(HM_DEFAULT, "Failed to drop %s!", weapon_name);
+			return;
+		}
+		if (count)
+			objnum->ctype.powerup_info.count = static_cast<int>(*count);
+		net_objects_announce(objnum, static_cast<uint8_t>(Player_num), false);
 	}
 
 	HUD_init_message(HM_DEFAULT, "%s dropped!", weapon_name);
 #if DXX_BUILD_DESCENT == 2
 	digi_play_sample (sound_effect::SOUND_DROP_WEAPON,F1_0);
 #endif
-
-	if (weapon_index_uses_vulcan_ammo(Primary_weapon)) {
-
-		//if it's one of these, drop some ammo with the weapon
-		auto &plr_vulcan_ammo{player_info.vulcan_ammo};
-		auto ammo{plr_vulcan_ammo};
-#if DXX_BUILD_DESCENT == 2
-		const auto HAS_VULCAN_AND_GAUSS_FLAGS{HAS_VULCAN_FLAG | HAS_GAUSS_FLAG};
-		if ((player_info.primary_weapon_flags & HAS_VULCAN_AND_GAUSS_FLAGS) == HAS_VULCAN_AND_GAUSS_FLAGS)
-			ammo /= 2;		//if both vulcan & gauss, drop half
-#endif
-
-		plr_vulcan_ammo -= ammo;
-		objnum->ctype.powerup_info.count = ammo;
-	}
-#if DXX_BUILD_DESCENT == 2
-	else if (Primary_weapon == primary_weapon_index::omega) {
-
-		//dropped weapon has current energy
-		objnum->ctype.powerup_info.count = player_info.Omega_charge;
-	}
-#endif
-
-	if (+(Game_mode & GM_MULTI))
-		multi_send_drop_weapon(objnum,seed);
+	player_info.vulcan_ammo -= vulcan_ammo_dropped;
 
 	if (Primary_weapon == primary_weapon_index::laser)
 	{
@@ -1774,22 +1792,30 @@ void DropSecondaryWeapon (player_info &player_info)
 #endif
 	}
 
-	seed = d_rand();
-
-	auto objnum = spit_powerup(LevelUniqueObjectState, LevelSharedSegmentState, LevelUniqueSegmentState, Vclip, *ConsoleObject, weapon_drop_id, seed);
-
 	const auto weapon_name = SECONDARY_WEAPON_NAMES(Secondary_weapon);
-	if (objnum == object_none)
+	/* A client asks the host to create it (protocol v2 stage 3). */
+	if (net_objects_active() && !multi_i_am_master())
 	{
-		HUD_init_message(HM_DEFAULT, "Failed to drop %s%s!", weapon_name, sub_ammo > 1 ? "s" : "");
-		return;
+		if (!net_objects_request_drop(weapon_drop_id, 0))
+		{
+			HUD_init_message(HM_DEFAULT, "Failed to drop %s%s!", weapon_name, sub_ammo > 1 ? "s" : "");
+			return;
+		}
+	}
+	else
+	{
+		seed = d_rand();
+		const auto objnum = spit_powerup(LevelUniqueObjectState, LevelSharedSegmentState, LevelUniqueSegmentState, Vclip, *ConsoleObject, weapon_drop_id, seed);
+		if (objnum == object_none)
+		{
+			HUD_init_message(HM_DEFAULT, "Failed to drop %s%s!", weapon_name, sub_ammo > 1 ? "s" : "");
+			return;
+		}
+		net_objects_announce(objnum, static_cast<uint8_t>(Player_num), false);
 	}
 #if DXX_BUILD_DESCENT == 2
 	digi_play_sample(sound_effect::SOUND_DROP_WEAPON, F1_0);
 #endif
-
-	if (+(Game_mode & GM_MULTI))
-		multi_send_drop_weapon(objnum,seed);
 
 	secondary_ammo -= sub_ammo;
 	HUD_init_message(HM_DEFAULT, "Dropped %s%s, leaving %u on board!", weapon_name, sub_ammo > 1 ? "s" : "", secondary_ammo);

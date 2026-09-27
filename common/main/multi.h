@@ -174,8 +174,11 @@ static inline player_ship_color get_team_color(const team_number tnum)
  * changes the wire format, so that mismatched experimental builds refuse each
  * other instead of misbehaving.  It equals NET_V2_PROTO_VERSION in net_v2.h.
  * 101: stage 2 (state bundle, INPUT, interpolation).
+ * 102: stage 3 (object ids, host-decided pickups and drops, INVENTORY).
+ * 103: stage 3 review fixes (PICKUP_GRANT `life`, MULTI_PLAYER_DERES mine
+ * counts).
  */
-constexpr std::uint16_t MULTI_PROTO_VERSION{101};
+constexpr std::uint16_t MULTI_PROTO_VERSION{103};
 // PROTOCOL VARIABLES AND DEFINES - END
 
 /* The network tick rate (positions per second, and the pacing of every
@@ -452,7 +455,6 @@ void multi_send_destroy_controlcen(objnum_t objnum, playernum_t player);
 void multi_send_kill(vmobjptridx_t objnum);
 void multi_send_remobj(vmobjidx_t objnum);
 void multi_send_door_open(vcsegidx_t segnum, sidenum_t side, wall_flags flag);
-void multi_send_drop_weapon(vmobjptridx_t objnum,int seed);
 void multi_reset_player_object(object &objp);
 }
 #endif
@@ -506,7 +508,6 @@ static inline void multi_send_endlevel_start(multi_endlevel_type)
 }
 #endif
 void multi_send_player_deres(deres_type_t type);
-void multi_send_create_powerup(powerup_type_t powerup_type, vcsegidx_t segnum, vcobjidx_t objnum, const vms_vector &pos);
 }
 void multi_send_play_sound(sound_effect sound_num, fix volume, sound_stack once);
 void multi_send_reappear();
@@ -522,7 +523,6 @@ void multi_send_score(void);
 void multi_send_trigger(trgnum_t trigger);
 #if DXX_BUILD_DESCENT == 2
 namespace dsx {
-void multi_send_flags(playernum_t);
 struct marker_message_text_t;
 void multi_send_drop_marker(unsigned player, const vms_vector &position, player_marker_index messagenum, const marker_message_text_t &text);
 void multi_send_markers();
@@ -536,7 +536,6 @@ void multi_send_guided_release(const object_base &miss);
 [[nodiscard]]
 uint8_t multi_guided_generation(playernum_t pnum);
 void multi_send_orb_bonus(playernum_t pnum, uint8_t);
-void multi_send_got_orb(playernum_t pnum);
 void multi_send_effect_blowup(vcsegidx_t segnum, sidenum_t side, const vms_vector &pnt);
 #ifndef RELEASE
 void multi_add_lifetime_kills(int count);
@@ -549,7 +548,6 @@ void multi_send_bounty( void );
 void multi_consistency_error(int reset);
 #ifdef DXX_BUILD_DESCENT
 namespace dsx {
-void multi_send_vulcan_weapon_ammo_adjust(const vmobjptridx_t objnum);
 void multi_send_hostage_door_status(vcwallptridx_t wallnum);
 void multi_prep_level_objects(const d_powerup_info_array &Powerup_info, const d_vclip_array &Vclip);
 void multi_prep_level_player();
@@ -576,11 +574,6 @@ namespace dsx {
 void multi_initiate_save_game();
 void multi_initiate_restore_game();
 void multi_execute_save_game(d_game_unique_state::save_slot slot, const d_game_unique_state::savegame_description &desc, std::ranges::subrange<const player *> player_range);
-#if DXX_BUILD_DESCENT == 1
-static inline void multi_send_got_flag (playernum_t) {}
-#elif DXX_BUILD_DESCENT == 2
-void multi_send_got_flag (playernum_t);
-#endif
 }
 #endif
 
@@ -642,7 +635,6 @@ extern multi_macro_message_index multi_defining_message;
 
 vms_vector multi_get_vector(std::span<const uint8_t, 12> buf);
 void multi_put_vector(uint8_t *buf, const vms_vector &v);
-unsigned multi_create_powerup_seed(const vms_vector &pos);
 team_number multi_get_team_from_player(uint8_t, playernum_t pnum);
 
 }
@@ -737,7 +729,6 @@ extern bool MultiLevelInv_AllowSpawn(powerup_type_t powerup_type);
 netflag_flag multi_powerup_is_allowed(powerup_type_t id, const netflag_flag AllowedItems);
 netflag_flag multi_powerup_is_allowed(powerup_type_t id, const netflag_flag AllowedItems, const netflag_flag SpawnGrantedItems);
 void show_netgame_info(const netgame_info &netgame);
-void multi_send_player_inventory(multiplayer_data_priority priority);
 const char *multi_common_deny_save_game(const fvcobjptr &vcobjptr, std::ranges::subrange<const player *> player_range);
 const char *multi_interactive_deny_save_game(const fvcobjptr &vcobjptr, std::ranges::subrange<const player *> player_range, const d_level_unique_control_center_state &);
 void multi_check_for_killgoal_winner(const d_robot_info_array &Robot_info);
@@ -993,10 +984,16 @@ bool net_interp_player_lagging(playernum_t pnum);
 void net_interp_reset();
 /* Put player `pnum`'s ship where its newest snapshot has it (not at the
  * delayed render time), for a message that acts at the ship's position
- * now: MULTI_PLAYER_DERES, MULTI_DROP_WEAPON, MULTI_DROP_FLAG.  The next
+ * now: MULTI_PLAYER_DERES, and on the host a DROP_REQUEST.  The next
  * net_interp_apply_all puts it back on its interpolated path.
  */
 void net_interp_snap_to_newest(playernum_t pnum);
+/* Where player `pnum`'s newest snapshot has its ship, and how fast it
+ * moves there (the host's range check of a pickup request).  False if
+ * there is no snapshot.
+ */
+[[nodiscard]]
+bool net_interp_newest_position(playernum_t pnum, vms_vector &pos, fix &speed);
 /* object_move_one, for an object net_interp_drives: the object
  * collisions along the path a remote ship was moved this frame
  * (phys_sweep_objects).
@@ -1007,6 +1004,67 @@ void net_interp_sweep_driven(const d_robot_info_array &Robot_info, vmobjptridx_t
  * the ship moves on (the flash object itself does not move).
  */
 void net_interp_carry_flash(vcobjptridx_t ship, vcobjptridx_t flash);
+
+/* Object authority and pickups (similar/main/net_objects.cpp,
+ * Documentation/network-protocol-v2.md sections 6.1-6.4, stage 3).  In
+ * a network game the host decides every pickup, creates and removes
+ * every powerup and drops the eggs of dead and departed players; every
+ * machine names a powerup by the same net id.  Nothing here acts outside
+ * a network game.
+ */
+/* Level start, every machine: forget the old ids and give every powerup
+ * of the level its level id (after multi_prep_level_objects).
+ */
+void net_objects_level_start();
+/* A join in progress: the snapshot replaces the level's objects. */
+void net_objects_snapshot_begin();
+void net_objects_snapshot_bind(vmobjptridx_t obj, uint16_t netid);
+/* The host, writing a snapshot: the id of an object (0xffff if none). */
+[[nodiscard]]
+uint16_t net_objects_netid_of(vcobjptridx_t obj);
+/* The host: player `pnum` joins in progress; its inventory starts anew. */
+void net_objects_host_join(playernum_t pnum);
+/* Once per frame, from multi_do_frame. */
+void net_objects_frame();
+/* A stage 3 message (net_v2_session.h ids 0x20-0x26, 0x3b, 0x47) from
+ * `from` (a client, on the host; the host, on a client).
+ */
+void net_objects_receive(playernum_t from, uint8_t type, std::span<const uint8_t> payload);
+/* The local ship touched a powerup.  True if the pickup is handled by
+ * the object authority (asked for, or decided on the host); false for an
+ * object without a net id, which keeps the v1 handling.
+ */
+bool net_objects_touch(vmobjptridx_t powerup);
+/* The host created a powerup (respawn, used item, drop): give it an id
+ * and announce it.  `owner` is the player who spat it (it cannot take it
+ * back for 2 s) or 0xff; `appear` shows the appearance effect (a
+ * respawned item).
+ */
+void net_objects_announce(vmobjptridx_t obj, uint8_t owner, bool appear);
+/* The host: player `pnum` died or left; drop what it carried (once until
+ * it reappears).
+ */
+void net_objects_host_drop_player_eggs(playernum_t pnum);
+/* Player `pnum` reappeared (MULTI_REAPPEAR): it may be dropped again. */
+void net_objects_player_reappeared(playernum_t pnum);
+/* The local player sent its MULTI_PLAYER_DERES: its life ended (grants
+ * for it that arrive later are not applied).
+ */
+void net_objects_own_deres();
+/* A client drops a weapon, missiles, a flag or an orb: ask the host to
+ * create it.  False if not sent.
+ */
+bool net_objects_request_drop(powerup_type_t id, uint32_t count);
+/* Send the local inventory now if it changed (before a pickup request, a
+ * drop and a death, so the host decides with the current inventory).
+ */
+void net_objects_flush_inventory();
+/* The host: send every player's inventory to everyone (the extras of a
+ * join in progress).
+ */
+void net_objects_send_all_inventories();
+[[nodiscard]]
+bool net_objects_active();
 
 }
 #endif

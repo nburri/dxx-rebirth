@@ -77,6 +77,12 @@ void net_destroy_controlcen_object(const d_robot_info_array &Robot_info, imobjpt
 int check_effect_blowup(const d_level_shared_destructible_light_state &LevelSharedDestructibleLightState, const d_vclip_array &Vclip, vmsegptridx_t seg, sidenum_t side, const vms_vector &pnt, const laser_parent &blower, int force_blowup_flag, int remote);
 void apply_damage_to_controlcen(const d_robot_info_array &Robot_info, vmobjptridx_t controlcen, fix damage, const object &who);
 void drop_player_eggs(vmobjptridx_t playerobj);
+/* The two halves of drop_player_eggs.  In a network game every machine
+ * arms the dead player's mines (seeded, from its copy of the inventory)
+ * and only the host drops the powerups, which it announces.
+ */
+void drop_player_armed_bombs(vmobjptridx_t playerobj);
+void drop_player_powerup_eggs(vmobjptridx_t playerobj);
 enum class volatile_wall_result : int8_t
 {
 	none = -1,

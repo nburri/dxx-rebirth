@@ -62,6 +62,15 @@ enum class session_msg : std::uint8_t
 	snapshot_objects = 0x15,
 	snapshot_game = 0x1a,
 	snapshot_end = 0x1c,
+	/* Stage 3, object authority (section 6.1-6.4, net_v2_objects.h). */
+	inventory = 0x20,
+	obj_create = 0x21,
+	obj_remove = 0x22,
+	pickup_request = 0x24,
+	pickup_grant = 0x25,
+	pickup_deny = 0x26,
+	drop_request = 0x3b,
+	obj_settle = 0x47,
 	/* v1 `endlevel_h` payload (without the upid byte), host to client. */
 	legacy_endlevel_host = 0x7c,
 	/* v1 `endlevel_c` payload (without upid and player number), client to

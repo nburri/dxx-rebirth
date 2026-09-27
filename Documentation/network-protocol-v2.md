@@ -1444,6 +1444,8 @@ Message type numbering: session 0x01–0x1F (§4), `INVENTORY` 0x20,
 `MARKER_TEXT` 0x3E, `MESSAGE` 0x3F, `RANK` 0x40, `ROBOT_KILLED` 0x41,
 `BOSS_ACTION` 0x42, `STOLEN_ITEMS` 0x43, `BUDDY_STATE` 0x44, `SAVE_GAME` 0x45,
 `RESTORE_GAME` 0x46, `ESCAPED` 0x1E, `LEVEL_STATUS` 0x1D, `LEVEL_END` 0x1F.
+Stage 3 adds `OBJ_SETTLE` 0x47 and does not use `OBJ_AMMO` 0x23 or
+`DROP_FLAG_REQUEST` 0x3C (§8, "Stage 3 as implemented").
 The table lives in `net_v2.h` as a `for_each_net_v2_message(VALUE)` macro
 with `(NAME, id, min_len, max_len, allowed_sender)` so the length and
 direction checks of §3.7 are table-driven like v1's `command_length`.
@@ -2002,6 +2004,239 @@ where the text was open or did not work as written:
   same place on all machines; death drops identical everywhere including with
   spawn grants; used items respawn once; pickup delay acceptable at 60 ms
   RTT; deny path (touch a missile while full) restores the object.
+
+#### Stage 3 as implemented
+
+The game-independent part (net ids and their tables, the pickup and drop
+rules, the host's copy of a client's inventory, the host's decision, the
+client's table of requests, the respawn rules, the range check and the
+wire layouts) is `common/main/net_v2_objects.h`, tested by
+`test-net-v2-authority`; the game side is `similar/main/net_objects.cpp`,
+with the hooks in `multi.cpp`, `collide.cpp`, `powerup.cpp`,
+`weapon.cpp`, `fireball.cpp`, `object.cpp` and `net_v2.cpp`.
+`MULTI_PROTO_VERSION` and `NET_V2_PROTO_VERSION` are 103 (102 was the
+first stage 3 playtest build; the review fixes added the grant's `life`
+and the mine counts of `MULTI_PLAYER_DERES`). Everything is
+active only in a network game (`net_objects_active`: `GM_NETWORK` and not
+playing back a demo); single player and demos run the old code paths.
+Differences from §6.1–§6.4 and decisions:
+
+- **Messages.** The stage 3 messages are session-level reliable messages
+  with the ids of §6.10 (`INVENTORY` 0x20, `OBJ_CREATE` 0x21, `OBJ_REMOVE`
+  0x22, `PICKUP_REQUEST` 0x24, `PICKUP_GRANT` 0x25, `PICKUP_DENY` 0x26,
+  `DROP_REQUEST` 0x3B) plus `OBJ_SETTLE` 0x47 (below). They share each
+  connection's ordered stream with `LEGACY_MDATA`, so their order with the
+  v1 records is kept (an `INVENTORY` before a `MULTI_PLAYER_DERES`, the
+  `OBJ_CREATE`s after it); they are accepted from a peer only when
+  `LEGACY_MDATA` would be, and are never relayed as they are: the host
+  answers or re-announces. `OBJ_AMMO` 0x23 and `DROP_FLAG_REQUEST` 0x3C
+  are not used (below).
+- **Net ids (§6.1).** As designed: level ids (bit 15 + object number)
+  are given by every machine to every powerup after
+  `multi_prep_level_objects` (which is deterministic, as v1 relied on);
+  the host's creations get dynamic ids with creator slot 0 from a counter
+  that skips ids still bound. A binding records the object's signature,
+  and a lookup also checks that the object is still a powerup that is not
+  about to die, so a reused object slot is never taken for the old
+  object. `netid_of`/`local_of` are a 64 K table of {object number,
+  signature} (256 KiB) and a per-slot array. Only powerups get ids in
+  stage 3: mines are weapons, which stage 4 announces with `FIRE`;
+  robots are deferred (decision 3). The v1 `(owner, remote objnum)`
+  mapping stays for the messages that still use it (fire, robots).
+- **Inventory authority in stage 3.** A client still spends its own
+  ammunition and energy and takes its own damage until stage 4, so the
+  host cannot simply own the inventory. Instead the client reports it
+  (`INVENTORY`, client → host) and the host keeps a copy that is the
+  newest report *plus every grant it sent after that report*: each grant
+  to a player is numbered, the client counts the grants it received and
+  sends the count with each report, and the host applies the grants the
+  report does not include yet (`inventory_mirror`). A report sent before a
+  grant arrived therefore never makes the host forget the grant, and no
+  grant is counted twice. The host decides pickups and drops with this
+  copy, writes it into its object of that player (so `MultiLevelInv`
+  counts exact inventories, grants in flight included) and relays it to
+  everyone else as `INVENTORY` (host → all). `INVENTORY` is 36 bytes:
+  `pid`, the grant count `seq` (u16), the fields of §6.2 without the
+  reserved byte, `has_flag` being the `has_team_flag` bit of
+  `powerup_flags`, plus `shields`, `energy`, `omega_charge` (i32 each)
+  and `faking_invul` (u8: invulnerable only after a respawn, which may
+  take a real invulnerability powerup). A player sends it when its
+  inventory changes, at once for items and flags and at most every
+  100 ms when only ammunition, energy or shields changed, and always right
+  before a pickup request, a drop request and a `MULTI_PLAYER_DERES`, so
+  that the host decides with the inventory as it is. It replaces
+  `MULTI_PLAYER_INV` (three per second), `MULTI_FLAGS` (the headlight),
+  `MULTI_GOT_FLAG` and `MULTI_GOT_ORB` (the others' HUD message and sound
+  now come from the grant). The joining player gets every player's
+  inventory in the extras (step 2, instead of the flags and the host's
+  inventory).
+- **Pickups (§6.2).** A client first checks with the same rules
+  (`evaluate_pickup`, the multiplayer cases of `do_powerup`) whether it
+  can use the powerup; if not it only shows the "already have" message
+  and sends nothing, so the powerup stays in place everywhere (the deny
+  path of the playtest checklist). Otherwise it sends its inventory and
+  `PICKUP_REQUEST` {`netid`, powerup id} (3 bytes; the id guards against
+  a stale request naming a reused id) and hides the powerup (render type
+  none) until the answer. `view_time` is left out: without the position
+  history of stage 4 the host checks the range against the requester's
+  newest snapshot, with 6 units of slack plus a quarter of a second of the
+  ship's speed (`pickup_in_range`). The host grants the first valid
+  request (`decide_pickup`: the object exists and is of the requested
+  type, the requester is playing, alive and has not had its items
+  dropped, in range, not the spitter within 2 s of spitting it, and can
+  use it); every later request finds the object gone (or a cannon with
+  less ammunition) and is denied. `PICKUP_GRANT` (14 bytes: `pid`,
+  `netid`, powerup id, `count` u32 = what the player receives,
+  `remaining` u32, flags bit 0 = removed, `life` u8, below) goes to everyone and also
+  removes the object or sets the ammunition left in a cannon, so the
+  design's `OBJ_REMOVE` and `OBJ_AMMO` for a pickup are folded into it
+  (one message, no ordering question). The requester applies it with
+  `do_powerup(obj, granted)`, which skips the spat check (the host made
+  it) and sends nothing. The v1 "someone else is closer" guess in
+  `do_powerup` is kept only for its local path, i.e. for objects without
+  a net id that are still taken the v1 way (robot eggs, the thief's and
+  guide-bot's eggs), so that path is not weaker than v1. **Lives.** A
+  player's life ends when its items are dropped: the host counts it in
+  its copy (`inventory_mirror::life`, advanced by each drop, 0 again for
+  a new session) and the client in `own_life` (advanced by the first
+  deres it sends per life, 0 again at level start and join); every grant
+  carries the host's count for the player. A grant that arrives while
+  the requester is dead but has not sent its deres yet (it asked just
+  before dying) goes into its inventory without effects (shields and
+  energy excepted), so that the report sent with the deres includes it,
+  as the host's copy does; the host drops it with the rest. A grant for
+  an earlier life (the answer arrived after the deres, possibly after the
+  respawn) is counted but not applied: the item was in the host's drop
+  of that life, and applying it to the new ship would duplicate it.
+  `PICKUP_DENY` (`netid`, reason) makes the requester show the
+  powerup again and not ask for it for 0.5 s; without an answer in 1.5 s
+  (a link about to time out) it shows it again as well. Keys are not
+  arbitrated: in a multiplayer game they stay in the level and every
+  player may take one, as before.
+- **The host's own pickups** go through the same decision function, at
+  the moment its ship touches the powerup, and the effect is
+  `do_powerup`'s; the host then sends the same `PICKUP_GRANT`. There is no
+  time-based tie-break between the host's touch and a client's request
+  still on its way: whichever the host processes first wins. Waiting for
+  requests that might carry an earlier touch time would delay every
+  pickup of the host's player by the largest round trip, and reversing a
+  grant after its effect is not possible; the host has no other
+  advantage (no check is skipped for it, and it cannot take a powerup
+  another player already has).
+- **Vulcan and gauss cannons.** As in `do_powerup`: a player without the
+  cannon takes it with the ammunition that fits, and it is removed; a
+  player with the cannon takes only ammunition, and the cannon stays with
+  the rest, even when empty. `count` in the grant is the ammunition taken
+  (the omega charge for the omega cannon); the requester puts it in its
+  copy of the object before `do_powerup`.
+- **Creation and removal (§6.3).** Only the host creates powerups:
+  `maybe_drop_net_powerup` (respawns, used items; now host-only whatever
+  the caller), death and disconnect drops, and the drops players ask for.
+  `OBJ_CREATE` has the designed 36 bytes with two changes: the velocity is
+  exact (12 bytes, decision 5: positions are exact, and a quantised
+  velocity would send the object elsewhere) instead of the orientation,
+  which a powerup does not have, and `count` is a u32 (the omega charge is
+  up to 65536). Its `pflags` byte is `appear` (show the appearance
+  effect), `player_dropped` and `spat` (with `owner`: that player cannot
+  take it back for 2 s). The `multi_create_powerup_seed` and every other
+  shared seed for powerup velocities are gone. Receivers create the
+  object with the given state and never let it expire: the host decides
+  when a powerup's life ends and sends `OBJ_REMOVE` (reason `expired`:
+  receivers show it disappearing). The host scans its bound objects every
+  frame; any that disappeared otherwise is removed everywhere with reason
+  `gone`. Clients never remove a powerup on their own.
+- **`OBJ_SETTLE` (new, 0x47, 16 bytes: `netid`, segment, position).**
+  Physics depends on the frame rate, so a dropped powerup that bounces
+  and slides comes to rest at slightly different places on different
+  machines. When a powerup that was moving comes to rest on the host
+  (below 1 unit/s) the host stops it and sends its final position, and
+  every machine puts it there: every powerup is at the same place
+  everywhere once it lies still.
+- **Death and disconnect drops (§6.4).** The dying player sends its
+  `INVENTORY` and then `MULTI_PLAYER_DERES`, which is now 5 bytes (player,
+  explode/drop, smart mines, proximity bombs): the inventory and object
+  list half is gone. Every machine (the dying one included) arms the dead
+  player's mines with the v1 seed (`drop_player_armed_bombs`: mines are
+  weapons, stage 4) from the two counts in the deres, which are the dying
+  player's own: the host's copy may include a grant still on its way to
+  the dying player, and arming from different counts would give
+  different mines and random sequences. Only the host drops the powerups
+  (`drop_player_powerup_eggs`, from its copy, with the spawn grant
+  subtracted once) and announces each with `OBJ_CREATE`. The host does
+  the same when a playing player disconnects without a deres (timeout,
+  kick). The drop happens once per life: a player's items are not dropped
+  again, and its reports are ignored, until its `MULTI_REAPPEAR`. After
+  the drop the host empties both its copy and its object of the player,
+  so `MultiLevelInv` does not count the dropped items twice and nothing
+  is left in the slot for a later joiner.
+- **Drops.** A client that drops a weapon, missiles, a flag or an orb
+  changes its own inventory as before but does not create the object; it
+  sends `DROP_REQUEST` {powerup id, `count`} (5 bytes, one message for
+  what the design split into `DROP_WEAPON_REQUEST` and
+  `DROP_FLAG_REQUEST`; the powerup says which), after its inventory. The
+  host checks it against its copy (`evaluate_drop`: the player has it,
+  a cannon carries no more ammunition than the player has), takes it out
+  of the copy, spits it from the ship's newest snapshot (as stage 2 did
+  for `MULTI_DROP_WEAPON`) and announces it with the dropper as `owner`.
+  The host's own drops are spat locally and announced.
+- **Respawn bookkeeping.** `MultiLevelInv_*` was already host-only; its
+  rules moved to `respawn_allowed` and `respawn_timer` and are tested.
+  The counts are now exact because the host's copies include the grants
+  in flight.
+- **Join in progress.** Each `SNAPSHOT_OBJECTS` entry carries the object's
+  net id (u16, 0xFFFF for none) after the remote object number; the
+  joiner binds it to the object number it placed the object at and makes
+  it immortal (the host decides). A powerup granted in the frame the
+  snapshot is written is left out (it is flagged to die and no longer has
+  an id); only powerups are filtered that way, so a ship hit lethally in
+  that frame (also flagged until its death sequence starts) is still
+  sent. The host starts an empty copy of the joiner's inventory (a new
+  player or one rejoining its slot alike), never one taken from the
+  slot's ship, whose items were dropped when its player left; the
+  joiner's first report, in its first frame and before any request,
+  fills it.
+- **Removed** v1 records: `MULTI_CREATE_POWERUP`, `MULTI_DROP_WEAPON`,
+  `MULTI_DROP_FLAG`, `MULTI_VULWPN_AMMO_ADJ`, `MULTI_PLAYER_INV`,
+  `MULTI_FLAGS`, `MULTI_GOT_FLAG`, `MULTI_GOT_ORB` (the record numbers
+  after them move down). **Kept** for objects without a net id, which
+  exist only in the robot games that are deferred: `MULTI_REMOVE_OBJECT`
+  (hostages, robot eggs picked up the v1 way) and
+  `MULTI_CREATE_ROBOT_POWERUPS` (robot eggs).
+- **Not yet.** The host does not validate what a client spends (stage 4
+  moves ammunition, energy and shields to the host); mines get no net id
+  (stage 4); robot eggs and hostages keep the v1 handling (deferred robot
+  games); the range check has no rewind (stage 4).
+- **Tested** by `test-net-v2-authority`: id encoding; the table (bind,
+  rebind, signatures, invalid binds); allocation, skipping bound ids,
+  wrap and reuse after removal, exhaustion; every pickup rule (boosts,
+  lasers and super lasers, primaries, omega charge, missiles with and
+  without the ammo rack, both cannon cases, vulcan ammunition, flag items,
+  CTF teams, hoard orbs, keys not arbitrated); every drop rule; the
+  inventory copy under grants in flight, stale reports, drops, death,
+  overflow and count wrap; the life counts of host and client; the order of the host's checks (gone, dead,
+  range, spat for the spitter only, cannot use); the client's request
+  table (deny, cooldown, timeout, eviction); the respawn rules (an item
+  used up respawns once, not while carried, not when it came back by
+  itself); the range check; round trips and malformed sizes of every
+  message; and a model of a host and three clients over ordered channels
+  with random delays: two ships touching one weapon in the same frame in
+  both orders and the host against a client (exactly one grant, the
+  other sees it vanish), the deny path (nothing sent, the object stays),
+  two packs within one round trip with room for one, a request for an
+  expired object, a repeated request after a timeout, a reused id, three
+  players sharing one cannon's ammunition (nothing created or lost) and
+  a new cannon taken with what fits, 30 random games of 3000 steps with
+  pickups, simultaneous touches, spending, drops, creations and
+  expiries, deaths and respawns (every machine ends with the host's
+  objects, no consumed object granted twice, no plasma cannon created or
+  lost by a death, every copy and life equal to its client's after the
+  last report), a grant that arrives after the deres, before and after
+  the respawn (not applied, dropped once), a slot rejoined after its
+  player's drop (an empty copy: nothing dropped twice), and a joiner's snapshot (every id names the same object
+  on the joiner as on the host). Only playable: everything that touches
+  real objects and the feel (the round trip before a pickup shows, the
+  hidden object, the effects and messages), the settle correction, the
+  mines of a death, and CTF/hoard rounds.
 
 ### Stage 4 — Firing, hits, damage, kills, respawn with lag compensation
 

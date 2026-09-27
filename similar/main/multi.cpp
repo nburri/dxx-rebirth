@@ -42,6 +42,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "multi.h"
 #include "multiinternal.h"
 #include "net_v2_state.h"
+#include "net_v2_objects.h"
 #include "object.h"
 #include "player.h"
 #include "laser.h"
@@ -147,7 +148,6 @@ static char hoard_ham_basename[]{"hoard.ham"};
 
 static void multi_do_capture_bonus(const playernum_t pnum);
 static void multi_do_orb_bonus(const playernum_t pnum, const multiplayer_rspan<multiplayer_command_t::MULTI_ORB_BONUS> buf);
-static void multi_send_drop_flag(vmobjptridx_t objnum,int seed);
 
 }
 
@@ -255,17 +255,6 @@ void multi_put_vector(uint8_t *const buf, const vms_vector &v)
 	PUT_INTEL_INT(&buf[0], lv.x);
 	PUT_INTEL_INT(&buf[4], lv.y);
 	PUT_INTEL_INT(&buf[8], lv.z);
-}
-
-/* Seed for the random velocity that `drop_powerup` gives a powerup
- * created by MULTI_CREATE_POWERUP.  The sender and every receiver must
- * derive the same seed, or each machine sends the powerup in a different
- * direction and it comes to rest at a different position.  The position
- * is already in the packet, so derive the seed from it.
- */
-unsigned multi_create_powerup_seed(const vms_vector &pos)
-{
-	return static_cast<unsigned>(pos.x ^ pos.y ^ pos.z);
 }
 
 team_number multi_get_team_from_player(uint8_t team_vector, const playernum_t pnum)
@@ -1062,7 +1051,7 @@ static void multi_compute_kill(const d_robot_info_array &Robot_info, const imobj
 
 window_event_result multi_do_frame()
 {
-	static fix64 last_gmode_time = 0, last_inventory_time = 0, last_repo_time = 0;
+	static fix64 last_gmode_time = 0, last_repo_time = 0;
 
 	if (!(Game_mode & GM_MULTI) || Newdemo_state == ND_STATE_PLAYBACK)
 	{
@@ -1080,14 +1069,13 @@ window_event_result multi_do_frame()
 		last_gmode_time = timer_query();
 	}
 
+	/* Object authority (protocol v2 stage 3): removals, resting
+	 * positions, pickups asked for, and this player's INVENTORY, which is
+	 * sent on change instead of three times per second.
+	 */
+	net_objects_frame();
 	if (Network_status == network_state::playing)
 	{
-		// Send out inventory three times per second
-		if (timer_query() >= last_inventory_time + (F1_0/3))
-		{
-			multi_send_player_inventory(multiplayer_data_priority::_0);
-			last_inventory_time = timer_query();
-		}
 		// Repopulate the level if necessary
 		if (timer_query() >= last_repo_time + (F1_0/2))
 		{
@@ -1140,14 +1128,12 @@ void multi_leave_game()
 		 * cause all guests to be ejected from the game, so no players would
 		 * have time to pick up any items dropped by this block.
 		 */
-		Net_create_loc = 0;
+		/* The host drops what this player carries when the deres
+		 * arrives (protocol v2 stage 3).
+		 */
 		const auto cobjp = vmobjptridx(get_local_player().objnum);
 		auto &player_info = cobjp->ctype.player_info;
-		if (!player_info.Player_eggs_dropped)
-		{
-			player_info.Player_eggs_dropped = true;
-			drop_player_eggs(cobjp);
-		}
+		player_info.Player_eggs_dropped = true;
 		multi_send_player_deres(deres_drop);
 	}
 
@@ -1756,17 +1742,14 @@ static void multi_do_reappear(const playernum_t pnum, const multiplayer_rspan<mu
 
 	multi_make_ghost_player(pnum);
 	create_player_appearance_effect(Vclip, obj);
+	net_objects_player_reappeared(pnum);
 }
 
 static void multi_do_player_deres(const d_robot_info_array &Robot_info, object_array &Objects, const playernum_t pnum, const multiplayer_rspan<multiplayer_command_t::MULTI_PLAYER_DERES> buf)
 {
 	auto &vmobjptridx = Objects.vmptridx;
-	auto &vmobjptr = Objects.vmptr;
 	// Only call this for players, not robots.  pnum is player number, not
 	// Object number.
-
-	int count;
-	char remote_created;
 
 #ifdef NDEBUG
 	if (pnum >= N_players)
@@ -1775,71 +1758,29 @@ static void multi_do_player_deres(const d_robot_info_array &Robot_info, object_a
 	Assert(pnum < N_players);
 #endif
 
-
-	// Stuff the Players structure to prepare for the explosion
-
-	count = 3;
-#if DXX_BUILD_DESCENT == 1
-#define GET_WEAPON_FLAGS(buf,count)	buf[count++]
-#elif DXX_BUILD_DESCENT == 2
-#define GET_WEAPON_FLAGS(buf,count)	(count += sizeof(uint16_t), GET_INTEL_SHORT(&buf[(count - sizeof(uint16_t))]))
-#endif
-	/* The explosion and the eggs where the owner's ship is, not at its
+	/* The explosion and the mines where the owner's ship is, not at its
 	 * delayed interpolated pose (v1 sent a MULTI_POSITION first).
 	 */
 	net_interp_snap_to_newest(pnum);
 	const auto &&objp = vmobjptridx(vcplayerptr(pnum)->objnum);
 	auto &player_info = objp->ctype.player_info;
-	player_info.primary_weapon_flags = GET_WEAPON_FLAGS(buf, count);
-	player_info.laser_level = laser_level{buf[count]};
-	count++;
-	if (game_mode_hoard(Game_mode))
-		player_info.hoard.orbs = buf[count];
-	count++;
-
-	auto &secondary_ammo = player_info.secondary_ammo;
-	secondary_ammo[secondary_weapon_index::homing] = buf[count];                count++;
-	secondary_ammo[secondary_weapon_index::concussion] = buf[count];count++;
-	secondary_ammo[secondary_weapon_index::smart] = buf[count];         count++;
-	secondary_ammo[secondary_weapon_index::mega] = buf[count];          count++;
-	secondary_ammo[secondary_weapon_index::proximity] = buf[count]; count++;
-
+	/* Protocol v2 stage 3: the dead player's inventory came in the
+	 * INVENTORY sent right before this message.  Every machine arms its
+	 * mines (seeded, as before) from the mine counts in this message,
+	 * which are the dying player's own (the host's copy may include
+	 * grants still on their way to it); only the host drops the
+	 * powerups, from its copy of the inventory, and announces them with
+	 * OBJ_CREATE.
+	 */
+	{
+		auto &secondary_ammo{player_info.secondary_ammo};
 #if DXX_BUILD_DESCENT == 2
-	secondary_ammo[secondary_weapon_index::flash] = buf[count]; count++;
-	secondary_ammo[secondary_weapon_index::guided]    = buf[count]; count++;
-	secondary_ammo[secondary_weapon_index::smart_mine]= buf[count]; count++;
-	secondary_ammo[secondary_weapon_index::mercury] = buf[count]; count++;
-	secondary_ammo[secondary_weapon_index::earthshaker] = buf[count]; count++;
+		secondary_ammo[secondary_weapon_index::smart_mine] = buf[3];
 #endif
-
-	player_info.vulcan_ammo = GET_INTEL_SHORT(&buf[count]); count += 2;
-	player_info.powerup_flags = player_flags(GET_INTEL_INT(&buf[count]));    count += 4;
-
-	//      objp->phys_info.velocity = *reinterpret_cast<vms_vector *>(buf+16); // 12 bytes
-	//      objp->pos = *reinterpret_cast<vms_vector *>(buf+28);                // 12 bytes
-
-	remote_created = buf[count++]; // How many did the other guy create?
-
-	Net_create_loc = 0;
-	drop_player_eggs(objp);
-
-	// Create mapping from remote to local numbering system
-
-	// We now handle this situation gracefully, Int3 not required
-	//      if (Net_create_loc != remote_created)
-	//              Int3(); // Probably out of object array space, see Rob
-
-	range_for (const auto i, partial_const_range(Net_create_objnums, std::min(Net_create_loc, static_cast<unsigned>(remote_created))))
-	{
-		const int16_t s{GET_INTEL_SHORT<int16_t>(&buf[count])};
-		if (s > 0)
-			map_objnum_local_to_remote(i, s, pnum);
-		count += 2;
+		secondary_ammo[secondary_weapon_index::proximity] = buf[4];
 	}
-	range_for (const auto i, partial_const_range(Net_create_objnums, remote_created, Net_create_loc))
-	{
-		vmobjptr(i)->flags |= OF_SHOULD_BE_DEAD;
-	}
+	drop_player_armed_bombs(objp);
+	net_objects_host_drop_player_eggs(pnum);
 
 	if (buf[2] == deres_explode)
 	{
@@ -2018,6 +1959,10 @@ void multi_disconnect_player(const playernum_t pnum)
 
 		if (Network_status == network_state::playing)
 		{
+			/* The host drops what a player who left without its deres
+			 * (timed out, kicked) still carried (protocol v2 stage 3).
+			 */
+			net_objects_host_drop_player_eggs(pnum);
 			multi_make_player_ghost(pnum);
 			multi_strip_robots(pnum);
 		}
@@ -2195,46 +2140,6 @@ static void multi_do_controlcen_fire(const multiplayer_rspan<multiplayer_command
 		return;
 	const auto &&objp = *uobj;
 	Laser_create_new_easy(LevelSharedRobotInfoState.Robot_info, to_target, objp->ctype.reactor_info.gun_pos[gun_num], objp, weapon_id_type::CONTROLCEN_WEAPON_NUM, weapon_sound_flag::audible);
-}
-
-static void multi_do_create_powerup(fvmsegptridx &vmsegptridx, const playernum_t pnum, const multiplayer_rspan<multiplayer_command_t::MULTI_CREATE_POWERUP> buf)
-{
-	auto &LevelUniqueControlCenterState = LevelUniqueObjectState.ControlCenterState;
-	int count{1};
-	if (Network_status == network_state::endlevel || LevelUniqueControlCenterState.Control_center_destroyed)
-		return;
-
-	count++;
-	const uint8_t powerup_type{buf[count++]};
-	if (powerup_type >= MAX_POWERUP_TYPES)
-		return;
-	/* Casting the untrusted network input to segnum_t is safe here, since it
-	 * is immediately passed to `check_untrusted`, which validates that the
-	 * index is reasonable.
-	 */
-	const auto &&useg = vmsegptridx.check_untrusted(segnum_t{GET_INTEL_SHORT(&buf[count])});
-	if (!useg)
-		return;
-	const auto &&segnum = *useg;
-	count += 2;
-	const objnum_t objnum{GET_INTEL_SHORT(&buf[count])}; count += 2;
-	const auto new_pos = multi_get_vector(buf.subspan<1 + 1 + 1 + 2 + 2, 12>());
-	count+=sizeof(vms_vector);
-	/* Continue this client's own random sequence after the drop, so that
-	 * the seed from the packet does not make every receiver's later
-	 * random values identical.
-	 */
-	const unsigned resume_seed{(static_cast<unsigned>(d_rand()) << 15) ^ static_cast<unsigned>(d_rand())};
-	d_srand(multi_create_powerup_seed(new_pos));
-	const auto &&my_objnum{drop_powerup(LevelUniqueObjectState, LevelSharedSegmentState, LevelUniqueSegmentState, Vclip, powerup_type_t{powerup_type}, vmd_zero_vector, new_pos, segnum, true)};
-	d_srand(resume_seed);
-	if (my_objnum == object_none)
-		return;
-
-
-	map_objnum_local_to_remote(my_objnum, objnum, pnum);
-
-	object_create_explosion_without_damage(Vclip, segnum, new_pos, i2f(5), vclip_index::powerup_disappearance);
 }
 
 static void multi_do_play_sound(object_array &Objects, const playernum_t pnum, const multiplayer_rspan<multiplayer_command_t::MULTI_PLAY_SOUND> buf)
@@ -2688,71 +2593,25 @@ void multi_send_player_deres(deres_type_t type)
 {
 	auto &Objects = LevelUniqueObjectState.Objects;
 	auto &vmobjptr = Objects.vmptr;
-	int count{0};
-
+	/* The inventory goes first: the host drops the eggs from it, the
+	 * others arm the mines from it (protocol v2 stage 3).
+	 */
+	net_objects_flush_inventory();
 	multi_command<multiplayer_command_t::MULTI_PLAYER_DERES> multibuf;
-	count++;
-	multibuf[count++] = Player_num;
-	multibuf[count++] = type;
-
-#if DXX_BUILD_DESCENT == 1
-#define PUT_WEAPON_FLAGS(buf,count,value)	(buf[count] = value, ++count)
-#elif DXX_BUILD_DESCENT == 2
-#define PUT_WEAPON_FLAGS(buf,count,value)	((PUT_INTEL_SHORT(&buf[count], value)), count+=sizeof(uint16_t))
-#endif
+	multibuf[1] = Player_num;
+	multibuf[2] = type;
 	auto &player_info = get_local_plrobj().ctype.player_info;
-	PUT_WEAPON_FLAGS(multibuf, count, player_info.primary_weapon_flags);
-	multibuf[count++] = static_cast<char>(player_info.laser_level);
-	multibuf[count++] = game_mode_hoard(Game_mode) ? static_cast<char>(player_info.hoard.orbs) : 0;
-
-	auto &secondary_ammo = player_info.secondary_ammo;
-	multibuf[count++] = secondary_ammo[secondary_weapon_index::homing];
-	multibuf[count++] = secondary_ammo[secondary_weapon_index::concussion];
-	multibuf[count++] = secondary_ammo[secondary_weapon_index::smart];
-	multibuf[count++] = secondary_ammo[secondary_weapon_index::mega];
-	multibuf[count++] = secondary_ammo[secondary_weapon_index::proximity];
-
+	/* The mines every machine arms, as this machine does
+	 * (drop_player_armed_bombs).
+	 */
 #if DXX_BUILD_DESCENT == 2
-	multibuf[count++] = secondary_ammo[secondary_weapon_index::flash];
-	multibuf[count++] = secondary_ammo[secondary_weapon_index::guided];
-	multibuf[count++] = secondary_ammo[secondary_weapon_index::smart_mine];
-	multibuf[count++] = secondary_ammo[secondary_weapon_index::mercury];
-	multibuf[count++] = secondary_ammo[secondary_weapon_index::earthshaker];
+	multibuf[3] = player_info.secondary_ammo[secondary_weapon_index::smart_mine];
+#else
+	multibuf[3] = 0;
 #endif
-
-	PUT_INTEL_SHORT(&multibuf[count], player_info.vulcan_ammo);
-	count += 2;
-	PUT_INTEL_INT(&multibuf[count], +player_info.powerup_flags);
-	count += 4;
-
-	multibuf[count++] = Net_create_loc;
-
-	Assert(Net_create_loc <= MAX_NET_CREATE_OBJECTS);
-
-	memset(&multibuf[count], -1, MAX_NET_CREATE_OBJECTS*sizeof(short));
-
-	range_for (const auto i, partial_const_range(Net_create_objnums, Net_create_loc))
-	{
-		if (i <= 0) {
-			Int3(); // Illegal value in created egg object numbers
-			count +=2;
-			continue;
-		}
-
-		PUT_INTEL_SHORT(&multibuf[count], i); count += 2;
-
-		// We created these objs so our local number = the network number
-		map_objnum_local_to_local(i);
-	}
-
-	Net_create_loc = 0;
-
-	if (count > command_length<multiplayer_command_t::MULTI_PLAYER_DERES>)
-	{
-		Int3(); // See Rob
-	}
-
+	multibuf[4] = player_info.secondary_ammo[secondary_weapon_index::proximity];
 	multi_send_data(multibuf, multiplayer_data_priority::_2);
+	net_objects_own_deres();
 	if (+(player_info.powerup_flags & player_flag::cloaked))
 		multi_send_decloak();
 	multi_strip_robots(Player_num);
@@ -2785,6 +2644,7 @@ void multi_send_reappear()
 	PUT_INTEL_SHORT(&multibuf[2], plr.objnum);
 
 	multi_send_data(multibuf, multiplayer_data_priority::_2);
+	::dsx::net_objects_player_reappeared(Player_num);
 }
 
 namespace dsx {
@@ -2967,34 +2827,6 @@ void multi_send_controlcen_fire(const vms_vector &to_goal, int best_gun_num, obj
 	//                                                                                                                      ------------
 	//                                                                                                                      Total  = 16
 	multi_send_data(multibuf, multiplayer_data_priority::_0);
-}
-
-namespace dsx {
-
-void multi_send_create_powerup(const powerup_type_t powerup_type, const vcsegidx_t segnum, const vcobjidx_t objnum, const vms_vector &pos)
-{
-	// Create a powerup on a remote machine, used for remote
-	// placement of used powerups like missiles and cloaking
-	// powerups.
-
-	int count{0};
-
-	count += 1;
-	multi_command<multiplayer_command_t::MULTI_CREATE_POWERUP> multibuf;
-	multibuf[count] = Player_num;                                      count += 1;
-	multibuf[count] = underlying_value(powerup_type);                                 count += 1;
-	PUT_INTEL_SEGNUM(&multibuf[count], segnum);     count += 2;
-	PUT_INTEL_SHORT(&multibuf[count], objnum );     count += 2;
-	multi_put_vector(&multibuf[count], pos);
-	count += 12;
-	//                                                                                                            -----------
-	//                                                                                                            Total =  19
-	multi_send_data(multibuf, multiplayer_data_priority::_2);
-
-
-	map_objnum_local_to_local(objnum);
-}
-
 }
 
 namespace {
@@ -3439,6 +3271,8 @@ void multi_prep_level_objects(const d_powerup_info_array &Powerup_info, const d_
 
 	// After everything is done, count initial level inventory.
 	MultiLevelInv_InitializeCount();
+	/* Every machine gives the level's powerups the same net ids. */
+	net_objects_level_start();
 }
 
 void multi_prep_level_player(void)
@@ -3799,104 +3633,6 @@ const char *multi_interactive_deny_save_game(const fvcobjptr &vcobjptr, const st
 	return multi_common_deny_save_game(vcobjptr, player_range);
 }
 
-void multi_send_drop_weapon(const vmobjptridx_t objp, int seed)
-{
-	int count{0};
-	int ammo_count;
-
-	ammo_count = objp->ctype.powerup_info.count;
-
-#if DXX_BUILD_DESCENT == 2
-	if (get_powerup_id(objp) == powerup_type_t::POW_OMEGA_WEAPON && ammo_count == F1_0)
-		ammo_count = F1_0 - 1; //make fit in short
-#endif
-
-	Assert(ammo_count < F1_0); //make sure fits in short
-
-	count++;
-	multi_command<multiplayer_command_t::MULTI_DROP_WEAPON> multibuf;
-	multibuf[count++]=static_cast<char>(get_powerup_id(objp));
-	PUT_INTEL_SHORT(&multibuf[count], objp); count += 2;
-	PUT_INTEL_SHORT(&multibuf[count], static_cast<uint16_t>(ammo_count)); count += 2;
-	PUT_INTEL_INT(&multibuf[count], seed);
-	count += 4;
-
-	map_objnum_local_to_local(objp);
-
-	multi_send_data(multibuf, multiplayer_data_priority::_2);
-}
-
-namespace {
-
-static void multi_do_drop_weapon(fvmobjptr &vmobjptr, const playernum_t pnum, const multiplayer_rspan<multiplayer_command_t::MULTI_DROP_WEAPON> buf)
-{
-	const auto powerup_id = static_cast<powerup_type_t>(buf[1]);
-	const objnum_t remote_objnum{GET_INTEL_SHORT(&buf[2])};
-	const uint16_t ammo{GET_INTEL_SHORT(&buf[4])};
-	const auto seed{GET_INTEL_INT(&buf[6])};
-	/* Spat from the ship where its owner had it, not from its delayed
-	 * interpolated pose.
-	 */
-	net_interp_snap_to_newest(pnum);
-	const auto &&objnum = spit_powerup(LevelUniqueObjectState, LevelSharedSegmentState, LevelUniqueSegmentState, Vclip, vmobjptr(vcplayerptr(pnum)->objnum), powerup_id, seed);
-	if (objnum == object_none)
-		return;
-	objnum->ctype.powerup_info.count = ammo;
-	map_objnum_local_to_remote(objnum, remote_objnum, pnum);
-}
-
-}
-
-// We collected some ammo from a vulcan/gauss cannon powerup. Now we need to let everyone else know about its new ammo count.
-void multi_send_vulcan_weapon_ammo_adjust(const vmobjptridx_t objnum)
-{
-	const auto &&[obj_owner, remote_objnum] = objnum_local_to_remote(objnum);
-	multi_command<multiplayer_command_t::MULTI_VULWPN_AMMO_ADJ> multibuf;
-	PUT_INTEL_SHORT(&multibuf[1], remote_objnum); // Map to network objnums
-
-	multibuf[3] = obj_owner;
-
-	const uint16_t ammo_count = objnum->ctype.powerup_info.count;
-	PUT_INTEL_SHORT(&multibuf[4], ammo_count);
-
-	multi_send_data(multibuf, multiplayer_data_priority::_2);
-
-}
-
-namespace {
-
-static void multi_do_vulcan_weapon_ammo_adjust(fvmobjptr &vmobjptr, const multiplayer_rspan<multiplayer_command_t::MULTI_VULWPN_AMMO_ADJ> buf)
-{
-	// which object to update
-	const objnum_t objnum{GET_INTEL_SHORT(&buf[1])};
-	// which remote list is it entered in
-	auto obj_owner = buf[3];
-
-	assert(objnum != object_none);
-
-	if (objnum < 1)
-		return;
-
-	auto local_objnum = objnum_remote_to_local(objnum, obj_owner); // translate to local objnum
-
-	if (local_objnum == object_none)
-	{
-		return;
-	}
-
-	const auto &&obj = vmobjptr(local_objnum);
-	if (obj->type != object_type::OBJ_POWERUP)
-	{
-		return;
-	}
-
-
-	const auto ammo{GET_INTEL_SHORT(&buf[4])};
-		obj->ctype.powerup_info.count = ammo;
-}
-
-}
-
 #if DXX_BUILD_DESCENT == 2
 namespace {
 
@@ -4188,26 +3924,6 @@ static void multi_do_light(const multiplayer_rspan<multiplayer_command_t::MULTI_
 	}
 }
 
-static void multi_do_flags(fvmobjptr &vmobjptr, const playernum_t pnum, const multiplayer_rspan<multiplayer_command_t::MULTI_FLAGS> buf)
-{
-	if (pnum!=Player_num)
-	{
-		const auto flags{GET_INTEL_INT(&buf[2])};
-		vmobjptr(vcplayerptr(pnum)->objnum)->ctype.player_info.powerup_flags = player_flags(flags);
-	}
-}
-
-}
-
-void multi_send_flags (const playernum_t pnum)
-{
-	auto &Objects = LevelUniqueObjectState.Objects;
-	auto &vmobjptr = Objects.vmptr;
-	multi_command<multiplayer_command_t::MULTI_FLAGS> multibuf;
-	multibuf[1]=pnum;
-	PUT_INTEL_INT(&multibuf[2], +vmobjptr(vcplayerptr(pnum)->objnum)->ctype.player_info.powerup_flags);
- 
-	multi_send_data(multibuf, multiplayer_data_priority::_2);
 }
 
 void multi_send_drop_blobs (const playernum_t pnum)
@@ -4415,65 +4131,26 @@ void multi_do_orb_bonus(const playernum_t pnum, const multiplayer_rspan<multipla
 
 }
 
-void multi_send_got_flag (const playernum_t pnum)
-{
-	multi_command<multiplayer_command_t::MULTI_GOT_FLAG> multibuf;
-	multibuf[1]=pnum;
-
-	digi_start_sound_queued (sound_effect::SOUND_HUD_YOU_GOT_FLAG,F1_0*2);
-
-	multi_send_data(multibuf, multiplayer_data_priority::_2);
-	multi_send_flags (Player_num);
-}
-
-void multi_send_got_orb (const playernum_t pnum)
-{
-	multi_command<multiplayer_command_t::MULTI_GOT_ORB> multibuf;
-	multibuf[1]=pnum;
-
-	digi_play_sample (sound_effect::SOUND_YOU_GOT_ORB,F1_0*2);
-
-	multi_send_data(multibuf, multiplayer_data_priority::_2);
-	multi_send_flags (Player_num);
-}
-
 namespace {
 
-static void multi_do_got_flag (const playernum_t pnum)
+/* Drop a flag or an orb: a client asks the host for it (protocol v2
+ * stage 3); the host spits it here and announces it.
+ */
+static bool drop_team_item(const powerup_type_t id)
 {
-	auto &Objects = LevelUniqueObjectState.Objects;
-	auto &vmobjptr = Objects.vmptr;
-	digi_start_sound_queued(pnum == Player_num
-		? sound_effect::SOUND_HUD_YOU_GOT_FLAG
-		: (multi_get_team_from_player(Netgame, pnum) == team_number::blue
-			? sound_effect::SOUND_HUD_BLUE_GOT_FLAG
-			: sound_effect::SOUND_HUD_RED_GOT_FLAG
-		), F1_0*2);
-	vmobjptr(vcplayerptr(pnum)->objnum)->ctype.player_info.powerup_flags |= player_flag::has_team_flag;
-	HUD_init_message(HM_MULTI, "%s picked up a flag!",static_cast<const char *>(vcplayerptr(pnum)->callsign));
-}
-
-static void multi_do_got_orb (const playernum_t pnum)
-{
-	auto &Objects = LevelUniqueObjectState.Objects;
-	auto &vmobjptr = Objects.vmptr;
-	assert(game_mode_hoard(Game_mode));
-
-	digi_play_sample(+(Game_mode & GM_TEAM) && multi_get_team_from_player(Netgame, pnum) == multi_get_team_from_player(Netgame, Player_num)
-		? sound_effect::SOUND_FRIEND_GOT_ORB
-		: sound_effect::SOUND_OPPONENT_GOT_ORB, F1_0*2);
-
-	const auto &&objp = vmobjptr(vcplayerptr(pnum)->objnum);
-	objp->ctype.player_info.powerup_flags |= player_flag::has_team_flag;
-	HUD_init_message(HM_MULTI, "%s picked up an orb!",static_cast<const char *>(vcplayerptr(pnum)->callsign));
+	if (net_objects_active() && !multi_i_am_master())
+		return net_objects_request_drop(id, 0);
+	const auto &&objnum = spit_powerup(LevelUniqueObjectState, LevelSharedSegmentState, LevelUniqueSegmentState, Vclip, *ConsoleObject, id, static_cast<unsigned>(d_rand()));
+	if (objnum == object_none)
+		return false;
+	net_objects_announce(objnum, static_cast<uint8_t>(Player_num), false);
+	return true;
 }
 
 static void DropOrb ()
 {
 	auto &Objects = LevelUniqueObjectState.Objects;
 	auto &vmobjptr = Objects.vmptr;
-	int seed;
-
 	if (!game_mode_hoard(Game_mode))
 		Int3(); // How did we get here? Get Leighton!
 
@@ -4485,10 +4162,7 @@ static void DropOrb ()
 		return;
 	}
 
-	seed = d_rand();
-
-	const auto &&objnum = spit_powerup(LevelUniqueObjectState, LevelSharedSegmentState, LevelUniqueSegmentState, Vclip, *ConsoleObject, powerup_type_t::POW_HOARD_ORB, seed);
-	if (objnum == object_none)
+	if (!drop_team_item(powerup_type_t::POW_HOARD_ORB))
 	{
 		HUD_init_message_literal(HM_MULTI, "Failed to drop orb!");
 		return;
@@ -4497,15 +4171,12 @@ static void DropOrb ()
 	HUD_init_message_literal(HM_MULTI, "Orb dropped!");
 	digi_play_sample (sound_effect::SOUND_DROP_WEAPON,F1_0);
 
-	multi_send_drop_flag(objnum, seed);
 	-- proximity;
 
-	// If empty, tell everyone to stop drawing the box around me
+	// If empty, stop drawing the box around me (the others learn it
+	// from the INVENTORY that follows)
 	if (!proximity)
-	{
 		player_info.powerup_flags &=~(player_flag::has_team_flag);
-		multi_send_flags (Player_num);
-	}
 }
 
 }
@@ -4514,8 +4185,6 @@ void DropFlag ()
 {
 	auto &Objects = LevelUniqueObjectState.Objects;
 	auto &vmobjptr = Objects.vmptr;
-	int seed;
-
 	if (game_mode_hoard(Game_mode))
 	{
 		DropOrb();
@@ -4530,9 +4199,7 @@ void DropFlag ()
 		HUD_init_message_literal(HM_MULTI, "No flag to drop!");
 		return;
 	}
-	seed = d_rand();
-	const auto &&objnum = spit_powerup(LevelUniqueObjectState, LevelSharedSegmentState, LevelUniqueSegmentState, Vclip, *ConsoleObject, multi_get_team_from_player(Netgame, Player_num) == team_number::blue ? powerup_type_t::POW_FLAG_RED : powerup_type_t::POW_FLAG_BLUE, seed);
-	if (objnum == object_none)
+	if (!drop_team_item(multi_get_team_from_player(Netgame, Player_num) == team_number::blue ? powerup_type_t::POW_FLAG_RED : powerup_type_t::POW_FLAG_BLUE))
 	{
 		HUD_init_message_literal(HM_MULTI, "Failed to drop flag!");
 		return;
@@ -4541,52 +4208,10 @@ void DropFlag ()
 	HUD_init_message_literal(HM_MULTI, "Flag dropped!");
 	digi_play_sample (sound_effect::SOUND_DROP_WEAPON,F1_0);
 
-	if (game_mode_capture_flag(Game_mode))
-		multi_send_drop_flag(objnum,seed);
-
 	player_info.powerup_flags &=~(player_flag::has_team_flag);
 }
 
 namespace {
-
-void multi_send_drop_flag(const vmobjptridx_t objp, int seed)
-{
-	multi_command<multiplayer_command_t::MULTI_DROP_FLAG> multibuf;
-	int count{0};
-	count++;
-	multibuf[count++]=static_cast<char>(get_powerup_id(objp));
-
-	PUT_INTEL_SHORT(&multibuf[count], objp.get_unchecked_index());
-	count += 2;
-	PUT_INTEL_INT(&multibuf[count], seed);
-
-	map_objnum_local_to_local(objp);
-
-	multi_send_data(multibuf, multiplayer_data_priority::_2);
-}
-
-static void multi_do_drop_flag(const playernum_t pnum, const multiplayer_rspan<multiplayer_command_t::MULTI_DROP_FLAG> buf)
-{
-	auto &Objects = LevelUniqueObjectState.Objects;
-	auto &vmobjptr = Objects.vmptr;
-	const auto powerup_id = static_cast<powerup_type_t>(buf[1]);
-	const objnum_t remote_objnum{GET_INTEL_SHORT(&buf[2])};
-	/* multi_send_drop_flag writes the seed right after the object number.
-	 * Unlike MULTI_DROP_WEAPON, there is no ammo field before it.
-	 */
-	const auto seed{GET_INTEL_INT<int32_t>(&buf[4])};
-
-	net_interp_snap_to_newest(pnum);
-	auto &plrobj{*vmobjptr(vcplayerptr(pnum)->objnum)};
-
-	const imobjidx_t objnum{spit_powerup(LevelUniqueObjectState, LevelSharedSegmentState, LevelUniqueSegmentState, Vclip, plrobj, powerup_id, seed)};
-	if (objnum == object_none)
-		return;
-
-	map_objnum_local_to_remote(objnum, remote_objnum, pnum);
-	if (!game_mode_hoard(Game_mode))
-		plrobj.ctype.player_info.powerup_flags &= ~(player_flag::has_team_flag);
-}
 
 }
 #endif
@@ -5174,93 +4799,7 @@ static void multi_do_gmode_update(const multiplayer_rspan<multiplayer_command_t:
  * Could also be used to let host decide which powerups a client is allowed to collect and/or drop, anti-cheat functions (needs shield/energy update then and more frequent updates/triggers).
  */
 namespace dsx {
-void multi_send_player_inventory(const multiplayer_data_priority priority)
-{
-	auto &Objects = LevelUniqueObjectState.Objects;
-	auto &vmobjptr = Objects.vmptr;
-	multi_command<multiplayer_command_t::MULTI_PLAYER_INV> multibuf;
-	int count{0};
-
-	count++;
-	multibuf[count++] = Player_num;
-
-	auto &player_info = get_local_plrobj().ctype.player_info;
-	PUT_WEAPON_FLAGS(multibuf, count, player_info.primary_weapon_flags);
-	multibuf[count++] = static_cast<char>(player_info.laser_level);
-
-	auto &secondary_ammo = player_info.secondary_ammo;
-	multibuf[count++] = secondary_ammo[secondary_weapon_index::homing];
-	multibuf[count++] = secondary_ammo[secondary_weapon_index::concussion];
-	multibuf[count++] = secondary_ammo[secondary_weapon_index::smart];
-	multibuf[count++] = secondary_ammo[secondary_weapon_index::mega];
-	multibuf[count++] = secondary_ammo[secondary_weapon_index::proximity];
-
-#if DXX_BUILD_DESCENT == 2
-	multibuf[count++] = secondary_ammo[secondary_weapon_index::flash];
-	multibuf[count++] = secondary_ammo[secondary_weapon_index::guided];
-	multibuf[count++] = secondary_ammo[secondary_weapon_index::smart_mine];
-	multibuf[count++] = secondary_ammo[secondary_weapon_index::mercury];
-	multibuf[count++] = secondary_ammo[secondary_weapon_index::earthshaker];
-#endif
-
-	PUT_INTEL_SHORT(&multibuf[count], player_info.vulcan_ammo);
-	count += 2;
-	PUT_INTEL_INT(&multibuf[count], +player_info.powerup_flags);
-	count += 4;
-
-	multi_send_data(multibuf, priority);
-}
-
 namespace {
-
-static void multi_do_player_inventory(const playernum_t pnum, const multiplayer_rspan<multiplayer_command_t::MULTI_PLAYER_INV> buf)
-{
-	auto &Objects = LevelUniqueObjectState.Objects;
-	auto &vmobjptridx = Objects.vmptridx;
-	int count;
-
-#ifdef NDEBUG
-	if (pnum >= N_players || pnum == Player_num)
-		return;
-#else
-	Assert(pnum < N_players);
-        Assert(pnum != Player_num);
-#endif
-
-	count = 2;
-#if DXX_BUILD_DESCENT == 1
-#define GET_WEAPON_FLAGS(buf,count)	buf[count++]
-#elif DXX_BUILD_DESCENT == 2
-#define GET_WEAPON_FLAGS(buf,count)	(count += sizeof(uint16_t), GET_INTEL_SHORT(&buf[(count - sizeof(uint16_t))]))
-#endif
-	/* The explosion and the eggs where the owner's ship is, not at its
-	 * delayed interpolated pose (v1 sent a MULTI_POSITION first).
-	 */
-	net_interp_snap_to_newest(pnum);
-	const auto &&objp = vmobjptridx(vcplayerptr(pnum)->objnum);
-	auto &player_info = objp->ctype.player_info;
-	player_info.primary_weapon_flags = GET_WEAPON_FLAGS(buf, count);
-	player_info.laser_level = laser_level{buf[count]};
-	count++;
-
-	auto &secondary_ammo = player_info.secondary_ammo;
-	secondary_ammo[secondary_weapon_index::homing] = buf[count];                count++;
-	secondary_ammo[secondary_weapon_index::concussion] = buf[count];count++;
-	secondary_ammo[secondary_weapon_index::smart] = buf[count];         count++;
-	secondary_ammo[secondary_weapon_index::mega] = buf[count];          count++;
-	secondary_ammo[secondary_weapon_index::proximity] = buf[count]; count++;
-
-#if DXX_BUILD_DESCENT == 2
-	secondary_ammo[secondary_weapon_index::flash] = buf[count]; count++;
-	secondary_ammo[secondary_weapon_index::guided]    = buf[count]; count++;
-	secondary_ammo[secondary_weapon_index::smart_mine]= buf[count]; count++;
-	secondary_ammo[secondary_weapon_index::mercury] = buf[count]; count++;
-	secondary_ammo[secondary_weapon_index::earthshaker] = buf[count]; count++;
-#endif
-
-	player_info.vulcan_ammo = GET_INTEL_SHORT(&buf[count]); count += 2;
-	player_info.powerup_flags = player_flags(GET_INTEL_INT(&buf[count]));    count += 4;
-}
 
 /*
  * Count the inventory of the level. Initial (start) or current (now).
@@ -5462,7 +5001,7 @@ bool MultiLevelInv_AllowSpawn(powerup_type_t powerup_type)
 	if (+(Game_mode & GM_MULTI_COOP) || LevelUniqueControlCenterState.Control_center_destroyed || Network_status != network_state::playing)
                 return 0;
 
-        int req_amount{1}; // required amount of item to drop a powerup.
+        unsigned req_amount{1}; // required amount of item to drop a powerup.
 
         if (powerup_type == powerup_type_t::POW_VULCAN_AMMO)
                 req_amount = VULCAN_AMMO_AMOUNT;
@@ -5473,11 +5012,10 @@ bool MultiLevelInv_AllowSpawn(powerup_type_t powerup_type)
         )
                 req_amount = 4;
 
-        if (MultiLevelInv.Initial[powerup_type] == 0 || MultiLevelInv.Current[powerup_type] > MultiLevelInv.Initial[powerup_type]) // Item does not exist in level or we have too many.
-                return 0;
-        else if (MultiLevelInv.Initial[powerup_type] - MultiLevelInv.Current[powerup_type] >= req_amount)
-                return 1;
-        return 0;
+	/* Item exists in the level, and enough of it is missing
+	 * (net_v2_objects.h, tested there).
+	 */
+	return ::dcx::net_v2::respawn_allowed(MultiLevelInv.Initial[powerup_type], MultiLevelInv.Current[powerup_type], req_amount);
 }
 
 namespace {
@@ -5494,18 +5032,12 @@ void MultiLevelInv_Repopulate(fix frequency)
 	{
 		const powerup_type_t pi{i};
 		auto &rt = MultiLevelInv.RespawnTimer[pi];
-		if (MultiLevelInv_AllowSpawn(pi))
-			rt += frequency;
-		else
-		{
-			rt = 0;
-			continue;
-		}
-
-		if (rt >= F1_0*2)
+		::dcx::net_v2::respawn_timer timer{rt};
+		const bool due{timer.step(MultiLevelInv_AllowSpawn(pi), frequency, F1_0*2)};
+		rt = timer.elapsed;
+		if (due)
 		{
 			con_printf(CON_VERBOSE, "MultiLevelInv_Repopulate type: %i - Init: %i Cur: %i", i, MultiLevelInv.Initial[pi], MultiLevelInv.Current[pi]);
-			rt = 0;
 			maybe_drop_net_powerup(pi, 0, 1);
 		}
 	}
@@ -5823,21 +5355,12 @@ static void multi_process_data(const d_level_shared_robot_info_state &LevelShare
 		case multiplayer_command_t::MULTI_CONTROLCEN:
 			multi_do_controlcen_destroy(LevelSharedRobotInfoState.Robot_info, imobjptridx, multi_subspan_first<multiplayer_command_t::MULTI_CONTROLCEN>(data));
 			break;
-		case multiplayer_command_t::MULTI_DROP_WEAPON:
-			multi_do_drop_weapon(vmobjptr, pnum, multi_subspan_first<multiplayer_command_t::MULTI_DROP_WEAPON>(data));
-			break;
-		case multiplayer_command_t::MULTI_VULWPN_AMMO_ADJ:
-			multi_do_vulcan_weapon_ammo_adjust(vmobjptr, multi_subspan_first<multiplayer_command_t::MULTI_VULWPN_AMMO_ADJ>(data));
-			break;
 #if DXX_BUILD_DESCENT == 2
 		case multiplayer_command_t::MULTI_SOUND_FUNCTION:
 			multi_do_sound_function(pnum, multi_subspan_first<multiplayer_command_t::MULTI_SOUND_FUNCTION>(data));
 			break;
 		case multiplayer_command_t::MULTI_MARKER:
 			multi_do_drop_marker(Objects, vmsegptridx, pnum, multi_subspan_first<multiplayer_command_t::MULTI_MARKER>(data));
-			break;
-		case multiplayer_command_t::MULTI_DROP_FLAG:
-			multi_do_drop_flag(pnum, multi_subspan_first<multiplayer_command_t::MULTI_DROP_FLAG>(data));
 			break;
 		case multiplayer_command_t::MULTI_GUIDED:
 			multi_do_guided(LevelUniqueObjectState, pnum, multi_subspan_first<multiplayer_command_t::MULTI_GUIDED>(data));
@@ -5872,9 +5395,6 @@ static void multi_process_data(const d_level_shared_robot_info_state &LevelShare
 		case multiplayer_command_t::MULTI_CONTROLCEN_FIRE:
 			multi_do_controlcen_fire(multi_subspan_first<multiplayer_command_t::MULTI_CONTROLCEN_FIRE>(data));
 			break;
-		case multiplayer_command_t::MULTI_CREATE_POWERUP:
-			multi_do_create_powerup(vmsegptridx, pnum, multi_subspan_first<multiplayer_command_t::MULTI_CREATE_POWERUP>(data));
-			break;
 		case multiplayer_command_t::MULTI_PLAY_SOUND:
 			multi_do_play_sound(Objects, pnum, multi_subspan_first<multiplayer_command_t::MULTI_PLAY_SOUND>(data));
 			break;
@@ -5884,10 +5404,6 @@ static void multi_process_data(const d_level_shared_robot_info_state &LevelShare
 		case multiplayer_command_t::MULTI_ORB_BONUS:
 			multi_do_orb_bonus(pnum, multi_subspan_first<multiplayer_command_t::MULTI_ORB_BONUS>(data));
 			break;
-		case multiplayer_command_t::MULTI_GOT_FLAG:
-			multi_do_got_flag(pnum); break;
-		case multiplayer_command_t::MULTI_GOT_ORB:
-			multi_do_got_orb(pnum); break;
 		case multiplayer_command_t::MULTI_FINISH_GAME:
 			multi_do_finish_game();
 			break;  // do this one regardless of endsequence
@@ -5925,9 +5441,6 @@ static void multi_process_data(const d_level_shared_robot_info_state &LevelShare
 			break;
 		case multiplayer_command_t::MULTI_EFFECT_BLOWUP:
 			multi_do_effect_blowup(pnum, multi_subspan_first<multiplayer_command_t::MULTI_EFFECT_BLOWUP>(data));
-			break;
-		case multiplayer_command_t::MULTI_FLAGS:
-			multi_do_flags(vmobjptr, pnum, multi_subspan_first<multiplayer_command_t::MULTI_FLAGS>(data));
 			break;
 		case multiplayer_command_t::MULTI_DROP_BLOB:
 			multi_do_drop_blob(vmobjptr, pnum);
@@ -5980,9 +5493,6 @@ static void multi_process_data(const d_level_shared_robot_info_state &LevelShare
 			break;
 		case multiplayer_command_t::MULTI_KILL_CLIENT:
 			multi_do_kill_client(Objects, pnum, multi_subspan_first<multiplayer_command_t::MULTI_KILL_CLIENT>(data));
-			break;
-		case multiplayer_command_t::MULTI_PLAYER_INV:
-			multi_do_player_inventory(pnum, multi_subspan_first<multiplayer_command_t::MULTI_PLAYER_INV>(data));
 			break;
 	}
 }

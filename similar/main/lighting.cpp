@@ -688,9 +688,10 @@ void toggle_headlight_active(object &player)
 {
 	auto &player_info = player.ctype.player_info;
 	if (+(player_info.powerup_flags & player_flag::headlight)) {
+		/* In a network game the others learn it from this player's
+		 * next INVENTORY (protocol v2 stage 3).
+		 */
 		player_info.powerup_flags ^= player_flag::headlight_on;
-		if (+(Game_mode & GM_MULTI))
-			multi_send_flags(player.id);
 	}
 }
 
