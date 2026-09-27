@@ -73,6 +73,10 @@ exits with status 1; success ends with `all tests passed`.
 | corrupted then intact | – | A corrupted copy of a packet, then the intact copy: the intact one is accepted and its message delivered; one protocol error. |
 | corrupted future seq | – | A corrupt datagram whose `seq` byte reads as a future sequence does not prevent the real packets 2, 3 and 4 from being accepted. |
 | big message, second packet | – | A 1 KiB message beside an 1100-byte state: the state goes out first, the message in the tick's second packet; `max_packets_per_tick` 1 is clamped to 2. |
+| two-part bundle | 30 ms | Two 900-byte parts every tick plus a message every third tick: each part delivered on all 200 ticks, none dropped. |
+| parts reordered | – | Part 1 arriving before part 0 of one tick: both applied; a stale part 0 is dropped while an older part 1 that is still the newest of its part applies. |
+| first grant | – | A connection created at 0 and first built at 3 s gets one tick (2 packets), not a burst. |
+| exact 60 Hz caller | – | 36 000 steps of exactly 1/60 s with a permanent backlog: never more than 2 packets per step. |
 | bulk transfer + state | 30 ms | 20 × 900-byte messages queued while a 350-byte state is set every tick: 207+ of 210 states delivered, none dropped, all messages in order. |
 | peer tick period | 10–85 ms, no jitter | A 60 Hz host (`peer_tick_period` 1/30) against a 30 Hz client: zero retransmissions over four latencies. |
 | 240 Hz caller | – | `build_outgoing` called four times per tick period with a 90 KiB backlog: never more than 2 packets in any 16.7 ms window, everything delivered. |
@@ -94,13 +98,15 @@ Each peer can tick with its own phase offset (`sim_world::phase`).
 ```cpp
 using namespace dcx::net_v2;
 connection c{{.session_id = sid, .peer_token = tok, .local_player_id = 0, .remote_player_id = 3}, now};
-// connection_config also has tick_period (default 1/60 s),
-// max_packets_per_tick (default 2, at least 2) and peer_tick_period
-// (default: same as tick_period; stage 1 sets it from the handshake).
-// report.unreliable holds views into `datagram`, valid while it is.
+// connection_config also has tick (a period as numerator/denominator net
+// units, default 65536/60 = exactly 1/60 s), max_packets_per_tick
+// (default 2, at least 2) and peer_tick (default: same as tick; stage 1
+// sets it from the handshake).  report.unreliable holds views into
+// `datagram`, valid while it is, with the §3.8 part index/count.
 
 c.enqueue_reliable(msg_type, payload);            // ≤ 1024 bytes, or too_large
 c.set_unreliable_state(chunk_type::state, bundle); // latest wins, sent once
+c.set_unreliable_state(chunk_type::state, 1, 2, part_b); // §3.8: part 1 of 2, latest wins per part
 c.send_unreliable(chunk_type::event_u, bytes);     // best effort
 
 c.begin_tick(now);                                 // once per tick
@@ -121,9 +127,11 @@ message, or 100 ms have passed since the last packet (keepalive). The second
 call in a tick carries only reliable messages that did not fit beside the
 state chunk, and no more than `max_packets_per_tick` (2, §3.6) are built per
 tick; a backlog beyond that waits for later ticks. `begin_tick(now)` grants
-that budget for every whole `tick_period` elapsed since the last grant, and
-judges the timeouts and the RTO once per grant (a retransmission cannot go out
-more often anyway),
+that budget for every whole period elapsed since the last grant (in exact
+rational arithmetic with one unit of tolerance for the caller's clock
+rounding, so a true 60 Hz caller never sees a spurious double grant; the very
+first grant is a single tick, however long the connection existed before), and judges the timeouts and the RTO once per
+grant (a retransmission cannot go out more often anyway),
 advancing the tick origin by whole periods (not resetting it to `now`), so a
 caller at any rate gets exactly one budget per period, a frame that spans two
 ticks gets both. A grant replaces whatever was left of the previous one and is
@@ -131,10 +139,12 @@ capped at two ticks, so unused ticks never pile up into a spare and a long
 stall does not end in a burst. Within a tick the first packet goes out
 whenever anything is due; a second, up to `max_packets_per_tick` (at least 2),
 only while reliable messages remain that did not fit in the previous one. The
-first packet of a tick always carries the state chunk; a head message that
-does not fit beside it rides the tick's second packet, which has no state left
-to carry (and omits one set in between), so no message size can starve and no
-message stream can displace the state. The tick's credit is spent only when a
+first packet of a tick always carries the state chunks that fit; a head message
+that does not fit beside them rides the tick's second packet, which normally
+has no state left to carry, so no message size can starve and no message
+stream can displace the state. A pending state part opens the second packet
+too (a two-part bundle, §3.8, needs two packets); when that packet holds both
+a part and a blocked head message, the two alternate tick by tick. The tick's credit is spent only when a
 packet is really built. `build_outgoing` calls `begin_tick` itself. `on_receive` applies the checks of §3.7
 in order and reports why a datagram was dropped (`receive_status`). A packet
 whose header validates but whose chunks do not (`malformed_chunk`) has no
@@ -155,10 +165,11 @@ peer for a protocol error. Packets with
 layer (stage 1), which also decides which `connection` a datagram belongs to
 (`packet_header::read` gives it `session_id`, `peer_token` and `player_id`).
 
-Unreliable chunks: the report carries every `event_u` chunk and every
-`state`/`input` chunk of the packet, unless the packet is older (by `seq`)
-than one, still inside the 64-packet reorder window, whose chunk of that type
-was already delivered (a reference older than the window has been superseded
+Unreliable chunks: `state`/`input` chunks carry a part byte (index and count,
+§3.8; `set_unreliable_state(type, part, count, bytes)`), and the report
+carries every `event_u` chunk and every `state`/`input` part of the packet,
+unless the packet is older (by `seq`) than one, still inside the 64-packet
+reorder window, whose chunk of that type *and part* was already delivered (a reference older than the window has been superseded
 by every packet since and no longer suppresses anything, so a type unseen for
 32 768 packets cannot wedge on a wrapped comparison). All chunks of one packet
 count as equally new, so a bundle split into two `state` chunks (§3.8)
@@ -180,7 +191,7 @@ the connection neither sends nor accepts anything.
 
 | Field | Meaning |
 |---|---|
-| `rtt_valid`, `srtt`, `rttvar`, `rto` | §3.5 estimator, in net time units (1/65536 s; `× 1000 / 65536` for ms). Samples come only from the echo fields, so they exclude the peer's hold time; an echo is taken only if `echo_seq` equals the packet's `ack` (a conforming peer echoes the newest packet it received, which is also its `ack`), names a packet in our log whose recorded `send_time` equals `echo_time`, and is strictly newer than the last echo taken (a repeated `echo_seq` is the same measurement held longer, so it yields no sample); the sample is then `now − sent_at − echo_delay` from our own log. A peer therefore cannot steer the estimate, not even by pinning one real old packet with a small delay. Acks contribute no samples: an ack is held until the peer's next tick and may ride a reordered packet, so it would only add noise on top of what the echo already measures. `rto` is `clamp(srtt + max(4·rttvar, hold) + tick, 50 ms, 1 s)` with `hold = max(tick_period, peer_tick_period)`, and 1 s before the first sample; the slack covers the peer's ack hold (its tick) and our own detection alignment (ours), which the echo-based `srtt` deliberately excludes. This `srtt` is what the HUD will show as ping. |
+| `rtt_valid`, `srtt`, `rttvar`, `rto` | §3.5 estimator, in net time units (1/65536 s; `× 1000 / 65536` for ms). Samples come only from the echo fields, so they exclude the peer's hold time; an echo is taken only if `echo_seq` equals the packet's `ack` (a conforming peer echoes the newest packet it received, which is also its `ack`), names a packet in our log whose recorded `send_time` equals `echo_time`, and is strictly newer than the last echo taken (a repeated `echo_seq` is the same measurement held longer, so it yields no sample); the sample is then `now − sent_at − echo_delay` from our own log. A peer therefore cannot steer the estimate, not even by pinning one real old packet with a small delay. Acks contribute no samples: an ack is held until the peer's next tick and may ride a reordered packet, so it would only add noise on top of what the echo already measures. `rto` is `clamp(srtt + max(4·rttvar, hold) + tick, 50 ms, 1 s)` with `tick` the own period rounded up to whole units and `hold` the larger of the own and the peer's, and 1 s before the first sample; the slack covers the peer's ack hold (its tick) and our own detection alignment (ours), which the echo-based `srtt` deliberately excludes. This `srtt` is what the HUD will show as ping. |
 | `loss_estimate` | Moving average (1/64 per packet) of the fraction of our packets the peer never acknowledged. A packet counts as lost once the peer's `ack` is more than 64 ahead of it, or when its slot in the 256-entry packet log is reused without an ack (no acks at all), so the value lags by one to four seconds at 60 pps and settles slowly on a link that just became clean. |
 | `packets_sent/received/rejected/acked/lost` | Per direction. `rejected` counts every datagram `on_receive` dropped, including duplicates. |
 | `messages_enqueued/delivered` | Reliable messages queued here / delivered to the caller from the peer. |
@@ -222,6 +233,15 @@ the connection neither sends nor accepts anything.
   beside the state chunk rides the tick's second packet, and with one packet
   per tick and a state every tick it could otherwise never go out. The state
   is never displaced from a tick's first packet.
+- `state`/`input` chunk payloads start with a part byte (index low nibble,
+  count high nibble, at most 4 parts; `net_v2.h`), so that a bundle split
+  over two packets (§3.8) is latest-wins per part; the design leaves the
+  parts self-describing at the application layer only, which the transport
+  cannot key on. A pending part opens a tick's second packet, and a part and
+  a blocked head message in that packet alternate tick by tick.
+- The tick period is a rational (`tick_period{numerator, denominator}`), so
+  1/60 s is exact; the design's integer `fix` accumulator would drift by
+  0.24 ms/s.
 - The packet log resolves an entry as lost when its slot is reused after
   256 packets without an ack, so a total ack blackout still shows as loss.
 - The 600-byte resend budget is cumulative, but the first resent message of

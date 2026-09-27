@@ -123,11 +123,14 @@ Pain points from the fork changelog (`Documentation/fork-changelog.md`):
   offset  = send_time + rtt/2 - now               (host_time ≈ local + offset)
   ```
 
-  but only if `echo_seq` names a packet still in the local packet log whose
-  recorded `send_time` equals `echo_time`, and `echo_seq` is not older than
-  the last echo taken. Anything else is ignored: the host later rewinds
-  hits by the client's RTT, so a peer must not be able to steer it with
-  numbers unrelated to real packets.
+  but only if `echo_seq` equals the packet's `ack` (a conforming peer echoes
+  the newest packet it received, which is also its `ack`), names a packet
+  still in the local packet log whose recorded `send_time` equals
+  `echo_time`, and is strictly newer than the last echo taken: a repeated
+  `echo_seq` is the same measurement held longer and yields no sample.
+  Anything else is ignored: the host later rewinds hits by the client's
+  RTT, so a peer must not be able to steer it with numbers unrelated to
+  real packets, nor by pinning one real old packet.
 
   and keeps the last 2 s of samples. The target offset is the sample with the
   smallest `rtt` in that window (minimum filter: queueing delay only ever adds
@@ -237,7 +240,7 @@ Every UDP datagram, connected or not, starts with this header.
 | 24 | 4 | `send_time` | Sender's local clock (net time units) when the packet was built. |
 | 28 | 4 | `echo_time` | `send_time` of the most recent packet received from the peer, or 0. |
 | 32 | 2 | `echo_delay` | Time between receiving that packet and sending this one, in net time units, saturated at 65535 (1 s). Peers send at least every 100 ms (§3.6), so saturation only happens on a stalled link and the RTT sample is then discarded. |
-| 34 | 2 | `echo_seq` | `seq` of the packet whose `send_time` is echoed, or 0. The receiver of the echo verifies `echo_seq`/`echo_time` against its packet log before taking a sample (§2.2). The echo fields follow only the newest packet received, never a reordered older one. |
+| 34 | 2 | `echo_seq` | `seq` of the packet whose `send_time` is echoed, or 0; always equal to `ack`, since both name the newest packet received. The receiver of the echo takes a sample only if `echo_seq == ack`, the pair matches its packet log, and `echo_seq` is strictly newer than the last echo it took (§2.2). The echo fields follow only the newest packet received, never a reordered older one. |
 
 Maximum UDP payload: `NET_V2_MAX_PACKET` = 1200 bytes (header included). This
 is below the 1280-byte IPv6 minimum MTU minus headers, so no path in practice
@@ -261,8 +264,8 @@ A chunk that does not fit in the remaining bytes invalidates the whole packet
 | Id | Name | Class | Content |
 |---|---|---|---|
 | 0x01 | `RELIABLE` | R | A run of consecutive reliable messages (§3.4). |
-| 0x02 | `STATE` | U | Host state bundle, whole or part (§5.2). |
-| 0x03 | `INPUT` | U | Client ship state (§5.3). |
+| 0x02 | `STATE` | U | Host state bundle, whole or part (§5.2). The payload starts with a part byte: index in the low nibble, count (1–4) in the high nibble (§3.8). |
+| 0x03 | `INPUT` | U | Client ship state (§5.3). Same part byte. |
 | 0x04 | `EVENT_U` | U | Best-effort cosmetic events (§6.9). |
 | 0x05 | `SESSION` | – | Unconnected session messages (§4.2, §4.3). Only valid with `flags.UNCONNECTED`. |
 
@@ -396,7 +399,7 @@ rto = clamp(srtt + 4 rttvar, NET_V2_RTO_MIN = 50 ms, NET_V2_RTO_MAX = 1000 ms)
 | Limit | Value | On violation |
 |---|---|---|
 | Packet size | 1200 bytes | Sender: never built; receiver: dropped. |
-| Packets per tick per connection | 1 normally; 2 if the reliable backlog does not fit next to the state chunk (the second packet carries reliable chunks only) | – |
+| Packets per tick per connection | 1 normally; 2 if the reliable backlog or a further bundle part does not fit next to the state chunk | – |
 | Reliable send queue (queued + in flight) per connection | 512 messages or 96 KiB | Host: kick that client, `kick_player_reason::queue_overflow` (new reason). Client: leave the game with the message "Connection to host too slow". |
 | Messages in flight | 256 (receiver window) | Sender stops taking new messages from the queue until acks arrive. |
 | Oldest unacked reliable message | 10 s | Same as queue overflow (this replaces the v1 `pkttimeout`; a message unacked for 10 s means the link is dead or unusable). |
@@ -437,10 +440,10 @@ address with an implausible `seq` is dropped.
    to us, set the bit, process. Otherwise (duplicate or older than 64
    packets): drop. This is done before any chunk is parsed, so a replayed
    packet never reaches the game layer twice.
-7. Update the peer's `last_heard`, RTT sample from `echo_*` if
-   `echo_seq` names a logged packet whose `send_time` is `echo_time`,
-   `echo_delay < 65535`, and the echo is not older than the last one
-   taken (§2.2).
+7. Update the peer's `last_heard`; RTT and clock sample from `echo_*` if
+   `echo_seq == ack`, `echo_seq` names a logged packet whose `send_time`
+   is `echo_time`, `echo_delay < 65535`, and `echo_seq` is strictly newer
+   than the last echo taken (a repeated echo yields no sample, §2.2).
 8. Walk the chunks. Every chunk must fit; every `RELIABLE` message must fit
    its chunk; every `STATE`/`INPUT` record must have the exact size for its
    flags. The first violation drops the whole packet: nothing of it is
@@ -466,8 +469,10 @@ protocol error for the peer.
   bytes and fits in one packet with room for the header and a chunk header.
 - The state bundle may exceed one packet only in robot games (§5.2). It is
   then split into two `STATE` chunks in two packets, each self-describing
-  (its own `player_mask` / record counts), and each applied independently;
-  the receiver does not wait for both.
+  (its own `player_mask` / record counts) and each tagged with its part
+  index and count in the chunk's first byte (§3.2), so that the transport
+  keeps the newest of each part on its own; each is applied independently
+  and the receiver does not wait for both.
 - Application-level splitting (level snapshot, §4.4) uses explicit part
   numbers and totals in the messages themselves.
 - Why not IP fragmentation or a fragment chunk: a lost fragment loses the
