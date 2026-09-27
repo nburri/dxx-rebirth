@@ -571,7 +571,11 @@ constexpr std::size_t LEVEL_READY_SIZE{6};
 constexpr std::size_t LEVEL_GO_SIZE{8};
 constexpr std::size_t SNAPSHOT_BEGIN_SIZE{4};
 constexpr std::size_t SNAPSHOT_END_SIZE{8};
-constexpr std::size_t SNAPSHOT_OBJECT_ENTRY_SIZE{4 + 1 + 4 + sizeof(object_rw)};
+/* Object number, owner, remote object number, net id (stage 3, 0xffff
+ * for none), the object.
+ */
+constexpr std::size_t SNAPSHOT_OBJECT_ENTRY_OBJECT_OFFSET{4 + 1 + 4 + 2};
+constexpr std::size_t SNAPSHOT_OBJECT_ENTRY_SIZE{SNAPSHOT_OBJECT_ENTRY_OBJECT_OFFSET + sizeof(object_rw)};
 constexpr unsigned SNAPSHOT_OBJECTS_PER_MESSAGE{3};
 constexpr std::size_t SNAPSHOT_GAME_SIZE{2 + (MAX_PLAYERS * MAX_PLAYERS * 2) + (MAX_PLAYERS * 2) + (MAX_PLAYERS * 2) + (MAX_PLAYERS * 4) + 4 + 1 + 1 + MAX_PLAYERS + 4 + 2 + 10 + 4 + MAX_PLAYERS};
 /* v1 endlevel_h without the upid byte; endlevel_c without upid and player
@@ -2080,7 +2084,6 @@ bool legacy_record_is_event(const uint8_t command, const multiplayer_data_priori
 		case multiplayer_command_t::MULTI_ROBOT_POSITION:
 		case multiplayer_command_t::MULTI_TYPING_STATE:
 		case multiplayer_command_t::MULTI_GMODE_UPDATE:
-		case multiplayer_command_t::MULTI_PLAYER_INV:
 #if DXX_BUILD_DESCENT == 2
 		case multiplayer_command_t::MULTI_GUIDED:
 		case multiplayer_command_t::MULTI_DROP_BLOB:
@@ -2167,6 +2170,36 @@ void receive_legacy_mdata(peer &p, const std::span<const uint8_t> payload)
 	if (!legacy_processing_allowed())
 		return;
 	multi_process_bigdata(LevelSharedRobotInfoState, originator, records);
+}
+
+/* Stage 3 object messages (net_v2_objects.h): gated like LEGACY_MDATA,
+ * never relayed as they are (the host answers or re-announces them
+ * itself).
+ */
+[[nodiscard]]
+bool is_object_message(const session_msg type)
+{
+	switch (type)
+	{
+		case session_msg::inventory:
+		case session_msg::obj_create:
+		case session_msg::obj_remove:
+		case session_msg::pickup_request:
+		case session_msg::pickup_grant:
+		case session_msg::pickup_deny:
+		case session_msg::drop_request:
+		case session_msg::obj_settle:
+			return true;
+		default:
+			return false;
+	}
+}
+
+void receive_object_message(peer &p, const session_msg type, const std::span<const uint8_t> payload)
+{
+	if (!peer_sends_game_data(p) || !legacy_processing_allowed())
+		return;
+	net_objects_receive(peer_slot(p), static_cast<uint8_t>(type), payload);
 }
 
 void receive_event(peer &p, const std::span<const uint8_t> payload)
@@ -2307,6 +2340,14 @@ void receive_endlevel_host(const std::span<const uint8_t> data)
 [[nodiscard]]
 bool snapshot_includes(const object_base &objp)
 {
+	/* A powerup picked up in this frame is gone (its id is unbound);
+	 * sending it would leave a copy on the joiner that nothing removes.
+	 * Only powerups: a ship hit lethally in this frame also carries
+	 * OF_SHOULD_BE_DEAD until the death sequence starts next frame, and
+	 * the joiner must still receive every player object.
+	 */
+	if (objp.type == object_type::OBJ_POWERUP && (objp.flags & OF_SHOULD_BE_DEAD))
+		return false;
 	if (objp.type == object_type::OBJ_POWERUP || objp.type == object_type::OBJ_PLAYER || objp.type == object_type::OBJ_CNTRLCEN || objp.type == object_type::OBJ_GHOST || objp.type == object_type::OBJ_ROBOT || objp.type == object_type::OBJ_HOSTAGE)
 		return true;
 #if DXX_BUILD_DESCENT == 2
@@ -2329,6 +2370,7 @@ void queue_snapshot(peer &p)
 	const auto slot{peer_slot(p)};
 	net_udp_update_netgame();
 	fill_netgame_scores();
+	net_objects_host_join(slot);
 	if (p.is_new)
 	{
 		/* A new player enters the game (new_player) only with its
@@ -2423,6 +2465,7 @@ void queue_snapshot(peer &p)
 			w.u32(i);
 			w.u8(static_cast<uint8_t>(owner));
 			w.u32(remote_objnum);
+			w.u16(net_objects_netid_of(Objects.vcptridx(i)));
 			multi_object_to_object_rw(objp, reinterpret_cast<object_rw *>(&entry[w.pos]));
 			msg.insert(msg.end(), entry.begin(), entry.end());
 			if (++msg[2] == SNAPSHOT_OBJECTS_PER_MESSAGE)
@@ -2473,6 +2516,7 @@ void apply_snapshot_begin(const std::span<const uint8_t> payload)
 	S.snapshot_crc = ::dcx::net_v2::crc32_update(0, payload);
 	// Clear object array
 	init_objects();
+	net_objects_snapshot_begin();
 	Network_rejoined = 1;
 	S.snapshot_mode_static = true;
 	S.snapshot_objects = 0;
@@ -2499,6 +2543,7 @@ void apply_snapshot_objects(const std::span<const uint8_t> payload)
 		objnum_t objnum = uobjnum;
 		const int8_t obj_owner{static_cast<int8_t>(r.u8())};
 		const int remote_objnum{r.i32()};
+		const uint16_t netid{r.u16()};
 		++S.snapshot_objects;
 		if (obj_owner == my_pnum || obj_owner == -1)
 		{
@@ -2526,7 +2571,7 @@ void apply_snapshot_objects(const std::span<const uint8_t> payload)
 			obj_unlink(Objects.vmptr, Segments.vmptr, obj);
 			Assert(obj->segnum == segment_none);
 		}
-		multi_object_rw_to_object(reinterpret_cast<const object_rw *>(&payload[pos + 9]), obj);
+		multi_object_rw_to_object(reinterpret_cast<const object_rw *>(&payload[pos + SNAPSHOT_OBJECT_ENTRY_OBJECT_OFFSET]), obj);
 		const auto segnum = obj->segnum;
 		if (segnum != segment_none)
 			obj_link_unchecked(Objects.vmptr, obj, Segments.vmptridx(segnum));
@@ -2536,6 +2581,7 @@ void apply_snapshot_objects(const std::span<const uint8_t> payload)
 			map_objnum_local_to_remote(objnum, remote_objnum, obj_owner);
 		else
 			object_owner[objnum] = -1;
+		net_objects_snapshot_bind(obj, netid);
 	}
 }
 
@@ -2714,11 +2760,6 @@ void send_fly_thru_triggers(const playernum_t pnum)
 	}
 }
 
-void send_player_flags()
-{
-	for (playernum_t i=0;i<N_players;i++)
-		multi_send_flags(i);
-}
 #endif
 
 void begin_extras(playernum_t pnum);
@@ -2749,14 +2790,12 @@ void send_extras()
 #if DXX_BUILD_DESCENT == 2
 	if (Network_sending_extras==4)
 		send_smash_lights(Player_joining_extras);
-	if (Network_sending_extras==3)
-		send_player_flags();
 #endif
 	if (Network_sending_extras==2)
-		/* Reliable: the joining player must get its inventory (v1 sent it
-		 * with priority 1, unacknowledged).
+		/* Every player's INVENTORY (stage 3; v1 sent the flags and the
+		 * host's inventory here).
 		 */
-		multi_send_player_inventory(multiplayer_data_priority::_2);
+		net_objects_send_all_inventories();
 	if (Network_sending_extras==1 && +(Game_mode & GM_BOUNTY))
 		multi_send_bounty();
 
@@ -3986,6 +4025,11 @@ void handle_unconnected(const std::span<const uint8_t> datagram, const _sockaddr
 void handle_reliable(peer &p, const session_msg type, const std::span<const uint8_t> payload)
 {
 	const auto slot{peer_slot(p)};
+	if (is_object_message(type))
+	{
+		receive_object_message(p, type, payload);
+		return;
+	}
 	if (multi_i_am_master())
 	{
 		switch (type)
@@ -4480,6 +4524,16 @@ void flush_sockets()
 bool socket_ready()
 {
 	return static_cast<bool>(UDP_Socket[0]);
+}
+
+void game_broadcast(const uint8_t type, const std::span<const uint8_t> payload, const playernum_t exclude)
+{
+	broadcast_reliable(static_cast<session_msg>(type), payload, exclude);
+}
+
+void game_send_to(const playernum_t slot, const uint8_t type, const std::span<const uint8_t> payload)
+{
+	send_to_slot(slot, static_cast<session_msg>(type), payload);
 }
 
 void session_reset()

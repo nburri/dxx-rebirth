@@ -71,7 +71,16 @@ extern powerup_names_array Powerup_names;
 #endif
 
 void draw_powerup(const d_vclip_array &Vclip, grs_canvas &, const object_base &obj);
-int do_powerup(vmobjptridx_t obj);
+/* `local`: the local ship touched the powerup (single player, keys);
+ * `granted`: the host granted it (network game, protocol v2 stage 3), so
+ * the checks that were the host's are skipped and nothing is sent.
+ */
+enum class powerup_pickup_mode : bool
+{
+	local,
+	granted,
+};
+int do_powerup(vmobjptridx_t obj, powerup_pickup_mode mode = powerup_pickup_mode::local);
 
 //process (animate) a powerup for one frame
 void do_powerup_frame(const d_vclip_array &Vclip, vmobjptridx_t obj);

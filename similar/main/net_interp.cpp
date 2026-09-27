@@ -429,6 +429,23 @@ void net_interp_snap_to_newest(const playernum_t pnum)
 		place_ship(pnum, obj, *g);
 }
 
+bool net_interp_newest_position(const playernum_t pnum, vms_vector &pos, fix &speed)
+{
+	if (pnum >= MAX_PLAYERS)
+		return false;
+	const auto &ring{I.ships[pnum].ring};
+	const snapshot *s{nullptr};
+	if (!ring.empty())
+		s = &ring.newest();
+	else if (const auto &g{I.ghosted[pnum]})
+		s = &*g;
+	if (!s)
+		return false;
+	pos = {s->pos.x, s->pos.y, s->pos.z};
+	speed = vm_vec_mag_quick(vms_vector{s->vel.x, s->vel.y, s->vel.z}).d;
+	return true;
+}
+
 void net_interp_sweep_driven(const d_robot_info_array &Robot_info, const vmobjptridx_t obj)
 {
 	const objnum_t o{obj};
