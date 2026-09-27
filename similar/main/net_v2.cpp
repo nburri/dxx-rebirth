@@ -604,22 +604,13 @@ struct queued_message
 
 struct peer
 {
-	enum class phase : uint8_t
-	{
-		none,
-		/* JOIN_ACCEPT sent (host) or received (client); a join in progress
-		 * awaits the client's LEVEL_READY.
-		 */
-		joining,
-		/* The level snapshot was queued; awaiting CLIENT_READY. */
-		syncing,
-		playing,
-		/* LEAVE, KICK or HOST_SHUTDOWN queued; the connection lingers for
-		 * NET_V2_CLOSE_LINGER so that it can be retransmitted.
-		 */
-		closing,
-	};
+	/* none, joining, syncing, playing, closing (net_v2_session.h). */
+	using phase = ::dcx::net_v2::peer_phase;
 	phase ph{phase::none};
+	/* Host: when the peer entered `joining` or `syncing` (section 4.4:
+	 * a join in progress is bounded by NET_V2_JOIN_SYNC_TIMEOUT).
+	 */
+	fix64 phase_since{};
 	std::optional<connection> conn;
 	_sockaddr addr{};
 	uint32_t token{};
@@ -678,6 +669,10 @@ struct session_state
 	join_attempt join;
 	_sockaddr join_addr{};
 	join_status join_result{join_status::idle};
+	/* Client: the wait for the snapshot of a join in progress (section
+	 * 4.4), from LEVEL_READY to LEVEL_GO.
+	 */
+	::dcx::net_v2::join_sync_wait sync_wait;
 	/* Client: the host last sent a GAME_INFO_REQ; only its GAME_INFO and
 	 * version JOIN_DENY are accepted.
 	 */
@@ -983,6 +978,22 @@ bool peer_receives_broadcasts(const peer &p)
 	return p.conn && (p.ph == peer::phase::syncing || p.ph == peer::phase::playing);
 }
 
+/* Best-effort events (EVENT_U) go only to a peer in the game.  A peer
+ * still syncing is applying its level snapshot: an event that creates an
+ * object (MULTI_CREATE_EXPLOSION, MULTI_DROP_BLOB) would take an object
+ * number from a free list that does not yet know the numbers the snapshot
+ * has placed, and overwrite a placed object - a player ship (the snapshot
+ * then fails with TXT_NET_SYNC_FAILED) or an object linked into a segment
+ * (cross-linked segment lists, which hang the client).  Reliable messages
+ * are safe: they are ordered behind the snapshot.  v1 sent a joining
+ * player no game data before its sync either.
+ */
+[[nodiscard]]
+bool peer_receives_events(const peer &p)
+{
+	return p.conn && p.ph == peer::phase::playing;
+}
+
 /* Game data (LEGACY_MDATA, EVENT_U, INPUT, the endlevel status) is
  * accepted and relayed only from a peer in the game.  A peer still
  * joining or syncing is not in the level yet; a closing one lingers only
@@ -1002,12 +1013,10 @@ bool peer_sends_game_data(const peer &p)
 [[nodiscard]]
 bool join_in_progress(const _sockaddr &ignore_addr)
 {
-	if (Network_sending_extras || !S.extras_queue.empty())
-		return true;
-	for (auto &p : S.peers)
-		if ((p.ph == peer::phase::joining || p.ph == peer::phase::syncing) && p.addr != ignore_addr)
-			return true;
-	return false;
+	per_player_array<::dcx::net_v2::join_peer_view> views{};
+	for (auto &&[i, p] : enumerate(S.peers))
+		views[i] = {.phase = p.ph, .same_address = p.addr == ignore_addr};
+	return ::dcx::net_v2::join_in_progress(views, Network_sending_extras || !S.extras_queue.empty());
 }
 
 void drop_peer(peer &p)
@@ -2091,10 +2100,10 @@ void flush_events()
 	if (multi_i_am_master())
 	{
 		for (auto &p : S.peers)
-			if (peer_receives_broadcasts(p))
+			if (peer_receives_events(p))
 				p.conn->send_unreliable(chunk_type::event_u, S.event_buffer);
 	}
-	else if (auto &p{S.peers[0]}; peer_receives_broadcasts(p))
+	else if (auto &p{S.peers[0]}; peer_receives_events(p))
 		p.conn->send_unreliable(chunk_type::event_u, S.event_buffer);
 	S.event_buffer.clear();
 }
@@ -2127,6 +2136,17 @@ void send_legacy_reliable(const playernum_t originator, const std::span<const ui
 bool legacy_processing_allowed()
 {
 	return Network_status == network_state::playing || Network_status == network_state::endlevel || Network_status == network_state::waiting;
+}
+
+/* Best-effort events are applied only in the level.  While `waiting`
+ * the client may be applying its level snapshot (see
+ * peer_receives_events); events are cosmetic or latest-wins, so dropping
+ * the few that arrive before LEVEL_GO loses nothing.
+ */
+[[nodiscard]]
+bool event_processing_allowed()
+{
+	return Network_status == network_state::playing || Network_status == network_state::endlevel;
 }
 
 void receive_legacy_mdata(peer &p, const std::span<const uint8_t> payload)
@@ -2162,10 +2182,10 @@ void receive_event(peer &p, const std::span<const uint8_t> payload)
 		if (originator != peer_slot(p))
 			return;
 		for (auto &&[i, q] : enumerate(S.peers))
-			if (i != originator && peer_receives_broadcasts(q))
+			if (i != originator && peer_receives_events(q))
 				q.conn->send_unreliable(chunk_type::event_u, payload);
 	}
-	if (!legacy_processing_allowed())
+	if (!event_processing_allowed())
 		return;
 	multi_process_bigdata(LevelSharedRobotInfoState, originator, records);
 }
@@ -2428,6 +2448,7 @@ void queue_snapshot(peer &p)
 	assert(part == parts);
 	con_printf(CON_VERBOSE, "net: snapshot of %u objects in %u parts queued for P#%u", object_count, part, slot);
 	p.ph = peer::phase::syncing;
+	p.phase_since = S.now;
 }
 
 /* Client: abort a join whose snapshot cannot be applied. */
@@ -2627,6 +2648,7 @@ void apply_level_go_internal()
 	S.inputs = {};
 	net_interp_reset();
 
+	S.sync_wait.end();
 	Network_status = network_state::playing;
 	multi_sort_kill_list();
 }
@@ -2700,6 +2722,7 @@ void send_player_flags()
 #endif
 
 void begin_extras(playernum_t pnum);
+void start_next_extras();
 
 void send_extras()
 {
@@ -2741,16 +2764,21 @@ void send_extras()
 	if (!Network_sending_extras)
 	{
 		Player_joining_extras=-1;
-		/* The next player whose extras waited, if still in the game. */
-		while (!S.extras_queue.empty())
+		start_next_extras();
+	}
+}
+
+/* The next player whose extras waited, if still in the game. */
+void start_next_extras()
+{
+	while (!S.extras_queue.empty())
+	{
+		const auto next{S.extras_queue.front()};
+		S.extras_queue.pop_front();
+		if (S.peers[next].ph == peer::phase::playing)
 		{
-			const auto next{S.extras_queue.front()};
-			S.extras_queue.pop_front();
-			if (S.peers[next].ph == peer::phase::playing)
-			{
-				begin_extras(next);
-				break;
-			}
+			begin_extras(next);
+			break;
 		}
 	}
 }
@@ -2789,6 +2817,24 @@ void cancel_extras()
 	Network_sending_extras = 0;
 	Player_joining_extras = -1;
 	S.extras_queue.clear();
+}
+
+/* Host: the player in `pnum` is gone (or its slot is taken by a new
+ * connection).  Its extras run ends and its queued run is forgotten: the
+ * rest of a run for the previous connection would otherwise go to a new
+ * player in the slot before its snapshot (useless, the snapshot replaces
+ * the level state), and that player's own run would never start, since
+ * start_extras takes a run already under way for the slot as its own.
+ */
+void drop_extras_for(const playernum_t pnum)
+{
+	std::erase(S.extras_queue, pnum);
+	if (Network_sending_extras && Player_joining_extras == static_cast<int>(pnum))
+	{
+		Network_sending_extras = 0;
+		Player_joining_extras = -1;
+		start_next_extras();
+	}
 }
 
 /* Players joining and leaving */
@@ -2883,6 +2929,7 @@ void host_peer_gone(peer &p, const kick_player_reason why)
 	const auto slot{peer_slot(p)};
 	const bool was_closing{p.ph == peer::phase::closing};
 	drop_peer(p);
+	drop_extras_for(slot);
 	if (Network_status == network_state::starting)
 	{
 		if (vcplayerptr(slot)->connected != player_connection_status::disconnected)
@@ -2929,7 +2976,9 @@ void accept_peer(const playernum_t slot, const ::dcx::net_v2::join_request &req,
 {
 	auto &p = S.peers[slot];
 	drop_peer(p);
+	drop_extras_for(slot);
 	p.ph = ph;
+	p.phase_since = S.now;
 	p.token = random_nonzero_u32();
 	p.nonce = req.client_nonce;
 	p.addr = from;
@@ -2995,12 +3044,12 @@ void welcome_player(const ::dcx::net_v2::join_request &req, const callsign_t &ca
 		return;
 	}
 
-	if (req.current_level != Current_level_num)
-	{
-		deny_join(from, req.client_nonce, kick_player_reason::level);
-		return;
-	}
-
+	/* Not req.current_level: the client asks before it loads the level
+	 * (it loads the host's level after JOIN_ACCEPT), so its number is
+	 * whatever it played last - 1 after a restart.  Denying on it refused
+	 * every restarted client on any level but the first; the level is
+	 * checked where it means something, in LEVEL_READY.
+	 */
 	/* The same client restarted during its own join: drop the stale
 	 * attempt, so that it neither holds a second slot nor blocks the new
 	 * one.
@@ -3214,7 +3263,7 @@ void handle_join_request(const std::span<const uint8_t> payload, const _sockaddr
 	{
 		if (p.ph == peer::phase::none || !p.conn)
 			continue;
-		switch (::dcx::net_v2::classify_duplicate_join(p.addr == from, p.nonce, req->client_nonce, p.conn->state() == connection_state::connecting))
+		switch (::dcx::net_v2::classify_duplicate_join(p.addr == from, p.nonce, req->client_nonce, p.conn->state() == connection_state::connecting, p.ph == peer::phase::closing))
 		{
 			case ::dcx::net_v2::duplicate_join::none:
 				continue;
@@ -4039,7 +4088,14 @@ void handle_reliable(peer &p, const session_msg type, const std::span<const uint
 				Netgame.level_time = level_time;
 				Netgame.control_invul_time = control_invul_time;
 				if (flags & 1)
+				{
 					Network_rejoined = 1;
+					/* A snapshot follows: a player late for a level start
+					 * learns only here that it joins in progress.
+					 */
+					if (!S.sync_wait.active())
+						S.sync_wait.begin(S.now);
+				}
 			}
 			break;
 		case session_msg::snapshot_begin:
@@ -4355,6 +4411,16 @@ void frame(const bool listen)
 			continue;
 		}
 		report_stats(p);
+		if (multi_i_am_master() && ::dcx::net_v2::join_stalled(p.ph, p.phase_since, S.now))
+		{
+			/* Section 4.4: a join in progress that does not finish.  The
+			 * client may be alive (its connection keeps up) but stuck;
+			 * the joins are serialised, so it must not block the others
+			 * for ever.
+			 */
+			con_printf(CON_NORMAL, "net: P#%u did not complete its join in %u s; removed", peer_slot(p), static_cast<unsigned>(::dcx::net_v2::NET_V2_JOIN_SYNC_TIMEOUT / F1_0));
+			kick_peer(p, kick_player_reason::snapshot_failed);
+		}
 		if (p.ph == peer::phase::closing && S.now >= p.close_at)
 		{
 			if (multi_i_am_master())
@@ -4432,6 +4498,7 @@ void session_reset()
 	S.event_buffer.clear();
 	S.join.end();
 	S.join_result = join_status::idle;
+	S.sync_wait.end();
 	S.info_addr.reset();
 	S.extras_queue.clear();
 	S.lite_limit.reset();
@@ -4500,13 +4567,35 @@ void client_end_join()
 	S.join_result = join_status::idle;
 }
 
+void client_cancel_join()
+{
+	S.join.end();
+	S.join_result = join_status::idle;
+	/* Accepted meanwhile: the host counts this client as joining (and
+	 * serves no other join) until it hears that it left.
+	 */
+	client_send_leave(kick_player_reason::cancelled);
+}
+
 void client_send_level_ready()
 {
+	/* A game in progress answers with a snapshot, which is bounded; a
+	 * fresh level start waits for the host and the other players.
+	 */
+	if (Netgame.game_status == network_state::playing)
+		S.sync_wait.begin(timer_query());
+	else
+		S.sync_wait.end();
 	std::array<uint8_t, LEVEL_READY_SIZE> buf;
 	writer w{buf.data()};
 	w.u32(static_cast<uint32_t>(Current_level_num));
 	w.u16(my_segments_checksum);
 	send_to_slot(0, session_msg::level_ready, buf);
+}
+
+bool client_sync_timed_out()
+{
+	return S.sync_wait.expired(timer_query());
 }
 
 void client_send_leave(const kick_player_reason reason)
@@ -4916,6 +5005,11 @@ void dispatch_table::leave_game() const
 
 	net_v2::flush_sockets();
 	net_v2::close_sockets();
+	/* Out of the game: a later join's GAME_INFO is accepted only in the
+	 * menus (handle_game_info), and the manual join does not set the
+	 * state itself.
+	 */
+	Network_status = network_state::menu;
 }
 
 }

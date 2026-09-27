@@ -644,6 +644,8 @@ window_event_result manual_join_menu::event_handler(const d_event &event)
 		case event_type::key_command:
 			if (connecting != direct_join::connect_type::idle && event_key_get(event) == KEY_ESC)
 			{
+				if (connecting == direct_join::connect_type::joining)
+					net_v2::client_cancel_join();
 				connecting = direct_join::connect_type::idle;
 				nm_set_item_text(m[label_status_text], "");
 				return window_event_result::handled;
@@ -833,6 +835,8 @@ window_event_result netgame_list_game_menu::event_handler(const d_event &event)
 			{
 				if (connecting != direct_join::connect_type::idle)
 				{
+					if (connecting == direct_join::connect_type::joining)
+						net_v2::client_cancel_join();
 					connecting = direct_join::connect_type::idle;
 					nm_set_item_text(menus[UDP_NETGAMES_PPAGE+4], "\t");
 					return window_event_result::handled;
@@ -1172,6 +1176,12 @@ static int net_udp_sync_poll( newmenu *,const d_event &event, const unused_newme
 
 	// Leave if Host disconnects
 	if (Netgame.players[0].connected == player_connection_status::disconnected)
+		rval = -2;
+
+	/* A join in progress whose snapshot does not come: give up rather
+	 * than wait for ever (the host's connection may well be alive).
+	 */
+	if (net_v2::client_sync_timed_out())
 		rval = -2;
 
 	if (Network_status != network_state::waiting)	// Status changed to playing, exit the menu
@@ -2405,7 +2415,13 @@ static int net_udp_wait_for_sync(void)
 
 	if (Network_status != network_state::playing)
 	{
-		net_v2::client_send_leave(kick_player_reason::cancelled);
+		if (net_v2::client_sync_timed_out())
+		{
+			net_v2::client_send_leave(kick_player_reason::snapshot_failed);
+			nm_messagebox_str(menu_title{TXT_ERROR}, nm_messagebox_tie(TXT_OK), menu_subtitle{"Failed to join the netgame.\nThe host did not send the\ngame state in time.\nTry joining again."});
+		}
+		else
+			net_v2::client_send_leave(kick_player_reason::cancelled);
 		N_players = 0;
 		Game_mode = {};
 		return(-1);     // they cancelled
