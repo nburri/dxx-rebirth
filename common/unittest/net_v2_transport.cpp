@@ -873,6 +873,153 @@ void test_unreliable_chunks_per_packet()
 	std::printf("    two STATE chunks in one packet both delivered; an older packet's STATE dropped, its EVENT_U kept\n");
 }
 
+/* Fourth review round: the coordinator's probe cases. */
+
+/* 1. Latest-wins does not wedge after 32 768 packets without that
+ * chunk type.
+ */
+void test_latest_wins_wrap()
+{
+	begin("latest-wins after a sequence wrap");
+	connection_config h{host_side}, c{client_side};
+	h.tick_period = 1;
+	c.tick_period = 1;
+	connection a{h, 0};
+	connection b{c, 0};
+	const std::array<std::uint8_t, 4> x{{1, 2, 3, 4}};
+	net_clock t{1};
+	a.set_unreliable_state(chunk_type::state, x);
+	CHECK(b.on_receive(a.build_outgoing(t), t).unreliable.size() == 1);
+	for (unsigned i{}; i != 33000; ++i)
+	{
+		++t;
+		CHECK(a.send_unreliable(chunk_type::event_u, x));
+		const auto p{a.build_outgoing(t)};
+		CHECK(!p.empty());
+		CHECK(b.on_receive(p, t).status == receive_status::accepted);
+	}
+	unsigned dropped{};
+	for (unsigned i{}; i != 200; ++i)
+	{
+		++t;
+		a.set_unreliable_state(chunk_type::state, x);
+		const auto r{b.on_receive(a.build_outgoing(t), t)};
+		CHECK(r.status == receive_status::accepted);
+		if (r.unreliable.empty())
+			++dropped;
+	}
+	CHECK_MSG(dropped == 0, "state chunks dropped after the wrap: " + std::to_string(dropped));
+	/* And a genuinely reordered older state is still dropped. */
+	a.set_unreliable_state(chunk_type::state, x);
+	const datagram p1{[&] { const auto p{a.build_outgoing(++t)}; return datagram{p.begin(), p.end()}; }()};
+	a.set_unreliable_state(chunk_type::state, x);
+	const datagram p2{[&] { const auto p{a.build_outgoing(++t)}; return datagram{p.begin(), p.end()}; }()};
+	CHECK(b.on_receive(p2, t).unreliable.size() == 1);
+	CHECK(b.on_receive(p1, t).unreliable.empty());
+	std::printf("    33000 event-only packets, then 200 states: all delivered; a reordered older state still dropped\n");
+}
+
+/* 2. A grant closes the tick that was still open. */
+void test_grant_closes_tick()
+{
+	begin("grant closes the open tick");
+	connection a{host_side, 0};
+	const datagram big(NET_V2_MAX_MESSAGE);
+	for (unsigned i{}; i != 6; ++i)
+		CHECK(a.enqueue_reliable(9, big) == enqueue_result::ok);
+	/* The caller builds once in tick 0 and stops. */
+	CHECK(!a.build_outgoing(0).empty());
+	unsigned n1{};
+	while (!a.build_outgoing(TICK).empty())
+		++n1;
+	CHECK_MSG(n1 == NET_V2_DEFAULT_MAX_PACKETS_PER_TICK, "packets in tick 1: " + std::to_string(n1));
+	std::printf("    one packet in tick 0, then %u (not 3) in tick 1\n", n1);
+}
+
+/* 3. An ack of a packet we never sent is rejected as a protocol error
+ * and touches nothing.
+ */
+void test_hostile_ack()
+{
+	begin("hostile ack");
+	connection a{host_side, 0};
+	const std::array<std::uint8_t, 4> x{{1, 2, 3, 4}};
+	for (unsigned i{}; i != 5; ++i)
+	{
+		CHECK(a.enqueue_reliable(1, x) == enqueue_result::ok);
+		CHECK(!a.build_outgoing(net_clock{i + 1} * TICK).empty());
+	}
+	const auto before{a.stats()};
+	packet_header h;
+	h.session_id = host_side.session_id;
+	h.peer_token = host_side.peer_token;
+	h.player_id = host_side.remote_player_id;
+	h.flags = static_cast<std::uint8_t>(packet_flag::keepalive);
+	h.seq = 1;
+	h.ack = 5000;
+	std::array<std::uint8_t, NET_V2_HEADER_SIZE> d{};
+	h.write(d.data());
+	CHECK(a.on_receive(d, 10 * TICK).status == receive_status::bad_ack);
+	const auto after{a.stats()};
+	CHECK(after.packets_lost == before.packets_lost && after.resends_by_gap == before.resends_by_gap && after.packets_acked == before.packets_acked);
+	CHECK(after.loss_estimate == before.loss_estimate);
+	CHECK(after.protocol_errors == 1 && after.packets_received == before.packets_received);
+	CHECK(after.state == connection_state::connecting);
+	/* A replay of it is a duplicate, not a second error. */
+	CHECK(a.on_receive(d, 11 * TICK).status == receive_status::duplicate);
+	CHECK(a.stats().protocol_errors == 1);
+	/* An ack of exactly the last packet we sent is fine. */
+	h.seq = 2;
+	h.ack = 5;
+	h.write(d.data());
+	CHECK(a.on_receive(d, 12 * TICK).status == receive_status::accepted);
+	CHECK(a.stats().packets_acked == 1);
+	std::printf("    ack 5000 with 5 packets sent: bad_ack, nothing resolved or resent; ack 5 accepted\n");
+}
+
+/* 4. An event that does not fit does not block the events behind it. */
+void test_event_head_of_line()
+{
+	begin("event head-of-line");
+	connection a{host_side, 0};
+	const datagram huge(NET_V2_MAX_CHUNK_PAYLOAD), tiny(4), state(300);
+	CHECK(a.send_unreliable(chunk_type::event_u, huge));
+	for (unsigned i{}; i != 10; ++i)
+		CHECK(a.send_unreliable(chunk_type::event_u, tiny));
+	a.set_unreliable_state(chunk_type::state, state);
+	const auto p0{a.build_outgoing(0)};
+	CHECK_MSG(p0.size() == NET_V2_HEADER_SIZE + (3 + 300) + 10 * (3 + 4), "first packet " + std::to_string(p0.size()) + " bytes");
+	CHECK(a.stats().unreliable_dropped == 0);
+	unsigned ticks_until_dropped{};
+	for (unsigned t{1}; t != 20 && a.stats().unreliable_dropped == 0; ++t)
+	{
+		a.set_unreliable_state(chunk_type::state, state);
+		CHECK(!a.build_outgoing(net_clock{t} * TICK).empty());
+		ticks_until_dropped = t;
+	}
+	CHECK(a.stats().unreliable_dropped == 1);
+	CHECK_MSG(ticks_until_dropped == NET_V2_EVENT_SKIP_MAX - 1, "dropped after " + std::to_string(ticks_until_dropped + 1) + " packets");
+	/* Without a state chunk the huge event would have fitted. */
+	CHECK(a.send_unreliable(chunk_type::event_u, huge));
+	const auto p{a.build_outgoing(net_clock{30} * TICK)};
+	CHECK(p.size() == NET_V2_MAX_PACKET);
+	std::printf("    10 tiny events go out beside the state at once; the oversize one is dropped after %u packets, and fits alone\n", NET_V2_EVENT_SKIP_MAX);
+}
+
+/* 6. A zero tick period does not divide by zero. */
+void test_zero_tick_period()
+{
+	begin("zero tick period");
+	connection_config h{host_side};
+	h.tick_period = 0;
+	h.max_packets_per_tick = 0;
+	connection a{h, 0};
+	CHECK(a.config().tick_period == 1 && a.config().max_packets_per_tick == 1);
+	a.set_unreliable_state(chunk_type::state, std::array<std::uint8_t, 1>{{1}});
+	CHECK(!a.build_outgoing(1).empty());
+	std::printf("    tick_period 0 and max_packets_per_tick 0 are clamped to 1\n");
+}
+
 /* Third review round. */
 
 /* 1. Echo fields that do not name one of our packets with its true
@@ -1534,6 +1681,11 @@ int main(const int argc, char **const argv)
 	test_bounds(seed);
 	test_timeouts(seed);
 	test_replay(seed);
+	test_latest_wins_wrap();
+	test_grant_closes_tick();
+	test_hostile_ack();
+	test_event_head_of_line();
+	test_zero_tick_period();
 	test_echo_authentication(seed);
 	test_tick_credit();
 	test_reordered_echo();

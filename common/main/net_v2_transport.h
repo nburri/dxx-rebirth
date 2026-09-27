@@ -57,6 +57,12 @@ namespace net_v2 {
  */
 constexpr std::size_t NET_V2_EVENT_QUEUE_MAX{64};
 
+/* A pending event that did not fit beside the state chunk in this many
+ * packets is dropped; later events are not held up by it in the
+ * meantime (order between unreliable events is not guaranteed).
+ */
+constexpr unsigned NET_V2_EVENT_SKIP_MAX{8};
+
 /* Section 2.3: the default network tick, 60 Hz. */
 constexpr net_clock NET_V2_DEFAULT_TICK_PERIOD{net_seconds(1) / 60};
 
@@ -71,7 +77,8 @@ struct connection_config
 	std::uint8_t remote_player_id{NET_V2_PLAYER_ID_NONE};
 	/* The network tick.  A packet budget of max_packets_per_tick opens
 	 * once per tick_period (see begin_tick), and the RTO is padded by
-	 * it for the peer's ack hold time.
+	 * it for the peer's ack hold time.  Both are clamped to at least 1
+	 * by the connection.
 	 */
 	net_clock tick_period{NET_V2_DEFAULT_TICK_PERIOD};
 	unsigned max_packets_per_tick{NET_V2_DEFAULT_MAX_PACKETS_PER_TICK};
@@ -135,6 +142,11 @@ enum class receive_status : std::uint8_t
 	bad_session,
 	bad_token,
 	bad_player,
+	/* `ack` names a packet we have not sent.  Nothing is applied; a
+	 * protocol error is counted and the sequence is remembered like a
+	 * malformed packet's.
+	 */
+	bad_ack,
 	/* Already seen, or older than the 64-packet reorder window. */
 	duplicate,
 	/* The connection is closed. */
@@ -346,6 +358,11 @@ class connection
 		bool valid{};
 		std::uint16_t seq{};
 	};
+	struct pending_event
+	{
+		unreliable_chunk chunk;
+		unsigned skipped{};
+	};
 	/* Parsed once by validate_chunks, applied by deliver_*. */
 	struct parsed_message
 	{
@@ -405,7 +422,7 @@ class connection
 	std::vector<out_msg *> m_carried;
 	std::vector<selected_run> m_runs;
 	std::optional<unreliable_chunk> m_pending_state;
-	std::deque<unreliable_chunk> m_pending_events;
+	std::deque<pending_event> m_pending_events;
 
 	/* Receiver side */
 	bool m_any_received{};
@@ -442,7 +459,7 @@ class connection
 	void check_timeouts(net_clock now);
 	void detect_rto_losses(net_clock now);
 	void flag_resend(out_msg &m);
-	void process_acks(std::uint16_t ack, std::uint64_t ack_bits, net_clock now, bool take_rtt_samples);
+	void process_acks(std::uint16_t ack, std::uint64_t ack_bits);
 	void resolve_packet(packet_log_entry &e, bool acked);
 	void pop_acked_messages();
 	[[nodiscard]]
@@ -477,8 +494,10 @@ public:
 	void set_unreliable_state(chunk_type type, std::span<const std::uint8_t> payload);
 
 	/* A best-effort chunk (`event_u`, or a further `state` part): sent
-	 * once in the next packet with room for it, never retransmitted.
-	 * Returns false if it was dropped.
+	 * once in the next packet with room for it, never retransmitted.  An
+	 * event that does not fit does not hold up the ones behind it and is
+	 * dropped after NET_V2_EVENT_SKIP_MAX packets.  Returns false if it
+	 * was dropped at once.
 	 */
 	bool send_unreliable(chunk_type type, std::span<const std::uint8_t> payload);
 
@@ -491,8 +510,10 @@ public:
 	 * pile up into a spare and a long stall does not end in a burst.
 	 * Within a tick, §3.6 allows one packet, and further ones up to
 	 * config.max_packets_per_tick only while reliable messages remain
-	 * that did not fit.  build_outgoing calls this itself; calling it
-	 * explicitly at the tick merely documents the tick.
+	 * that did not fit.  A grant closes the tick that was open, so an
+	 * unfinished allowance is never spent on top of the new one.
+	 * build_outgoing calls this itself; calling it explicitly at the
+	 * tick merely documents the tick.
 	 */
 	void begin_tick(net_clock now);
 

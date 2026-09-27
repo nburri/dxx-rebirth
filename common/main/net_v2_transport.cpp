@@ -140,14 +140,29 @@ void clock_sync::update(const net_clock now)
 
 /* connection */
 
+namespace {
+
+[[nodiscard]]
+connection_config sanitized(connection_config config)
+{
+	/* A zero period would divide by zero in begin_tick; a zero budget
+	 * could never send.
+	 */
+	config.tick_period = std::max<net_clock>(config.tick_period, 1);
+	config.max_packets_per_tick = std::max(config.max_packets_per_tick, 1u);
+	return config;
+}
+
+}
+
 connection::connection(const connection_config &config, const net_clock now) :
-	m_config{config},
+	m_config{sanitized(config)},
 	/* Make the first build_outgoing produce a packet at once. */
 	m_last_sent{now - NET_V2_KEEPALIVE_INTERVAL},
 	/* One full period behind, so the first begin_tick grants a budget. */
-	m_tick_start{now - config.tick_period},
+	m_tick_start{now - m_config.tick_period},
 	m_last_heard{now},
-	m_rtt{config.tick_period}
+	m_rtt{m_config.tick_period}
 {
 }
 
@@ -219,7 +234,7 @@ bool connection::send_unreliable(const chunk_type type, const std::span<const st
 		m_pending_events.pop_front();
 		++m_stats.unreliable_dropped;
 	}
-	m_pending_events.push_back(unreliable_chunk{.type = type, .payload = {payload.begin(), payload.end()}});
+	m_pending_events.push_back({.chunk = {.type = type, .payload = {payload.begin(), payload.end()}}});
 	return true;
 }
 
@@ -300,6 +315,9 @@ void connection::begin_tick(const net_clock now)
 	const auto ticks{elapsed / m_config.tick_period};
 	m_tick_start += ticks * m_config.tick_period;
 	m_tick_credit = static_cast<unsigned>(std::min<net_clock>(ticks, NET_V2_TICK_GRANT_MAX));
+	/* Whatever was left of the previous tick is not carried on top. */
+	m_tick_open = false;
+	m_tick_packets = 0;
 }
 
 std::span<const std::uint8_t> connection::build_outgoing(const net_clock now)
@@ -447,17 +465,25 @@ std::span<const std::uint8_t> connection::build_outgoing(const net_clock now)
 		pos += s.payload.size();
 		m_pending_state.reset();
 	}
-	while (!m_pending_events.empty())
-	{
-		const auto &e{m_pending_events.front()};
-		if (chunk_wire_size(e.payload.size()) > NET_V2_MAX_PACKET - pos)
-			break;
-		chunk_header{.type = static_cast<std::uint8_t>(e.type), .length = static_cast<std::uint16_t>(e.payload.size())}.write(buf + pos);
+	/* Events: every one that fits, in queue order; one that does not fit
+	 * is skipped (not a head-of-line block) and dropped once it has been
+	 * skipped NET_V2_EVENT_SKIP_MAX times.
+	 */
+	std::erase_if(m_pending_events, [&](pending_event &e) {
+		const auto &c{e.chunk};
+		if (chunk_wire_size(c.payload.size()) > NET_V2_MAX_PACKET - pos)
+		{
+			if (++e.skipped < NET_V2_EVENT_SKIP_MAX)
+				return false;
+			++m_stats.unreliable_dropped;
+			return true;
+		}
+		chunk_header{.type = static_cast<std::uint8_t>(c.type), .length = static_cast<std::uint16_t>(c.payload.size())}.write(buf + pos);
 		pos += NET_V2_CHUNK_HEADER_SIZE;
-		std::ranges::copy(e.payload, buf + pos);
-		pos += e.payload.size();
-		m_pending_events.pop_front();
-	}
+		std::ranges::copy(c.payload, buf + pos);
+		pos += c.payload.size();
+		return true;
+	});
 
 	packet_header h;
 	h.session_id = m_config.session_id;
@@ -547,7 +573,12 @@ void connection::pop_acked_messages()
 	}
 }
 
-void connection::process_acks(const std::uint16_t ack, const std::uint64_t ack_bits, const net_clock now, const bool take_rtt_samples)
+/* The caller has checked that `ack` names a packet we sent.  No RTT is
+ * taken from acks: the ack for a packet is held until the peer's next
+ * tick and may ride a reordered packet, so only the echo fields, which
+ * account for the hold, feed the estimator.
+ */
+void connection::process_acks(const std::uint16_t ack, const std::uint64_t ack_bits)
 {
 	if (ack == 0 && ack_bits == 0)
 		/* The peer has not received anything from us yet. */
@@ -560,16 +591,6 @@ void connection::process_acks(const std::uint16_t ack, const std::uint64_t ack_b
 		auto &e{m_packet_log[s % NET_V2_RECV_WINDOW]};
 		if (!e.valid || e.seq != s || e.acked || e.lost)
 			continue;
-		if (take_rtt_samples)
-		{
-			/* Acks name the packet, not the message, so the packet's
-			 * single transmission time is an unambiguous sample even if
-			 * a message in it was resent in another packet.
-			 */
-			const auto r{now - e.sent_at};
-			if (r >= 0 && r <= NET_V2_RTT_SAMPLE_MAX)
-				m_rtt.add_sample(r);
-		}
 		resolve_packet(e, true);
 	}
 	/* Packets that fell out of the ack bitfield unacked are lost.  Scan
@@ -748,14 +769,25 @@ void connection::deliver_unreliable(const std::uint16_t packet_seq, receive_repo
 		if (is_latest_wins(c.type))
 		{
 			auto &latest{m_latest_packet[latest_index(c.type)]};
-			if (latest.valid && seq_diff(packet_seq, latest.seq) < 0)
+			/* The last packet that carried this type is a reference only
+			 * while it is inside the reorder window; anything older has
+			 * been superseded by every packet since, and its sequence
+			 * may even have wrapped (a type not seen for 32 768 packets
+			 * would otherwise be dropped for the next 32 768).
+			 */
+			const auto age{latest.valid ? seq_diff(m_highest_seen, latest.seq) : std::int16_t{-1}};
+			const bool reference{age >= 0 && age <= static_cast<std::int16_t>(NET_V2_ACK_BITS)};
+			if (reference && seq_diff(packet_seq, latest.seq) < 0)
 				/* From a packet older than one already applied:
 				 * reordered, drop.  Chunks of the same packet are all
 				 * delivered.
 				 */
 				continue;
-			latest.valid = true;
-			latest.seq = packet_seq;
+			if (!reference || seq_diff(packet_seq, latest.seq) >= 0)
+			{
+				latest.valid = true;
+				latest.seq = packet_seq;
+			}
 		}
 		report.unreliable.push_back({.type = c.type, .payload = {c.payload.begin(), c.payload.end()}});
 	}
@@ -773,7 +805,7 @@ receive_report connection::on_receive(const std::span<const std::uint8_t> datagr
 	if (datagram.size() < NET_V2_HEADER_SIZE || datagram.size() > NET_V2_MAX_PACKET)
 		return reject(receive_status::bad_length);
 	const auto h{*packet_header::read(datagram)};
-	if (h.proto != MULTI_PROTO_VERSION)
+	if (h.proto != NET_V2_PROTO_VERSION)
 		return reject(receive_status::bad_proto);
 	if (h.flags & static_cast<std::uint8_t>(packet_flag::reserved_mask))
 		return reject(receive_status::bad_flags);
@@ -815,11 +847,22 @@ receive_report connection::on_receive(const std::span<const std::uint8_t> datagr
 			new_ack_bits = m_ack_bits | bit;
 		}
 	}
-	/* A replay of a packet we refused to acknowledge (malformed) is not
-	 * in the replay window; it must not count again.
+	/* A replay of a packet we refused to acknowledge (malformed or with
+	 * a bad ack) is not in the replay window; it must not count again.
 	 */
 	if (seen_malformed(h.seq))
 		return reject(receive_status::duplicate);
+	/* An ack of a packet we have not sent is a protocol error, and it
+	 * would drive the loss scan and the gap rule over everything in
+	 * flight on every packet.
+	 */
+	if (!(h.ack == 0 && h.ack_bits == 0) && seq_diff(h.ack, m_local_seq) > 0)
+	{
+		remember_malformed(h.seq);
+		if (count_protocol_error(now))
+			close_with(close_reason::protocol_error);
+		return reject(receive_status::bad_ack);
+	}
 	/* Step 7: header effects.  These hold even if the chunks turn out
 	 * to be malformed: the header itself validated.
 	 */
@@ -827,7 +870,6 @@ receive_report connection::on_receive(const std::span<const std::uint8_t> datagr
 		m_state = connection_state::connected;
 	m_last_heard = now;
 	++m_stats.packets_received;
-	bool echo_sample{};
 	if (h.echo_seq != 0 && h.echo_delay != NET_V2_ECHO_DELAY_SATURATED)
 	{
 		/* Only an echo of a packet we really sent, with the send_time
@@ -846,13 +888,12 @@ receive_report connection::on_receive(const std::span<const std::uint8_t> datagr
 				m_rtt.add_sample(rtt);
 				const net_time peer_now{h.send_time + static_cast<net_time>(rtt / 2)};
 				m_clock.add_sample(now, rtt, net_time_diff(peer_now, to_net_time(now)));
-				echo_sample = true;
 			}
 		}
 	}
 	/* Step 8: walk the chunks */
 	const bool well_formed{validate_chunks(datagram.subspan(NET_V2_HEADER_SIZE), h.flags)};
-	process_acks(h.ack, h.ack_bits, now, !echo_sample);
+	process_acks(h.ack, h.ack_bits);
 	if (!well_formed)
 	{
 		/* Not acknowledged and nothing delivered, so that a conforming

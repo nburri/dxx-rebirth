@@ -4600,9 +4600,9 @@ class DXXCommon(LazyObjectConstructor):
 			# StaticObject hook.
 			self.create_header_targets()
 		if user_settings.register_runtime_test_link_targets:
-			self._register_runtime_test_link_targets()
+			self._register_runtime_test_link_targets(self.runtime_test_boost_tests, boost=True)
 		if user_settings.register_runtime_test_plain_link_targets:
-			self._register_runtime_test_plain_link_targets()
+			self._register_runtime_test_link_targets(self.runtime_test_plain_tests, boost=False)
 		configure_pch_flags = archive.configure_pch_flags
 		if configure_pch_flags or env.GetOption('clean'):
 			self.pch_manager = PCHManager(self, configure_pch_flags, archive.pch_manager)
@@ -4913,35 +4913,26 @@ class DXXCommon(LazyObjectConstructor):
 				LIBS = ['bcm_host'],
 			)
 
-	def _register_runtime_test_link_targets(self):
-		runtime_test_boost_tests = self.runtime_test_boost_tests
-		if not runtime_test_boost_tests:
-			return
-		env = self.env
-		user_settings = self.user_settings
-		builddir = env.Dir(user_settings.builddir).Dir(self.srcdir)
-		library = env.Library(builddir.File(f'{env["LIBPREFIX"]}{self.srcdir}{env["LIBSUFFIX"]}'), self.get_library_objects())
-		env_LIBS = env.get('LIBS')
-		for test in runtime_test_boost_tests:
-			LIBS = [] if (env_LIBS is None or not test.use_default_libs) else env_LIBS.copy()
-			LIBS.extend((
-				'boost_unit_test_framework',
-				library,
-				))
-			env.Program(target=builddir.File(test.target), source=test.source(self), LIBS=LIBS)
-
-	# Tests that do not use Boost.Test: plain programs that exit non-zero
-	# on failure.  Each is registered as an alias named after its target,
-	# so `scons register_runtime_test_plain_link_targets=1 <target>` builds
-	# and links just that test, without the Boost.Test configure check.
-	def _register_runtime_test_plain_link_targets(self):
-		runtime_test_plain_tests = self.runtime_test_plain_tests
-		if not runtime_test_plain_tests:
+	# Register the link targets of runtime tests.  Boost.Test programs
+	# (boost=True) link the unit test framework and the library of
+	# common objects; plain programs (boost=False) exit non-zero on
+	# failure and link only what they list, so they need no Boost.Test
+	# configure check.  Every test is also an alias named after its
+	# target, so `scons <target>` builds just that test.
+	def _register_runtime_test_link_targets(self, tests, boost):
+		if not tests:
 			return
 		env = self.env
 		builddir = env.Dir(self.user_settings.builddir).Dir(self.srcdir)
-		for test in runtime_test_plain_tests:
-			program = env.Program(target=builddir.File(test.target), source=test.source(self), LIBS=[])
+		extra_libs = [
+			'boost_unit_test_framework',
+			env.Library(builddir.File(f'{env["LIBPREFIX"]}{self.srcdir}{env["LIBSUFFIX"]}'), self.get_library_objects()),
+		] if boost else []
+		env_LIBS = env.get('LIBS')
+		for test in tests:
+			LIBS = [] if (env_LIBS is None or not test.use_default_libs) else env_LIBS.copy()
+			LIBS.extend(extra_libs)
+			program = env.Program(target=builddir.File(test.target), source=test.source(self), LIBS=LIBS)
 			env.Alias(test.target, program)
 
 	runtime_test_boost_tests: collections.abc.Sequence[RuntimeTest] = None

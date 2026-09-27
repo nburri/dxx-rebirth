@@ -49,7 +49,11 @@ constexpr net_clock net_milliseconds(const net_clock ms)
  * that the receiver of the echo can verify it against its own packet log
  * before taking an RTT or clock sample from it.
  */
-constexpr std::uint16_t MULTI_PROTO_VERSION{100};
+/* The value MULTI_PROTO_VERSION (multi.h) takes once stage 1 switches
+ * the game to this protocol; named differently so that the two never
+ * shadow each other in a translation unit that sees both.
+ */
+constexpr std::uint16_t NET_V2_PROTO_VERSION{100};
 constexpr std::size_t NET_V2_HEADER_SIZE{36};
 constexpr std::size_t NET_V2_MAX_PACKET{1200};
 constexpr std::size_t NET_V2_ACK_BITS{64};
@@ -185,7 +189,7 @@ constexpr net_time to_net_time(const net_clock t)
  */
 struct packet_header
 {
-	std::uint16_t proto{MULTI_PROTO_VERSION};
+	std::uint16_t proto{NET_V2_PROTO_VERSION};
 	std::uint32_t session_id{};
 	std::uint32_t peer_token{};
 	std::uint8_t player_id{NET_V2_PLAYER_ID_NONE};
