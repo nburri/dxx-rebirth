@@ -941,6 +941,116 @@ void test_unreliable_chunks_per_packet()
 	std::printf("    two STATE chunks in one packet both delivered; an older packet's STATE dropped, its EVENT_U kept\n");
 }
 
+/* Fourteenth review round. */
+
+/* 1. Priority within a tick: state parts, then reliable messages, then
+ * events fill what is left.  Only the tick's first packet reserves room
+ * for the head event; a message blocked out of it is never blocked again
+ * by an event (the round-12 reservation starved a 1 KiB message behind a
+ * 700-byte state and a 700-byte event per tick for good).
+ */
+void test_reliable_before_events(const std::uint64_t seed)
+{
+	begin("reliable messages before events");
+	rng r{seed};
+	sim_world w{r, link_params{.latency = net_milliseconds(30)}};
+	const datagram big(NET_V2_MAX_MESSAGE), event(700);
+	std::uint32_t sent{};
+	bool queued{};
+	/* The host's turn (act runs per peer): a state, an event, and once
+	 * the message.
+	 */
+	const auto tick{[&](const unsigned peer) {
+		if (peer != 0)
+			return;
+		w.set_state_parts(0, 1, 700);
+		datagram e{event};
+		net_put_le32(e.data(), sent++);
+		CHECK(w.peers[0].conn.send_unreliable(chunk_type::event_u, e));
+		if (!queued)
+		{
+			queued = true;
+			CHECK(w.peers[0].conn.enqueue_reliable(9, big) == enqueue_result::ok);
+			w.peers[0].sent.push_back({.type = 9, .payload = big});
+		}
+	}};
+	/* The message goes out in the first tick and arrives 30 ms later. */
+	w.run(3, tick);
+	CHECK_MSG(w.peers[1].delivered.size() == 1, "message delivered after 3 ticks: " + std::to_string(w.peers[1].delivered.size()));
+	w.run(60, tick);
+	w.run(5, [&](const unsigned peer) {
+		if (peer == 0)
+			w.set_state_parts(0, 1, 700);
+	});
+	check_delivery(w, 0);
+	const auto host{w.peers[0].conn.stats()};
+	CHECK(host.state == connection_state::connected);
+	CHECK_MSG(host.unreliable_dropped == 0, "events dropped " + std::to_string(host.unreliable_dropped));
+	CHECK_MSG(w.peers[1].events_seen.size() >= 60, "events delivered " + std::to_string(w.peers[1].events_seen.size()) + " of " + std::to_string(sent));
+	std::printf("    700-byte state and event per tick, 1 KiB message queued: sent in the first tick, %zu of %u events delivered, none dropped\n", w.peers[1].events_seen.size(), sent);
+}
+
+/* 2. The bound hold ages by granted ticks, not by grants: a caller at
+ * 30 Hz (two ticks per grant) forgets a bound at the same wall-clock
+ * speed as one at 60 Hz.
+ */
+void test_bound_hold_ages_by_ticks()
+{
+	begin("30 Hz caller ages the bound hold at wall-clock speed");
+	connection a{host_side, 0};
+	connection b{client_side, 0};
+	const std::array<std::uint8_t, 4> x{};
+	const net_clock latency{1000};
+	/* One exchange: a builds (every second tick, so each grant is two
+	 * ticks), b answers at once with the echo.  Returns b's packet so
+	 * that it may be held back.
+	 */
+	const auto exchange{[&](const net_clock t, const bool deliver) {
+		a.set_unreliable_state(chunk_type::state, x);
+		const auto p{a.build_outgoing(t)};
+		CHECK(!p.empty());
+		CHECK(b.on_receive(p, t + latency).status == receive_status::accepted);
+		b.set_unreliable_state(chunk_type::input, x);
+		const auto q{b.build_outgoing(t + latency + 100)};
+		CHECK(!q.empty());
+		if (deliver)
+			CHECK(a.on_receive(q, t + 2 * latency + 100).status == receive_status::accepted);
+		return datagram{q.begin(), q.end()};
+	}};
+	net_clock t{};
+	for (unsigned i{}; i != 60; ++i, t += 2 * TICK)
+		exchange(t, true);
+	const auto steady{a.stats()};
+	CHECK_MSG(steady.rtt_valid && steady.srtt == 2 * latency, "srtt " + std::to_string(steady.srtt));
+	/* b's answer to this packet is held back ... */
+	const auto held{exchange(t, false)};
+	t += 2 * TICK;
+	/* ... its successor arrives normally ... */
+	exchange(t, true);
+	/* ... and the held one 200 ms late: a bound of 2 ticks + 200 ms over
+	 * srtt, held for a second.
+	 */
+	const net_clock extra{net_milliseconds(200)};
+	CHECK(a.on_receive(held, t + 2 * latency + 100 + extra).status == receive_status::accepted);
+	const net_clock bound_at{t};
+	const auto bounded{a.stats()};
+	const net_clock excess{2 * TICK + extra};
+	CHECK_MSG(bounded.rto >= bounded.srtt + excess, "rto " + std::to_string(bounded.rto) + " right after the bound");
+	/* Just short of a second later the excess is still covered. */
+	for (t += 2 * TICK; t < bound_at + net_seconds(1) - 2 * TICK; t += 2 * TICK)
+		exchange(t, true);
+	const auto held_stats{a.stats()};
+	CHECK_MSG(held_stats.rto >= held_stats.srtt + excess, "rto " + std::to_string(held_stats.rto) + " inside the hold");
+	/* Half a second after the hold (30 ticks in 15 grants) it has faded
+	 * to a seventh; aged per grant it would still be whole.
+	 */
+	for (; t < bound_at + net_seconds(1) + net_milliseconds(500); t += 2 * TICK)
+		exchange(t, true);
+	const auto faded{a.stats()};
+	CHECK_MSG(faded.rto < faded.srtt + excess / 4 + 2 * TICK + 1000, "rto " + std::to_string(faded.rto) + " half a second after the hold, srtt " + std::to_string(faded.srtt));
+	std::printf("    bound of %.1f ms over srtt: rto %.1f ms inside the hold, %.1f ms half a second after it (30 Hz caller)\n", to_ms(excess), to_ms(held_stats.rto), to_ms(faded.rto));
+}
+
 /* Thirteenth review round. */
 
 /* 5. Delivered reliable messages are views: a message delivered while
@@ -1096,7 +1206,7 @@ void test_bound_excess()
 	 */
 	for (unsigned i{}; i != 120; ++i)
 	{
-		e.advance_tick();
+		e.advance_ticks(1);
 		e.add_sample(rtt);
 		if (i % 10 == 9)
 			e.add_bound(net_milliseconds(100));
@@ -1105,14 +1215,24 @@ void test_bound_excess()
 	/* Just short of a second after the last bound: still covered. */
 	for (unsigned i{}; i != 59; ++i)
 	{
-		e.advance_tick();
+		e.advance_ticks(1);
 		e.add_sample(rtt);
 	}
 	CHECK_MSG(e.rto() >= held + slack, "rto " + std::to_string(e.rto()) + " a second after the last bound");
+	/* A bound never shrinks rttvar: after wide samples a bound at srtt
+	 * (no error at all) leaves rttvar where it was.
+	 */
+	rtt_estimator wide;
+	for (unsigned i{}; i != 20; ++i)
+		wide.add_sample(i % 2 ? net_milliseconds(60) : net_milliseconds(100));
+	const auto rttvar_before{wide.rttvar()};
+	CHECK(rttvar_before > hold / 4);
+	wide.add_bound(wide.srtt());
+	CHECK_MSG(wide.rttvar() == rttvar_before, "rttvar " + std::to_string(wide.rttvar()) + " after a bound at srtt, was " + std::to_string(rttvar_before));
 	/* Two seconds more: faded, back to the steady value. */
 	for (unsigned i{}; i != 120; ++i)
 	{
-		e.advance_tick();
+		e.advance_ticks(1);
 		e.add_sample(rtt);
 	}
 	CHECK_MSG(e.rto() == steady, "rto " + std::to_string(e.rto()) + " after the excess faded, steady " + std::to_string(steady));
@@ -2898,6 +3018,8 @@ int main(const int argc, char **const argv)
 	test_bounds(seed);
 	test_timeouts(seed);
 	test_replay(seed);
+	test_reliable_before_events(seed);
+	test_bound_hold_ages_by_ticks();
 	test_held_message_view_lifetime();
 	test_to_peer_time_wraps(seed);
 	test_echo_of_old_unechoed_packet();

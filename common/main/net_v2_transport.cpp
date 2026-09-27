@@ -57,11 +57,17 @@ constexpr bool is_latest_wins(const chunk_type type)
 	return type == chunk_type::state || type == chunk_type::input;
 }
 
-/* Index into the per-type bundle arrays. */
+/* Index into the per-type bundle arrays, and its inverse. */
 [[nodiscard]]
 constexpr std::size_t state_index(const chunk_type type)
 {
 	return type == chunk_type::input ? 1 : 0;
+}
+
+[[nodiscard]]
+constexpr chunk_type state_type(const std::size_t index)
+{
+	return index == 1 ? chunk_type::input : chunk_type::state;
 }
 
 }
@@ -92,8 +98,11 @@ void rtt_estimator::add_bound(const net_clock r)
 {
 	if (!m_valid)
 		return;
+	/* Widen only: a bound is a delay that happened, not a measurement of
+	 * how steady the link is, so a small one never narrows rttvar.
+	 */
 	const auto err{m_srtt > r ? m_srtt - r : r - m_srtt};
-	m_rttvar = std::max((3 * m_rttvar + err) / 4, m_hold_period / 4);
+	m_rttvar = std::max({m_rttvar, (3 * m_rttvar + err) / 4, m_hold_period / 4});
 	/* Any bound, however small, says that delays are still being seen:
 	 * the largest of them stays covered.
 	 */
@@ -102,16 +111,20 @@ void rtt_estimator::add_bound(const net_clock r)
 	m_bound_age = 0;
 }
 
-void rtt_estimator::advance_tick()
+void rtt_estimator::advance_ticks(net_clock ticks)
 {
-	if (m_bound_excess == 0)
-		return;
-	m_bound_age += m_tick_period;
-	if (m_bound_age <= NET_V2_BOUND_HOLD)
-		return;
-	m_bound_excess -= m_bound_excess / 16;
-	if (m_bound_excess < 16)
-		m_bound_excess = 0;
+	/* Bounded: however long the stall, the excess is gone after the
+	 * hold plus some 150 ticks of decay, and the loop ends with it.
+	 */
+	for (; ticks > 0 && m_bound_excess != 0; --ticks)
+	{
+		m_bound_age += m_tick_period;
+		if (m_bound_age <= NET_V2_BOUND_HOLD)
+			continue;
+		m_bound_excess -= m_bound_excess / 16;
+		if (m_bound_excess < 16)
+			m_bound_excess = 0;
+	}
 }
 
 
@@ -337,7 +350,7 @@ void for_each_pending_part(Bundles &bundles, F &&f)
 		for (unsigned i{}; i != bundle.count; ++i)
 		{
 			auto &p{bundle.parts[i]};
-			if (p.pending && !f(t == 0 ? chunk_type::state : chunk_type::input, i, bundle.count, p))
+			if (p.pending && !f(state_type(t), i, bundle.count, p))
 				return;
 		}
 	}
@@ -541,7 +554,7 @@ void connection::grant_ticks(const net_clock now)
 	 * cannot go out more often anyway.
 	 */
 	check_timeouts(now);
-	m_rtt.advance_tick();
+	m_rtt.advance_ticks(ticks);
 	detect_rto_losses(now);
 }
 
@@ -616,18 +629,20 @@ std::span<const std::uint8_t> connection::build_outgoing(const net_clock now)
 				break;
 		}
 	}};
-	/* The state chunks that fit go first in every packet; a head message
-	 * that does not fit beside them rides a later packet of the tick,
-	 * which the budget below always leaves room for.
-	 */
-	/* Room for the state parts that fit and for the head pending event:
-	 * neither must be crowded out by reliable messages, which have their
-	 * own later packets; an event that does not fit even so goes to the
-	 * tick's second packet, like a blocked reliable head.
+	/* The tick's priority order: (a) the state parts that fit go first in
+	 * every packet; (b) reliable messages; a head that does not fit
+	 * beside the parts rides a later packet of the tick, which the
+	 * budget below always leaves room for; (c) events fill what is left.
+	 * Only the tick's first packet reserves room for the head event
+	 * beside the parts (a head message it displaces gets the next packet
+	 * anyway); a later packet never reserves it, so a message blocked
+	 * out of the first packet is not blocked again, by an event, out of
+	 * the packet that is meant for it.  Events may be skipped and
+	 * dropped under a sustained backlog: they are cosmetic.
 	 */
 	const auto plan{plan_state_parts()};
 	std::size_t reserved{plan.first_packet_bytes};
-	if (!m_pending_events.empty())
+	if (opens_tick && !m_pending_events.empty())
 	{
 		const auto event_size{chunk_wire_size(m_pending_events.front().chunk.payload.size())};
 		if (reserved + event_size <= NET_V2_MAX_PACKET - NET_V2_HEADER_SIZE)
@@ -1060,7 +1075,7 @@ bool connection::validate_chunks(const std::span<const std::uint8_t> payload, co
 	return true;
 }
 
-void connection::deliver_reliable(const net_clock now, receive_report &report)
+void connection::deliver_reliable(const net_clock now)
 {
 	if (m_parsed_messages.empty())
 		return;
@@ -1076,7 +1091,7 @@ void connection::deliver_reliable(const net_clock now, receive_report &report)
 			 * into the report as a view into the datagram, not through
 			 * a window slot.
 			 */
-			report.reliable.push_back({.type = pm.type, .payload = pm.payload});
+			m_report_reliable.push_back({.type = pm.type, .payload = pm.payload});
 			++m_next_expected;
 			++m_stats.messages_delivered;
 			continue;
@@ -1098,7 +1113,7 @@ void connection::deliver_reliable(const net_clock now, receive_report &report)
 		 * outlives this call like the ones into the datagram.
 		 */
 		const auto &held{m_delivered_held.emplace_back(std::move(slot.payload))};
-		report.reliable.push_back({.type = slot.type, .payload = held});
+		m_report_reliable.push_back({.type = slot.type, .payload = held});
 		slot.payload.clear();
 		slot.filled = false;
 		--m_recv_window_pending;
@@ -1108,7 +1123,7 @@ void connection::deliver_reliable(const net_clock now, receive_report &report)
 	/* The stall clock restarts whenever the window was empty before or
 	 * the stream advanced now.
 	 */
-	if (!had_pending || !report.reliable.empty())
+	if (!had_pending || !m_report_reliable.empty())
 		m_recv_gap_since = now;
 	m_ack_owed = true;
 }
@@ -1118,7 +1133,7 @@ connection::latest_packet &connection::latest_for(const chunk_type type, const u
 	return m_latest[state_index(type)][part];
 }
 
-void connection::deliver_unreliable(const std::uint16_t packet_seq, receive_report &report)
+void connection::deliver_unreliable(const std::uint16_t packet_seq)
 {
 	for (const auto &c : m_parsed_chunks)
 	{
@@ -1142,14 +1157,19 @@ void connection::deliver_unreliable(const std::uint16_t packet_seq, receive_repo
 			latest.valid = true;
 			latest.seq = packet_seq;
 		}
-		report.unreliable.push_back({.type = c.type, .part = c.part, .part_count = c.part_count, .payload = c.payload});
+		m_report_unreliable.push_back({.type = c.type, .part = c.part, .part_count = c.part_count, .payload = c.payload});
 	}
 }
 
 receive_report connection::on_receive(const std::span<const std::uint8_t> datagram, const net_clock now)
 {
-	/* The previous report's views into held storage end here. */
+	/* The previous report ends here: its lists and its views into held
+	 * storage.  The vectors keep their capacity, so a datagram costs no
+	 * allocation once the connection has warmed up.
+	 */
 	m_delivered_held.clear();
+	m_report_reliable.clear();
+	m_report_unreliable.clear();
 	receive_report report;
 	const auto reject{[&](const receive_status status) {
 		++m_stats.packets_rejected;
@@ -1310,8 +1330,10 @@ receive_report connection::on_receive(const std::span<const std::uint8_t> datagr
 		m_last_recv_send_time = h.send_time;
 		m_last_recv_local_time = now;
 	}
-	deliver_reliable(now, report);
-	deliver_unreliable(h.seq, report);
+	deliver_reliable(now);
+	deliver_unreliable(h.seq);
+	report.reliable = m_report_reliable;
+	report.unreliable = m_report_unreliable;
 	report.status = receive_status::accepted;
 	return report;
 }

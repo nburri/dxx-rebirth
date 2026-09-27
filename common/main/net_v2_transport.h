@@ -152,19 +152,14 @@ enum class enqueue_result : std::uint8_t
  * section 3.7.  Everything from `bad_length` on means the datagram had no
  * effect at all.
  */
+/* Why on_receive dropped a datagram, in the order the checks run (§3.7):
+ * the first failing check names the status.
+ */
 enum class receive_status : std::uint8_t
 {
 	/* Header applied, every chunk delivered. */
 	accepted,
-	/* A chunk was malformed.  Nothing of the datagram was applied, not
-	 * even the header's acks or echo (a corrupt ack bit would otherwise
-	 * acknowledge a message that was never delivered), and it is not
-	 * acknowledged, so a conforming peer retransmits.  One protocol
-	 * error is counted per distinct `seq` (16 within 10 s close the
-	 * connection with close_reason::protocol_error), and an intact copy
-	 * of the same `seq` arriving later is accepted normally.
-	 */
-	malformed_chunk,
+	/* Shorter than the header or longer than NET_V2_MAX_PACKET. */
 	bad_length,
 	bad_proto,
 	bad_flags,
@@ -175,19 +170,28 @@ enum class receive_status : std::uint8_t
 	bad_session,
 	bad_token,
 	bad_player,
-	/* `ack` names a packet we have not sent.  Nothing is applied; one
-	 * protocol error is counted per distinct `seq`, as for a malformed
-	 * packet, and may close the connection the same way.
-	 */
-	bad_ack,
-	/* Already seen, or older than the 64-packet reorder window. */
-	duplicate,
 	/* The connection is closed.  Checked after the identity checks
 	 * (bad_session .. bad_player) and before the replay window, so a
 	 * packet for a closed connection is reported as such, not as a
 	 * duplicate.
 	 */
 	closed,
+	/* Already seen, or older than the 64-packet reorder window. */
+	duplicate,
+	/* `ack` names a packet we have not sent.  Nothing is applied; one
+	 * protocol error is counted per distinct `seq`, as for a malformed
+	 * packet, and 16 within 10 s close the connection the same way.
+	 */
+	bad_ack,
+	/* A chunk was malformed.  Nothing of the datagram was applied, not
+	 * even the header's acks or echo (a corrupt ack bit would otherwise
+	 * acknowledge a message that was never delivered), and it is not
+	 * acknowledged, so a conforming peer retransmits.  One protocol
+	 * error is counted per distinct `seq` (16 within 10 s close the
+	 * connection with close_reason::protocol_error), and an intact copy
+	 * of the same `seq` arriving later is accepted normally.
+	 */
+	malformed_chunk,
 };
 
 /* A reliable message as delivered: a view, like unreliable_view.  A
@@ -225,20 +229,24 @@ struct unreliable_view
 	std::span<const std::uint8_t> payload;
 };
 
+/* What one on_receive delivered.  Both lists live in connection storage
+ * (no allocation per datagram) and, like the views they hold, are valid
+ * until the next on_receive on that connection.
+ */
 struct receive_report
 {
 	receive_status status{receive_status::bad_length};
 	/* Reliable messages that became deliverable, in sequence order.
 	 * Views, see reliable_message.
 	 */
-	std::vector<reliable_message> reliable;
+	std::span<const reliable_message> reliable;
 	/* Every unreliable chunk of the packet, in packet order, except
 	 * `state`/`input` chunks from a packet older than one already seen
 	 * (latest wins across packets; all chunks of one packet count as
 	 * equally new, so a bundle split into two chunks arrives whole).
 	 * Views into the caller's datagram, see unreliable_view.
 	 */
-	std::vector<unreliable_view> unreliable;
+	std::span<const unreliable_view> unreliable;
 };
 
 struct connection_stats
@@ -325,12 +333,14 @@ public:
 	 * of a reordered peer packet, which carries that packet's own
 	 * delay, or the ack of a packet that will never be echoed, which
 	 * carries the peer's hold): it widens rttvar, so that the RTO covers
-	 * such a delay, but never moves srtt.  Ignored before the first real
-	 * sample; the caller checks valid() to know.
+	 * such a delay, never narrows it, and never moves srtt.  Ignored
+	 * before the first real sample; the caller checks valid() to know.
 	 */
 	void add_bound(net_clock r);
-	/* Once per tick: ages the bound excess. */
-	void advance_tick();
+	/* Ages the bound excess by this many ticks (every tick granted, not
+	 * every grant: a caller at half the tick rate gets two per grant).
+	 */
+	void advance_ticks(net_clock ticks);
 	/* The hold term changed (the peer's tick became known). */
 	void set_hold_period(const net_clock hold_period)
 	{
@@ -586,6 +596,11 @@ class connection
 	 * next on_receive.
 	 */
 	std::vector<std::vector<std::uint8_t>> m_delivered_held;
+	/* The lists the last report points into; cleared by the next
+	 * on_receive.
+	 */
+	std::vector<reliable_message> m_report_reliable;
+	std::vector<unreliable_view> m_report_unreliable;
 	/* When the window last went from empty to holding out-of-order
 	 * messages, or last advanced; the stream_stalled clock.
 	 */
@@ -637,8 +652,8 @@ class connection
 	/* §3.7 step 8.  Fills m_parsed_messages and m_parsed_chunks. */
 	[[nodiscard]]
 	bool validate_chunks(std::span<const std::uint8_t> payload, std::uint8_t flags);
-	void deliver_reliable(net_clock now, receive_report &report);
-	void deliver_unreliable(std::uint16_t packet_seq, receive_report &report);
+	void deliver_reliable(net_clock now);
+	void deliver_unreliable(std::uint16_t packet_seq);
 	[[nodiscard]]
 	std::uint16_t next_local_seq();
 public:
@@ -709,12 +724,32 @@ public:
 
 	/* Build the next datagram to send, or return an empty span if nothing
 	 * is due or the tick's packet budget is spent.  A packet is due when
-	 * there is a pending state chunk, a pending event, a reliable message
+	 * there is a pending state part, a pending event, a reliable message
 	 * to send or resend, an ack owed for a received reliable message, or
 	 * NET_V2_KEEPALIVE_INTERVAL has passed since the last packet.  Call
-	 * repeatedly until it returns empty: the second packet of a tick
-	 * carries only reliable messages that did not fit beside the state
-	 * chunk.  The span is valid until the next call.
+	 * repeatedly until it returns empty.
+	 *
+	 * A tick is composed in one fixed priority order:
+	 *  (a) state/input parts (§3.8): the first packet carries every part
+	 *      that fits, part 0 always; parts that do not fit open further
+	 *      packets, and a bundle that needs n > 1 packets may use n + 1
+	 *      in the tick;
+	 *  (b) reliable messages: resends first, then the queue in order,
+	 *      each only if it fits, stopping at the first that does not.  A
+	 *      head that does not fit beside the parts gets the next packet
+	 *      of the tick, by itself if need be, so no message size starves;
+	 *  (c) best-effort events fill whatever is left, in queue order; one
+	 *      that does not fit is skipped, not a head-of-line block, and
+	 *      dropped after NET_V2_EVENT_SKIP_MAX skips.  Only the tick's
+	 *      first packet reserves room for the head event beside the
+	 *      parts; later packets put reliable messages first, so a head
+	 *      message blocked out of the first packet is never blocked
+	 *      again by an event.  Under a sustained reliable backlog events
+	 *      may therefore be skipped and dropped: they are cosmetic.
+	 * A second and further packet is built only while something is left
+	 * over (a due message, a pending part or a pending event), up to
+	 * max_packets_per_tick (at least 2) or the bundle's n + 1.  The span
+	 * is valid until the next call.
 	 */
 	[[nodiscard]]
 	std::span<const std::uint8_t> build_outgoing(net_clock now);
