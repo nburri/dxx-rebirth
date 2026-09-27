@@ -3067,10 +3067,15 @@ void test_fuzz(const std::uint64_t seed)
 			h.session_id = host_side.session_id;
 			h.peer_token = host_side.peer_token;
 			h.player_id = host_side.remote_player_id;
-			h.flags = static_cast<std::uint8_t>(r.below(8));
+			/* Flags without UNCONNECTED (that is the session layer's),
+			 * and no acks: the victim has sent nothing, so any ack would
+			 * be bad_ack before the chunks are ever looked at.  The
+			 * chunk walk is what this stage exercises.
+			 */
+			h.flags = static_cast<std::uint8_t>(r.below(4));
 			h.seq = ++seq;
-			h.ack = static_cast<std::uint16_t>(r.next());
-			h.ack_bits = r.next();
+			h.ack = 0;
+			h.ack_bits = 0;
 			h.send_time = static_cast<net_time>(r.next());
 			h.echo_time = static_cast<net_time>(r.next());
 			h.echo_delay = static_cast<std::uint16_t>(r.next());
@@ -3095,6 +3100,10 @@ void test_fuzz(const std::uint64_t seed)
 				seq = 0;
 			}
 		}
+		/* The stage must reach the chunk walk: most datagrams are either
+		 * accepted or rejected there, not before.
+		 */
+		CHECK_MSG(structured_accepted + structured_malformed > structured / 2, "structured datagrams reaching the chunk walk: " + std::to_string(structured_accepted + structured_malformed) + " of " + std::to_string(structured));
 	}
 	/* Mutations of real traffic. */
 	std::uint64_t mutated{}, mutated_accepted{};
