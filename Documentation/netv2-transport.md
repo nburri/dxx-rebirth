@@ -80,6 +80,10 @@ exits with status 1; success ends with `all tests passed`.
 | slow peer | 60 ms | A 60 Hz host against a 10 Hz peer: host `srtt` within 5 % of the round trip (the peer's ack hold does not leak in). |
 | two packets per tick | 30 ms | A host sending two packets per tick against a one-packet peer: `srtt` within 5 %. |
 | frame-rate caller | – | 5000 frames at 500 Hz setting the state only when `begin_tick` opened a tick: 600 ticks, 600 states delivered, none dropped. |
+| event beside a big state | 30 ms | A 700-byte state and a 700-byte event every tick: all 100 events delivered in the tick's second packet, none dropped. |
+| gap rule counts acks | – | Six packets, only the sixth acknowledged first: no gap resend; packets 4–6 acknowledged and 1–3 lost: three gap resends. |
+| rejected sample | – | A forged echo with `echo_delay` beyond the round trip is rejected without spending the packet's sample; the genuine echo that follows is taken. |
+| set_peer_tick | – | Setting the peer's tick to 1/10 s on a live connection grows `rto` by exactly the hold difference and leaves `srtt` alone; zero terms restore the own tick. |
 | parts reordered | – | Part 1 arriving before part 0 of one tick: both applied; a stale part 0 is dropped while an older part 1 that is still the newest of its part applies. |
 | first grant | – | A connection created at 0 and first built at 3 s gets one tick (2 packets), not a burst. |
 | exact 60 Hz caller | – | 36 000 steps of exactly 1/60 s with a permanent backlog: never more than 2 packets per step. |
@@ -93,7 +97,7 @@ exits with status 1; success ends with `all tests passed`.
 | echo_delay clamp | – | A packet built 100 units before the receive stamp carries `echo_delay` 0 and the peer's RTT sample is the true value. |
 | unreliable chunks per packet | – | Two `state` chunks in one packet are both delivered; a reordered older packet's `state` is dropped while its `event_u` is kept. |
 | f: fuzz | – | 200 000 random datagrams are all rejected without effect; 100 000 packets with a valid header and random chunk bytes, and 100 000 mutations of captured real packets, never crash and a malformed packet delivers nothing; 16 malformed packets close the connection with `protocol_error`. |
-| g: clock | 50 ± 20 ms, host clock about to wrap, client 1234 s behind | The client's offset target is within 20 ms after 8 packets and within 5 ms after 2 s; the host's estimate is the negative; a 300 ms clock step is followed within 2.5 s; a 20 ms step is slewed (5 ms/s), not jumped. |
+| g: clock | 50 ± 20 ms, host clock about to wrap, client 1234 s behind | The client's offset target is within 20 ms after 8 packets and within 5 ms after 2 s; the host's estimate is the negative; a 300 ms clock step is followed within 2.5 s; after a 20 ms step the applied error shrinks by 5 ± 1.5 ms over the second following the window's expiry (slewed, not jumped) and settles. |
 
 The simulated link delivers a packet at its arrival time, as the game does
 by reading the socket every frame; packets are *sent* on the 60 Hz tick.
@@ -116,6 +120,7 @@ connection c{{.session_id = sid, .peer_token = tok, .local_player_id = 0, .remot
 c.enqueue_reliable(msg_type, payload);            // ≤ 1024 bytes, or too_large
 c.set_unreliable_state(chunk_type::state, bundle); // latest wins, sent once
 c.set_unreliable_state(chunk_type::state, 1, 2, part_b); // §3.8: part 1 of 2, latest wins per part
+c.set_peer_tick({65536, 30});                      // once the handshake tells the peer's tick
 c.send_unreliable(chunk_type::event_u, bytes);     // best effort
 
 if (c.begin_tick(now))                             // once per tick period;
@@ -153,9 +158,10 @@ first packet of a tick always carries the state chunks that fit; a head message
 that does not fit beside them rides the tick's second packet, which normally
 has no state left to carry, so no message size can starve and no message
 stream can displace the state. A pending state part opens the second packet
-too, and a bundle that needs several packets (§3.8) raises the tick's limit to
-one more than it needs, so a blocked head message still gets a packet of its
-own and never displaces a part. The tick's credit is spent only when a
+too, and so does an event that did not fit beside the state chunk; a bundle
+that needs several packets (§3.8) raises the tick's limit to one more than it
+needs, so a blocked head message still gets a packet of its own and never
+displaces a part. The tick's credit is spent only when a
 packet is really built. `build_outgoing` calls `begin_tick` itself. `on_receive` applies the checks of §3.7
 in order and reports why a datagram was dropped (`receive_status`). A packet
 whose header validates but whose chunks do not (`malformed_chunk`) has no
@@ -206,7 +212,7 @@ the connection neither sends nor accepts anything.
 | `loss_estimate` | Moving average (1/64 per packet) of the fraction of our packets the peer never acknowledged. A packet counts as lost once the peer's `ack` is more than 64 ahead of it, or when its slot in the 256-entry packet log is reused without an ack (no acks at all), so the value lags by one to four seconds at 60 pps and settles slowly on a link that just became clean. |
 | `packets_sent/received/rejected/acked/lost` | Per direction. `rejected` counts every datagram `on_receive` dropped, including duplicates. |
 | `messages_enqueued/delivered` | Reliable messages queued here / delivered to the caller from the peer. |
-| `message_sends`, `message_resends`, `resends_by_gap`, `resends_by_rto` | Transmissions of reliable messages; the resend split says which rule detected the loss (3 later packets acked, or the RTO). Resends well above the loss rate mean the RTO is too tight for the link. |
+| `message_sends`, `message_resends`, `resends_by_gap`, `resends_by_rto` | Transmissions of reliable messages; the resend split says which rule detected the loss: the gap rule (three packets sent after the message's own acknowledged, counted from `ack` and the bits between, so a lone reordered ack far ahead resends nothing) or the RTO. Resends well above the loss rate mean the RTO is too tight for the link. |
 | `unreliable_dropped` | State chunks replaced before they were sent, oversize chunks, and events pushed out of the 64-entry event queue. |
 | `protocol_errors` | Malformed packets from the peer; 16 within 10 s close the connection. |
 | `queue_messages`, `queue_bytes` | Reliable messages queued or in flight, and their payload bytes; the connection closes at 512 messages or 96 KiB. |

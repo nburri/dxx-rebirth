@@ -337,7 +337,7 @@ on_ack(header.ack, header.ack_bits):
         mark acked; if a later packet was echoed before this one was acked, rtt sample from its sent_at (§3.5)
         for each msg_seq in it: erase from in_flight
     for each in_flight message m not acked:
-        lost_by_gap = (ack - m.in_packet_seq) >= 3 wrapping      // 3 later packets acked
+        lost_by_gap = acked packets after m.in_packet_seq >= 3   // ack itself + set bits between
         lost_by_rto = now - m.last_sent >= rto
         if lost_by_gap or lost_by_rto: mark RESEND (kept in in_flight, same msg seq)
 ```
