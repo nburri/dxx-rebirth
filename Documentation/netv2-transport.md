@@ -71,6 +71,8 @@ exits with status 1; success ends with `all tests passed`.
 | corrupt acks | 40 ms | A packet with reliable messages is lost and the peer's next datagram falsely acks it but is corrupt: nothing of it is applied, the messages are retransmitted, all 200 arrive, one protocol error. |
 | stream stalled | – | Message 1 arrives, message 0 never does, the peer keeps sending state: the receiver closes with `stream_stalled` after 10 s. |
 | corrupted then intact | – | A corrupted copy of a packet, then the intact copy: the intact one is accepted and its message delivered; one protocol error. |
+| forged seq far ahead | – | A well-formed keepalive with bit 14 of its `seq` flipped: `bad_seq`, one protocol error (a replay counts none), the stream continues and the peer sees no `bad_ack`. |
+| clock stall | 50 ms | A 50 ms clock step being slewed, then a 2.5 s stall: the applied offset moves while samples remain in the window and holds once it is empty; the target equals the applied value. |
 | corrupted future seq | – | A corrupt datagram whose `seq` byte reads as a future sequence does not prevent the real packets 2, 3 and 4 from being accepted. |
 | big message, second packet | – | A 1 KiB message beside an 1100-byte state: the state goes out first, the message in the tick's second packet; `max_packets_per_tick` 1 is clamped to 2. |
 | held-back packets | 40 ms, 20 % held 33–50 ms | 1200 messages over a lossless link with a fifth of the packets delayed: at most a dozen resent by the RTO; the held packets, acked after later ones were echoed, bound `rttvar` and the recent excess by their acks, `srtt` stays at the true 80 ms. |
@@ -211,7 +213,12 @@ distinct `seq` (a 16-entry list of recently counted sequences, expired with
 the reorder window, suppresses further counts for replays); the list never
 rejects anything, so an intact copy of a sequence whose corrupted copy came
 first is accepted normally, and a corrupt `seq` byte cannot blackhole the real
-packet with that sequence. Should the receive window hold out-of-order
+packet with that sequence. A well-formed packet whose `seq` is more than
+`NET_V2_MAX_SEQ_JUMP` (4096) ahead of the newest seen (`bad_seq`) is rejected
+and counted the same way: a conforming peer cannot send that many packets
+within the 5 s timeout, and taking it as the new highest would reject every
+real packet that follows as a duplicate until the timeout and make our acks
+protocol errors at the peer. Should the receive window hold out-of-order
 messages for 10 s without the gap ever being filled while the peer keeps
 sending, the connection closes with `stream_stalled` rather than blaming the
 peer for a protocol error. Packets with
@@ -231,7 +238,9 @@ arrives whole and in order. The transport keeps no copy of the latest state;
 the consumer keeps what it needs from the report. Events (`send_unreliable`)
 go out in queue order as far as they fit; one that does not fit beside the
 state chunk is skipped, not a head-of-line block, and dropped after
-`NET_V2_EVENT_SKIP_MAX` (8) packets.
+`NET_V2_EVENT_SKIP_MAX` (8) packets. They wait in a fixed ring of
+`NET_V2_EVENT_QUEUE_MAX` (64) slots of `NET_V2_MAX_CHUNK_PAYLOAD` bytes, so
+queueing one allocates nothing; when the ring is full the oldest is dropped.
 
 `state()` is `connecting` until the first valid packet arrives, then
 `connected`, and `closed` with a `close_reason` (`timeout`,
@@ -255,7 +264,7 @@ the connection neither sends nor accepts anything.
 | `queue_messages`, `queue_bytes` | Reliable messages queued or in flight, and their payload bytes; the connection closes at 512 messages or 96 KiB. |
 | `in_flight` | Sent but not yet acked, at most 256. If it sits at 256 the peer is not acking. |
 | `recv_window_pending` | Messages received out of order and held until the gap before them is filled. |
-| `clock_offset_valid`, `clock_offset`, `clock_offset_target` | §2.2: peer clock ≈ local clock + `clock_offset`. The target is the offset of the minimum-RTT sample in the last 2 s; the applied value slews toward it at 5 ms/s or jumps if more than 100 ms away (and follows it directly during the first 2 s of a session). Only meaningful on the client (the host is the reference), though both sides compute it. |
+| `clock_offset_valid`, `clock_offset`, `clock_offset_target` | §2.2: peer clock ≈ local clock + `clock_offset`. The target is the offset of the minimum-RTT sample in the last 2 s; the applied value slews toward it at 5 ms/s or jumps if more than 100 ms away (and follows it directly during the first 2 s of a session). When a stall empties the window the target freezes at the applied value until a fresh sample arrives, so the slew never runs on toward an expired sample. Only meaningful on the client (the host is the reference), though both sides compute it. |
 | `last_heard` | Local time of the last valid packet from the peer. |
 
 ## Deviations from the design text

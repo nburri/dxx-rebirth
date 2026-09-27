@@ -137,9 +137,11 @@ Pain points from the fork changelog (`Documentation/fork-changelog.md`):
   smallest `rtt` in that window (minimum filter: queueing delay only ever adds
   to RTT, so the smallest sample is closest to the true one-way delay). The
   applied offset slews toward the target at most 5 ms per second, or jumps if
-  the difference exceeds 100 ms (start of session, route change). This is a
-  minimal NTP-style estimator: one sample per packet, 60 per second, no extra
-  ping traffic.
+  the difference exceeds 100 ms (start of session, route change). When a
+  stall empties the window the target freezes at the applied offset until a
+  fresh sample arrives (the slew never runs on toward an expired sample).
+  This is a minimal NTP-style estimator: one sample per packet, 60 per
+  second, no extra ping traffic.
 - The host does the same computation to get each client's RTT, which replaces
   the v1 `ping`/`pong` packets; RTTs are shown to everyone through the bundle
   (§5.2).
@@ -479,11 +481,15 @@ address with an implausible `seq` is dropped.
    name a live connection whose `player_id` equals the header's, else drop.
    Clients additionally require the source address to be the host's address
    *or* the token to match with a plausible `seq` (the host may also rebind).
-6. Replay/reorder: `d = seq - highest_seen` (wrapping `i16`). `d > 0`: new
-   highest, shift `ack_bits`. `-64 ≤ d ≤ 0` and bit not yet set: old but new
-   to us, set the bit, process. Otherwise (duplicate or older than 64
-   packets): drop. This is done before any chunk is parsed, so a replayed
-   packet never reaches the game layer twice.
+6. Replay/reorder: `d = seq - highest_seen` (wrapping `i16`). `d > 4096`
+   (`NET_V2_MAX_SEQ_JUMP`, more than a conforming peer can send within the
+   5 s timeout): a corrupted or forged sequence; drop and count a protocol
+   error (once per `seq`), so that one bad packet cannot move the window
+   past every real one. `0 < d ≤ 4096`: new highest, shift `ack_bits`.
+   `-64 ≤ d ≤ 0` and bit not yet set: old but new to us, set the bit,
+   process. Otherwise (duplicate or older than 64 packets): drop. This is
+   done before any chunk is parsed, so a replayed packet never reaches the
+   game layer twice.
 7. Update the peer's `last_heard`; RTT and clock sample from `echo_*` if
    `ack` names a logged packet whose `send_time` is `echo_time`,
    `echo_delay < 65535`, that packet has not been sampled before (each
@@ -1498,7 +1504,10 @@ set to a final value at stage 7.
   4. Replay/reorder: a captured packet re-injected later is rejected; a packet
      64+ behind is rejected; out-of-order within 64 is accepted once.
   5. RTT estimator: with 80 ± 20 ms link, `srtt` settles within 10 % in 2 s;
-     `rto` stays within [50, 1000] ms; Karn's rule holds under loss.
+     `rto` stays within [50, 1000] ms; packets held back 33–50 ms on a
+     lossless link are not resent by the RTO (their late acks bound
+     `rttvar` and the excess, §3.5). Karn's rule is moot: packets are never
+     retransmitted, only messages are.
   6. Clock sync: offset error < 5 ms after 2 s at 20 ms jitter; a 300 ms clock
      step is followed within one window.
   7. Fuzz: 1 000 000 random and mutated packets never crash or read out of
