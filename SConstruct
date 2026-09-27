@@ -4023,6 +4023,7 @@ class DXXCommon(LazyObjectConstructor):
 					('register_compile_target', True, 'report compile targets to SCons core'),
 					('register_cpp_output_targets', None, None),
 					('register_runtime_test_link_targets', False, None),
+					('register_runtime_test_plain_link_targets', False, 'register link targets for the runtime tests that do not use Boost.Test (build one with `scons <test-name>`)'),
 					('enable_build_failure_summary', True, 'print failed nodes and their commands'),
 					('wrap_PHYSFS_read', False, None),
 					('wrap_PHYSFS_write', False, None),
@@ -4599,7 +4600,9 @@ class DXXCommon(LazyObjectConstructor):
 			# StaticObject hook.
 			self.create_header_targets()
 		if user_settings.register_runtime_test_link_targets:
-			self._register_runtime_test_link_targets()
+			self._register_runtime_test_link_targets(self.runtime_test_boost_tests, boost=True)
+		if user_settings.register_runtime_test_plain_link_targets:
+			self._register_runtime_test_link_targets(self.runtime_test_plain_tests, boost=False)
 		configure_pch_flags = archive.configure_pch_flags
 		if configure_pch_flags or env.GetOption('clean'):
 			self.pch_manager = PCHManager(self, configure_pch_flags, archive.pch_manager)
@@ -4910,24 +4913,30 @@ class DXXCommon(LazyObjectConstructor):
 				LIBS = ['bcm_host'],
 			)
 
-	def _register_runtime_test_link_targets(self):
-		runtime_test_boost_tests = self.runtime_test_boost_tests
-		if not runtime_test_boost_tests:
+	# Register the link targets of runtime tests.  Boost.Test programs
+	# (boost=True) link the unit test framework and the library of
+	# common objects; plain programs (boost=False) exit non-zero on
+	# failure and link only what they list, so they need no Boost.Test
+	# configure check.  Every test is also an alias named after its
+	# target, so `scons <target>` builds just that test.
+	def _register_runtime_test_link_targets(self, tests, boost):
+		if not tests:
 			return
 		env = self.env
-		user_settings = self.user_settings
-		builddir = env.Dir(user_settings.builddir).Dir(self.srcdir)
-		library = env.Library(builddir.File(f'{env["LIBPREFIX"]}{self.srcdir}{env["LIBSUFFIX"]}'), self.get_library_objects())
+		builddir = env.Dir(self.user_settings.builddir).Dir(self.srcdir)
+		extra_libs = [
+			'boost_unit_test_framework',
+			env.Library(builddir.File(f'{env["LIBPREFIX"]}{self.srcdir}{env["LIBSUFFIX"]}'), self.get_library_objects()),
+		] if boost else []
 		env_LIBS = env.get('LIBS')
-		for test in runtime_test_boost_tests:
+		for test in tests:
 			LIBS = [] if (env_LIBS is None or not test.use_default_libs) else env_LIBS.copy()
-			LIBS.extend((
-				'boost_unit_test_framework',
-				library,
-				))
-			env.Program(target=builddir.File(test.target), source=test.source(self), LIBS=LIBS)
+			LIBS.extend(extra_libs)
+			program = env.Program(target=builddir.File(test.target), source=test.source(self), LIBS=LIBS)
+			env.Alias(test.target, program)
 
 	runtime_test_boost_tests: collections.abc.Sequence[RuntimeTest] = None
+	runtime_test_plain_tests: collections.abc.Sequence[RuntimeTest] = None
 
 class DXXArchive(DXXCommon):
 	PROGRAM_NAME: typing.Final[str] = 'DXX-Archive'
@@ -4979,6 +4988,14 @@ class DXXArchive(DXXCommon):
 			'common/unittest/zip.cpp',
 			)),
 			)
+	runtime_test_plain_tests = (
+		# Simulation test of the v2 network transport
+		# (Documentation/netv2-transport.md).
+		RuntimeTest('test-net-v2-transport', (
+			'common/unittest/net_v2_transport.cpp',
+			'common/main/net_v2_transport.cpp',
+			)),
+			)
 	del RuntimeTest
 
 	def get_objects_common(self,
@@ -5014,6 +5031,7 @@ class DXXArchive(DXXCommon):
 'common/main/cli.cpp',
 'common/main/cmd.cpp',
 'common/main/cvar.cpp',
+'common/main/net_v2_transport.cpp',
 'common/main/piggy.cpp',
 'common/maths/rand.cpp',
 'common/mem/mem.cpp',

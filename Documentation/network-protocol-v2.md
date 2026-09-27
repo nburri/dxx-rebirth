@@ -115,21 +115,33 @@ Pain points from the fork changelog (`Documentation/fork-changelog.md`):
   low 32 bits. The host's `GameTime64` and `ThisLevelTime` are derived from the
   same source, so the bundle header can carry level time as a tick-aligned
   value for free (§5.2).
-- Every packet header carries `send_time`, `echo_time` and `echo_delay` (§3.1).
-  From each received host packet, a client computes
+- Every packet header carries `send_time`, `echo_time` and `echo_delay`
+  (§3.1); the echo describes the packet the header's `ack` names, the
+  newest one received. From each received host packet, a client computes
 
   ```
-  rtt     = now - echo_time - echo_delay          (all in fix, wrapping i32)
+  rtt     = now - sent_at[ack] - echo_delay       (sent_at from the local packet log)
   offset  = send_time + rtt/2 - now               (host_time ≈ local + offset)
   ```
+
+  but only if `ack` names a packet still in the local packet log whose
+  recorded `send_time` equals `echo_time`, and that packet has not been
+  sampled before: each packet yields one sample at most, whichever of the
+  peer's packets carries its echo first, so a reordered echo counts once and
+  a repeated one (the same measurement held longer) not at all.
+  Anything else is ignored: the host later rewinds hits by the client's
+  RTT, so a peer must not be able to steer it with numbers unrelated to
+  real packets, nor by pinning one real old packet.
 
   and keeps the last 2 s of samples. The target offset is the sample with the
   smallest `rtt` in that window (minimum filter: queueing delay only ever adds
   to RTT, so the smallest sample is closest to the true one-way delay). The
   applied offset slews toward the target at most 5 ms per second, or jumps if
-  the difference exceeds 100 ms (start of session, route change). This is a
-  minimal NTP-style estimator: one sample per packet, 60 per second, no extra
-  ping traffic.
+  the difference exceeds 100 ms (start of session, route change). When a
+  stall empties the window the target freezes at the applied offset until a
+  fresh sample arrives (the slew never runs on toward an expired sample).
+  This is a minimal NTP-style estimator: one sample per packet, 60 per
+  second, no extra ping traffic.
 - The host does the same computation to get each client's RTT, which replaces
   the v1 `ping`/`pong` packets; RTTs are shown to everyone through the bundle
   (§5.2).
@@ -229,7 +241,7 @@ Every UDP datagram, connected or not, starts with this header.
 | 14 | 2 | `ack` | Highest `seq` received from the peer (in wrapping order). |
 | 16 | 8 | `ack_bits` | Bit `i` (0–63) set: packet `ack - 1 - i` was received. 64 bits cover 1.07 s at 60 pps and 0.53 s at 120 pps, which is more than any RTO in §3.5, so a retransmission is never triggered by a bitfield too short to report a late ack. |
 | 24 | 4 | `send_time` | Sender's local clock (net time units) when the packet was built. |
-| 28 | 4 | `echo_time` | `send_time` of the most recent packet received from the peer, or 0. |
+| 28 | 4 | `echo_time` | `send_time` of the most recent packet received from the peer (the one `ack` names), or 0. The receiver of the echo takes a sample only if the packet `ack` names is in its packet log with that `send_time` and was not sampled before (§2.2). The echo fields follow only the newest packet received, never a reordered older one. |
 | 32 | 2 | `echo_delay` | Time between receiving that packet and sending this one, in net time units, saturated at 65535 (1 s). Peers send at least every 100 ms (§3.6), so saturation only happens on a stalled link and the RTT sample is then discarded. |
 
 Maximum UDP payload: `NET_V2_MAX_PACKET` = 1200 bytes (header included). This
@@ -254,8 +266,8 @@ A chunk that does not fit in the remaining bytes invalidates the whole packet
 | Id | Name | Class | Content |
 |---|---|---|---|
 | 0x01 | `RELIABLE` | R | A run of consecutive reliable messages (§3.4). |
-| 0x02 | `STATE` | U | Host state bundle, whole or part (§5.2). |
-| 0x03 | `INPUT` | U | Client ship state (§5.3). |
+| 0x02 | `STATE` | U | Host state bundle, whole or part (§5.2). The payload starts with a part byte: index in the low nibble, count (1–4) in the high nibble (§3.8). |
+| 0x03 | `INPUT` | U | Client ship state (§5.3). Same part byte. |
 | 0x04 | `EVENT_U` | U | Best-effort cosmetic events (§6.9). |
 | 0x05 | `SESSION` | – | Unconnected session messages (§4.2, §4.3). Only valid with `flags.UNCONNECTED`. |
 
@@ -313,7 +325,8 @@ packet_log:  ring[256] of { u16 packet_seq; fix64 sent_at; vector<u16> msg_seqs;
 
 on_tick(build packet):
     header.seq = ++local_seq; header.ack/ack_bits = receiver state (below)
-    budget = 1200 - 34 - space reserved for the STATE/INPUT chunk of this tick
+    budget = 1200 - 34 - the STATE/INPUT parts that fit this packet (§3.8)
+                       - the head EVENT_U if it fits beside them (first packet of the tick only)
     first put messages marked RESEND (oldest first), then new messages from send_queue,
     each message only if 3 + msg_len fits in budget; stop at the first that does not fit
     (order is preserved: a message that does not fit blocks later ones, so a large
@@ -324,14 +337,27 @@ on_tick(build packet):
 
 on_ack(header.ack, header.ack_bits):
     for each packet_seq in {ack} ∪ {ack-1-i | bit i set}, not yet acked:
-        mark acked; rtt sample from its sent_at (only if sends of all its messages == 1,
-        Karn's rule: no RTT from retransmissions)
+        mark acked (also if it had been given up as lost: a late ack still counts);
+        if a later packet was echoed before this one was acked, rttvar bound from its sent_at (§3.5; srtt untouched)
         for each msg_seq in it: erase from in_flight
     for each in_flight message m not acked:
-        lost_by_gap = (ack - m.in_packet_seq) >= 3 wrapping      // 3 later packets acked
+        lost_by_gap = acked packets after m.in_packet_seq >= 3   // ack itself + set bits between
         lost_by_rto = now - m.last_sent >= rto
         if lost_by_gap or lost_by_rto: mark RESEND (kept in in_flight, same msg seq)
 ```
+
+Within a tick the packets are composed in one fixed priority order: (a) the
+`STATE`/`INPUT` parts, the first packet carrying every part that fits (part 0
+always) and further parts opening further packets (a bundle that needs n > 1
+packets allows n + 1, §3.6); (b) reliable messages, resends first, then the
+queue in order, a head that does not fit beside the parts taking the tick's
+next packet by itself if need be, so that no message size can starve; (c)
+`EVENT_U` chunks fill whatever is left, in queue order, one that does not fit
+being skipped (not a head-of-line block) and dropped after 8 skips. Only the
+tick's first packet reserves room for the head event beside the parts; later
+packets put reliable messages first, so a message blocked out of the first
+packet is never blocked again by an event. Under a sustained reliable backlog
+events may be skipped and dropped: they are cosmetic (§6.9).
 
 Retransmissions are bounded per packet: at most `NET_V2_RESEND_BUDGET` = 600
 bytes of resent messages per packet, so a burst of loss cannot starve the
@@ -369,12 +395,42 @@ Per connection (Jacobson/Karels, RFC 6298 constants):
 ```
 first sample:   srtt = r;  rttvar = r/2
 later samples:  rttvar = 3/4 rttvar + 1/4 |srtt - r|;  srtt = 7/8 srtt + 1/8 r
-rto = clamp(srtt + 4 rttvar, NET_V2_RTO_MIN = 50 ms, NET_V2_RTO_MAX = 1000 ms)
+bound b:        rttvar = 3/4 rttvar + 1/4 |srtt - b|;  excess = max(excess, b - srtt)
+each tick (granted, not each grant), once no bound came for 1 s:  excess = 15/16 excess
+always:         rttvar = max(rttvar, hold/4)
+rto = clamp(srtt + max(4 rttvar, excess) + hold + tick, NET_V2_RTO_MIN = 50 ms, NET_V2_RTO_MAX = 1000 ms)
 ```
 
-- RTT samples come from acked packets (`sent_at` in `packet_log`) and from the
-  `echo_time`/`echo_delay` of each received packet (§2.2). Both feed the same
-  estimator.
+where `tick` is the sender's own tick period and `hold` the longer of its own
+and the peer's (the peer holds an ack until its next tick; the sender looks
+for losses only at its own). The two holds are added because the samples
+exclude them: on a steady link `rttvar` alone would not cover them, and the
+floor keeps `rttvar` from collapsing to zero. A bound is a delayed round trip
+that did happen (below); `rttvar` is a mean deviation and forgets it within a
+few samples while the next packet may be held just as long, so the largest
+excess of a bound over `srtt` is kept for as long as bounds keep coming and
+for a second after the last, then fades by a sixteenth per tick, and the RTO
+covers it whenever it exceeds the variance term: a loss is not declared
+before a delay that was just seen.
+
+- RTT samples come from the echo fields (`echo_time`, `echo_delay`, §2.2)
+  of the newest packet received: one sample per packet sent, at most, when
+  that packet's `ack` names it, its `send_time` matches, it was not sampled
+  before, and it is newer than the packet last sampled (a conforming peer
+  echoes the newest packet it received, so an echo of an older one is never
+  genuine and is ignored; otherwise a hostile peer could name a seconds-old
+  unechoed packet with `echo_delay` 0). `srtt` moves on samples alone.
+  Bounds widen `rttvar` only (`rttvar = 3/4 rttvar + 1/4 |srtt - r|`, with
+  the floor): the echo carried by a reordered older peer packet, whose own
+  delay is what a late ack costs, and the ack of a packet that was first
+  acked only after a later-sent packet had already been echoed, which
+  arrived out of order at the peer, will never be echoed, and whose ack is
+  the one word about that delayed round trip, which the RTO must cover. An
+  ack is never a sample: it includes the peer's hold, and a peer may hold
+  ack bits back at will. A packet left unechoed merely because the peer
+  sends fewer packets than the sender is not bounded by its ack either
+  (the RTO already adds the hold). Karn's rule is moot: packets are never
+  retransmitted, only messages are.
 - A message is retransmitted by the gap rule (3 later packets acked) *or* by
   the RTO, whichever comes first. With 60 packets per second the gap rule fires
   about 50 ms after the loss; the RTO is the fallback for the tail of a burst.
@@ -389,7 +445,7 @@ rto = clamp(srtt + 4 rttvar, NET_V2_RTO_MIN = 50 ms, NET_V2_RTO_MAX = 1000 ms)
 | Limit | Value | On violation |
 |---|---|---|
 | Packet size | 1200 bytes | Sender: never built; receiver: dropped. |
-| Packets per tick per connection | 1 normally; 2 if the reliable backlog does not fit next to the state chunk (the second packet carries reliable chunks only) | – |
+| Packets per tick per connection | 1 normally; 2 if the reliable backlog, a further bundle part or a pending event does not fit next to the state chunk; a bundle that needs n > 1 packets allows n + 1 | – |
 | Reliable send queue (queued + in flight) per connection | 512 messages or 96 KiB | Host: kick that client, `kick_player_reason::queue_overflow` (new reason). Client: leave the game with the message "Connection to host too slow". |
 | Messages in flight | 256 (receiver window) | Sender stops taking new messages from the queue until acks arrive. |
 | Oldest unacked reliable message | 10 s | Same as queue overflow (this replaces the v1 `pkttimeout`; a message unacked for 10 s means the link is dead or unusable). |
@@ -425,19 +481,35 @@ address with an implausible `seq` is dropped.
    name a live connection whose `player_id` equals the header's, else drop.
    Clients additionally require the source address to be the host's address
    *or* the token to match with a plausible `seq` (the host may also rebind).
-6. Replay/reorder: `d = seq - highest_seen` (wrapping `i16`). `d > 0`: new
-   highest, shift `ack_bits`. `-64 ≤ d ≤ 0` and bit not yet set: old but new
-   to us, set the bit, process. Otherwise (duplicate or older than 64
-   packets): drop. This is done before any chunk is parsed, so a replayed
-   packet never reaches the game layer twice.
-7. Update the peer's `last_heard`, RTT sample from `echo_*` if
-   `echo_time != 0` and `echo_delay < 65535`.
+6. Replay/reorder: `d = seq - highest_seen` (wrapping `i16`). `d` beyond
+   what the peer can send within the 5 s timeout (the ticks in the timeout
+   at the peer's tick × the packets a tick may carry × a margin of 2,
+   capped at 32767; 3000 at 60 Hz): a corrupted or forged sequence; drop
+   and count a protocol error (once per `seq`), so that one bad packet
+   cannot move the window past every real one. Otherwise `d > 0`: new
+   highest, shift `ack_bits`.
+   `-64 ≤ d ≤ 0` and bit not yet set: old but new to us, set the bit,
+   process. Otherwise (duplicate or older than 64 packets): drop. This is
+   done before any chunk is parsed, so a replayed packet never reaches the
+   game layer twice.
+7. Update the peer's `last_heard`; RTT and clock sample from `echo_*` if
+   `ack` names a logged packet whose `send_time` is `echo_time`,
+   `echo_delay < 65535`, that packet has not been sampled before (each
+   packet at most once; a repeated echo yields no sample, §2.2), and it is
+   newer than the packet last sampled (an echo of an older one is not
+   genuine and is ignored). Only the newest packet received measures
+   `srtt`; a reordered older one carries its own reorder delay, which is
+   what a late ack costs, so its echo widens `rttvar` only.
 8. Walk the chunks. Every chunk must fit; every `RELIABLE` message must fit
    its chunk; every `STATE`/`INPUT` record must have the exact size for its
-   flags. The first violation drops the *rest* of the packet but keeps the
-   header effects (acks, RTT) already applied, and increments a per-peer error
-   counter; 16 invalid packets within 10 s from one peer disconnect it
-   (`kick_player_reason::protocol_error`, new).
+   flags. The first violation drops the whole packet: nothing of it is
+   applied, not even the header's acks or echo (a corrupt ack bit would
+   otherwise acknowledge messages that were never delivered), and the packet
+   is not recorded in the replay window, so an intact copy of the same `seq`
+   is still accepted. One protocol error is counted per distinct `seq`; 16
+   within 10 s from one peer disconnect it
+   (`kick_player_reason::protocol_error`, new). The header effects of step 7
+   are therefore applied only after this step succeeds.
 9. Only then are messages delivered and the header's `ack`/`ack_bits`
    applied to the sender state.
 
@@ -453,8 +525,10 @@ protocol error for the peer.
   bytes and fits in one packet with room for the header and a chunk header.
 - The state bundle may exceed one packet only in robot games (§5.2). It is
   then split into two `STATE` chunks in two packets, each self-describing
-  (its own `player_mask` / record counts), and each applied independently;
-  the receiver does not wait for both.
+  (its own `player_mask` / record counts) and each tagged with its part
+  index and count in the chunk's first byte (§3.2), so that the transport
+  keeps the newest of each part on its own; each is applied independently
+  and the receiver does not wait for both.
 - Application-level splitting (level snapshot, §4.4) uses explicit part
   numbers and totals in the messages themselves.
 - Why not IP fragmentation or a fragment chunk: a lost fragment loses the
@@ -1250,8 +1324,10 @@ live in `SNAPSHOT_GAME` and `STOLEN_ITEMS` (host).
 
 ### 6.9 Cosmetic events (`EVENT_U`)
 
-Chunk payload: `n` u8, then `n` events of `{type u8, len u8, payload}`. Sent
-once, relayed once by the host, never retransmitted. Receivers apply them if
+Chunk payload: `n` u8, then `n` events of `{type u8, len u8, payload}`; the
+transport takes at most 255 bytes per `EVENT_U` chunk (`NET_V2_MAX_EVENT`),
+a handful of events. Sent once, relayed once by the host, never
+retransmitted. Receivers apply them if
 the referenced player exists. Types: `PLAY_SOUND` (v1 `MULTI_PLAY_SOUND`
 payload + `pid`), `CREATE_EXPLOSION` (`pid`), `DROP_BLOB` (`pid`),
 `SOUND_FUNCTION` (`pid`, function, sound), `TYPING_STATE` (`pid`, state).
@@ -1432,7 +1508,10 @@ set to a final value at stage 7.
   4. Replay/reorder: a captured packet re-injected later is rejected; a packet
      64+ behind is rejected; out-of-order within 64 is accepted once.
   5. RTT estimator: with 80 ± 20 ms link, `srtt` settles within 10 % in 2 s;
-     `rto` stays within [50, 1000] ms; Karn's rule holds under loss.
+     `rto` stays within [50, 1000] ms; packets held back 33–50 ms on a
+     lossless link are not resent by the RTO (their late acks bound
+     `rttvar` and the excess, §3.5). Karn's rule is moot: packets are never
+     retransmitted, only messages are.
   6. Clock sync: offset error < 5 ms after 2 s at 20 ms jitter; a 300 ms clock
      step is followed within one window.
   7. Fuzz: 1 000 000 random and mutated packets never crash or read out of
