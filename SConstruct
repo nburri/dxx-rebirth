@@ -5009,6 +5009,12 @@ class DXXArchive(DXXCommon):
 			'common/unittest/net_v2_interp.cpp',
 			'common/main/net_v2_transport.cpp',
 			)),
+		# Test of the object authority: net ids, pickup and drop rules,
+		# the host's inventory copies, pickup arbitration
+		# (net_v2_objects.h).
+		RuntimeTest('test-net-v2-authority', (
+			'common/unittest/net_v2_authority.cpp',
+			)),
 			)
 	del RuntimeTest
 
