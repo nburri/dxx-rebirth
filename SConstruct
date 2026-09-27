@@ -5003,6 +5003,12 @@ class DXXArchive(DXXCommon):
 		RuntimeTest('test-net-v2-session', (
 			'common/unittest/net_v2_session.cpp',
 			)),
+		# Test of the state layouts and the interpolation, clock and tick
+		# math (net_v2_state.h, net_interp.h).
+		RuntimeTest('test-net-v2-interp', (
+			'common/unittest/net_v2_interp.cpp',
+			'common/main/net_v2_transport.cpp',
+			)),
 			)
 	del RuntimeTest
 
@@ -5514,6 +5520,7 @@ class DXXProgram(DXXCommon):
 		__get_objects_multiplayer=DXXCommon.create_lazy_object_states_getter((LazyObjectState(sources=(
 'similar/main/multi.cpp',
 'similar/main/multibot.cpp',
+'similar/main/net_interp.cpp',
 ),
 		transform_target=_apply_target_name,
 	),

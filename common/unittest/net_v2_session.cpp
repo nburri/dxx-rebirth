@@ -59,8 +59,10 @@ void test_unconnected_framing()
 	req.write(payload.data());
 	const auto dg{build_unconnected(buf, 0xaabbccdd, 0, NET_V2_PLAYER_ID_NONE, 777, session_msg::join_request, payload)};
 	CHECK(dg.size() == NET_V2_HEADER_SIZE + NET_V2_CHUNK_HEADER_SIZE + NET_V2_MESSAGE_HEADER_SIZE + NET_V2_JOIN_REQUEST_SIZE);
-	/* The first two bytes are the protocol, so a v1 build reads upid 100. */
-	CHECK(dg[0] == 100 && dg[1] == 0);
+	/* The first two bytes are the protocol, so a v1 build reads upid 100
+	 * and up (an unknown packet type).
+	 */
+	CHECK(dg[0] == NET_V2_PROTO_VERSION && dg[1] == 0);
 
 	{
 		const auto m{parse_unconnected(dg, 0xaabbccdd)};
@@ -95,7 +97,7 @@ void test_unconnected_framing()
 		CHECK(parse_unconnected(big, 0).status == unconnected_status::bad_length);
 		d[0] = 16;
 		CHECK(parse_unconnected(d, 0xaabbccdd).status == unconnected_status::bad_proto);
-		d[0] = 100;
+		d[0] = NET_V2_PROTO_VERSION;
 		d[11] |= 0x80;
 		CHECK(parse_unconnected(d, 0xaabbccdd).status == unconnected_status::bad_flags);
 		d[11] = 0;

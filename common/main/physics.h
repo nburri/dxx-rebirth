@@ -55,6 +55,13 @@ void phys_apply_force(object_base &obj, const vms_vector &force_vec);
 }
 namespace dsx {
 window_event_result do_physics_sim(const d_robot_info_array &Robot_info, vmobjptridx_t obj, const vms_vector &obj_previous_position, phys_visited_seglist *phys_segs);
+/* The object collisions of `obj` (a remote ship placed by the network,
+ * which does not move by physics) moving in a straight line from `from`
+ * in segment `from_seg` to where it is now: collide_two_objects for every
+ * object the sweep touches, as do_physics_sim would, without the wall
+ * collisions.
+ */
+void phys_sweep_objects(const d_robot_info_array &Robot_info, vmobjptridx_t obj, const vms_vector &from, segnum_t from_seg);
 void phys_apply_rot(object &obj, const vms_vector &force_vec);
 }
 

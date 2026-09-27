@@ -1418,13 +1418,6 @@ void obj_delete(d_level_unique_object_state &LevelUniqueObjectState, segment_arr
 			LevelUniqueObjectState.Guided_missile.clear_player_active_guided_missile(pnum);
 			if (pnum == Player_num)
 			{
-				/* Position updates are paced, so send the final position
-				 * of the missile if it was removed in play
-				 * (obj_delete_all_that_should_be_dead), but not when it is
-				 * removed by clear_transient_objects at a level change.
-				 */
-				if (+(Game_mode & GM_MULTI) && Newdemo_state != ND_STATE_PLAYBACK && (obj->flags & OF_SHOULD_BE_DEAD))
-					multi_send_guided_final_position(obj);
 				if (!PlayerCfg.GuidedInBigWindow)
 					do_cockpit_window_view(gauge_inset_window_view::secondary, weapon_box_user::post_missile_static);
 				if (Newdemo_state == ND_STATE_RECORDING)
@@ -2065,19 +2058,28 @@ static window_event_result object_move_one(const d_level_shared_robot_info_state
 
 	bool prepare_seglist = false;
 	phys_visited_seglist phys_visited_segs;
-	switch (obj->movement_source) {
-
-		case object::movement_type::None:
-			break;				//this doesn't move
-
-		case object::movement_type::physics:	//move by physics
-			result = do_physics_sim(LevelSharedRobotInfoState.Robot_info, obj, obj_previous_position, obj->type == object_type::OBJ_PLAYER ? (prepare_seglist = true, phys_visited_segs.nsegs = 0, &phys_visited_segs) : nullptr);
-			break;
-
-		case object::movement_type::spinning:
-			spin_object(obj);
-			break;
+	/* A remote ship or guided missile whose pose net_interp_apply_all
+	 * wrote this frame is not moved again (section 5.4 of
+	 * Documentation/network-protocol-v2.md).
+	 */
+	if (!net_interp_drives(obj))
+	{
+		switch (obj->movement_source) {
+			case object::movement_type::None:
+				break;				//this doesn't move
+			case object::movement_type::physics:	//move by physics
+				result = do_physics_sim(LevelSharedRobotInfoState.Robot_info, obj, obj_previous_position, obj->type == object_type::OBJ_PLAYER ? (prepare_seglist = true, phys_visited_segs.nsegs = 0, &phys_visited_segs) : nullptr);
+				break;
+			case object::movement_type::spinning:
+				spin_object(obj);
+				break;
+		}
 	}
+	else
+		/* It did not move by physics, which is where a moving ship finds
+		 * the objects it runs into.
+		 */
+		net_interp_sweep_driven(LevelSharedRobotInfoState.Robot_info, obj);
 
 #if DXX_BUILD_DESCENT == 2
 	auto &Walls = LevelUniqueWallSubsystemState.Walls;
@@ -2230,6 +2232,12 @@ static window_event_result object_move_all(const d_level_shared_robot_info_state
 		free_object_slots(MAX_USED_OBJECTS);		//	Free all possible object slots.
 
 	obj_delete_all_that_should_be_dead();
+
+	/* Remote ships and guided missiles take their interpolated poses
+	 * before anything moves, so that local physics and collisions see
+	 * them where they are drawn.
+	 */
+	net_interp_apply_all();
 
 	if (PlayerCfg.AutoLeveling)
 		ConsoleObject->mtype.phys_info.flags |= PF_LEVELLING;

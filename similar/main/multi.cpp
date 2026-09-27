@@ -41,6 +41,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "game.h"
 #include "multi.h"
 #include "multiinternal.h"
+#include "net_v2_state.h"
 #include "object.h"
 #include "player.h"
 #include "laser.h"
@@ -132,7 +133,6 @@ static void multi_add_lifetime_kills(int count);
 
 namespace {
 
-static void multi_send_heartbeat(multiplayer_data_priority priority);
 static void multi_send_ranking(netplayer_info::player_rank);
 static void multi_send_gmode_update();
 
@@ -1060,28 +1060,6 @@ static void multi_compute_kill(const d_robot_info_array &Robot_info, const imobj
 
 }
 
-namespace {
-
-/* Whole second of ThisLevelTime in which this player last sent
- * MULTI_HEARTBEAT, or -1 to send it in the next frame.
- */
-static int last_heartbeat_second = -1;
-
-/* Priority of the next MULTI_HEARTBEAT.  The periodic heartbeat is sent
- * unreliably, but the one scheduled by multi_schedule_heartbeat is the only
- * one that tells a joining player the level time before the next second, so
- * send that one reliably.
- */
-static multiplayer_data_priority next_heartbeat_priority = multiplayer_data_priority::_1;
-
-}
-
-void multi_schedule_heartbeat()
-{
-	last_heartbeat_second = -1;
-	next_heartbeat_priority = multiplayer_data_priority::_2;
-}
-
 window_event_result multi_do_frame()
 {
 	static fix64 last_gmode_time = 0, last_inventory_time = 0, last_repo_time = 0;
@@ -1092,24 +1070,9 @@ window_event_result multi_do_frame()
 		return window_event_result::ignored;
 	}
 
-	/* The receiver only uses the heartbeat to correct its own level time,
-	 * which it advances every frame.  Send it when the second changes, not
-	 * every frame, so that the rate does not scale with the frame rate.
+	/* The level time reaches the clients in every state bundle (stage 2 of
+	 * the v2 protocol), not in MULTI_HEARTBEAT any more.
 	 */
-	if (const auto this_level_second{f2i(ThisLevelTime.count())}; +(Game_mode & GM_NETWORK) && Netgame.PlayTimeAllowed.count() && last_heartbeat_second != this_level_second)
-	{
-		for (unsigned i = 0; i < N_players; ++i)
-			if (vcplayerptr(i)->connected != player_connection_status::disconnected)
-			{
-				if (i==Player_num)
-				{
-					multi_send_heartbeat(std::exchange(next_heartbeat_priority, multiplayer_data_priority::_1));
-					last_heartbeat_second = this_level_second;
-				}
-				break;
-			}
-	}
-
 	// Send update about our game mode-specific variables every 2 secs (to keep in sync since delayed kills can invalidate these infos on Clients)
 	if (multi_i_am_master() && timer_query() >= last_gmode_time + (F1_0*2))
 	{
@@ -1179,7 +1142,6 @@ void multi_leave_game()
 		 */
 		Net_create_loc = 0;
 		const auto cobjp = vmobjptridx(get_local_player().objnum);
-		multi_send_position(cobjp);
 		auto &player_info = cobjp->ctype.player_info;
 		if (!player_info.Player_eggs_dropped)
 		{
@@ -1664,6 +1626,11 @@ window_event_result multi_message_input_sub(const d_robot_info_array &Robot_info
 
 namespace {
 
+#if DXX_BUILD_DESCENT == 2
+/* multi_guided_generation */
+static per_player_array<uint8_t> Guided_generation{};
+#endif
+
 static void multi_do_fire(fvmobjptridx &vmobjptridx, const playernum_t pnum, const multiplayer_rspan<multiplayer_command_t::MULTI_FIRE> buf, const icobjidx_t Network_laser_track, const std::optional<uint16_t> remote_objnum)
 {
 	// Act out the actual shooting
@@ -1690,6 +1657,11 @@ static void multi_do_fire(fvmobjptridx &vmobjptridx, const playernum_t pnum, con
 			? static_cast<player_gun_number>(static_cast<uint8_t>(base_weapon_gun) + (flags & 1))
 			: base_weapon_gun;
 
+#if DXX_BUILD_DESCENT == 2
+		/* Before the copy is created: its generation (multi_send_fire). */
+		if (weapon == secondary_weapon_index::guided && pnum < Guided_generation.size())
+			Guided_generation[pnum] = static_cast<uint8_t>((flags >> 1) & 0x7f);
+#endif
 		const auto &&objnum = Laser_player_fire(LevelSharedRobotInfoState.Robot_info, obj, weapon_id, weapon_gun, weapon_sound_flag::audible, shot_orientation, Network_laser_track);
 		if (remote_objnum)
 			map_objnum_local_to_remote(objnum, *remote_objnum, pnum);
@@ -1758,36 +1730,6 @@ static void multi_do_message(const playernum_t pnum, const multiplayer_rspan<mul
 	multi_sending_message[pnum] = msgsend_state::none;
 }
 
-static void multi_do_position(object_array &Objects, const playernum_t pnum, const multiplayer_rspan<multiplayer_command_t::MULTI_POSITION> buf)
-{
-	auto &vmobjptridx{Objects.vmptridx};
-	const auto &&obj = vmobjptridx(vcplayerptr(pnum)->objnum);
-        int count{1};
-
-        quaternionpos qpp{};
-	qpp.orient.w = GET_INTEL_SHORT(&buf[count]);					count += 2;
-	qpp.orient.x = GET_INTEL_SHORT(&buf[count]);					count += 2;
-	qpp.orient.y = GET_INTEL_SHORT(&buf[count]);					count += 2;
-	qpp.orient.z = GET_INTEL_SHORT(&buf[count]);					count += 2;
-	qpp.pos = multi_get_vector(buf.subspan<9, 12>());
-	count += 12;
-	if (const auto s{vmsegidx_t::check_nothrow_index(GET_INTEL_SHORT(&buf[count]))})
-	{
-		qpp.segment = *s;
-		count += 2;
-	}
-	else
-		return;
-	qpp.vel = multi_get_vector(buf.subspan<9 + 12 + 2, 12>());
-	count += 12;
-	qpp.rotvel = multi_get_vector(buf.subspan<9 + 12 + 2 + 12, 12>());
-	count += 12;
-	extract_quaternionpos(Objects.vmptr, vmsegptr, obj, qpp);
-
-	if (obj->movement_source == object::movement_type::physics)
-		set_thrust_from_velocity(obj);
-}
-
 static void multi_do_reappear(const playernum_t pnum, const multiplayer_rspan<multiplayer_command_t::MULTI_REAPPEAR> buf)
 {
 	auto &Objects = LevelUniqueObjectState.Objects;
@@ -1842,6 +1784,10 @@ static void multi_do_player_deres(const d_robot_info_array &Robot_info, object_a
 #elif DXX_BUILD_DESCENT == 2
 #define GET_WEAPON_FLAGS(buf,count)	(count += sizeof(uint16_t), GET_INTEL_SHORT(&buf[(count - sizeof(uint16_t))]))
 #endif
+	/* The explosion and the eggs where the owner's ship is, not at its
+	 * delayed interpolated pose (v1 sent a MULTI_POSITION first).
+	 */
+	net_interp_snap_to_newest(pnum);
 	const auto &&objp = vmobjptridx(vcplayerptr(pnum)->objnum);
 	auto &player_info = objp->ctype.player_info;
 	player_info.primary_weapon_flags = GET_WEAPON_FLAGS(buf, count);
@@ -2581,8 +2527,26 @@ void multi_process_bigdata(const d_level_shared_robot_info_state &LevelSharedRob
 //          players of something we did.
 //
 
+#if DXX_BUILD_DESCENT == 2
+uint8_t multi_guided_generation(const playernum_t pnum)
+{
+	return pnum < Guided_generation.size() ? Guided_generation[pnum] : 0;
+}
+#endif
+
 void multi_send_fire(const vms_matrix &orient, int laser_gun, const laser_level level, int laser_flags, objnum_t laser_track, const imobjptridx_t is_bomb_objnum)
 {
+#if DXX_BUILD_DESCENT == 2
+	/* A guided missile: bits 1-7 of the flags are its generation (only
+	 * bit 0, the gun, is read for a missile).
+	 */
+	if (laser_gun == underlying_value(secondary_weapon_index::guided) + MISSILE_ADJUST)
+	{
+		auto &gen = Guided_generation[Player_num];
+		gen = static_cast<uint8_t>((gen + 1) % ::dcx::net_v2::NET_V2_GUIDED_GEN_MODULO);
+		laser_flags = (laser_flags & 1) | (gen << 1);
+	}
+#endif
 	static fix64 last_fireup_time = 0;
 
 	// provoke positional update if possible (20 times per second max. matches vulcan, the fastest firing weapon)
@@ -2598,10 +2562,13 @@ void multi_send_fire(const vms_matrix &orient, int laser_gun, const laser_level 
 		multi_command<multiplayer_command_t::MULTI_FIRE> multifire;
 		mb() {}
 	} multibuf;
-	if (is_bomb_objnum != object_none)
-		new(&multibuf.multibomb) multi_command<multiplayer_command_t::MULTI_FIRE_BOMB>();
-	else if (laser_track != object_none)
+	/* A tracked weapon that also names its object (a guided missile with
+	 * a target) goes as MULTI_FIRE_TRACK with the object number appended.
+	 */
+	if (laser_track != object_none)
 		new(&multibuf.multitrack) multi_command<multiplayer_command_t::MULTI_FIRE_TRACK>();
+	else if (is_bomb_objnum != object_none)
+		new(&multibuf.multibomb) multi_command<multiplayer_command_t::MULTI_FIRE_BOMB>();
 	else
 		new(&multibuf.multifire) multi_command<multiplayer_command_t::MULTI_FIRE>();
 	multibuf.multifire[1] = static_cast<char>(Player_num);
@@ -2615,19 +2582,28 @@ void multi_send_fire(const vms_matrix &orient, int laser_gun, const laser_level 
 	 * If we fire a bomb, it's persistent. Let others know of it's objnum so host can track it's behaviour over clients (host-authority functions, D2 chaff ability).
 	 * If we fire a tracking projectile, we should others let know about what we track but we have to pay attention that it is mapped correctly.
 	 * If we fire something else, we make the packet as small as possible.
+	 * A guided missile (D2) is sent like a bomb, with its object number,
+	 * because the v2 state bundle names it by that number.
 	 */
-	if (is_bomb_objnum != object_none)
-	{
-		map_objnum_local_to_local(is_bomb_objnum);
-		PUT_INTEL_SHORT(&multibuf.multibomb[17], is_bomb_objnum.operator objnum_t());
-		multi_send_data(multibuf.multibomb, multiplayer_data_priority::_1);
-	}
-	else if (laser_track != object_none)
+	if (laser_track != object_none)
 	{
 		const auto &&[remote_owner, remote_laser_track] = objnum_local_to_remote(laser_track);
 		PUT_INTEL_SHORT(&multibuf.multitrack[17], remote_laser_track);
 		multibuf.multitrack[19] = remote_owner;
+		if (is_bomb_objnum != object_none)
+		{
+			map_objnum_local_to_local(is_bomb_objnum);
+			PUT_INTEL_SHORT(&multibuf.multitrack[20], is_bomb_objnum.operator objnum_t());
+		}
+		else
+			PUT_INTEL_SHORT(&multibuf.multitrack[20], uint16_t{0xffff});
 		multi_send_data(multibuf.multitrack, multiplayer_data_priority::_1);
+	}
+	else if (is_bomb_objnum != object_none)
+	{
+		map_objnum_local_to_local(is_bomb_objnum);
+		PUT_INTEL_SHORT(&multibuf.multibomb[17], is_bomb_objnum.operator objnum_t());
+		multi_send_data(multibuf.multibomb, multiplayer_data_priority::_1);
 	}
 	else
 		multi_send_data(multibuf.multifire, multiplayer_data_priority::_1);
@@ -2712,10 +2688,7 @@ void multi_send_player_deres(deres_type_t type)
 {
 	auto &Objects = LevelUniqueObjectState.Objects;
 	auto &vmobjptr = Objects.vmptr;
-	auto &vmobjptridx = Objects.vmptridx;
 	int count{0};
-
-	multi_send_position(vmobjptridx(get_local_player().objnum));
 
 	multi_command<multiplayer_command_t::MULTI_PLAYER_DERES> multibuf;
 	count++;
@@ -2806,10 +2779,7 @@ void multi_send_message()
 
 void multi_send_reappear()
 {
-	auto &Objects = LevelUniqueObjectState.Objects;
-	auto &vmobjptridx = Objects.vmptridx;
 	auto &plr = get_local_player();
-	multi_send_position(vmobjptridx(plr.objnum));
 	multi_command<multiplayer_command_t::MULTI_REAPPEAR> multibuf;
 	multibuf[1] = static_cast<char>(Player_num);
 	PUT_INTEL_SHORT(&multibuf[2], plr.objnum);
@@ -2818,30 +2788,6 @@ void multi_send_reappear()
 }
 
 namespace dsx {
-
-void multi_send_position(object &obj)
-{
-	int count{1};
-
-	const auto qpp{build_quaternionpos(obj)};
-	multi_command<multiplayer_command_t::MULTI_POSITION> multibuf;
-	PUT_INTEL_SHORT(&multibuf[count], qpp.orient.w);							count += 2;
-	PUT_INTEL_SHORT(&multibuf[count], qpp.orient.x);							count += 2;
-	PUT_INTEL_SHORT(&multibuf[count], qpp.orient.y);							count += 2;
-	PUT_INTEL_SHORT(&multibuf[count], qpp.orient.z);							count += 2;
-	multi_put_vector(&multibuf[count], qpp.pos);
-	count += 12;
-	PUT_INTEL_SEGNUM(&multibuf[count], qpp.segment);					count += 2;
-	multi_put_vector(&multibuf[count], qpp.vel);
-	count += 12;
-	multi_put_vector(&multibuf[count], qpp.rotvel);
-	count += 12;
-	// 46
-
-	// send twice while first has priority so the next one will be attached to the next bigdata packet
-	multi_send_data(multibuf, multiplayer_data_priority::_1);
-	multi_send_data(multibuf, multiplayer_data_priority::_0);
-}
 
 /* 
  * I was killed. If I am host, send this info to everyone and compute kill. If I am just a Client I'll only send the kill but not compute it for me. I (Client) will wait for Host to send me my kill back together with updated game_mode related variables which are important for me to compute consistent kill.
@@ -3027,15 +2973,11 @@ namespace dsx {
 
 void multi_send_create_powerup(const powerup_type_t powerup_type, const vcsegidx_t segnum, const vcobjidx_t objnum, const vms_vector &pos)
 {
-	auto &Objects = LevelUniqueObjectState.Objects;
-	auto &vmobjptridx = Objects.vmptridx;
 	// Create a powerup on a remote machine, used for remote
 	// placement of used powerups like missiles and cloaking
 	// powerups.
 
 	int count{0};
-
-	multi_send_position(vmobjptridx(get_local_player().objnum));
 
 	count += 1;
 	multi_command<multiplayer_command_t::MULTI_CREATE_POWERUP> multibuf;
@@ -3525,10 +3467,8 @@ void multi_prep_level_player(void)
 	multi_consistency_error(1);
 
 	multi_sending_message.fill(msgsend_state::none);
-	/* ThisLevelTime restarts at 0, so send the heartbeat in the first frame
-	 * of the level even if the previous level ended in second 0.
-	 */
-	multi_schedule_heartbeat();
+	/* The snapshots of the previous level describe other objects. */
+	net_interp_reset();
 	if (imulti_new_game)
 		for (uint_fast32_t i = 0; i != Players.size(); i++)
 			init_player_stats_new_ship(i);
@@ -3861,12 +3801,9 @@ const char *multi_interactive_deny_save_game(const fvcobjptr &vcobjptr, const st
 
 void multi_send_drop_weapon(const vmobjptridx_t objp, int seed)
 {
-	auto &Objects = LevelUniqueObjectState.Objects;
-	auto &vmobjptridx = Objects.vmptridx;
 	int count{0};
 	int ammo_count;
 
-	multi_send_position(vmobjptridx(get_local_player().objnum));
 	ammo_count = objp->ctype.powerup_info.count;
 
 #if DXX_BUILD_DESCENT == 2
@@ -3897,6 +3834,10 @@ static void multi_do_drop_weapon(fvmobjptr &vmobjptr, const playernum_t pnum, co
 	const objnum_t remote_objnum{GET_INTEL_SHORT(&buf[2])};
 	const uint16_t ammo{GET_INTEL_SHORT(&buf[4])};
 	const auto seed{GET_INTEL_INT(&buf[6])};
+	/* Spat from the ship where its owner had it, not from its delayed
+	 * interpolated pose.
+	 */
+	net_interp_snap_to_newest(pnum);
 	const auto &&objnum = spit_powerup(LevelUniqueObjectState, LevelSharedSegmentState, LevelUniqueSegmentState, Vclip, vmobjptr(vcplayerptr(pnum)->objnum), powerup_id, seed);
 	if (objnum == object_none)
 		return;
@@ -4004,48 +3945,12 @@ static void multi_send_guided_info(const object_base &miss, const uint8_t releas
 
 void multi_send_guided_release(const object_base &miss)
 {
-	/* Position updates are paced by multi_send_guided_frame, and the
-	 * receiver ignores the position in a release message, so send the
-	 * final position before the release.  The release flushes both at
-	 * once, like the paced updates, so that the receiver does not get the
-	 * final position after it moved the missile past that position.
+	/* The missile's pose travels in the state bundle while the owner
+	 * steers it (stage 2 of the v2 protocol); the release carries the
+	 * final pose, reliably, so that every copy continues by physics from
+	 * where the owner let go of it.
 	 */
-	multi_send_guided_info(miss, 0, multiplayer_data_priority::_0);
-	multi_send_guided_info(miss, 1, multiplayer_data_priority::_1);
-}
-
-void multi_send_guided_final_position(const object_base &miss)
-{
-	/* Called when the local player's active guided missile is removed in
-	 * play.  Position updates are paced by multi_send_guided_frame, so send
-	 * the final position, at once like the paced updates.  Do not send
-	 * anything when the level is being torn down.
-	 */
-	if (Network_status != network_state::playing)
-		return;
-	multi_send_guided_info(miss, 0, multiplayer_data_priority::_1);
-}
-
-bool multi_send_guided_frame()
-{
-	/* Called by do_protocol_frame at the network tick rate (Netgame.TickRate),
-	 * never from a forced call, and the caller sends the mdata packet at
-	 * once, together with the thief position if the pdata tick is in the
-	 * same frame.  The receiver (multi_do_guided) warps its copy of the
-	 * missile to the received position and velocity, then moves it by
-	 * physics until the next update, the same as for ship positions.  The
-	 * final state is sent by multi_send_guided_release and
-	 * multi_send_guided_final_position.
-	 *
-	 * Return whether an update was queued.
-	 */
-	if (Network_status != network_state::playing)
-		return false;
-	const auto &&gimobj = LevelUniqueObjectState.Guided_missile.get_player_active_guided_missile(LevelUniqueObjectState.Objects.vmptr, Player_num);
-	if (gimobj == nullptr)
-		return false;
-	multi_send_guided_info(*gimobj, 0, multiplayer_data_priority::_0);
-	return true;
+	multi_send_guided_info(miss, 1, multiplayer_data_priority::_2);
 }
 
 namespace {
@@ -4057,18 +3962,16 @@ static void multi_do_guided(d_level_unique_object_state &LevelUniqueObjectState,
 	auto &Objects = LevelUniqueObjectState.Objects;
 	auto &vmobjptr = Objects.vmptr;
 
-	if (b.release)
+	/* Only releases are sent now; positions are in the state bundle. */
+	if (!b.release)
+		return;
+	if (const auto &&gimobj = LevelUniqueObjectState.Guided_missile.get_player_active_guided_missile(LevelUniqueObjectState.Objects.vmptridx, pnum); gimobj != nullptr)
 	{
-		release_remote_guided_missile(LevelUniqueObjectState, pnum);
-		return;
+		const vmobjptridx_t guided_missile = gimobj;
+		multi_object_warp_to_shortpos(guided_missile, b.sp);
+		update_object_seg(vmobjptr, LevelSharedSegmentState, LevelUniqueSegmentState, guided_missile);
 	}
-
-	const auto &&gimobj = LevelUniqueObjectState.Guided_missile.get_player_active_guided_missile(LevelUniqueObjectState.Objects.vmptridx, pnum);
-	if (gimobj == nullptr)
-		return;
-	const vmobjptridx_t guided_missile = gimobj;
-	multi_object_warp_to_shortpos(guided_missile, b.sp);
-	update_object_seg(vmobjptr, LevelSharedSegmentState, LevelUniqueSegmentState, guided_missile);
+	release_remote_guided_missile(LevelUniqueObjectState, pnum);
 }
 
 }
@@ -4168,26 +4071,6 @@ static void multi_do_kill_goal_counts(fvmobjptr &vmobjptr, const multiplayer_rsp
 		player_info.KillGoalCount = buf[count];
 		count++;
 	}
-}
-
-void multi_send_heartbeat(const multiplayer_data_priority priority)
-{
-	if (!Netgame.PlayTimeAllowed.count())
-		return;
-
-	multi_command<multiplayer_command_t::MULTI_HEARTBEAT> multibuf;
-	PUT_INTEL_INT(&multibuf[1], ThisLevelTime.count());
-	/* The receiver overwrites its level time with this value, so send it at
-	 * once (priority 1 or 2) rather than up to 100ms late with the next
-	 * regular mdata packet.  It is sent only once per second.
-	 */
-	multi_send_data(multibuf, priority);
-}
-
-static void multi_do_heartbeat(const multiplayer_rspan<multiplayer_command_t::MULTI_HEARTBEAT> buf)
-{
-	const fix num{GET_INTEL_INT<int32_t>(&buf[1])};
-	ThisLevelTime = d_time_fix(num);
 }
 
 }
@@ -4693,6 +4576,7 @@ static void multi_do_drop_flag(const playernum_t pnum, const multiplayer_rspan<m
 	 */
 	const auto seed{GET_INTEL_INT<int32_t>(&buf[4])};
 
+	net_interp_snap_to_newest(pnum);
 	auto &plrobj{*vmobjptr(vcplayerptr(pnum)->objnum)};
 
 	const imobjidx_t objnum{spit_powerup(LevelUniqueObjectState, LevelSharedSegmentState, LevelUniqueSegmentState, Vclip, plrobj, powerup_id, seed)};
@@ -5349,6 +5233,10 @@ static void multi_do_player_inventory(const playernum_t pnum, const multiplayer_
 #elif DXX_BUILD_DESCENT == 2
 #define GET_WEAPON_FLAGS(buf,count)	(count += sizeof(uint16_t), GET_INTEL_SHORT(&buf[(count - sizeof(uint16_t))]))
 #endif
+	/* The explosion and the eggs where the owner's ship is, not at its
+	 * delayed interpolated pose (v1 sent a MULTI_POSITION first).
+	 */
+	net_interp_snap_to_newest(pnum);
 	const auto &&objp = vmobjptridx(vcplayerptr(pnum)->objnum);
 	auto &player_info = objp->ctype.player_info;
 	player_info.primary_weapon_flags = GET_WEAPON_FLAGS(buf, count);
@@ -5904,9 +5792,6 @@ static void multi_process_data(const d_level_shared_robot_info_state &LevelShare
 	auto &vmwallptr = Walls.vmptr;
 	switch (type)
 	{
-		case multiplayer_command_t::MULTI_POSITION:
-			multi_do_position(Objects, pnum, multi_subspan_first<multiplayer_command_t::MULTI_POSITION>(data));
-			break;
 		case multiplayer_command_t::MULTI_REAPPEAR:
 			multi_do_reappear(pnum, multi_subspan_first<multiplayer_command_t::MULTI_REAPPEAR>(data));
 			break;
@@ -5919,7 +5804,9 @@ static void multi_process_data(const d_level_shared_robot_info_state &LevelShare
 							: object_none,
 							type == multiplayer_command_t::MULTI_FIRE_BOMB
 							? std::optional(GET_INTEL_SHORT(&data[17]))
-							: std::nullopt);
+							: (type == multiplayer_command_t::MULTI_FIRE_TRACK && GET_INTEL_SHORT(&data[20]) != 0xffff)
+								? std::optional(GET_INTEL_SHORT(&data[20]))
+								: std::nullopt);
 			break;
 		case multiplayer_command_t::MULTI_REMOVE_OBJECT:
 			multi_do_remobj(vmobjptr, multi_subspan_first<multiplayer_command_t::MULTI_REMOVE_OBJECT>(data));
@@ -6075,9 +5962,6 @@ static void multi_process_data(const d_level_shared_robot_info_state &LevelShare
 			break;
 		case multiplayer_command_t::MULTI_RESTORE_GAME:
 			multi_do_restore_game(multi_subspan_first<multiplayer_command_t::MULTI_RESTORE_GAME>(data));
-			break;
-		case multiplayer_command_t::MULTI_HEARTBEAT:
-			multi_do_heartbeat(multi_subspan_first<multiplayer_command_t::MULTI_HEARTBEAT>(data));
 			break;
 		case multiplayer_command_t::MULTI_KILLGOALS:
 			multi_do_kill_goal_counts(vmobjptr, multi_subspan_first<multiplayer_command_t::MULTI_KILLGOALS>(data));

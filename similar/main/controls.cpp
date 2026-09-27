@@ -107,8 +107,8 @@ void read_flying_controls(object &obj, control_info &Controls)
 		gmobj.orient = vm_matrix_x_matrix(gmobj.orient, rotmat);
 
 		gmobj.mtype.phys_info.velocity = vm_vec_copy_scale(gmobj.orient.fvec, speed);
-		/* In multiplayer, do_protocol_frame sends the position of the
-		 * missile with each position packet (multi_send_guided_frame).
+		/* In multiplayer, the pose of the missile travels with the ship
+		 * in every INPUT and state bundle (net_v2.cpp).
 		 */
 		return true;
 	};

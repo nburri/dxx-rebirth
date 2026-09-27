@@ -25,10 +25,9 @@
 
 #ifdef DXX_BUILD_DESCENT
 #define for_each_multiplayer_command(VALUE)	\
-	VALUE(MULTI_POSITION              , 1 + quaternionpos::packed_size::value)	\
 	VALUE(MULTI_REAPPEAR              , 4)	\
 	VALUE(MULTI_FIRE                  , 17)	\
-	VALUE(MULTI_FIRE_TRACK            , 20)	\
+	VALUE(MULTI_FIRE_TRACK            , 22)	/* + objnum of a guided missile, or 0xffff */	\
 	VALUE(MULTI_FIRE_BOMB             , 19)	\
 	VALUE(MULTI_REMOVE_OBJECT         , 4)	\
 	VALUE(MULTI_MESSAGE               , 37)	/* (MAX_MESSAGE_LENGTH = 40) */	\
@@ -60,7 +59,6 @@
 	VALUE(MULTI_HOSTAGE_DOOR         , 7)	\
 	VALUE(MULTI_SAVE_GAME            , 2+24)	/* (ubyte slot, uint id, char name[20]) */	\
 	VALUE(MULTI_RESTORE_GAME         , 2+4)	/* (ubyte slot, uint id) */	\
-	VALUE(MULTI_HEARTBEAT            , 5)	\
 	VALUE(MULTI_KILLGOALS            , 1 + MAX_PLAYERS)	\
 	VALUE(MULTI_DO_BOUNTY            , 2)	\
 	VALUE(MULTI_TYPING_STATE         , 3)	\

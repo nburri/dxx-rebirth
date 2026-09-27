@@ -63,6 +63,7 @@ struct fvi_info : prohibit_void_ptr<>
 #define FQ_TRANSPOINT	4		//go through trans wall if hit point is transparent
 #define FQ_GET_SEGLIST	8		//build a list of segments
 #define FQ_IGNORE_POWERUPS	16		//ignore powerups
+#define FQ_OBJECTS_ONLY	32		//walls stop only the centre point, as for objects that do not collide with walls
 
 #ifdef DXX_BUILD_DESCENT
 namespace dcx {

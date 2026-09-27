@@ -173,8 +173,9 @@ static inline player_ship_color get_team_color(const team_number tnum)
  * (Documentation/network-protocol-v2.md); it is bumped by one per stage that
  * changes the wire format, so that mismatched experimental builds refuse each
  * other instead of misbehaving.  It equals NET_V2_PROTO_VERSION in net_v2.h.
+ * 101: stage 2 (state bundle, INPUT, interpolation).
  */
-constexpr std::uint16_t MULTI_PROTO_VERSION{100};
+constexpr std::uint16_t MULTI_PROTO_VERSION{101};
 // PROTOCOL VARIABLES AND DEFINES - END
 
 /* The network tick rate (positions per second, and the pacing of every
@@ -448,7 +449,6 @@ namespace dsx {
 
 void multi_send_fire(const vms_matrix &orient, int laser_gun, laser_level, int laser_flags, objnum_t laser_track, imobjptridx_t is_bomb_objnum);
 void multi_send_destroy_controlcen(objnum_t objnum, playernum_t player);
-void multi_send_position(object &objnum);
 void multi_send_kill(vmobjptridx_t objnum);
 void multi_send_remobj(vmobjidx_t objnum);
 void multi_send_door_open(vcsegidx_t segnum, sidenum_t side, wall_flags flag);
@@ -485,7 +485,6 @@ void reset_network_objects();
 
 void multi_init_objects(void);
 window_event_result multi_do_frame();
-void multi_schedule_heartbeat();
 
 #ifdef DXX_BUILD_DESCENT
 namespace dsx {
@@ -528,8 +527,14 @@ struct marker_message_text_t;
 void multi_send_drop_marker(unsigned player, const vms_vector &position, player_marker_index messagenum, const marker_message_text_t &text);
 void multi_send_markers();
 void multi_send_guided_release(const object_base &miss);
-void multi_send_guided_final_position(const object_base &miss);
-bool multi_send_guided_frame();
+/* The generation of player `pnum`'s newest guided missile: counted by the
+ * owner when it fires one, carried in bits 1-7 of the fire message's
+ * flags byte and in the v2 guided record (stage 2), so that the records
+ * of a new missile that reuses the previous one's object slot are not
+ * applied to the previous one's copy.
+ */
+[[nodiscard]]
+uint8_t multi_guided_generation(playernum_t pnum);
 void multi_send_orb_bonus(playernum_t pnum, uint8_t);
 void multi_send_got_orb(playernum_t pnum);
 void multi_send_effect_blowup(vcsegidx_t segnum, sidenum_t side, const vms_vector &pnt);
@@ -966,6 +971,41 @@ netplayer_info::player_rank build_rank_from_untrusted(uint8_t untrusted);
 	PUT_INTEL_SHORT(D, static_cast<uint16_t>(PUT_INTEL_SEGNUM));	\
 	} DXX_END_COMPOUND_STATEMENT )
 
+#ifdef DXX_BUILD_DESCENT
+namespace dsx {
+
+/* Receiver-side interpolation of remote ships and guided missiles
+ * (similar/main/net_interp.cpp, Documentation/network-protocol-v2.md
+ * section 5.4).  The network layer feeds it snapshots; the game calls
+ * net_interp_apply_all once per frame from object_move_all, before any
+ * object moves, and object_move_one skips the physics of every object it
+ * drives.
+ */
+void net_interp_apply_all();
+[[nodiscard]]
+bool net_interp_drives(vcobjidx_t obj);
+/* The player's state is old at the host (section 5.2 `input_age`, and
+ * the record's sample age): shown as a lag marker.
+ */
+[[nodiscard]]
+bool net_interp_player_lagging(playernum_t pnum);
+/* Forget every snapshot (level start, session end). */
+void net_interp_reset();
+/* Put player `pnum`'s ship where its newest snapshot has it (not at the
+ * delayed render time), for a message that acts at the ship's position
+ * now: MULTI_PLAYER_DERES, MULTI_DROP_WEAPON, MULTI_DROP_FLAG.  The next
+ * net_interp_apply_all puts it back on its interpolated path.
+ */
+void net_interp_snap_to_newest(playernum_t pnum);
+/* object_move_one, for an object net_interp_drives: the object
+ * collisions along the path a remote ship was moved this frame
+ * (phys_sweep_objects).
+ */
+void net_interp_sweep_driven(const d_robot_info_array &Robot_info, vmobjptridx_t obj);
+
+}
+#endif
+
 #else
 
 static inline window_event_result multi_do_frame()
@@ -986,11 +1026,21 @@ static inline void multi_send_guided_release(const object_base &)
 {
 }
 
-static inline void multi_send_guided_final_position(const object_base &)
+#endif
+
+static inline void net_interp_apply_all()
 {
 }
 
-#endif
+[[nodiscard]]
+static inline bool net_interp_drives(const vcobjidx_t)
+{
+	return false;
+}
+
+static inline void net_interp_sweep_driven(const d_robot_info_array &, vmobjptridx_t)
+{
+}
 
 }
 #endif
