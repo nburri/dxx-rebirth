@@ -3627,8 +3627,12 @@ class DXXCommon(LazyObjectConstructor):
 	VERSION_MICRO: typing.Final[int] = 0
 	# Prefix of the version shown in the game (for example
 	# "D2X-Rebirth ggc-v0.61-nb2"), so that builds from this fork can be
-	# told apart from original DXX-Rebirth builds.
-	VERSION_FORK_PREFIX: typing.Final[str] = 'ggc-'
+	# told apart from original DXX-Rebirth builds.  On the
+	# experimental-netcode branch the prefix also carries "netv2-", so
+	# every build that speaks protocol v2 (and cannot play with the normal
+	# builds) says so in its version, for example
+	# "D2X-Rebirth ggc-netv2-v0.61-exp-1".
+	VERSION_FORK_PREFIX: typing.Final[str] = 'ggc-netv2-'
 	DXX_VERSION_SEQ: typing.Final[str] = ','.join([str(VERSION_MAJOR), str(VERSION_MINOR), str(VERSION_MICRO)])
 	pch_manager = None
 	# dict compilation_database_dict_fn_to_entries:
