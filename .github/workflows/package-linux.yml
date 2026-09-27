@@ -76,6 +76,7 @@ jobs:
           -k
           CXX=g++-15
           sdl2=1
+          d1x=0
           "CXXFLAGS=-flto=$(( $nproc + 1 / 2 ))"
 
       - name: Upload SConf log
@@ -119,7 +120,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: "DXX-Rebirth-Linux-AppImage-${{ steps.architecture.outputs.uname_m }}"
-          path: 'D*X-Rebirth.AppImage'
+          path: 'D2X-Rebirth.AppImage'
 
       - name: Check header includes
         run: >
@@ -139,6 +140,7 @@ jobs:
           -k
           CXX=g++-15
           sdl2=1
+          d1x=0
           "CXXFLAGS=-flto=$(( $nproc + 1 / 2 ))"
           check_header_includes=1
-          build/{common,d1x-rebirth,d2x-rebirth}/check_header_includes
+          build/{common,d2x-rebirth}/check_header_includes

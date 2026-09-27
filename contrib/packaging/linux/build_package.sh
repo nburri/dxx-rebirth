@@ -38,5 +38,4 @@ build_appimage() {
 }
 
 # Build each app
-build_appimage "d1x-rebirth" "D1X-Rebirth"
 build_appimage "d2x-rebirth" "D2X-Rebirth"

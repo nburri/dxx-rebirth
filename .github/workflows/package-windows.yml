@@ -74,6 +74,7 @@ jobs:
           CHOST=x86_64-w64-mingw32
           RC=windres
           sdl2=1
+          d1x=0
 
       - name: Upload SConf log
         if: ${{ !cancelled() }}
@@ -100,5 +101,6 @@ jobs:
           CHOST=x86_64-w64-mingw32
           RC=windres
           sdl2=1
+          d1x=0
           check_header_includes=1
-          build/{common,d1x-rebirth,d2x-rebirth}/check_header_includes
+          build/{common,d2x-rebirth}/check_header_includes
