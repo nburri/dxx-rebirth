@@ -117,15 +117,35 @@ static void game_draw_multi_message(grs_canvas &canvas)
 
 static void show_framerate(grs_canvas &canvas)
 {
+	/* Both values are measured over the same window of about one
+	 * second and change only once per window, so that they stay
+	 * readable.  Showing the length of the last frame instead made the
+	 * millisecond value change on every frame, which with VSync (frames
+	 * of alternating length) was unreadable.
+	 */
 	static int fps_count = 0, fps_rate = 0;
 	static fix64 fps_time = 0;
+	static double fps_frame_ms = 0;
 	fps_count++;
 	const auto tq = timer_query();
-	if (tq >= fps_time + F1_0)
+	if (tq >= fps_time + F1_0 * 2)
+	{
+		/* The counter was not drawn for a while: start a new window
+		 * without showing a value for the gap.
+		 */
+		fps_count = 0;
+		fps_time = tq;
+	}
+	else if (tq >= fps_time + F1_0)
 	{
 		fps_rate = fps_count;
+		fps_frame_ms = (static_cast<double>(tq - fps_time) * 1000.) / (static_cast<double>(F1_0) * fps_count);
 		fps_count = 0;
-		fps_time += F1_0;
+		/* Restart the window at the current time, instead of adding
+		 * one second to the old start, which could lie far in the past
+		 * and then close a window on every frame.
+		 */
+		fps_time = tq;
 	}
 	const auto &&line_spacing = LINE_SPACING(*canvas.cv_font, *GAME_FONT);
 	unsigned line_displacement;
@@ -165,7 +185,7 @@ static void show_framerate(grs_canvas &canvas)
 	gr_set_fontcolor(canvas, BM_XRGB(0, 31, 0),-1);
 	char buf[16];
 	if (CGameArg.DbgVerbose)
-		snprintf(buf, sizeof(buf), "%iFPS (%.2fms)", fps_rate, (FrameTime * 1000.) / F1_0);
+		snprintf(buf, sizeof(buf), "%iFPS (%.2fms)", fps_rate, fps_frame_ms);
 	else
 		snprintf(buf, sizeof(buf), "%iFPS", fps_rate);
 	const auto &&[w, h] = gr_get_string_size(game_font, buf);
