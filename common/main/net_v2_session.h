@@ -548,9 +548,13 @@ constexpr admission_decision decide_admission(const std::span<const slot_view> s
 			return {admission_result::accept_new, i};
 	if (slots.size() < max_players)
 		return {admission_result::accept_new, static_cast<unsigned>(slots.size())};
-	/* Every slot is taken: replace the player disconnected the longest. */
+	/* Every slot below the limit is taken: replace the player disconnected
+	 * the longest.  Slots at or above the limit are never handed out: the
+	 * level has start positions (and the game per-player tables) only for
+	 * the first `max_players` slots.
+	 */
 	std::optional<unsigned> oldest;
-	for (unsigned i = 0; i < slots.size(); ++i)
+	for (unsigned i = 0; i < slots.size() && i < max_players; ++i)
 	{
 		const auto &s{slots[i]};
 		if (s.connected)
@@ -561,6 +565,73 @@ constexpr admission_decision decide_admission(const std::span<const slot_view> s
 	if (oldest)
 		return {admission_result::accept_new, *oldest};
 	return {admission_result::deny_full, 0};
+}
+
+/* Section 4.3, the lobby: the slot a new player gets while the host forms
+ * the game.  `occupied[i]` is true for a slot that has a player or a
+ * connection; slot 0 is the host.  Returns the lowest free slot below
+ * `max_players`, or nothing if the game is full.  Keeping every slot below
+ * the player limit means the slots are always valid indices into the
+ * start positions and the per-player tables, without renumbering (every
+ * peer's player id is fixed by its JOIN_ACCEPT).
+ */
+[[nodiscard]]
+constexpr std::optional<unsigned> choose_lobby_slot(const std::span<const bool> occupied, const unsigned max_players)
+{
+	for (unsigned i = 1; i < max_players; ++i)
+		if (i >= occupied.size() || !occupied[i])
+			return i;
+	return std::nullopt;
+}
+
+/* Section 4.2: a JOIN_REQUEST compared with an existing connection.  A
+ * request carrying the nonce of the connection's own join attempt, from
+ * its address, is a retry: while the connection is still `connecting` the
+ * JOIN_ACCEPT was lost and is sent again; once the connection is
+ * established the retry was merely delayed or reordered and is ignored.
+ * It must never be admitted as a new join, which would give the same
+ * client a second slot or replace its live connection.
+ */
+enum class duplicate_join : std::uint8_t
+{
+	/* Not a retry of this connection's attempt. */
+	none,
+	resend_accept,
+	ignore,
+};
+
+[[nodiscard]]
+constexpr duplicate_join classify_duplicate_join(const bool same_address, const std::uint32_t connection_nonce, const std::uint32_t request_nonce, const bool connecting)
+{
+	if (!same_address || connection_nonce != request_nonce)
+		return duplicate_join::none;
+	return connecting ? duplicate_join::resend_accept : duplicate_join::ignore;
+}
+
+/* Section 4.2, the client: whether a JOIN_DENY is an answer to us.  A
+ * denial of the running join attempt carries its nonce and comes from the
+ * host it was sent to.  A version denial with nonce 0 answers a
+ * GAME_INFO_REQ (discovery) and must come from the host that was asked.
+ * Anything else is ignored, so that a stray or forged datagram cannot
+ * abort a join.
+ */
+enum class join_deny_match : std::uint8_t
+{
+	ignore,
+	/* Ends the join attempt. */
+	join,
+	/* A version mismatch reported to the game info request. */
+	discovery,
+};
+
+[[nodiscard]]
+constexpr join_deny_match classify_join_deny(const std::uint32_t deny_nonce, const bool version_mismatch, const bool join_active, const std::uint32_t join_nonce, const bool from_join_host, const bool from_info_host)
+{
+	if (join_active && deny_nonce == join_nonce && from_join_host)
+		return join_deny_match::join;
+	if (version_mismatch && deny_nonce == 0 && from_info_host)
+		return join_deny_match::discovery;
+	return join_deny_match::ignore;
 }
 
 /* CRC-32 (IEEE 802.3, as zlib) over the snapshot payloads (section 4.4).

@@ -7,8 +7,9 @@
 /*
  * Test of the game-independent session layer (net_v2_session.h): the
  * UNCONNECTED datagram framing and its validation order, the handshake
- * message layouts, the admission table of section 4.2, the client's join
- * schedule and the rate limiter.
+ * message layouts, the admission table of section 4.2, the lobby slot
+ * choice, the recognition of retried join requests and of join denials,
+ * the client's join schedule and the rate limiter.
  *
  * Build and run with SCons:
  *
@@ -237,6 +238,103 @@ void test_admission()
 		const auto d{decide_admission(slots, 8, false)};
 		CHECK(d.result == admission_result::accept_new && d.slot == 4);
 	}
+	/* The host's view is always MAX_PLAYERS wide.  With the slots below
+	 * the limit connected, the empty slots above it are neither free nor
+	 * taken over: the game is full.
+	 */
+	{
+		std::vector<slot_view> wide(8);
+		for (unsigned i = 0; i < 4; ++i)
+			wide[i] = {.occupied = true, .connected = true, .last_packet_time = 1000};
+		CHECK(decide_admission(wide, 4, false).result == admission_result::deny_full);
+		/* A disconnected slot above the limit (stale) is not taken over
+		 * either; one below it is.
+		 */
+		wide[5] = {.occupied = true, .connected = false, .last_packet_time = 1};
+		CHECK(decide_admission(wide, 4, false).result == admission_result::deny_full);
+		wide[2].connected = false;
+		const auto d{decide_admission(wide, 4, false)};
+		CHECK(d.result == admission_result::accept_new && d.slot == 2);
+	}
+}
+
+void test_lobby_slot()
+{
+	/* Host only: slot 1. */
+	{
+		const std::array<bool, 8> occ{{true}};
+		const auto s{choose_lobby_slot(occ, 4)};
+		CHECK(s && *s == 1);
+	}
+	/* A hole is filled first. */
+	{
+		const std::array<bool, 8> occ{{true, true, false, true}};
+		const auto s{choose_lobby_slot(occ, 4)};
+		CHECK(s && *s == 2);
+	}
+	/* Full at the limit, even though slots above it are free. */
+	{
+		const std::array<bool, 8> occ{{true, true, true, true}};
+		CHECK(!choose_lobby_slot(occ, 4));
+		const auto s{choose_lobby_slot(occ, 8)};
+		CHECK(s && *s == 4);
+	}
+	/* Every slot taken. */
+	{
+		std::array<bool, 8> occ;
+		occ.fill(true);
+		CHECK(!choose_lobby_slot(occ, 8));
+	}
+	/* A short view: slots past its end are free. */
+	{
+		const std::array<bool, 2> occ{{true, true}};
+		const auto s{choose_lobby_slot(occ, 8)};
+		CHECK(s && *s == 2);
+	}
+	/* Never slot 0, never at or above the limit. */
+	{
+		const std::array<bool, 8> occ{};
+		const auto s{choose_lobby_slot(occ, 2)};
+		CHECK(s && *s == 1);
+		CHECK(!choose_lobby_slot(occ, 1));
+	}
+}
+
+void test_duplicate_join()
+{
+	/* Other address or other nonce: a different attempt. */
+	CHECK(classify_duplicate_join(false, 7, 7, true) == duplicate_join::none);
+	CHECK(classify_duplicate_join(true, 7, 8, true) == duplicate_join::none);
+	CHECK(classify_duplicate_join(true, 7, 8, false) == duplicate_join::none);
+	/* The accept was lost: send it again. */
+	CHECK(classify_duplicate_join(true, 7, 7, true) == duplicate_join::resend_accept);
+	/* A late retry after the connection was established: ignored, never a
+	 * second admission.
+	 */
+	CHECK(classify_duplicate_join(true, 7, 7, false) == duplicate_join::ignore);
+}
+
+void test_join_deny()
+{
+	/* The answer to our join attempt. */
+	CHECK(classify_join_deny(5, false, true, 5, true, false) == join_deny_match::join);
+	CHECK(classify_join_deny(5, true, true, 5, true, false) == join_deny_match::join);
+	/* Wrong nonce, wrong sender, or no attempt running: ignored. */
+	CHECK(classify_join_deny(6, false, true, 5, true, false) == join_deny_match::ignore);
+	CHECK(classify_join_deny(5, false, true, 5, false, true) == join_deny_match::ignore);
+	CHECK(classify_join_deny(5, false, false, 5, true, false) == join_deny_match::ignore);
+	/* A version mismatch without a nonce or sender check is not accepted:
+	 * forged or stray denials cannot abort a join.
+	 */
+	CHECK(classify_join_deny(0, true, true, 5, false, false) == join_deny_match::ignore);
+	CHECK(classify_join_deny(9, true, true, 5, true, true) == join_deny_match::ignore);
+	/* The version answer to our GAME_INFO_REQ: nonce 0, from the host we
+	 * asked.
+	 */
+	CHECK(classify_join_deny(0, true, false, 0, false, true) == join_deny_match::discovery);
+	CHECK(classify_join_deny(0, true, true, 5, false, true) == join_deny_match::discovery);
+	/* Nonce 0 of another reason is not discovery. */
+	CHECK(classify_join_deny(0, false, false, 0, false, true) == join_deny_match::ignore);
 }
 
 void test_join_attempt()
@@ -298,6 +396,9 @@ int main()
 	test_unconnected_framing();
 	test_message_layouts();
 	test_admission();
+	test_lobby_slot();
+	test_duplicate_join();
+	test_join_deny();
 	test_join_attempt();
 	test_rate_limiter();
 	test_crc32();

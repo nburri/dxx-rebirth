@@ -643,17 +643,29 @@ same rules as v1 §2.5.1 unless noted):
 | Condition | Result |
 |---|---|
 | `game_id`, version or `proto` mismatch | `JOIN_DENY(version)` with the host's values |
-| Same `client_nonce` and callsign as an existing connection | Resend the same `JOIN_ACCEPT` (retry of a request whose accept was lost) |
+| Same `client_nonce` and address as an existing connection | Resend the same `JOIN_ACCEPT` while the connection is still connecting (the accept was lost); ignore once it is established (a delayed or reordered retry, never a second admission) |
+| Another join in progress (`JOIN_ACCEPT` sent, `CLIENT_READY` or the extras still pending) | No answer; the client retries (v1 behaviour) |
 | `RefusePlayers` set | Prompt as in v1 (`net_udp_do_refuse_stuff`); no answer until accepted; `JOIN_DENY(dork)` after 8 s |
 | Host in `endlevel` or reactor destroyed | `JOIN_DENY(endlevel)` |
 | Callsign matches a `disconnected` slot | Rejoin into that slot (keeps scores) |
 | Callsign matches a connected slot | `JOIN_DENY(duplicate_callsign)` (new reason; v1 silently ignored, which looked like a hang) |
 | Game closed | `JOIN_DENY(closed)` |
-| Free slot, or a disconnected slot to take over (oldest `LastPacketTime`) | Accept |
+| Free slot below `max_numplayers`, or a disconnected slot below it to take over (oldest `LastPacketTime`) | Accept |
 | Otherwise | `JOIN_DENY(full)` |
 
-The v1 refusal "host is already sending objects to someone else" disappears:
-snapshots are ordinary reliable streams and several can be in progress.
+As in v1, the host serves one join in progress at a time: a second
+`JOIN_REQUEST` gets no answer until the first joiner's `CLIENT_READY` and
+extras are done (the client's 10 s retry window covers a normal join).
+Snapshots themselves are ordinary reliable streams and could overlap, but the
+join bookkeeping (the new player's slot at `N_players`, the per-player extras
+of stage 1) assumes one joiner. A player late for a level start (§4.3) also
+gets a snapshot; its extras wait for the running ones.
+
+The client accepts a `JOIN_DENY` only with its attempt's `client_nonce` and
+from the host it sent the request to; a `JOIN_DENY(version)` with nonce 0
+(the answer to `GAME_INFO_REQ`) only from the host it asked. A `GAME_INFO`
+is accepted only from the host last asked and never while a join is under
+way, so a stray answer cannot replace the game being joined.
 
 `JOIN_ACCEPT` (0x06), 22 bytes, header: `UNCONNECTED`, `session_id`,
 `peer_token` = the new token (so the client learns it from the header),
@@ -1586,10 +1598,19 @@ The implementation (`similar/main/net_v2.cpp`, `common/main/net_v2_game.h`,
   connected from the *same address* is a restarted client and replaces its
   stale connection at once instead of being denied as a duplicate for the
   timeout. The joining slot counts as occupied from `JOIN_ACCEPT` on, so two
-  joiners cannot get the same slot.
+  joiners cannot get the same slot. Joins in progress are serialised (§4.2);
+  a client that restarts during its own join replaces the stale attempt.
+  Game data (`LEGACY_MDATA`, `EVENT_U`, `INPUT`, the endlevel status) is
+  accepted and relayed only from a peer in the `playing` phase, not from one
+  still joining or syncing, nor from one closing.
 - **Lobby** (`starting`): slots are never renumbered, since every peer's
-  player id is fixed by its `JOIN_ACCEPT`. A player who leaves or is not
-  selected leaves a disconnected hole; trailing holes are trimmed.
+  player id is fixed by its `JOIN_ACCEPT`. Instead the lobby admits players
+  only into slots below `max_numplayers` (holes first, then the next slot;
+  `JOIN_DENY(full)` beyond), so every slot has a start position and fits the
+  per-player tables; the host can therefore no longer collect more joiners
+  than the limit and pick among them. A player who leaves or is not
+  selected leaves a disconnected hole, refilled by the next joiner; trailing
+  holes are trimmed.
 - **Level start**: every client sends `LEVEL_READY` once from the level sync
   menu; the host counts a player as ready only with a `LEVEL_READY` for the
   current level (checksum mismatch → `KICK(checksum)`), the others are
@@ -1597,6 +1618,14 @@ The implementation (`similar/main/net_v2.cpp`, `common/main/net_v2_game.h`,
   and connection states) and `LEVEL_GO` on every level, so scores carry over
   as the v1 sync did. `LEVEL_GO` is also sent to a joining player after its
   `CLIENT_READY`, so a client enters the level on `LEVEL_GO` in both cases.
+  "Start without waiting" in the host's level wait keeps the unready players
+  `waiting` in their slots (v1 cut `N_players` to 1): they get no
+  `LEVEL_START`, and their `LEVEL_READY` later makes them a join in progress
+  (snapshot, `CLIENT_READY`, `LEVEL_GO`, keeping their scores); the other
+  clients see them enter through their position records. A player that was
+  never in the level when it ends (still loading or syncing, or late for its
+  start) gets `KICK(endlevel)` at the level end, since the next level start
+  would not reach it; it can join the next level.
 - **Snapshot**: serialised at the moment `LEVEL_READY` arrives, into a
   per-peer backlog that feeds the connection while it holds fewer than 256
   messages / 48 KiB; everything the game sends to that peer afterwards is

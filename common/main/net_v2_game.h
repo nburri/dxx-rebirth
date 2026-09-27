@@ -130,7 +130,9 @@ void host_broadcast_game_info_lite();
 /* Level start (section 4.3): the players that have not reported the
  * current level loaded are set to `waiting`; called when the host starts
  * waiting for them.  A peer's LEVEL_READY then sets it back to `playing`
- * (or kicks it on a checksum mismatch).
+ * (or kicks it on a checksum mismatch).  If the host starts without
+ * waiting, a player still `waiting` gets no LEVEL_START; its LEVEL_READY
+ * later makes it a join in progress (snapshot, CLIENT_READY, LEVEL_GO).
  */
 void host_begin_level_wait();
 /* Send LEVEL_START, the game snapshot and LEVEL_GO to every ready player
@@ -139,6 +141,11 @@ void host_begin_level_wait();
 void host_send_level_start();
 /* KICK every connected peer (game aborted, not enough start positions). */
 void host_kick_all(kick_player_reason reason);
+/* The level ended: KICK(endlevel) every peer that was accepted but never
+ * entered it (still loading, syncing, or late for the level start), since
+ * the next level start would not reach it; it may join the next level.
+ */
+void host_end_level();
 
 /* Apply the level start data in Netgame to the local game state (the v1
  * read_sync_packet without the parsing): player list, scores, ship

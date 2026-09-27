@@ -1045,6 +1045,8 @@ int dispatch_table::end_current_level(
 #endif
 
 	Network_status = network_state::endlevel; // We are between levels
+	if (multi_i_am_master())
+		net_v2::host_end_level();
 	net_udp_listen();
 	/* Reliable now: once is enough. */
 	dispatch->send_endlevel_packet();
@@ -2156,8 +2158,13 @@ static int net_udp_send_sync(void)
 	// Randomize their starting locations...
 	d_srand(static_cast<fix>(timer_query()));
 	for (auto &plr : partial_range(Players, supported_start_positions_on_level))
-		if (auto &connected = plr.connected; connected != player_connection_status::disconnected)
-			connected = player_connection_status::playing; // Get rid of endlevel connect statuses
+		/* Get rid of endlevel connect statuses.  A player still `waiting`
+		 * (the host started without waiting for it) stays so: it gets no
+		 * LEVEL_START and enters as a join in progress once it reports the
+		 * level loaded.
+		 */
+		if (auto &connected = plr.connected; connected != player_connection_status::disconnected && connected != player_connection_status::waiting)
+			connected = player_connection_status::playing;
 	auto &&locations = partial_range(Netgame.locations, supported_start_positions_on_level);
 	std::iota(locations.begin(), locations.end(), 0);
 	if (!(Game_mode & GM_MULTI_COOP))
@@ -2282,13 +2289,22 @@ abort:
 	// Count number of players chosen
 
 	N_players = 0;
-	range_for (auto &i, partial_const_range(spd.m, save_nplayers))
+	/* Slots are not renumbered, so the highest selected slot must be below
+	 * the player limit too (the lobby admits no player above it; this
+	 * keeps the invariant should that ever change).
+	 */
+	bool slot_beyond_limit{false};
+	for (auto &&[idx, i] : enumerate(partial_const_range(spd.m, save_nplayers)))
 	{
 		if (i.value)
+		{
 			N_players++;
+			if (idx >= Netgame.max_numplayers)
+				slot_beyond_limit = true;
+		}
 	}
 	
-	if ( N_players > Netgame.max_numplayers) {
+	if (N_players > Netgame.max_numplayers || slot_beyond_limit) {
 		nm_messagebox(menu_title{TXT_ERROR}, {TXT_OK}, "%s %d %s", TXT_SORRY_ONLY, Netgame.max_numplayers, TXT_NETPLAYERS_IN);
 		N_players = save_nplayers;
 		goto GetPlayersAgain;
@@ -2440,10 +2456,12 @@ menu:
 	{
 		// User aborted
 		choice = nm_messagebox_str(menu_title{nullptr}, nm_messagebox_tie(TXT_YES, TXT_NO, TXT_START_NOWAIT), menu_subtitle{TXT_QUITTING_NOW});
-		if (choice == 2) {
-			N_players = 1;
+		if (choice == 2)
+			/* Start without waiting: the players that are not ready stay
+			 * `waiting` (they keep their slots, so N_players is unchanged)
+			 * and join the level in progress when they are.
+			 */
 			return 0;
-		}
 		if (choice != 0)
 			goto menu;
 
