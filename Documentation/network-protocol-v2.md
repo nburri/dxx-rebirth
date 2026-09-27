@@ -873,7 +873,9 @@ Chunk header, 18 bytes:
 | 16 | 1 | `n_guided` (0–8) |
 | 17 | 1 | `n_robots` (0–12) |
 
-Player record, 41 bytes (or 1 byte when bit 7 of `flags` is set):
+Player record, 41 bytes (or 1 byte when bit 7 of `flags` is set); stage 2
+appends a u16 `sample_age` at offset 41, making it 43 bytes (see "Stage 2 as
+implemented" in §8):
 
 | Offset | Size | Field |
 |---|---|---|
@@ -960,7 +962,10 @@ render_time   = est_host_time - interp_delay        (est_host_time = local + off
 ```
 
 `interp_delay` is recomputed once per second and slewed by at most 1 ms per
-frame so the remote world does not jump when the margin changes. At 60 Hz and
+frame so the remote world does not jump when the margin changes. (Stage 2
+implements this per entity and with a different lateness sample, because
+this margin includes the one-way latency; see "Stage 2 as implemented" in
+§8.) At 60 Hz and
 a clean link it is 33 ms; with 20 ms jitter 53 ms.
 
 Each frame, before `object_move_all` runs local physics and before collision
@@ -1689,6 +1694,172 @@ The implementation (`similar/main/net_v2.cpp`, `common/main/net_v2_game.h`,
   land (still client-detected damage at this stage, so this is a visual
   check); guided missiles smooth on remote screens; a client with 300 ms
   extra latency shows the lag marker and does not warp others.
+
+#### Stage 2 as implemented
+
+The wire layouts are in `common/main/net_v2_state.h`, the interpolation,
+delay and tick math in `common/main/net_interp.h` (both standard library
+only and tested by `test-net-v2-interp`), the object side of the
+interpolation in `similar/main/net_interp.cpp`, and INPUT, bundle, clock
+and tick handling in `similar/main/net_v2.cpp`. `MULTI_PROTO_VERSION` and
+`NET_V2_PROTO_VERSION` are 101. Differences from §2.2–§5.6 and decisions
+where the text was open or did not work as written:
+
+- **Record time (`sample_age`).** A player record is 43 bytes: the 41 of
+  §5.2 plus `sample_age` (u16, net time units, saturating at 65535 ≈ 1 s),
+  the bundle's `host_time` minus the time the record was sampled at (its
+  INPUT's clamped `sample_time`; 0 for the host's own ship). Receivers
+  timestamp each record with `host_time − sample_age`. With one bundle
+  time for every record, another client's ship would be timestamped with
+  the moment the host happened to relay it: every INPUT that arrives
+  late, early or two in one host tick would show up as a stop and a jump,
+  and the timestamps would not match the host's history, which is keyed
+  by sample time (§5.5 step 6, §6.6). A guided missile record has the time
+  of its owner's player record (both come from one INPUT).
+- **Interpolation delay, per entity.** The design's `jitter_margin`
+  (`p90 |arrival − (host_time + offset)|`, clamped to 50 ms) measures how
+  late a snapshot arrives *including the one-way latency*: `est_host_time
+  − host_time` at arrival is the one-way delay, not only its jitter. With
+  the clamp, any link with more than about 35 ms one way would render
+  past the newest snapshot all the time. And a relayed ship is older than
+  the host's by that client's uplink plus up to one host tick, so one
+  delay for all entities is either too short for relayed ships or makes
+  everyone else wait for the slowest uplink. Implemented instead
+  (`delay_estimator`, `entity_track`): every remote entity has its own
+  delay, `tick_period + clamp(p90 over 2 s of lateness, 0, 400 ms)`, where
+  a lateness sample is taken when a snapshot newer than all others
+  arrives and is the age the previous newest one had reached by then
+  (`est_host_now − previous.time`): exactly how far behind the render
+  time must stay for a newer snapshot to be there. On a steady link that
+  is one tick plus the one-way lateness, so the total is the design's
+  `2 × tick_period + margin` (33 ms at 60 Hz on a LAN); it also covers a
+  host whose frame rate is below the tick rate (one bundle per frame) and
+  a burst of loss up to the 10th percentile. The 400 ms cap only affects
+  the one late entity. The target is recomputed once per second on a
+  fixed schedule and the applied delay slews at 60 ms per second of
+  elapsed time (the design's "1 ms per frame" at 60 fps, but independent
+  of the frame rate); the first target is taken at once. On the host the
+  same estimator runs per client on INPUT arrival.
+- **`view_time`** in INPUT is `sample_time` minus the delay of the host's
+  own ship (the host-stamped entities). Relayed ships are shown further
+  in the past (their own delay), so stage 4 must not rewind every target
+  by `view_time`: `WEAPON_HIT` should carry the time the target was shown
+  at, or the host adds the target's measured age.
+- **Sampling** (`sample` in `net_interp.h`): cubic Hermite with the
+  snapshots' velocities for position when the snapshots are at most
+  250 ms apart, linear beyond (after loss the velocities no longer
+  describe the path between them); nlerp along the shorter arc; linear
+  velocity and rotational velocity. A render time before the oldest
+  snapshot holds the oldest. Past the newest: constant velocity for at
+  most 100 ms, orientation held, then held there with zero velocity
+  (`stale`). A jump over 20 units or a change of `alive` holds `a` until
+  `b`'s time and then shows `b`. Reordered, duplicated and late snapshots
+  are sorted into the 16-entry ring by their time; a duplicate time (a
+  relayed record that did not change) is ignored; a full ring drops its
+  oldest. Only the bundle *header* (pings, level time, correction) is
+  latest-wins, by `tick` and, for two bundles of one tick, by
+  `host_time`.
+- **Segments.** The segment is searched with `get_seg_masks` in the
+  nearer snapshot's segment and up to two sides away from it, then the
+  same around the other snapshot's segment, then around the object's
+  current segment. A point found nowhere keeps the nearer snapshot's
+  segment (the design says `a.seg`; the nearer one is what the owner
+  reported for a position that close). An extrapolated or stale point
+  found nowhere left the mine: the object is not moved that frame and its
+  velocity is zeroed. `obj_relink` only on a change.
+- **Network-driven objects.** Remote ships and guided missiles keep their
+  `movement_source`; instead `net_interp_apply_all` (called from
+  `object_move_all` after the dead objects are removed and before any
+  object moves) records which objects it wrote this frame, and
+  `object_move_one` skips the movement of exactly those
+  (`net_interp_drives`). The v1 code that turns ships into ghosts and back
+  (which sets `movement_source`) stays as it is, and a guided missile that
+  is no longer driven continues by physics without any state to restore.
+  Ships are written with `set_thrust_from_velocity` for the engine glow,
+  as v1 did.
+- **Guided missiles.** The owner sends its active guided missile in every
+  INPUT; the host relays it in the bundle to everyone but its owner, and
+  adds its own. The record's `id` is the owner's object number, so a
+  guided missile is now fired with its object number (as `MULTI_FIRE_BOMB`
+  does for bombs; `MULTI_FIRE_TRACK` gained two bytes for it, 0xffff for
+  other tracked weapons) and every receiver maps it to its copy (the net
+  ids of stage 3 replace this, before stage 4 deletes both messages). A copy is
+  driven only while its records are interpolated or extrapolated; before
+  its first record (just launched) and when the records stopped for more
+  than 100 ms (the owner's missile hit something) it flies by its own
+  physics, so it also hits what the owner's missile hit. When the local
+  copy changes, the snapshots of the previous missile are dropped even if
+  the new one reuses its object slot. `MULTI_GUIDED` remains only as the
+  release, now reliable and carrying the final pose (receivers warp their
+  copy there, then release it); the paced positions and the final
+  position message are gone.
+- **Tick.** The session's tick counter (`tick_accumulator`: exact rational
+  phase, one unit of tolerance like `connection::begin_tick`, counts from
+  0 at the session start) numbers the bundles. Packets stay paced per
+  connection by `begin_tick` as in stage 1: each connection tick carries
+  the newest state, so a long frame sends one bundle, never a burst. The
+  host builds the common part of the bundle at most once per frame.
+  `host_time` and `sample_time` are the frame time at
+  `do_protocol_frame`; the poses are from the frame's object state, so
+  stamps can be up to one frame late (negligible at the intended frame
+  rates; at 30 fps it adds up to 33 ms of display delay).
+- **Clock.** A client sends no INPUT until its clock offset is valid (one
+  round trip after the connection opens), since `sample_time` would be
+  meaningless. Wire times are widened to 64 bits against the local
+  estimate of the host clock (`unwrap`).
+- **INPUT on the host.** Accepted without the checks of §5.5 except the
+  ones that keep the game safe: an `input_seq` not newer than the last is
+  dropped, a segment beyond the level is dropped, and the stored time is
+  `sample_time` clamped into `[host_now − 1 s, host_now]` and kept
+  strictly increasing. The host never sets `CORRECTION` yet; a client
+  applies one as §5.6 describes (snap with `extract_quaternionpos`).
+- **Authority not yet moved.** Receivers read only `alive` and the pose
+  from player records. Shields, energy, cloak, invulnerability and the
+  weapon byte are filled from the host's copy of each player (informative
+  until stage 4, when the host owns them); shields and energy of the own
+  record are not applied, because in stage 2 damage is still computed by
+  each owner. INPUT's afterburner bit is left clear; the `weapon` byte is
+  sent.
+- **Ghosts.** A dead or unspawned player's record is the one-byte ghost
+  record; it clears that player's ring, so the next record starts afresh
+  (and snaps). Only players the host has as `playing` get a record;
+  a client notices a returning or late player from its record, as stage 1
+  did from the position records.
+- **Removed.** `MULTI_POSITION` (also the copies sent before deres,
+  reappear, powerup creation, weapon drops and leaving: receivers see
+  those at the interpolated position, and the drops carry their own
+  positions until stage 3 moves them to the host), `MULTI_HEARTBEAT`
+  (the bundle's `level_time` sets `ThisLevelTime`, advanced by the
+  bundle's age, when a time limit is set and the difference exceeds
+  50 ms), the stage 1 position records and ping list. The thief's
+  position stays a legacy record.
+- **Pings and lag.** Each peer's bundle carries the ping list once per
+  second (`HAS_PINGS`, u8 in 4 ms). A player is marked as lagging when
+  `max(sample_age, input_age × tick)` of its newest record exceeds 250 ms,
+  and unmarked below 200 ms: "LAG" replaces its ping in the kill list (with
+  the ping HUD on) and ", Lag" follows its name tag.
+- **Tested** by `test-net-v2-interp`: quantisation; STATE and INPUT
+  layouts (round trip, truncation, limits, robot records skipped);
+  `unwrap`; the ring under reordering, duplication, late and too-old
+  snapshots; Hermite on a tight circle (error < 0.002 unit, over five
+  times better than linear), nlerp and the shorter arc, segment choice;
+  extrapolation and its cap, the linear fallback after loss, both
+  discontinuity snaps; equality of shuffled and ordered delivery; the
+  delay estimator (clean link, 20 ms jitter, negative and huge lateness,
+  adaptation within the slew bound and the same trajectory at 500 fps and
+  10 fps, tick rate change); the lag marker hysteresis; the tick
+  accumulator at 30/60/120 Hz with frame times from 2 ms to 100 ms and
+  random ones (exact over a minute, a true 60 Hz caller gets exactly one
+  tick per frame); the transport's per-connection tick grants at the same
+  rates; the clock offset under 20 ms jitter and a 300 ms step; and an
+  end-to-end run at 30/60/120 Hz shown at 500 fps and 30 fps over a link
+  with 40 ms latency, 25 ms jitter, 5 % loss, 5 % duplication and 10 %
+  reordering, for a host ship and a relayed ship 80 ms older (render time
+  monotonic, ≥ 97 % / 95 % of frames interpolated, error < 0.35 unit, no
+  jump above 0.4 unit per 2 ms frame, the relayed ship's delay alone
+  covering its age). Only playable: everything that touches objects
+  (segment relinking in tunnels, guided missile hand-over, respawn snaps,
+  the lag marker, correction), and the feel at 500 fps.
 
 ### Stage 3 — Object authority and pickups
 
