@@ -70,6 +70,7 @@
 #include <algorithm>
 #include <memory>
 #include <utility>
+#include "frame_probe.h"
 using std::max;
 
 //change to 1 for lots of spew.
@@ -124,6 +125,11 @@ unsigned last_width=~0u,last_height=~0u;
 int GL_TEXTURE_2D_enabled=-1;
 
 static int r_texcount = 0, r_cachedtexcount = 0;
+
+unsigned frame_probe::stats::ogl_textures()
+{
+	return r_texcount;
+}
 #if DXX_USE_OGLES
 static int ogl_rgba_internalformat = GL_RGBA;
 static int ogl_rgb_internalformat = GL_RGB;
@@ -1648,6 +1654,8 @@ static void tex_set_size(ogl_texture &tex)
 //stores OpenGL textured id in *texid and u/v values required to get only the real data in *u/*v
 static int ogl_loadtexture(const palette_array_t &pal, const uint8_t *data, const int dxo, int dyo, ogl_texture &tex, const int bm_flags, const int data_format, opengl_texture_filter texfilt, const bool texanis, const bool edgepad)
 {
+	++frame_probe::counters.texture_uploads;
+	frame_probe::event_scope probe{frame_probe::phase::tex, frame_probe::event_kind::texture_upload, tex.w, 0};
 	tex.tw = {std::bit_ceil(tex.w)};
 	tex.th = {std::bit_ceil(tex.h)};	//calculate smallest texture size that can accommodate us (must be power of 2)
 
@@ -1853,6 +1861,7 @@ static int ogl_loadtexture(const palette_array_t &pal, const uint8_t *data, cons
 			buildmipmap = true;
 			break;
 	}
+	probe.detail = buildmipmap;
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, gl_mag_filter_int);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, gl_min_filter_int);
 	if (texanis && ogl_maxanisotropy > 1.0f)

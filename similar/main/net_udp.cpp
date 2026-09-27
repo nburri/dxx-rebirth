@@ -1107,6 +1107,11 @@ static join_netgame_status_code net_udp_can_join_netgame(const netgame_info *con
 }
 }
 namespace dsx {
+void net_udp_probe_report()
+{
+	net_v2::probe_report();
+}
+
 void net_udp_update_netgame()
 {
 	auto &Objects = LevelUniqueObjectState.Objects;

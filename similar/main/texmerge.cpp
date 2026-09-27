@@ -24,12 +24,12 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
  */
 
 
+#include <algorithm>
 #include "gr.h"
 #include "dxxerror.h"
 #include "fmtcheck.h"
 #include "textures.h"
 #include "rle.h"
-#include "timer.h"
 #include "piggy.h"
 #include "segment.h"
 #include "texmerge.h"
@@ -39,6 +39,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "d_range.h"
 #include "d_underlying_value.h"
 #include "partial_range.h"
+#include "frame_probe.h"
 
 #if DXX_USE_OGL
 #include "ogl_init.h"
@@ -93,7 +94,8 @@ struct TEXTURE_CACHE {
 	}
 	cache_key key{};
 	grs_bitmap_ptr bitmap;
-	fix64		last_time_used{};
+	/* Value of `cache_use_counter` when this entry was last used. */
+	uint64_t last_used{};
 };
 
 /* Helper classes merge_texture_0 through merge_texture_3 correspond to
@@ -205,7 +207,23 @@ static void merge_textures(const unsigned wh, const uint8_t *const top_data, con
 	}
 }
 
-static std::array<TEXTURE_CACHE, /* MAX_NUM_CACHE_BITMAPS = */ 10> Cache;
+/* The OpenGL renderer merges only overlays with supertransparent pixels,
+ * but it does so for every such face it draws, twice per frame for
+ * transparent walls.  With the former 10 entries, a view that showed
+ * more than 10 distinct base/overlay combinations evicted and rebuilt
+ * entries on every frame: each rebuild merged the bitmaps, uploaded a
+ * new OpenGL texture (building mipmaps on the CPU with texture
+ * filtering) and deleted an old one, hundreds or thousands of times per
+ * second at high frame rates.  Large levels easily show more than 10
+ * combinations.  64 entries cost at most a few MB.
+ */
+static std::array<TEXTURE_CACHE, /* MAX_NUM_CACHE_BITMAPS = */ 64> Cache;
+/* Least recently used is decided by a counter of lookups, not by the
+ * time: the game timer advances only once per frame, so every entry
+ * used in the current frame had the same time, and eviction could pick
+ * an entry that the same frame still needed.
+ */
+static uint64_t cache_use_counter;
 
 static int cache_hits = 0;
 static int cache_misses = 0;
@@ -218,10 +236,11 @@ void texmerge_flush()
 {
 	range_for (auto &i, Cache)
 	{
-		i.last_time_used = {};
+		i.last_used = {};
 		i.bitmap.reset();
 		i.key = {};
 	}
+	cache_use_counter = 0;
 }
 
 }
@@ -236,23 +255,26 @@ grs_bitmap &texmerge_get_cached_bitmap(GameBitmaps_array &GameBitmaps, const Tex
 	const auto orient{get_texture_rotation_low(tmap_top)};
 
 	auto least_recently_used = &Cache.front();
-	auto lowest_time_used{least_recently_used->last_time_used};
+	auto lowest_used{least_recently_used->last_used};
 	const auto cache_lookup_key{TEXTURE_CACHE::build_cache_key(texture_bottom, texture_top, orient)};
+	const auto use{++cache_use_counter};
 	range_for (auto &i, Cache)
 	{
 		if (i.key == cache_lookup_key)	{
 			cache_hits++;
-			i.last_time_used = timer_query();
+			i.last_used = use;
 			return *i.bitmap.get();
 		}	
-		if ( i.last_time_used < lowest_time_used )	{
-			lowest_time_used = {i.last_time_used};
+		if (i.last_used < lowest_used)	{
+			lowest_used = i.last_used;
 			least_recently_used = &i;
 		}
 	}
 
 	//---- Page out the LRU bitmap;
 	cache_misses++;
+	++frame_probe::counters.texmerge_misses;
+	const frame_probe::event_scope probe{frame_probe::phase::tex, frame_probe::event_kind::texmerge, underlying_value(texture_bottom), underlying_value(texture_top)};
 
 	// Make sure the bitmaps are paged in...
 
@@ -296,7 +318,7 @@ grs_bitmap &texmerge_get_cached_bitmap(GameBitmaps_array &GameBitmaps, const Tex
 
 	least_recently_used->key = cache_lookup_key;
 	least_recently_used->bitmap = std::move(merged_bitmap);
-	least_recently_used->last_time_used = timer_query();
+	least_recently_used->last_used = use;
 	return mb;
 }
 
@@ -320,4 +342,9 @@ tmapinfo_flags get_side_combined_tmapinfo_flags(const d_level_unique_tmap_info_s
 	return tmap1_flags;
 }
 
+}
+
+unsigned dcx::frame_probe::stats::texmerge_entries()
+{
+	return std::ranges::count_if(::dcx::Cache, [](const ::dcx::TEXTURE_CACHE &c) { return c.bitmap != nullptr; });
 }

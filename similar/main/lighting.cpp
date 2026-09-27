@@ -63,6 +63,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "d_levelstate.h"
 #include "partial_range.h"
 #include "d_range.h"
+#include "frame_probe.h"
 
 using std::min;
 
@@ -666,6 +667,8 @@ void set_dynamic_light(const d_robot_info_array &Robot_info, render_state_t &rst
 		}
 	}
 
+	frame_probe::counters.render_vertices = n_render_vertices;
+	frame_probe::counters.light_frame = true;
 	cast_muzzle_flash_light(rvl);
 
 	range_for (const auto &&obj, vcobjptridx)
