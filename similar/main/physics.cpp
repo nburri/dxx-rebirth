@@ -886,6 +886,54 @@ window_event_result do_physics_sim(const d_robot_info_array &Robot_info, const v
 	return result;
 //--WE ALWYS WANT THIS IN, MATT AND MIKE DECISION ON 12/10/94, TWO MONTHS AFTER FINAL 	#endif
 }
+
+/* A remote ship written by net_interp_apply_all does not run
+ * do_physics_sim, which is where a moving ship finds the objects it runs
+ * into (an object at rest, such as a proximity bomb or a parked ship,
+ * never looks).  This sweep finds them along the ship's path of the frame
+ * and collides them as do_physics_sim does: the same fvi object test with
+ * the ship's radius, the same hit point, each object once.  Walls stop
+ * only the centre point (FQ_OBJECTS_ONLY), so a ship that scrapes a wall
+ * still finds the objects beyond, and nothing is done about walls: the
+ * ship's owner handles those, and v1 did nothing for a remote ship there
+ * either (scrape_player_on_wall and the wall damage are for the local
+ * player).
+ */
+void phys_sweep_objects(const d_robot_info_array &Robot_info, const vmobjptridx_t obj, const vms_vector &from, const segnum_t from_seg)
+{
+	if (from == obj->pos)
+		return;
+	ignore_objects_array_t ignore_obj_list;
+	/* As in do_physics_sim, at most 8 objects in one frame. */
+	for (unsigned count = 0; count < 8; ++count)
+	{
+		const vms_vector to{obj->pos};
+		fvi_info hit_info;
+		const auto fate{find_vector_intersection(fvi_query{
+			from,
+			to,
+			ignore_obj_list,
+			&LevelUniqueObjectState,
+			&Robot_info,
+			FQ_OBJECTS_ONLY,
+			obj,
+		}, from_seg, obj->size, hit_info)};
+		if (fate != fvi_hit_type::Object)
+			break;
+		const auto &&hit = obj.absolute_sibling(hit_info.hit_object);
+		const fix size0{hit->size};
+		const fix size1{obj->size};
+		if (size0 + size1 == 0)
+			break;
+		/* do_physics_sim moves the object to the hit point first. */
+		auto pos_hit{vm_vec_scale_add(hit->pos, vm_vec_build_sub(hit_info.hit_pnt, hit->pos), fixdiv(size0, size0 + size1))};
+		collide_two_objects(Robot_info, obj, hit, pos_hit);
+		if (obj->type != object_type::OBJ_PLAYER || (obj->flags & OF_SHOULD_BE_DEAD))
+			break;
+		if (!ignore_obj_list.push_back(hit))
+			break;
+	}
+}
 }
 
 namespace dcx {

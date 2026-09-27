@@ -185,12 +185,15 @@ namespace net_v2::interp {
 void set_clock(bool valid, std::int64_t offset, std::int64_t tick_period);
 /* A snapshot of player `pnum`'s ship, received at `now`. */
 void receive_ship(playernum_t pnum, const ::dcx::net_interp::snapshot &s, std::int64_t now);
-/* Player `pnum` is dead or not spawned: forget its snapshots. */
+/* Player `pnum` is dead or not spawned: forget its snapshots.  A ship
+ * that had snapshots stops at the newest one until its
+ * MULTI_PLAYER_DERES.
+ */
 void receive_ghost(playernum_t pnum);
 /* A snapshot of player `pnum`'s guided missile, `id` the owner's object
- * number of it.
+ * number of it and `gen` its generation (multi_guided_generation).
  */
-void receive_guided(playernum_t pnum, uint16_t id, const ::dcx::net_interp::snapshot &s, std::int64_t now);
+void receive_guided(playernum_t pnum, uint16_t id, uint8_t gen, const ::dcx::net_interp::snapshot &s, std::int64_t now);
 /* How old player `pnum`'s newest state was at the host (lag marker). */
 void set_lag_age(playernum_t pnum, std::int64_t age);
 /* How far in the past the host's own entities are shown: the `view_time`

@@ -360,6 +360,51 @@ inline std::optional<pose> sample(const snapshot_ring &ring, const host_clock re
 	return p;
 }
 
+/* Which guided missile the snapshots of one player's guided track
+ * describe: the owner's object number `id` and generation `gen` (the
+ * owner's count of guided missiles fired, which the fire message and
+ * every guided record carry).  A new missile that reuses the previous
+ * one's object slot has the same `id`, so without `gen` its records,
+ * arriving before its fire message, would be applied to the previous
+ * missile's copy.
+ */
+struct guided_identity
+{
+	std::uint16_t id{};
+	std::uint8_t gen{};
+	bool active{};
+	/* A record of missile (`rid`, `rgen`) arrived: true if the snapshots
+	 * held so far are of another missile (or none), so that the ring
+	 * must be cleared before this record goes in.
+	 */
+	bool receive(const std::uint16_t rid, const std::uint8_t rgen)
+	{
+		const bool changed{!active || id != rid || gen != rgen};
+		id = rid;
+		gen = rgen;
+		active = true;
+		return changed;
+	}
+	/* Whether the snapshots describe the local copy that was fired as
+	 * the owner's object `copy_id` with generation `copy_gen`.
+	 */
+	[[nodiscard]]
+	bool describes(const std::uint16_t copy_id, const std::uint8_t copy_gen) const
+	{
+		return active && id == copy_id && gen == copy_gen;
+	}
+};
+
+/* Whether a ship moved from `a` to `b` along a path its collisions can be
+ * swept on, rather than jumping (a discontinuity, the first record after
+ * a respawn): at most NET_INTERP_SNAP_DISTANCE.
+ */
+[[nodiscard]]
+inline bool is_sweepable_move(const net_vec &a, const net_vec &b)
+{
+	return detail::distance(a, b) <= NET_INTERP_SNAP_DISTANCE;
+}
+
 /* Section 5.4: the interpolation delay of one entity,
  *
  *	delay = base + clamp(p90(lateness over the last 2 s), 0, NET_INTERP_LATENESS_MAX)

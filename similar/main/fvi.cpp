@@ -821,7 +821,12 @@ static fvi_hit_type fvi_sub(const fvi_query &fq, vms_vector &intp, segnum_t &int
 				continue;
 			if (std::ranges::find(fq.ignore_obj_list, objnum) != fq.ignore_obj_list.end())
 				continue;
-			int fudged_rad = rad;
+			/* With FQ_OBJECTS_ONLY, the walls stop the centre point
+			 * only, which also makes `rad` 0 in the segments entered
+			 * from here; the objects are tested with the object's own
+			 * radius in every segment.
+			 */
+			int fudged_rad = (fq.flags & FQ_OBJECTS_ONLY) ? thisobjnum->size : rad;
 
 #if DXX_BUILD_DESCENT == 2
 			//	If this is a powerup, don't do collision if flag FQ_IGNORE_POWERUPS is set
@@ -876,7 +881,7 @@ static fvi_hit_type fvi_sub(const fvi_query &fq, vms_vector &intp, segnum_t &int
 	 * it is kept for consistency with other uses where both terms need to be
 	 * used.  The compiler should optimize out the resulting `0 |` in this case.
 	 */
-	if (fq.thisobjnum != object_none && collision_result{bool{CollisionResult[(object_type::OBJ_WALL << 4) | static_cast<unsigned>(fq.thisobjnum->type)]}} == collision_result::ignore)
+	if ((fq.flags & FQ_OBJECTS_ONLY) || (fq.thisobjnum != object_none && collision_result{bool{CollisionResult[(object_type::OBJ_WALL << 4) | static_cast<unsigned>(fq.thisobjnum->type)]}} == collision_result::ignore))
 		rad = 0;		//HACK - ignore when edges hit walls
 
 	//now, check segment walls

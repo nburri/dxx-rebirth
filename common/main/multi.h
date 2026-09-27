@@ -527,6 +527,14 @@ struct marker_message_text_t;
 void multi_send_drop_marker(unsigned player, const vms_vector &position, player_marker_index messagenum, const marker_message_text_t &text);
 void multi_send_markers();
 void multi_send_guided_release(const object_base &miss);
+/* The generation of player `pnum`'s newest guided missile: counted by the
+ * owner when it fires one, carried in bits 1-7 of the fire message's
+ * flags byte and in the v2 guided record (stage 2), so that the records
+ * of a new missile that reuses the previous one's object slot are not
+ * applied to the previous one's copy.
+ */
+[[nodiscard]]
+uint8_t multi_guided_generation(playernum_t pnum);
 void multi_send_orb_bonus(playernum_t pnum, uint8_t);
 void multi_send_got_orb(playernum_t pnum);
 void multi_send_effect_blowup(vcsegidx_t segnum, sidenum_t side, const vms_vector &pnt);
@@ -983,6 +991,17 @@ bool net_interp_drives(vcobjidx_t obj);
 bool net_interp_player_lagging(playernum_t pnum);
 /* Forget every snapshot (level start, session end). */
 void net_interp_reset();
+/* Put player `pnum`'s ship where its newest snapshot has it (not at the
+ * delayed render time), for a message that acts at the ship's position
+ * now: MULTI_PLAYER_DERES, MULTI_DROP_WEAPON, MULTI_DROP_FLAG.  The next
+ * net_interp_apply_all puts it back on its interpolated path.
+ */
+void net_interp_snap_to_newest(playernum_t pnum);
+/* object_move_one, for an object net_interp_drives: the object
+ * collisions along the path a remote ship was moved this frame
+ * (phys_sweep_objects).
+ */
+void net_interp_sweep_driven(const d_robot_info_array &Robot_info, vmobjptridx_t obj);
 
 }
 #endif
@@ -1017,6 +1036,10 @@ static inline void net_interp_apply_all()
 static inline bool net_interp_drives(const vcobjidx_t)
 {
 	return false;
+}
+
+static inline void net_interp_sweep_driven(const d_robot_info_array &, vmobjptridx_t)
+{
 }
 
 }

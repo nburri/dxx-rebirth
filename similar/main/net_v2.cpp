@@ -1666,6 +1666,20 @@ bool local_ship_alive()
 	return get_local_plrobj().type == object_type::OBJ_PLAYER && Player_dead_state == player_dead_state::no;
 }
 
+/* The local ship is in the level: alive, or tumbling in its death
+ * sequence until it explodes (dead_player_frame turns it into a ghost
+ * when it sends MULTI_PLAYER_DERES).  Its records stay live meanwhile,
+ * with `dying`, so that the others see the tumble where it happens, as
+ * v1's position packets showed it, and the explosion and the eggs where
+ * the owner has them.
+ */
+[[nodiscard]]
+bool local_ship_in_level()
+{
+	auto &vmobjptr = LevelUniqueObjectState.Objects.vmptr;
+	return get_local_plrobj().type == object_type::OBJ_PLAYER;
+}
+
 #if DXX_BUILD_DESCENT == 2
 /* The guided missile player `pnum` steers on this machine, if any. */
 [[nodiscard]]
@@ -1679,6 +1693,7 @@ std::optional<guided_record> local_guided_record(const playernum_t pnum)
 	return guided_record{
 		.pid = static_cast<uint8_t>(pnum),
 		.id = gim.get_unchecked_index(),
+		.gen = multi_guided_generation(pnum),
 		.orient = p.orient,
 		.pos = p.pos,
 		.segment = p.segment,
@@ -1704,8 +1719,12 @@ void set_input_for_host(peer &p)
 	const host_clock est{S.now + c.clock_offset()};
 	in.sample_time = ::dcx::net_v2::to_net_time(est);
 	in.view_time = ::dcx::net_v2::to_net_time(est - interp::view_delay());
-	if (local_ship_alive())
+	if (local_ship_in_level())
+	{
 		in.flags |= flag_bit(input_flag::alive);
+		if (Player_dead_state != player_dead_state::no)
+			in.flags |= flag_bit(input_flag::dying);
+	}
 #if DXX_BUILD_DESCENT == 2
 	if (+(player_info.powerup_flags & player_flag::headlight_on))
 		in.flags |= flag_bit(input_flag::headlight);
@@ -1759,7 +1778,7 @@ void apply_input(peer &p, const std::span<const uint8_t> payload)
 	else
 		interp::receive_ghost(slot);
 	if (in->guided)
-		interp::receive_guided(slot, in->guided->id, snapshot_of(t, *in->guided), S.now);
+		interp::receive_guided(slot, in->guided->id, in->guided->gen, snapshot_of(t, *in->guided), S.now);
 }
 
 /* The flags and inventory fields of a player record from this machine's
@@ -1807,7 +1826,7 @@ void build_common_bundle(state_bundle &s)
 		player_record rec;
 		if (i == Player_num)
 		{
-			if (!local_ship_alive())
+			if (!local_ship_in_level())
 			{
 				rec.flags = flag_bit(player_record_flag::ghost);
 				s.players[i] = rec;
@@ -1815,6 +1834,8 @@ void build_common_bundle(state_bundle &s)
 			}
 			rec.pose = pose_of(obj);
 			rec.flags = flag_bit(player_record_flag::alive);
+			if (Player_dead_state != player_dead_state::no)
+				rec.flags |= flag_bit(player_record_flag::dying);
 			fill_record_status(rec, obj, underlying_value(obj.ctype.player_info.Primary_weapon.get_active()));
 		}
 		else
@@ -1842,6 +1863,8 @@ void build_common_bundle(state_bundle &s)
 			}
 			rec.pose = st.input.pose;
 			rec.flags = flag_bit(player_record_flag::alive);
+			if (st.input.has_flag(input_flag::dying))
+				rec.flags |= flag_bit(player_record_flag::dying);
 			rec.sample_age = static_cast<uint16_t>(std::min<net_clock>(sample_age, 65535));
 			rec.input_age = static_cast<uint8_t>(std::min<net_clock>(input_age / period, 255));
 			fill_record_status(rec, obj, st.input.weapon & 0x0f);
@@ -2023,7 +2046,7 @@ void apply_state(peer &p, const std::span<const uint8_t> payload)
 		/* The missile was sampled with its owner's ship. */
 		const auto &owner{s->players[g.pid]};
 		const host_clock t{owner && !owner->is_ghost() ? host_time - owner->sample_age : host_time};
-		interp::receive_guided(g.pid, g.id, snapshot_of(t, g), S.now);
+		interp::receive_guided(g.pid, g.id, g.gen, snapshot_of(t, g), S.now);
 	}
 }
 

@@ -40,7 +40,10 @@ constexpr std::size_t NET_V2_STATE_HEADER_SIZE{18};
  */
 constexpr std::size_t NET_V2_PLAYER_RECORD_SIZE{43};
 constexpr std::size_t NET_V2_GHOST_RECORD_SIZE{1};
-constexpr std::size_t NET_V2_GUIDED_RECORD_SIZE{31};
+/* The 31 bytes of section 5.2 plus `gen` (u8, stage 2): see
+ * guided_record.
+ */
+constexpr std::size_t NET_V2_GUIDED_RECORD_SIZE{32};
 constexpr std::size_t NET_V2_ROBOT_RECORD_SIZE{31};
 constexpr unsigned NET_V2_MAX_GUIDED_RECORDS{NET_V2_MAX_PLAYERS};
 constexpr unsigned NET_V2_MAX_ROBOT_RECORDS{12};
@@ -89,6 +92,8 @@ enum class input_flag : std::uint8_t
 	headlight = 1 << 2,
 	want_respawn = 1 << 3,
 	has_guided = 1 << 4,
+	/* The ship exists but is in its death sequence (stage 2). */
+	dying = 1 << 5,
 };
 
 [[nodiscard]]
@@ -195,12 +200,19 @@ struct player_record
  * with stage 3); a receiver maps it to its copy of the missile, which
  * was fired with that number (MULTI_FIRE_BOMB or MULTI_FIRE_TRACK).
  * The record's time is the owner's player record time (both come from the
- * same INPUT).
+ * same INPUT).  `gen` (stage 2, appended to the 31 bytes of section 5.2)
+ * is the owner's count of guided missiles fired, modulo
+ * NET_V2_GUIDED_GEN_MODULO, which the fire message carries too: a new
+ * missile that reuses the object slot of the previous one has the same
+ * `id`, but not the same `gen`.
  */
+constexpr unsigned NET_V2_GUIDED_GEN_MODULO{128};
+
 struct guided_record
 {
 	std::uint8_t pid{};
 	std::uint16_t id{};
+	std::uint8_t gen{};
 	net_quat orient;
 	net_vec pos;
 	std::uint16_t segment{};
@@ -371,6 +383,7 @@ constexpr void write_guided(wire_writer &w, const guided_record &g)
 	w.vec(g.pos);
 	w.u16(g.segment);
 	w.qvec(g.vel, NET_V2_VELOCITY_SHIFT);
+	w.u8(g.gen);
 }
 
 constexpr guided_record read_guided(wire_reader &r)
@@ -382,6 +395,7 @@ constexpr guided_record read_guided(wire_reader &r)
 	g.pos = r.vec();
 	g.segment = r.u16();
 	g.vel = r.qvec(NET_V2_VELOCITY_SHIFT);
+	g.gen = r.u8();
 	return g;
 }
 
@@ -509,7 +523,7 @@ constexpr std::optional<state_bundle> read_state(const std::span<const std::uint
 	return s;
 }
 
-/* Serialise an INPUT chunk into `out`.  Returns the size (46, or 77 with
+/* Serialise an INPUT chunk into `out`.  Returns the size (46, or 78 with
  * a guided record; `has_guided` in `flags` follows `guided`).
  */
 [[nodiscard]]

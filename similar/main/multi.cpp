@@ -41,6 +41,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "game.h"
 #include "multi.h"
 #include "multiinternal.h"
+#include "net_v2_state.h"
 #include "object.h"
 #include "player.h"
 #include "laser.h"
@@ -1625,6 +1626,11 @@ window_event_result multi_message_input_sub(const d_robot_info_array &Robot_info
 
 namespace {
 
+#if DXX_BUILD_DESCENT == 2
+/* multi_guided_generation */
+static per_player_array<uint8_t> Guided_generation{};
+#endif
+
 static void multi_do_fire(fvmobjptridx &vmobjptridx, const playernum_t pnum, const multiplayer_rspan<multiplayer_command_t::MULTI_FIRE> buf, const icobjidx_t Network_laser_track, const std::optional<uint16_t> remote_objnum)
 {
 	// Act out the actual shooting
@@ -1651,6 +1657,11 @@ static void multi_do_fire(fvmobjptridx &vmobjptridx, const playernum_t pnum, con
 			? static_cast<player_gun_number>(static_cast<uint8_t>(base_weapon_gun) + (flags & 1))
 			: base_weapon_gun;
 
+#if DXX_BUILD_DESCENT == 2
+		/* Before the copy is created: its generation (multi_send_fire). */
+		if (weapon == secondary_weapon_index::guided && pnum < Guided_generation.size())
+			Guided_generation[pnum] = static_cast<uint8_t>((flags >> 1) & 0x7f);
+#endif
 		const auto &&objnum = Laser_player_fire(LevelSharedRobotInfoState.Robot_info, obj, weapon_id, weapon_gun, weapon_sound_flag::audible, shot_orientation, Network_laser_track);
 		if (remote_objnum)
 			map_objnum_local_to_remote(objnum, *remote_objnum, pnum);
@@ -1773,6 +1784,10 @@ static void multi_do_player_deres(const d_robot_info_array &Robot_info, object_a
 #elif DXX_BUILD_DESCENT == 2
 #define GET_WEAPON_FLAGS(buf,count)	(count += sizeof(uint16_t), GET_INTEL_SHORT(&buf[(count - sizeof(uint16_t))]))
 #endif
+	/* The explosion and the eggs where the owner's ship is, not at its
+	 * delayed interpolated pose (v1 sent a MULTI_POSITION first).
+	 */
+	net_interp_snap_to_newest(pnum);
 	const auto &&objp = vmobjptridx(vcplayerptr(pnum)->objnum);
 	auto &player_info = objp->ctype.player_info;
 	player_info.primary_weapon_flags = GET_WEAPON_FLAGS(buf, count);
@@ -2512,8 +2527,26 @@ void multi_process_bigdata(const d_level_shared_robot_info_state &LevelSharedRob
 //          players of something we did.
 //
 
+#if DXX_BUILD_DESCENT == 2
+uint8_t multi_guided_generation(const playernum_t pnum)
+{
+	return pnum < Guided_generation.size() ? Guided_generation[pnum] : 0;
+}
+#endif
+
 void multi_send_fire(const vms_matrix &orient, int laser_gun, const laser_level level, int laser_flags, objnum_t laser_track, const imobjptridx_t is_bomb_objnum)
 {
+#if DXX_BUILD_DESCENT == 2
+	/* A guided missile: bits 1-7 of the flags are its generation (only
+	 * bit 0, the gun, is read for a missile).
+	 */
+	if (laser_gun == underlying_value(secondary_weapon_index::guided) + MISSILE_ADJUST)
+	{
+		auto &gen = Guided_generation[Player_num];
+		gen = static_cast<uint8_t>((gen + 1) % ::dcx::net_v2::NET_V2_GUIDED_GEN_MODULO);
+		laser_flags = (laser_flags & 1) | (gen << 1);
+	}
+#endif
 	static fix64 last_fireup_time = 0;
 
 	// provoke positional update if possible (20 times per second max. matches vulcan, the fastest firing weapon)
@@ -3801,6 +3834,10 @@ static void multi_do_drop_weapon(fvmobjptr &vmobjptr, const playernum_t pnum, co
 	const objnum_t remote_objnum{GET_INTEL_SHORT(&buf[2])};
 	const uint16_t ammo{GET_INTEL_SHORT(&buf[4])};
 	const auto seed{GET_INTEL_INT(&buf[6])};
+	/* Spat from the ship where its owner had it, not from its delayed
+	 * interpolated pose.
+	 */
+	net_interp_snap_to_newest(pnum);
 	const auto &&objnum = spit_powerup(LevelUniqueObjectState, LevelSharedSegmentState, LevelUniqueSegmentState, Vclip, vmobjptr(vcplayerptr(pnum)->objnum), powerup_id, seed);
 	if (objnum == object_none)
 		return;
@@ -4539,6 +4576,7 @@ static void multi_do_drop_flag(const playernum_t pnum, const multiplayer_rspan<m
 	 */
 	const auto seed{GET_INTEL_INT<int32_t>(&buf[4])};
 
+	net_interp_snap_to_newest(pnum);
 	auto &plrobj{*vmobjptr(vcplayerptr(pnum)->objnum)};
 
 	const imobjidx_t objnum{spit_powerup(LevelUniqueObjectState, LevelSharedSegmentState, LevelUniqueSegmentState, Vclip, plrobj, powerup_id, seed)};
@@ -5195,6 +5233,10 @@ static void multi_do_player_inventory(const playernum_t pnum, const multiplayer_
 #elif DXX_BUILD_DESCENT == 2
 #define GET_WEAPON_FLAGS(buf,count)	(count += sizeof(uint16_t), GET_INTEL_SHORT(&buf[(count - sizeof(uint16_t))]))
 #endif
+	/* The explosion and the eggs where the owner's ship is, not at its
+	 * delayed interpolated pose (v1 sent a MULTI_POSITION first).
+	 */
+	net_interp_snap_to_newest(pnum);
 	const auto &&objp = vmobjptridx(vcplayerptr(pnum)->objnum);
 	auto &player_info = objp->ctype.player_info;
 	player_info.primary_weapon_flags = GET_WEAPON_FLAGS(buf, count);

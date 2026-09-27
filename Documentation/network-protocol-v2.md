@@ -895,7 +895,8 @@ state (normally identical to what it sent, at `your_input_ack`); its shields
 and energy fields are authoritative and are always applied (§5.6).
 
 Guided missile record, 31 bytes each (one per active guided missile; only in
-D2):
+D2); stage 2 appends a u8 `gen` at offset 31, making it 32 bytes (see "Stage 2
+as implemented" in §8):
 
 | Offset | Size | Field |
 |---|---|---|
@@ -932,7 +933,7 @@ are `disconnected` are omitted from the mask.
 | 0 | 2 | `input_seq` (u16, increments per sent chunk) |
 | 2 | 4 | `sample_time`: the client's estimate of host time when this state was sampled (§2.2) |
 | 6 | 4 | `view_time`: the host time the client's interpolation was displaying for remote entities at that moment (`sample_time − interp_delay`, §5.4). The host uses it for rewinds (§6.6). |
-| 10 | 1 | `flags`: bit 0 alive, bit 1 afterburner active, bit 2 headlight on, bit 3 `WANT_RESPAWN` (fire pressed while dead), bit 4 guided record follows, bits 5–7 reserved |
+| 10 | 1 | `flags`: bit 0 alive, bit 1 afterburner active, bit 2 headlight on, bit 3 `WANT_RESPAWN` (fire pressed while dead), bit 4 guided record follows, bit 5 dying (stage 2: the ship exists but is in its death sequence), bits 6–7 reserved |
 | 11 | 8 | quaternion |
 | 19 | 12 | position |
 | 31 | 2 | segment |
@@ -1776,20 +1777,43 @@ where the text was open or did not work as written:
   (which sets `movement_source`) stays as it is, and a guided missile that
   is no longer driven continues by physics without any state to restore.
   Ships are written with `set_thrust_from_velocity` for the engine glow,
-  as v1 did.
+  as v1 did. Since a driven ship does not run `do_physics_sim`, which is
+  where a moving ship finds the objects it runs into (an object at rest,
+  such as a proximity bomb, a smart mine, a powerup or a parked ship,
+  never looks), `object_move_one` sweeps the ship's path of the frame
+  instead (`phys_sweep_objects`): from the pose before
+  `net_interp_apply_all` wrote it (or before a snap to the newest
+  snapshot, below) to the new one, the same fvi object test with the
+  ship's radius, and `collide_two_objects` for each object touched, once,
+  at most 8, as `do_physics_sim` does. Walls stop only the centre point
+  (`FQ_OBJECTS_ONLY`, which also keeps the ship's radius for the objects
+  in every segment fvi enters), so a ship scraping a wall still finds the
+  objects beyond it, and nothing happens at walls: wall collisions,
+  scraping and their damage were the owner's in v1 too. A move of more
+  than 20 units (a discontinuity, a respawn, the first record) is a jump,
+  not a path, and is not swept. Triggers and the lava fall hiss for
+  remote ships, which `do_physics_sim`'s segment list drove in v1, are
+  not restored.
 - **Guided missiles.** The owner sends its active guided missile in every
   INPUT; the host relays it in the bundle to everyone but its owner, and
   adds its own. The record's `id` is the owner's object number, so a
   guided missile is now fired with its object number (as `MULTI_FIRE_BOMB`
   does for bombs; `MULTI_FIRE_TRACK` gained two bytes for it, 0xffff for
   other tracked weapons) and every receiver maps it to its copy (the net
-  ids of stage 3 replace this, before stage 4 deletes both messages). A copy is
+  ids of stage 3 replace this, before stage 4 deletes both messages). A
+  new missile that reuses the previous one's object slot has the same
+  `id`, and its records can arrive before its fire message while the old
+  copy still flies, so the owner also counts its guided missiles
+  (`multi_guided_generation`, modulo 128): the count goes in bits 1–7 of
+  the fire message's flags byte (a missile reads only bit 0, the gun) and
+  in a u8 `gen` appended to the guided record (32 bytes, INPUT 46 + 32).
+  Records are applied only to the copy whose object number *and*
+  generation match; a record of another generation restarts the ring. A copy is
   driven only while its records are interpolated or extrapolated; before
   its first record (just launched) and when the records stopped for more
   than 100 ms (the owner's missile hit something) it flies by its own
   physics, so it also hits what the owner's missile hit. When the local
-  copy changes, the snapshots of the previous missile are dropped even if
-  the new one reuses its object slot. `MULTI_GUIDED` remains only as the
+  copy is gone (exploded or released), its snapshots are dropped. `MULTI_GUIDED` remains only as the
   release, now reliable and carrying the final pose (receivers warp their
   copy there, then release it); the paced positions and the final
   position message are gone.
@@ -1820,15 +1844,37 @@ where the text was open or did not work as written:
   record are not applied, because in stage 2 damage is still computed by
   each owner. INPUT's afterburner bit is left clear; the `weapon` byte is
   sent.
-- **Ghosts.** A dead or unspawned player's record is the one-byte ghost
-  record; it clears that player's ring, so the next record starts afresh
-  (and snaps). Only players the host has as `playing` get a record;
+- **Death sequence and ghosts.** A ship stays in the level, with live
+  records, through its death sequence: `alive` means the ship exists
+  (§5.2), and `dying` (record bit 6, INPUT bit 5) is set from the moment
+  the player is killed until the ship explodes, when `dead_player_frame`
+  sends `MULTI_PLAYER_DERES` and turns it into a ghost. So the others see
+  the tumble where it happens, as v1's positions showed it (with a ghost
+  record from the start of the death sequence, the ship fell back to
+  physics with its last thrust and coasted on for the 2 s before the
+  deres, and exploded and dropped its eggs far from where the owner
+  had it). Receivers read `dying` nowhere yet; the local CORRECTION is
+  still applied only to a living ship. A dead or unspawned player's
+  record is the one-byte ghost record; it clears that player's ring, so
+  the next record starts afresh (and snaps). If the ring was not empty
+  and the ship is still a ship here (the ghost record came before the
+  deres), the ship is first put at the newest snapshot and stopped
+  (velocity and thrust zero) to wait for the deres there. Only players the host has as `playing` get a record;
   a client notices a returning or late player from its record, as stage 1
   did from the position records.
-- **Removed.** `MULTI_POSITION` (also the copies sent before deres,
-  reappear, powerup creation, weapon drops and leaving: receivers see
-  those at the interpolated position, and the drops carry their own
-  positions until stage 3 moves them to the host), `MULTI_HEARTBEAT`
+- **Removed.** `MULTI_POSITION`, also the copies sent before deres,
+  reappear, powerup creation, weapon drops and leaving. Receivers show a
+  ship `delay` in the past, so a message that acts at the ship's position
+  now would act where the ship was: `MULTI_PLAYER_DERES` (explosion and
+  eggs, `drop_player_eggs`), `MULTI_DROP_WEAPON` and `MULTI_DROP_FLAG`
+  (`spit_powerup` from the ship's pose and velocity) first put the ship
+  at its newest snapshot (`net_interp_snap_to_newest`; after a ghost
+  record, at the snapshot the ghost record stopped it at, with its
+  velocity), which is the owner's pose at most one tick and one trip
+  before the message; the next frame's interpolation puts a living ship
+  back on its path before it is drawn. `MULTI_CREATE_POWERUP` carries its
+  own position; reappear places the ship by its first record. Stage 3
+  moves the drops to the host. `MULTI_HEARTBEAT`
   (the bundle's `level_time` sets `ThisLevelTime`, advanced by the
   bundle's age, when a time limit is set and the difference exceeds
   50 ms), the stage 1 position records and ping list. The thief's

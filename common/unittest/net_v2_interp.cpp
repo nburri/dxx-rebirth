@@ -143,8 +143,8 @@ void test_state_layout()
 	s.players[3] = ghost;
 	s.players[7] = make_record(7);
 	s.n_guided = 2;
-	s.guided[0] = {.pid = 0, .id = 55, .orient = {1, 2, 3, 4}, .pos = {5, 6, 7}, .segment = 8, .vel = quantised_velocity({100 * F1, 0, -100 * F1})};
-	s.guided[1] = {.pid = 7, .id = 9000, .orient = {-1, -2, -3, -4}, .pos = {-5, -6, -7}, .segment = 9, .vel = {}};
+	s.guided[0] = {.pid = 0, .id = 55, .gen = 127, .orient = {1, 2, 3, 4}, .pos = {5, 6, 7}, .segment = 8, .vel = quantised_velocity({100 * F1, 0, -100 * F1})};
+	s.guided[1] = {.pid = 7, .id = 9000, .gen = 3, .orient = {-1, -2, -3, -4}, .pos = {-5, -6, -7}, .segment = 9, .vel = {}};
 	s.pings = {{0, 1, 2, 3, 4, 5, 6, 255}};
 	std::array<std::uint8_t, NET_V2_MAX_STATE_SIZE> buf{};
 	const auto n{write_state(buf, s)};
@@ -204,17 +204,22 @@ void test_state_layout()
 	in.seq = 65535;
 	in.sample_time = 0x80000001u;
 	in.view_time = 0x7fffffffu;
-	in.flags = flag_bit(input_flag::alive) | flag_bit(input_flag::headlight);
+	/* A ship in its death sequence is still alive (it exists), and dying. */
+	in.flags = flag_bit(input_flag::alive) | flag_bit(input_flag::headlight) | flag_bit(input_flag::dying);
 	in.pose = make_record(4).pose;
 	in.weapon = 0x42;
 	std::array<std::uint8_t, NET_V2_MAX_INPUT_SIZE> ib{};
 	const auto ni{write_input(ib, in)};
 	CHECK(ni == NET_V2_INPUT_SIZE);
 	CHECK(read_input(std::span(ib).first(ni)) == in);
+	CHECK(read_input(std::span(ib).first(ni))->has_flag(input_flag::dying));
 	CHECK(!read_input(std::span(ib).first(ni - 1)));
-	in.guided = guided_record{.pid = 2, .id = 300, .orient = {7, 7, 7, 7}, .pos = {1, 2, 3}, .segment = 4, .vel = quantised_velocity({F1, F1, F1})};
+	in.guided = guided_record{.pid = 2, .id = 300, .gen = 42, .orient = {7, 7, 7, 7}, .pos = {1, 2, 3}, .segment = 4, .vel = quantised_velocity({F1, F1, F1})};
 	const auto ng{write_input(ib, in)};
 	CHECK(ng == NET_V2_MAX_INPUT_SIZE);
+	CHECK(NET_V2_GUIDED_RECORD_SIZE == 32 && ng == 78);
+	/* The generation is the record's last byte. */
+	CHECK(ib[ng - 1] == 42);
 	const auto rg{read_input(std::span(ib).first(ng))};
 	CHECK(rg && rg->has_flag(input_flag::has_guided) && rg->guided == in.guided && rg->pose == in.pose);
 	/* The flag without the record, or the record without the flag. */
@@ -233,6 +238,82 @@ snapshot snap(const host_clock t, const net_vec &pos, const net_vec &vel = {}, c
 	s.orient = quat_z(0);
 	s.segment = seg;
 	return s;
+}
+
+/* A guided missile whose object slot is reused by the owner's next
+ * guided missile: the new missile's records (same `id`, next `gen`)
+ * arrive before its fire message and must not drive the old copy; once
+ * the fire message made the new copy, they drive it.
+ */
+void test_guided_identity()
+{
+	guided_identity who;
+	snapshot_ring ring;
+	CHECK(!who.describes(200, 1));
+	/* Missile 1 in slot 200. */
+	CHECK(who.receive(200, 1));
+	ring.insert(snap(net_milliseconds(0), {0, 0, 0}));
+	CHECK(!who.receive(200, 1));
+	ring.insert(snap(net_milliseconds(16), {F1, 0, 0}));
+	CHECK(who.describes(200, 1));
+	CHECK(ring.size() == 2);
+	/* Missile 2 reuses slot 200: its first record clears the ring... */
+	if (who.receive(200, 2))
+		ring.clear();
+	ring.insert(snap(net_milliseconds(33), {100 * F1, 0, 0}));
+	CHECK(ring.size() == 1);
+	/* ...and does not describe the old copy (generation 1). */
+	CHECK(!who.describes(200, 1));
+	/* The fire message made the new copy, generation 2. */
+	CHECK(who.describes(200, 2));
+	/* Another slot is another missile too. */
+	CHECK(who.receive(201, 2));
+	CHECK(!who.describes(200, 2));
+	/* The generation wraps with the modulo, still telling neighbours apart. */
+	guided_identity w2;
+	CHECK(w2.receive(5, static_cast<std::uint8_t>(NET_V2_GUIDED_GEN_MODULO - 1)));
+	CHECK(w2.receive(5, 0));
+	CHECK(NET_V2_GUIDED_GEN_MODULO <= 128);
+	/* Inactive (the copy is gone): nothing is described, the next record
+	 * starts afresh.
+	 */
+	w2.active = false;
+	CHECK(!w2.describes(5, 0));
+	CHECK(w2.receive(5, 0));
+}
+
+/* A remote ship's object collisions are swept along its path of the
+ * frame, never across a jump.
+ */
+void test_sweepable_move()
+{
+	CHECK(is_sweepable_move({0, 0, 0}, {0, 0, 0}));
+	CHECK(is_sweepable_move({0, 0, 0}, {3 * F1, 4 * F1, 0}));
+	CHECK(is_sweepable_move({0, 0, 0}, {20 * F1, 0, 0}));
+	CHECK(!is_sweepable_move({0, 0, 0}, {20 * F1, F1, 0}));
+	CHECK(!is_sweepable_move({-1000 * F1, 0, 0}, {1000 * F1, 0, 0}));
+}
+
+/* The death sequence: the owner's records stay live (alive) while the
+ * ship tumbles, so the receivers interpolate the tumble up to the newest
+ * record, which is where the ship explodes (a ghost record or the deres
+ * put it there); `alive` never changes during it, so nothing snaps.
+ */
+void test_death_tumble()
+{
+	snapshot_ring ring;
+	const net_vec v{60 * F1, 0, 0};
+	for (int k = 0; k <= 60; ++k)
+	{
+		auto s{snap(net_milliseconds(k * 50), {static_cast<std::int32_t>(k) * 3 * F1, 0, 0}, v)};
+		s.orient = quat_z(k * 0.1);
+		ring.insert(s);
+	}
+	const auto p{sample(ring, net_milliseconds(49 * 50 + 25))};
+	CHECK(p && p->kind == pose_kind::interpolated && p->alive);
+	CHECK(std::abs(units(p->pos.x) - 148.5) < 0.5);
+	/* The ship's final pose is the newest snapshot. */
+	CHECK(ring.newest().pos.x == 180 * F1);
 }
 
 void test_unwrap()
@@ -854,6 +935,9 @@ int main()
 {
 	test_quantisation();
 	test_state_layout();
+	test_guided_identity();
+	test_sweepable_move();
+	test_death_tumble();
 	test_unwrap();
 	test_ring();
 	test_interpolation();

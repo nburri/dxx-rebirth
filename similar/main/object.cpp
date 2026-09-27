@@ -2075,6 +2075,11 @@ static window_event_result object_move_one(const d_level_shared_robot_info_state
 				break;
 		}
 	}
+	else
+		/* It did not move by physics, which is where a moving ship finds
+		 * the objects it runs into.
+		 */
+		net_interp_sweep_driven(LevelSharedRobotInfoState.Robot_info, obj);
 
 #if DXX_BUILD_DESCENT == 2
 	auto &Walls = LevelUniqueWallSubsystemState.Walls;

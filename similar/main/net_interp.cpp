@@ -58,16 +58,22 @@ using ::dcx::net_v2::net_clock;
 struct guided_track
 {
 	entity_track track;
-	/* The owner's object number of the missile the snapshots describe. */
-	uint16_t id{};
-	bool active{};
-	/* The local copy the snapshots were last compared with: when it
-	 * changes (a new missile, possibly in a reused object slot, so with
-	 * the same `id`), the snapshots of the previous one are dropped.
-	 */
+	/* The missile the snapshots describe. */
+	::dcx::net_interp::guided_identity who;
+	/* The local copy the snapshots were last compared with. */
 	objnum_t local{object_none};
 };
 #endif
+
+/* Where a driven ship was before this frame's pose was written: the start
+ * of its object collision sweep (phys_sweep_objects).
+ */
+struct sweep_start
+{
+	vms_vector pos;
+	segnum_t segment{segment_none};
+	bool valid{};
+};
 
 struct interp_state
 {
@@ -82,6 +88,16 @@ struct interp_state
 	per_player_array<net_clock> lag_age{};
 	/* The objects written this frame; object_move_one leaves them alone. */
 	per_player_array<objnum_t> driven_ship{};
+	per_player_array<sweep_start> sweep_from{};
+	/* The pose a ship had before net_interp_snap_to_newest moved it this
+	 * frame, so that the sweep starts from where the ship was drawn.
+	 */
+	per_player_array<sweep_start> before_snap{};
+	/* The newest snapshot of a ship whose ghost record arrived while it
+	 * was still a ship here (before MULTI_PLAYER_DERES): the deres puts it
+	 * there again, with its velocity, for the explosion and the eggs.
+	 */
+	per_player_array<std::optional<snapshot>> ghosted{};
 #if DXX_BUILD_DESCENT == 2
 	per_player_array<guided_track> guided{};
 	per_player_array<objnum_t> driven_guided{};
@@ -93,6 +109,7 @@ interp_state I;
 void clear_driven()
 {
 	I.driven_ship.fill(object_none);
+	I.sweep_from.fill({});
 #if DXX_BUILD_DESCENT == 2
 	I.driven_guided.fill(object_none);
 #endif
@@ -190,6 +207,34 @@ host_clock est_host_now(const net_clock now)
 	return now + I.offset;
 }
 
+/* Player `pnum`'s ship object, if it is one (not a ghost). */
+[[nodiscard]]
+imobjptridx_t ship_object(const playernum_t pnum)
+{
+	if (pnum >= N_players || pnum == Player_num || !(Game_mode & GM_NETWORK) || Newdemo_state == ND_STATE_PLAYBACK)
+		return object_none;
+	auto &Objects = LevelUniqueObjectState.Objects;
+	const auto objnum{vcplayerptr(pnum)->objnum};
+	if (objnum == object_none)
+		return object_none;
+	const auto &&obj = Objects.vmptridx(objnum);
+	if (obj->type != object_type::OBJ_PLAYER)
+		return object_none;
+	return obj;
+}
+
+/* Put player `pnum`'s ship at snapshot `s`, now, rather than at its
+ * render time.
+ */
+void place_ship(const playernum_t pnum, const vmobjptridx_t obj, const snapshot &s)
+{
+	auto &b = I.before_snap[pnum];
+	if (!b.valid)
+		b = {obj->pos, obj->segnum, true};
+	if (write_pose(obj, ::dcx::net_interp::pose_at(s, pose_kind::interpolated)))
+		set_thrust_from_velocity(obj);
+}
+
 }
 
 namespace net_v2 {
@@ -216,6 +261,7 @@ void receive_ship(const playernum_t pnum, const snapshot &s, const net_clock now
 {
 	if (pnum >= MAX_PLAYERS || !segment_valid(s.segment))
 		return;
+	I.ghosted[pnum].reset();
 	I.ships[pnum].receive(s, now, est_host_now(now));
 }
 
@@ -227,25 +273,40 @@ void receive_ghost(const playernum_t pnum)
 	 * ship is placed there directly), however far it is.  The delay
 	 * estimate survives.
 	 */
-	I.ships[pnum].ring.clear();
+	auto &ring = I.ships[pnum].ring;
+	if (ring.empty())
+		return;
+	/* The owner's ship exploded (its records stay live through the death
+	 * sequence).  If the MULTI_PLAYER_DERES is not here yet, the ship
+	 * waits for it where the owner had it, stopped: without snapshots it
+	 * would coast on by physics with its last thrust.
+	 */
+	if (const auto &&obj = ship_object(pnum); obj != object_none)
+	{
+		const auto &newest{ring.newest()};
+		I.ghosted[pnum] = newest;
+		place_ship(pnum, obj, newest);
+		obj->mtype.phys_info.velocity = {};
+		obj->mtype.phys_info.rotvel = {};
+		obj->mtype.phys_info.thrust = {};
+		obj->mtype.phys_info.rotthrust = {};
+	}
+	ring.clear();
 }
 
-void receive_guided(const playernum_t pnum, const uint16_t id, const snapshot &s, const net_clock now)
+void receive_guided(const playernum_t pnum, const uint16_t id, const uint8_t gen, const snapshot &s, const net_clock now)
 {
 #if DXX_BUILD_DESCENT == 2
 	if (pnum >= MAX_PLAYERS || !segment_valid(s.segment))
 		return;
 	auto &g = I.guided[pnum];
-	if (!g.active || g.id != id)
-	{
+	if (g.who.receive(id, gen))
 		g.track.ring.clear();
-		g.id = id;
-		g.active = true;
-	}
 	g.track.receive(s, now, est_host_now(now));
 #else
 	(void)pnum;
 	(void)id;
+	(void)gen;
 	(void)s;
 	(void)now;
 #endif
@@ -272,6 +333,8 @@ void reset_player(const playernum_t pnum)
 	I.ships[pnum].reset(I.tick_period);
 	I.lag[pnum].reset();
 	I.lag_age[pnum] = 0;
+	I.ghosted[pnum].reset();
+	I.before_snap[pnum] = {};
 #if DXX_BUILD_DESCENT == 2
 	I.guided[pnum] = {};
 	I.guided[pnum].track.reset(I.tick_period);
@@ -299,6 +362,38 @@ bool net_interp_drives(const vcobjidx_t obj)
 		return true;
 #endif
 	return false;
+}
+
+void net_interp_snap_to_newest(const playernum_t pnum)
+{
+	if (pnum >= MAX_PLAYERS)
+		return;
+	const auto &&obj = ship_object(pnum);
+	if (obj == object_none)
+		return;
+	const auto &ring{I.ships[pnum].ring};
+	if (!ring.empty())
+		place_ship(pnum, obj, ring.newest());
+	else if (const auto &g{I.ghosted[pnum]})
+		place_ship(pnum, obj, *g);
+}
+
+void net_interp_sweep_driven(const d_robot_info_array &Robot_info, const vmobjptridx_t obj)
+{
+	const objnum_t o{obj};
+	for (playernum_t i = 0; i < MAX_PLAYERS; ++i)
+	{
+		if (I.driven_ship[i] != o)
+			continue;
+		auto &from = I.sweep_from[i];
+		if (!from.valid || obj->type != object_type::OBJ_PLAYER)
+			return;
+		from.valid = false;
+		if (!::dcx::net_interp::is_sweepable_move({from.pos.x, from.pos.y, from.pos.z}, {obj->pos.x, obj->pos.y, obj->pos.z}))
+			return;
+		phys_sweep_objects(Robot_info, obj, from.pos, from.segment);
+		return;
+	}
 }
 
 bool net_interp_player_lagging(const playernum_t pnum)
@@ -334,11 +429,17 @@ void net_interp_apply_all()
 			if (obj->type == object_type::OBJ_PLAYER)
 				if (const auto p{sample(t.ring, t.render_time(est))})
 				{
+					auto &b = I.before_snap[i];
+					const sweep_start from{b.valid ? b : sweep_start{obj->pos, obj->segnum, true}};
 					if (write_pose(obj, *p))
+					{
 						set_thrust_from_velocity(obj);
+						I.sweep_from[i] = from;
+					}
 					I.driven_ship[i] = obj;
 				}
 		}
+		I.before_snap[i] = {};
 #if DXX_BUILD_DESCENT == 2
 		auto &g = I.guided[i];
 		g.track.delay.update(now);
@@ -347,15 +448,26 @@ void net_interp_apply_all()
 		if (g.local != local)
 		{
 			g.local = local;
-			g.active = false;
-			g.track.ring.clear();
+			/* The copy is gone (it exploded or was released): its
+			 * snapshots with it.  A new copy keeps the snapshots that
+			 * arrived before its fire message, if they are its own
+			 * (same generation, checked below).
+			 */
+			if (local == object_none)
+			{
+				g.who.active = false;
+				g.track.ring.clear();
+			}
 		}
-		if (gim == nullptr || !g.active || g.track.ring.empty())
+		if (gim == nullptr || !g.who.active || g.track.ring.empty())
 			continue;
 		/* Only the missile the snapshots describe (MULTI_FIRE_BOMB and
-		 * MULTI_FIRE_TRACK map the owner's object number to the copy).
+		 * MULTI_FIRE_TRACK map the owner's object number to the copy and
+		 * set its generation): the records of the next missile, in the
+		 * same object slot, that arrive before its fire message are not
+		 * applied to the previous copy.
 		 */
-		if (local != objnum_remote_to_local(g.id, static_cast<int8_t>(i)))
+		if (local != objnum_remote_to_local(g.who.id, static_cast<int8_t>(i)) || !g.who.describes(g.who.id, multi_guided_generation(i)))
 			continue;
 		const auto p{sample(g.track.ring, g.track.render_time(est))};
 		/* Before its first snapshot (just launched) and after the records
