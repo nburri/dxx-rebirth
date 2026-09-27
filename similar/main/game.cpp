@@ -120,6 +120,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "partial_range.h"
 #include "segiter.h"
 #include "frame_probe.h"
+#include <cinttypes>
 #if DXX_USE_UDP
 #include "net_udp.h"
 #endif
@@ -1776,12 +1777,12 @@ static void log_session_stats()
 	for (const object_base &o : Objects.vcptr)
 		if (o.type != object_type::OBJ_NONE)
 			++live_objects;
-	con_printf(CON_VERBOSE, "session: memory resident %llu KiB private %llu KiB | objects highest %u live %u allocated %u | sound objects %u"
+	con_printf(CON_VERBOSE, "session: memory resident %" PRIu64 " KiB private %" PRIu64 " KiB | objects highest %u live %u allocated %u | sound objects %u"
 #if DXX_USE_SDLMIXER
 		", mixer channels busy %u, sounds converted %u"
 #endif
 		" | textures: OpenGL %u, texmerge %u, piggy cache %u/%u KiB | game time %.1f s",
-		static_cast<unsigned long long>(mem.resident_bytes / 1024), static_cast<unsigned long long>(mem.private_bytes / 1024),
+		mem.resident_bytes / 1024, mem.private_bytes / 1024,
 		static_cast<unsigned>(Highest_object_index), live_objects, static_cast<unsigned>(LevelUniqueObjectState.num_objects),
 		frame_probe::stats::active_sound_objects(),
 #if DXX_USE_SDLMIXER

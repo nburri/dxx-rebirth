@@ -27,6 +27,7 @@
 #include "frame_probe.h"
 #include "args.h"
 #include "console.h"
+#include <cinttypes>
 
 namespace dcx {
 namespace frame_probe {
@@ -308,13 +309,13 @@ void frame_mark()
 		if (!state.announced)
 		{
 			state.announced = true;
-			con_printf(CON_VERBOSE, "frame: probe enabled; logical CPUs %i, timer frequency %llu Hz; logging frames longer than %.1f ms and %.1fx the running average",
+			con_printf(CON_VERBOSE, "frame: probe enabled; logical CPUs %i, timer frequency %" PRIu64 " Hz; logging frames longer than %.1f ms and %.1fx the running average",
 #if SDL_MAJOR_VERSION == 1
 				-1,
 #else
 				SDL_GetCPUCount(),
 #endif
-				static_cast<unsigned long long>(tick_frequency()), long_frame_min_ms, long_frame_average_factor);
+				tick_frequency(), long_frame_min_ms, long_frame_average_factor);
 		}
 		if (!state.first_mark)
 			state.first_mark = t;
