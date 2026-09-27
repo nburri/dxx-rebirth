@@ -1649,7 +1649,18 @@ The implementation (`similar/main/net_v2.cpp`, `common/main/net_v2_game.h`,
   current level (checksum mismatch → `KICK(checksum)`), the others are
   `waiting` until then. `LEVEL_START` is followed by a `SNAPSHOT_GAME` (scores
   and connection states) and `LEVEL_GO` on every level, so scores carry over
-  as the v1 sync did. `LEVEL_GO` is also sent to a joining player after its
+  as the v1 sync did. The host builds those scores from the players' ship
+  objects after it has loaded the new level, so `LoadLevel` carries every
+  slot's kills, deaths, kill goal count and score from its old ship object
+  to its new one (`net_score_carry.h`, tested by `test-net-score-carry`);
+  the kill matrix and team kills are globals and need no carry. (Playtest
+  fix: only the local player's `player_info` survived the load. The other
+  slots, clients and bots alike, read whatever the previous level had left
+  in the memory of their new object number: their own values only when both
+  levels place the player starts at the same object numbers, another
+  slot's or a robot's bytes otherwise. The host sent those values and every
+  machine, the owners included, adopted them: kills and deaths changed
+  from one level to the next.) `LEVEL_GO` is also sent to a joining player after its
   `CLIENT_READY`, so a client enters the level on `LEVEL_GO` in both cases.
   "Start without waiting" in the host's level wait keeps the unready players
   `waiting` in their slots (v1 cut `N_players` to 1): they get no

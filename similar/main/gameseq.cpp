@@ -110,6 +110,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "d_underlying_value.h"
 #include "d_zip.h"
 #include "spawn_site.h"
+#include "net_score_carry.h"
 
 #if DXX_BUILD_DESCENT == 1
 #include "custom.h"
@@ -184,6 +185,43 @@ public:
 		auto &plr = *vmobjptr(objnum);
 		plr.shields = plr_shields;
 		plr.ctype.player_info = plr_info;
+	}
+};
+
+/* The netgame scores of every slot (net_score_carry.h).  The level load
+ * leaves the other players' objects with whatever the previous level had
+ * in that memory; the level start scores the host sends are read from
+ * those objects.
+ */
+class preserve_player_scores
+{
+	std::array<::dcx::net_v2::carried_scores, MAX_PLAYERS> scores{};
+	static const player_info *info_of(fvcobjptr &vcobjptr, const playernum_t pnum)
+	{
+		const auto objnum{vcplayerptr(pnum)->objnum};
+		if (objnum == object_none || objnum >= MAX_OBJECTS)
+			return nullptr;
+		return &vcobjptr(objnum)->ctype.player_info;
+	}
+public:
+	preserve_player_scores(fvcobjptr &vcobjptr)
+	{
+		if (+(Game_mode & GM_MULTI))
+			scores = ::dcx::net_v2::capture_all_scores<MAX_PLAYERS>([&vcobjptr](const std::size_t i) {
+				return info_of(vcobjptr, static_cast<playernum_t>(i));
+			});
+	}
+	/* After gameseq_init_network_players: each slot has its new object. */
+	void restore(fvmobjptr &vmobjptr) const
+	{
+		if (!(Game_mode & GM_MULTI))
+			return;
+		::dcx::net_v2::restore_all_scores(scores, [&vmobjptr](const std::size_t i) -> player_info * {
+			const auto objnum{vcplayerptr(static_cast<playernum_t>(i))->objnum};
+			if (objnum == object_none || objnum >= MAX_OBJECTS)
+				return nullptr;
+			return &vmobjptr(objnum)->ctype.player_info;
+		});
 	}
 };
 
@@ -1051,6 +1089,7 @@ void LoadLevel(int level_num,int page_in_textures)
 	auto &vcobjptr = Objects.vcptr;
 	auto &vmobjptr = Objects.vmptr;
 	preserve_player_object_info p(vcobjptr, vcplayerptr(Player_num)->objnum);
+	const preserve_player_scores scores{vcobjptr};
 
 	auto &plr = get_local_player();
 	auto save_player = plr;
@@ -1125,6 +1164,7 @@ void LoadLevel(int level_num,int page_in_textures)
 #endif
 
 	gameseq_init_network_players(LevelSharedRobotInfoState.Robot_info, Objects);
+	scores.restore(vmobjptr);
 	p.restore(vmobjptr);
 }
 }
