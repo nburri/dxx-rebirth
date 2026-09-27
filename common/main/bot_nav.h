@@ -271,6 +271,38 @@ public:
 	}
 };
 
+/* Section 4.3, roam: where a bot with nobody to fight flies to.  Of up
+ * to `tries` segments drawn with `below(n)` (uniform in [0, n)), the
+ * first one at least `min_distance` from `pos` that has a neighbour (a
+ * segment nothing connects to cannot be reached), else the furthest
+ * drawn; never `from` unless the graph has nothing else.
+ */
+template <typename Below>
+[[nodiscard]]
+uint32_t pick_roam_goal(const nav_graph &graph, const uint32_t from, const vec3 &pos, const double min_distance, Below &&below, const unsigned tries = 12)
+{
+	const auto n{static_cast<uint32_t>(graph.size())};
+	if (n < 2)
+		return from;
+	uint32_t best{from};
+	double best_distance{-1};
+	for (unsigned i = 0; i < tries; ++i)
+	{
+		const uint32_t seg{below(n)};
+		if (seg >= n || seg == from || graph.neighbours(seg).empty())
+			continue;
+		const double d{distance(graph.position(seg), pos)};
+		if (d >= min_distance)
+			return seg;
+		if (d > best_distance)
+		{
+			best = seg;
+			best_distance = d;
+		}
+	}
+	return best;
+}
+
 /* The furthest of the path points `from` .. `from + lookahead - 1` (not
  * beyond `count - 1`) that `reachable(i)` accepts, tried from the
  * furthest down; `from` if none is (the next point is steered at

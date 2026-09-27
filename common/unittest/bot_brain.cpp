@@ -331,6 +331,120 @@ void test_steering()
 	CHECK(!should_fire(radians(3), radians(6), true, 400, 300));
 }
 
+/* The pieces of the fight (sections 3.4 and 4.6; the flight itself is
+ * test-bot-flight): shortest-rotation errors near the vertical, the
+ * feed-forward, the line of sight's rate, the jukes, the combat velocity,
+ * the dodge and the trigger.
+ */
+void test_fight_pieces()
+{
+	/* Near straight up the heading error stays small whichever side the
+	 * direction leans (B1's heading angle swung by 180 degrees).
+	 */
+	for (const double x : {-1e-3, -1e-5, 0.0, 1e-5, 1e-3})
+		for (const double z : {-0.01, 0.0, 0.01})
+		{
+			const auto e{steer_errors_local({x, 1, z})};
+			CHECK(std::abs(e.heading) < 0.01);
+			CHECK(near(e.pitch, -std::numbers::pi / 2 + z, 0.02));
+		}
+	/* The errors are the rotation: their size is the angle to go. */
+	{
+		const vec3 d{0.3, -0.5, 0.4};
+		const auto e{steer_errors_local(d)};
+		CHECK(near(std::hypot(e.pitch, e.heading), angle_between({0, 0, 1}, d), 1e-12));
+		CHECK(e.pitch > 0 && e.heading > 0);
+	}
+	/* Feed-forward: on target and turning with it, the axis holds the
+	 * turn; without it, the axis would stop the turn.
+	 */
+	const turn_response ship{radians(150), 0.19};
+	const double w{0.8};
+	CHECK(near(rotation_axis(0, w, ship, 1, w), w / ship.max_rate, 1e-12));
+	CHECK(rotation_axis(0, w, ship, 1) < 0);
+	CHECK(rotation_axis(0, 0, ship, 0.75, 10) == 0.75);
+	/* Line of sight: a target ahead moving right turns the line to the
+	 * right (about up); moving up, the nose goes up (negative pitch rate
+	 * about right).
+	 */
+	const auto right{line_of_sight_rate({0, 0, 60}, {50, 0, 0})};
+	CHECK(near(right.y, 50.0 / 60, 1e-12) && right.x == 0 && right.z == 0);
+	const auto up{line_of_sight_rate({0, 0, 60}, {0, 50, 0})};
+	CHECK(near(up.x, -50.0 / 60, 1e-12));
+	CHECK(line_of_sight_rate({0, 0, 60}, {0, 0, -50}) == vec3{});
+	CHECK(line_of_sight_rate({}, {1, 0, 0}) == vec3{});
+
+	/* Jukes: each run a new direction at least 90 degrees from the last,
+	 * a new distance in the band, and a run length in range.
+	 */
+	{
+		bot_rng rng{11};
+		juke_state j;
+		j.update(rng, 36, 84, 35, 95);
+		double angle{j.angle()};
+		unsigned run{1}, runs{0};
+		for (unsigned i = 0; i < 20000; ++i)
+		{
+			j.update(rng, 36, 84, 35, 95);
+			CHECK(j.range() >= 35 && j.range() <= 95);
+			if (j.angle() != angle)
+			{
+				const double turn{std::abs(std::remainder(j.angle() - angle, 2 * std::numbers::pi))};
+				CHECK(turn >= radians(90) - 1e-9);
+				CHECK(run >= 36 && run <= 85);
+				angle = j.angle();
+				run = 0;
+				++runs;
+			}
+			++run;
+		}
+		CHECK(runs > 20000 / 85 && runs < 20000 / 36);
+		/* A band that moves (the style's scale) starts a new run. */
+		j.update(rng, 36, 84, 200, 300);
+		CHECK(j.range() >= 200 && j.range() <= 300);
+	}
+	/* Combat velocity: closes in when far, backs off when near, the
+	 * strafe across the line of sight.
+	 */
+	{
+		bot_rng rng{2};
+		juke_state j;
+		j.update(rng, 36, 84, 60, 60);
+		const vec3 r{1, 0, 0}, u{0, 1, 0};
+		const auto far{combat_velocity({0, 0, 150}, r, u, j, 0.5, 40, 0)};
+		CHECK(near(far.z, 40, 1e-9) && near(far.x, 0, 1e-9));
+		const auto close{combat_velocity({0, 0, 30}, r, u, j, 0.5, 40, 0)};
+		CHECK(close.z < -30);
+		const auto there{combat_velocity({0, 0, 60}, r, u, j, 0.5, 40, 35)};
+		CHECK(near(there.z, 0, 1e-9));
+		CHECK(near(length(there), 35, 1e-9));
+		const auto flat{combat_velocity({0, 0, 60}, r, u, j, 0, 40, 35)};
+		CHECK(near(flat.y, 0, 1e-9));
+		CHECK(combat_velocity({}, r, u, j, 0.5, 40, 35) == vec3{});
+	}
+	/* Dodge: a shot that will pass within the radius makes the bot move
+	 * away from where it passes; one that misses, or flies away, not.
+	 */
+	{
+		const vec3 side{1, 0, 0};
+		const auto near_miss{dodge_direction({2, 0, 60}, {0, 0, -120}, 0.7, 7, side)};
+		CHECK(near_miss && near_miss->x < -0.99);
+		const auto straight{dodge_direction({0, 0, 60}, {0, 0, -120}, 0.7, 7, side)};
+		CHECK(straight && near(dot(*straight, {0, 0, 1}), 0, 1e-9) && near(length(*straight), 1, 1e-9));
+		CHECK(!dodge_direction({20, 0, 60}, {0, 0, -120}, 0.7, 7, side));
+		CHECK(!dodge_direction({0, 0, 60}, {0, 0, 120}, 0.7, 7, side));
+		/* Too far to arrive within the horizon. */
+		CHECK(!dodge_direction({0, 0, 200}, {0, 0, -120}, 0.7, 7, side));
+	}
+	/* The trigger: aligned within the cone, clear and in range. */
+	{
+		const vec3 aim{normalized({0.05, 0, 1})};
+		const double cone{radians(skill_of(bot_skill::hotshot).fire_cone_deg)};
+		CHECK(should_fire(angle_between({0, 0, 1}, aim), cone, true, 60, 300));
+		CHECK(!should_fire(angle_between(normalized({0.2, 0, 1}), aim), cone, true, 60, 300));
+	}
+}
+
 /* A toy brain that uses every tick-driven part: the perception layer,
  * the reaction delay, the aim error, the strafe and the random numbers.
  * Its decision on each tick depends only on the tick number.
@@ -437,6 +551,7 @@ void test_tables()
 		CHECK(s.aim_sigma_deg > 0);
 		CHECK(s.turn_cap <= 1);
 		CHECK(s.strafe_min_ms <= s.strafe_max_ms);
+		CHECK(s.strafe_vertical >= 0 && s.strafe_vertical <= 1);
 	}
 	CHECK(&skill_of(BOT_DEFAULT_SKILL) == &skill_table[2]);
 	CHECK(skill_of(bot_skill::hotshot).reaction_ms == 280);
@@ -527,6 +642,7 @@ int main()
 	test_reaction_and_memory();
 	test_target_choice();
 	test_steering();
+	test_fight_pieces();
 	test_tick_schedule();
 	test_tables();
 	test_primary_choice();

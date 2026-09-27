@@ -10,7 +10,7 @@
  * Dijkstra on grids and random graphs, passability, extra costs, the
  * node limit and partial paths, deterministic tie-breaking, a graph of
  * MAX_SEGMENTS nodes within the time budget, string pulling, path
- * following and stuck recovery.
+ * following, stuck recovery and the roam goals.
  *
  * Build and run with SCons:
  *
@@ -443,6 +443,69 @@ void test_stuck_detector()
 	CHECK(t == 90);
 }
 
+/* Roam goals (section 4.3): far away, reachable, never the segment the
+ * bot is in, spread over the level; and a path to them that A* finds.
+ */
+void test_roam_goals()
+{
+	grid gr{12, 4, 12, 0.15, 99};
+	std::minstd_rand rng{5};
+	const auto below{[&rng](const uint32_t n) -> uint32_t {
+		/* uint_fast32_t is uint32_t on Windows: no cast. */
+		const uint32_t r = rng() % n;
+		return r;
+	}};
+	astar_search search;
+	path_result path;
+	const auto open{[](uint32_t, const nav_edge &) { return true; }};
+	const auto none{[](uint32_t, const nav_edge &) { return 0.0; }};
+	std::vector<unsigned> chosen(gr.g.size(), 0);
+	unsigned far{0}, reached{0};
+	for (unsigned i = 0; i < 400; ++i)
+	{
+		uint32_t from;
+		do
+			from = below(static_cast<uint32_t>(gr.g.size()));
+		while (gr.blocked[from]);
+		const auto &pos{gr.g.position(from)};
+		const uint32_t goal{pick_roam_goal(gr.g, from, pos, 120, below)};
+		CHECK(goal != from);
+		CHECK(goal < gr.g.size());
+		CHECK(!gr.blocked[goal]);
+		++chosen[goal];
+		far += distance(gr.g.position(goal), pos) >= 120;
+		CHECK(search.find(gr.g, from, goal, open, none, 4000, path));
+		reached += path.complete;
+		/* A real journey: many segments, not the next one. */
+		if (path.complete)
+			CHECK(path.steps.size() >= 3);
+	}
+	/* Almost always far; reachable unless the blocks cut it off. */
+	CHECK(far > 400 * 95 / 100);
+	CHECK(reached > 400 * 80 / 100);
+	/* Spread over the level, not a few favourite places. */
+	unsigned distinct{0}, most{0};
+	for (const auto c : chosen)
+	{
+		distinct += c != 0;
+		most = std::max(most, c);
+	}
+	CHECK(distinct > 150);
+	CHECK(most < 10);
+	/* A graph of one node: stays. */
+	nav_graph one;
+	one.begin(1);
+	one.finish();
+	CHECK(pick_roam_goal(one, 0, {}, 120, below) == 0);
+	/* Everything near: the furthest drawn. */
+	grid small{3, 1, 1, 0, 1};
+	for (unsigned i = 0; i < 20; ++i)
+	{
+		const auto g{pick_roam_goal(small.g, 0, small.g.position(0), 1000, below)};
+		CHECK(g == 1 || g == 2);
+	}
+}
+
 }
 
 int main()
@@ -454,6 +517,7 @@ int main()
 	test_large_graph_budget();
 	test_string_pulling_and_following();
 	test_stuck_detector();
+	test_roam_goals();
 	std::puts("test-bot-nav: all checks passed");
 	return 0;
 }

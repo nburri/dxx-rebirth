@@ -5030,6 +5030,11 @@ class DXXArchive(DXXCommon):
 		RuntimeTest('test-bot-brain', (
 			'common/unittest/bot_brain.cpp',
 			)),
+		# Test of the bots' flight: the steering controller flies a model
+		# of the ship at 30 to 500 fps (bot_brain.h, bot_nav.h).
+		RuntimeTest('test-bot-flight', (
+			'common/unittest/bot_flight.cpp',
+			)),
 			)
 	del RuntimeTest
 

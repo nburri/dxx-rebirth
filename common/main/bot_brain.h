@@ -125,17 +125,21 @@ struct skill_params
 	/* Map knowledge in path segments; 0xffff is the whole level. */
 	unsigned map_knowledge;
 	bool strafe;
-	/* Strafe direction flips after this many ms (random in range). */
+	/* The strafe takes a new direction after this many ms (random in
+	 * range).
+	 */
 	unsigned strafe_min_ms;
 	unsigned strafe_max_ms;
+	/* The vertical share of the strafe (0: flat; section 4.6, bobbing). */
+	double strafe_vertical;
 };
 
 inline constexpr std::array<skill_params, BOT_SKILL_COUNT> skill_table{{
-	{550, 7.0, 600, 0.0, 0.45, 12, 45, 150, 0, 2000, 0.0, 0, 0, false, 1200, 2000},
-	{400, 4.5, 500, 0.4, 0.60, 9, 60, 250, 80, 3000, 0.2, 1, 3, true, 900, 1600},
-	{280, 2.8, 400, 0.7, 0.75, 6, 70, 350, 150, 5000, 0.45, 2, 8, true, 400, 1200},
-	{200, 1.7, 300, 0.9, 0.90, 4, 80, 450, 250, 7000, 0.7, 3, 15, true, 400, 1200},
-	{140, 1.0, 250, 1.0, 1.00, 3, 90, 600, 350, 10000, 0.85, 4, 0xffff, true, 400, 1000},
+	{550, 7.0, 600, 0.0, 0.45, 12, 45, 150, 0, 2000, 0.0, 0, 0, false, 1200, 2000, 0.0},
+	{400, 4.5, 500, 0.4, 0.60, 9, 60, 250, 80, 3000, 0.2, 1, 3, true, 900, 1800, 0.25},
+	{280, 2.8, 400, 0.7, 0.75, 6, 70, 350, 150, 5000, 0.45, 2, 8, true, 600, 1400, 0.5},
+	{200, 1.7, 300, 0.9, 0.90, 4, 80, 450, 250, 7000, 0.7, 3, 15, true, 500, 1300, 0.8},
+	{140, 1.0, 250, 1.0, 1.00, 3, 90, 600, 350, 10000, 0.85, 4, 0xffff, true, 400, 1100, 1.0},
 }};
 
 [[nodiscard]]
@@ -496,9 +500,17 @@ inline std::optional<uint8_t> choose_target(const std::span<const target_candida
 /* Section 3.4, steering: the angle errors (radians) toward a direction
  * given in the ship's frame (right, up, forward).  Positive heading
  * turns right, positive pitch turns the nose down (the signs of the
- * game's rotational thrust).  A direction almost straight behind keeps
- * turning the way it turned (`prefer_heading_sign`), so the bot does not
- * dither between left and right.
+ * game's rotational thrust).
+ *
+ * The errors are the components of the shortest rotation that brings
+ * the nose onto the direction (its angle times its unit axis), not the
+ * heading and pitch angles of the direction: those change wildly for a
+ * direction near straight up or down (the heading of a direction just
+ * above the nose swings by 180 degrees when it passes to the other
+ * side), which made the ship shake left and right under a target above
+ * it.  A direction almost straight behind keeps turning the way it
+ * turned (`prefer_heading_sign`), so the bot does not dither between left
+ * and right.
  */
 struct steer_errors
 {
@@ -509,12 +521,30 @@ struct steer_errors
 [[nodiscard]]
 inline steer_errors steer_errors_local(const vec3 &local_dir, const int prefer_heading_sign = 0)
 {
-	const double horizontal{std::hypot(local_dir.x, local_dir.z)};
+	const auto d{normalized(local_dir)};
+	if (d == vec3{})
+		return {};
+	/* The rotation axis of the nose (0, 0, 1) onto d is (-d.y, d.x, 0):
+	 * a right-handed rotation about the right axis lowers the nose
+	 * (positive pitch), one about the up axis turns it right (positive
+	 * heading).
+	 */
+	const double angle{std::acos(std::clamp(d.z, -1.0, 1.0))};
+	const double side{std::hypot(d.x, d.y)};
 	steer_errors e;
-	e.pitch = std::atan2(-local_dir.y, horizontal);
-	e.heading = std::atan2(local_dir.x, local_dir.z);
-	if (prefer_heading_sign && local_dir.z < 0 && std::abs(local_dir.x) < 0.2 * -local_dir.z && (e.heading > 0) != (prefer_heading_sign > 0))
-		e.heading = prefer_heading_sign * (std::numbers::pi - std::abs(std::atan2(local_dir.x, -local_dir.z)));
+	if (side > 1e-9)
+	{
+		e.pitch = angle * -d.y / side;
+		e.heading = angle * d.x / side;
+	}
+	else if (d.z < 0)
+		e.heading = (prefer_heading_sign < 0 ? -1 : 1) * angle;
+	if (prefer_heading_sign && d.z < 0 && std::abs(d.x) < 0.2 * -d.z && std::abs(d.y) < 0.2 * -d.z && (e.heading > 0) != (prefer_heading_sign > 0))
+	{
+		/* Nearly behind: turn the preferred way round, by the angle to go. */
+		e.heading = prefer_heading_sign * angle;
+		e.pitch = 0;
+	}
 	return e;
 }
 
@@ -531,13 +561,18 @@ struct turn_response
 /* The rotation axis in [-cap, cap] that turns an angle error `error`
  * (radians) away at the current rate `rate` (radians per second).  A
  * cascaded controller: the wanted rate is proportional to the error
- * (critically damped for the ship's time constant), and the axis adds
- * rate feedback to the feed-forward, so the ship neither overshoots nor
- * crawls.  It uses the current state only, so its result for a given
+ * (critically damped for the ship's time constant) plus `feed_forward`,
+ * the rate at which the wanted direction itself turns (radians per
+ * second, about the same axis), and the axis adds rate feedback to the
+ * feed-forward, so the ship neither overshoots nor crawls.  Without the
+ * feed-forward the ship lags a moving target by (its angular rate x the
+ * time constant): 9 degrees behind a player strafing at 50 units per
+ * second at 60 units, outside every fire cone, so the bots almost never
+ * fired.  It uses the current state only, so its result for a given
  * state does not depend on the frame length.
  */
 [[nodiscard]]
-inline double rotation_axis(const double error, const double rate, const turn_response &ship, const double cap)
+inline double rotation_axis(const double error, const double rate, const turn_response &ship, const double cap, const double feed_forward = 0)
 {
 	if (ship.max_rate <= 0)
 		return 0;
@@ -545,9 +580,22 @@ inline double rotation_axis(const double error, const double rate, const turn_re
 	const double tau{std::max(ship.time_constant, 1e-3)};
 	const double kp{(1 + feedback) / (4 * tau)};
 	const double wmax{ship.max_rate * cap};
-	const double wanted{std::clamp(kp * error, -wmax, wmax)};
+	const double wanted{std::clamp(kp * error + feed_forward, -wmax, wmax)};
 	const double axis{(wanted + feedback * (wanted - rate)) / ship.max_rate};
 	return std::clamp(axis, -cap, cap);
+}
+
+/* The angular velocity (radians per second, world axes) of the line
+ * from a point to a target at `rel_pos` from it moving at `rel_vel`
+ * relative to it: the steering's feed-forward.
+ */
+[[nodiscard]]
+inline vec3 line_of_sight_rate(const vec3 &rel_pos, const vec3 &rel_vel)
+{
+	const double d2{dot(rel_pos, rel_pos)};
+	if (d2 < 1)
+		return {};
+	return cross(rel_pos, rel_vel) * (1 / d2);
 }
 
 /* The thrust command (world direction, length at most 1) that brings the
@@ -563,6 +611,49 @@ inline vec3 velocity_command(const vec3 &wanted, const vec3 &vel, const double m
 	const double l{length(c)};
 	if (l > 1)
 		c *= 1 / l;
+	return c;
+}
+
+/* Section 3.4: one frame of the steering, from the direction and the
+ * thrust the last tick chose and the ship's current state.
+ */
+struct steer_input
+{
+	/* The ship's orientation without the turn roll: the frame in which
+	 * do_physics_sim_rot applies the rotation.
+	 */
+	frame3 unrolled;
+	/* The orientation with it: the frame in which apply_pilot_controls
+	 * applies the thrust.
+	 */
+	frame3 thrust_frame;
+	/* The wanted forward direction and its angular velocity (world). */
+	vec3 face_dir{0, 0, 1};
+	vec3 face_rate;
+	/* The thrust command (world, length at most 1). */
+	vec3 move_cmd;
+	/* The current pitch and heading rates, radians per second. */
+	double pitch_rate{}, heading_rate{};
+};
+
+struct steer_output
+{
+	double pitch{}, heading{}, forward{}, sideways{}, vertical{};
+};
+
+[[nodiscard]]
+inline steer_output steer_controls(const steer_input &in, const turn_response &ship, const double cap, int &heading_pref)
+{
+	steer_output c;
+	const auto e{steer_errors_local(in.unrolled.to_local(in.face_dir), heading_pref)};
+	if (std::abs(e.heading) > 0.2)
+		heading_pref = e.heading > 0 ? 1 : -1;
+	c.pitch = rotation_axis(e.pitch, in.pitch_rate, ship, cap, dot(in.face_rate, in.unrolled.r));
+	c.heading = rotation_axis(e.heading, in.heading_rate, ship, cap, dot(in.face_rate, in.unrolled.u));
+	const auto thrust{in.thrust_frame.to_local(in.move_cmd)};
+	c.sideways = std::clamp(thrust.x, -1.0, 1.0);
+	c.vertical = std::clamp(thrust.y, -1.0, 1.0);
+	c.forward = std::clamp(thrust.z, -1.0, 1.0);
 	return c;
 }
 
@@ -610,6 +701,112 @@ public:
 		return m_dir;
 	}
 };
+
+/* Section 4.6, movement in a fight.  B1 first kept still inside the
+ * 35-95 unit band and strafed straight left and right, reversing every
+ * 0.4-1.2 s: the ship never reached speed before it turned back, so two
+ * bots fighting each other shook on one spot.  Now each run of the strafe
+ * takes a new direction across the line of sight, at least 90 degrees
+ * from the last (so the bot circles, climbs and dives rather than
+ * swinging), with a vertical share (`vertical`: 0 flat, 1 as much as
+ * sideways), and a new preferred distance inside the band, so the bot
+ * also closes in and backs off.
+ */
+class juke_state
+{
+	double m_angle{};
+	double m_range{};
+	unsigned m_left{};
+public:
+	void reset()
+	{
+		*this = {};
+	}
+	/* Once per tick. */
+	void update(bot_rng &rng, const unsigned min_ticks, const unsigned max_ticks, const double lo, const double hi)
+	{
+		if (m_left && m_range >= lo && m_range <= hi)
+		{
+			--m_left;
+			return;
+		}
+		m_angle = std::remainder(m_angle + rng.uniform(radians(90), radians(270)), 2 * std::numbers::pi);
+		m_range = rng.uniform(lo, hi);
+		const unsigned a{std::max(1u, min_ticks)};
+		const unsigned b{std::max(a, max_ticks)};
+		m_left = a + rng.below(b - a + 1);
+	}
+	/* The angle of the strafe about the line of sight, from the right. */
+	[[nodiscard]]
+	double angle() const
+	{
+		return m_angle;
+	}
+	/* The preferred distance to the target. */
+	[[nodiscard]]
+	double range() const
+	{
+		return m_range;
+	}
+	[[nodiscard]]
+	unsigned ticks_left() const
+	{
+		return m_left;
+	}
+};
+
+/* The velocity a fighting bot wants: toward or away from the target to
+ * reach the juke's preferred distance (at most `approach_speed`), plus
+ * the strafe across the line of sight (`strafe_speed`, 0 for none) in the
+ * juke's direction, taken in the frame (`right`, `up`) of the ship.
+ */
+[[nodiscard]]
+inline vec3 combat_velocity(const vec3 &to_target, const vec3 &right, const vec3 &up, const juke_state &juke, const double vertical, const double approach_speed, const double strafe_speed)
+{
+	const auto d{normalized(to_target)};
+	if (d == vec3{})
+		return {};
+	const double dist{length(to_target)};
+	const double approach{std::clamp((dist - juke.range()) * 1.5, -approach_speed, approach_speed)};
+	/* The ship's right and up, made perpendicular to the line of sight. */
+	auto r{normalized(right - d * dot(right, d))};
+	if (r == vec3{})
+		r = normalized(cross(up, d));
+	const auto u{cross(d, r)};
+	const auto lateral{normalized(r * std::cos(juke.angle()) + u * (std::sin(juke.angle()) * vertical))};
+	return d * approach + lateral * strafe_speed;
+}
+
+/* Section 4.6, dodge: a projectile at `rel_pos` from the ship moving at
+ * `rel_vel` relative to it passes nearest within `horizon` seconds; if
+ * that is closer than `radius`, the direction to thrust (unit, across
+ * the projectile's flight, away from where it passes), else none.
+ */
+[[nodiscard]]
+inline std::optional<vec3> dodge_direction(const vec3 &rel_pos, const vec3 &rel_vel, const double horizon, const double radius, const vec3 &fallback)
+{
+	const double v2{dot(rel_vel, rel_vel)};
+	if (v2 < 1)
+		return std::nullopt;
+	const double t{-dot(rel_pos, rel_vel) / v2};
+	if (t <= 0 || t > horizon)
+		return std::nullopt;
+	const auto closest{rel_pos + rel_vel * t};
+	if (length(closest) >= radius)
+		return std::nullopt;
+	const auto along{rel_vel * (1 / std::sqrt(v2))};
+	/* Away from where it passes; straight at the ship: to the side. */
+	auto away{normalized(-closest - along * dot(-closest, along))};
+	if (away == vec3{} || length(closest) < 0.5)
+	{
+		away = normalized(fallback - along * dot(fallback, along));
+		if (away == vec3{})
+			away = normalized(cross(along, vec3{0, 1, 0}));
+		if (away == vec3{})
+			away = vec3{1, 0, 0};
+	}
+	return away;
+}
 
 /* Section 4.4: trigger discipline. */
 [[nodiscard]]
