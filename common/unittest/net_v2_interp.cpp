@@ -12,8 +12,9 @@
  * arrival, Hermite and nlerp interpolation, the extrapolation cap, the
  * discontinuity snaps, the interpolation delay estimator, the lag marker,
  * the tick accumulator at 30/60/120 Hz with frame times from 2 ms to
- * 100 ms, and an end-to-end simulation of a remote ship shown at 500 fps
- * and at 30 fps over a lossy, jittery, reordering link.
+ * 100 ms, an end-to-end simulation of a remote ship shown at 500 fps
+ * and at 30 fps over a lossy, jittery, reordering link, and the muzzle
+ * flashes a remote ship carries along.
  *
  * Build and run with SCons:
  *
@@ -929,6 +930,113 @@ void test_end_to_end()
 		}
 }
 
+/* The axes (rows of the engine's orientation matrix) of a ship turned by
+ * `yaw` about its up axis and then by `pitch` about its right axis.
+ */
+[[nodiscard]]
+ship_axes axes_yaw_pitch(const double yaw, const double pitch)
+{
+	const double cy{std::cos(yaw)}, sy{std::sin(yaw)}, cp{std::cos(pitch)}, sp{std::sin(pitch)};
+	/* Forward and right as given, up = forward x right, as the engine
+	 * builds its matrices.
+	 */
+	const double f[3]{sy * cp, -sp, cy * cp};
+	const double r[3]{cy, 0, -sy};
+	const double u[3]{f[1] * r[2] - f[2] * r[1], f[2] * r[0] - f[0] * r[2], f[0] * r[1] - f[1] * r[0]};
+	return {vec_units(r[0], r[1], r[2]), vec_units(u[0], u[1], u[2]), vec_units(f[0], f[1], f[2])};
+}
+
+[[nodiscard]]
+net_vec add(const net_vec &a, const net_vec &b)
+{
+	return {a.x + b.x, a.y + b.y, a.z + b.z};
+}
+
+[[nodiscard]]
+net_vec sub(const net_vec &a, const net_vec &b)
+{
+	return {a.x - b.x, a.y - b.y, a.z - b.z};
+}
+
+void test_carried_effects()
+{
+	/* The frame conversion: a gun point in the ship's frame goes to the
+	 * world and back, and the axes map to the unit vectors.
+	 */
+	{
+		const auto axes{axes_yaw_pitch(0.7, -0.3)};
+		const auto gun{vec_units(2.2, -1.5, 4.8)};
+		const auto world{from_ship_frame(axes, gun)};
+		CHECK(std::abs(units(world.x) * units(world.x) + units(world.y) * units(world.y) + units(world.z) * units(world.z) - (2.2 * 2.2 + 1.5 * 1.5 + 4.8 * 4.8)) < 0.001);
+		CHECK(dist(to_ship_frame(axes, world), gun) < 0.0005);
+		CHECK(dist(from_ship_frame(axes, vec_units(0, 0, 1)), axes.fvec) < 0.0001);
+		CHECK(dist(to_ship_frame(axes, axes.rvec), vec_units(1, 0, 0)) < 0.0001);
+		const ship_axes identity{vec_units(1, 0, 0), vec_units(0, 1, 0), vec_units(0, 0, 1)};
+		CHECK(from_ship_frame(identity, gun) == gun);
+		CHECK(to_ship_frame(identity, gun) == gun);
+	}
+	/* The playtest case: a ship flying forward at 60 unit/s and turning,
+	 * drawn at 500 fps.  Its flash is made at the gun where the ship was
+	 * in the previous frame (the fire message is read before the frame's
+	 * pose is written) and is carried each frame: it stays on the gun for
+	 * its whole life, where a flash that stays put ends up far behind.
+	 */
+	{
+		constexpr double speed{60}, frame{0.002}, life{0.3};
+		const auto gun{vec_units(3.0, -1.0, 5.0)};
+		const auto pose_at{[&](const double t) {
+			const double yaw{0.5 * t};
+			const auto axes{axes_yaw_pitch(yaw, 0.1)};
+			const net_vec pos{add(vec_units(100, 20, -50), vec_units(speed * t * std::sin(yaw), 0, speed * t * std::cos(yaw)))};
+			return std::pair{pos, axes};
+		}};
+		const auto [pos0, axes0] = pose_at(0);
+		const net_vec flash0{add(pos0, from_ship_frame(axes0, gun))};
+		carried_effects c;
+		c.add({.object = 7, .signature = 42, .local = to_ship_frame(axes0, sub(flash0, pos0))});
+		CHECK(c.size() == 1);
+		net_vec flash{flash0};
+		double worst{};
+		for (double t = frame; t <= life; t += frame)
+		{
+			const auto [pos, axes] = pose_at(t);
+			c.remove_if([&](const carried_effects::entry &e) {
+				flash = add(pos, from_ship_frame(axes, e.local));
+				return false;
+			});
+			worst = std::max(worst, dist(flash, add(pos, from_ship_frame(axes, gun))));
+		}
+		CHECK(worst < 0.002);
+		const auto [pos_end, axes_end] = pose_at(life);
+		CHECK(dist(flash0, add(pos_end, from_ship_frame(axes_end, gun))) > 15);
+	}
+	/* The list: a new object in a slot replaces the old entry, a full list
+	 * drops its oldest entry, remove_if keeps the order.
+	 */
+	{
+		carried_effects c;
+		CHECK(c.empty());
+		for (std::uint16_t i = 0; i < NET_INTERP_CARRIED_MAX; ++i)
+			c.add({.object = i, .signature = 1, .local = {}});
+		CHECK(c.size() == NET_INTERP_CARRIED_MAX);
+		c.add({.object = 3, .signature = 2, .local = {}});
+		CHECK(c.size() == NET_INTERP_CARRIED_MAX);
+		CHECK(c[NET_INTERP_CARRIED_MAX - 1].object == 3 && c[NET_INTERP_CARRIED_MAX - 1].signature == 2);
+		c.add({.object = 100, .signature = 1, .local = {}});
+		CHECK(c.size() == NET_INTERP_CARRIED_MAX);
+		CHECK(c[0].object == 1);
+		CHECK(c[NET_INTERP_CARRIED_MAX - 1].object == 100);
+		c.remove_if([](const carried_effects::entry &e) { return e.object % 2 == 0; });
+		/* 0 was dropped, 3 moved to the end when its slot was reused. */
+		const std::vector<std::uint16_t> expected{1, 5, 7, 9, 11, 13, 15, 3};
+		CHECK(c.size() == expected.size());
+		for (std::size_t i = 0; i < c.size(); ++i)
+			CHECK(c[i].object == expected[i]);
+		c.clear();
+		CHECK(c.empty());
+	}
+}
+
 }
 
 int main()
@@ -949,6 +1057,7 @@ int main()
 	test_connection_ticks();
 	test_clock_offset();
 	test_end_to_end();
+	test_carried_effects();
 	std::puts("all tests passed");
 	return 0;
 }

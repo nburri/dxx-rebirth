@@ -46,11 +46,13 @@ namespace dsx {
 
 namespace {
 
+using ::dcx::net_interp::carried_effects;
 using ::dcx::net_interp::entity_track;
 using ::dcx::net_interp::host_clock;
 using ::dcx::net_interp::lag_indicator;
 using ::dcx::net_interp::pose;
 using ::dcx::net_interp::pose_kind;
+using ::dcx::net_interp::ship_axes;
 using ::dcx::net_interp::snapshot;
 using ::dcx::net_v2::net_clock;
 
@@ -98,6 +100,8 @@ struct interp_state
 	 * there again, with its velocity, for the explosion and the eggs.
 	 */
 	per_player_array<std::optional<snapshot>> ghosted{};
+	/* The muzzle flashes each remote ship carries along. */
+	per_player_array<carried_effects> carried{};
 #if DXX_BUILD_DESCENT == 2
 	per_player_array<guided_track> guided{};
 	per_player_array<objnum_t> driven_guided{};
@@ -193,6 +197,52 @@ bool write_pose(const vmobjptridx_t obj, const pose &p)
 		obj_relink(Objects.vmptr, vmsegptr, obj, vmsegptridx(seg));
 	}
 	return true;
+}
+
+[[nodiscard]]
+::dcx::net_v2::net_vec to_net_vec(const vms_vector &v)
+{
+	return {v.x, v.y, v.z};
+}
+
+[[nodiscard]]
+ship_axes axes_of(const object_base &obj)
+{
+	return {to_net_vec(obj.orient.rvec), to_net_vec(obj.orient.uvec), to_net_vec(obj.orient.fvec)};
+}
+
+/* Put the muzzle flashes of player `pnum`'s ship back on its guns, where
+ * the ship is now.  A flash that is gone, or whose place on the ship is
+ * outside the mine (it is left where it is), is forgotten.
+ */
+void carry_effects(const playernum_t pnum, const vcobjptr_t ship)
+{
+	auto &c = I.carried[pnum];
+	if (c.empty())
+		return;
+	if (ship->type != object_type::OBJ_PLAYER)
+	{
+		c.clear();
+		return;
+	}
+	auto &Objects = LevelUniqueObjectState.Objects;
+	const auto axes{axes_of(*ship)};
+	c.remove_if([&](const carried_effects::entry &e) {
+		const auto &&fx = Objects.vmptridx(objnum_t{e.object});
+		if (fx->type != object_type::OBJ_FIREBALL || fx->signature != object_signature_t{e.signature} || (fx->flags & OF_SHOULD_BE_DEAD))
+			return true;
+		const auto off{::dcx::net_interp::from_ship_frame(axes, e.local)};
+		const vms_vector pos{ship->pos.x + off.x, ship->pos.y + off.y, ship->pos.z + off.z};
+		auto seg{find_segment_near(pos, fx->segnum)};
+		if (seg == segment_none)
+			seg = find_segment_near(pos, ship->segnum);
+		if (seg == segment_none)
+			return true;
+		fx->pos = pos;
+		if (fx->segnum != seg)
+			obj_relink(Objects.vmptr, vmsegptr, fx, vmsegptridx(seg));
+		return false;
+	});
 }
 
 [[nodiscard]]
@@ -335,6 +385,7 @@ void reset_player(const playernum_t pnum)
 	I.lag_age[pnum] = 0;
 	I.ghosted[pnum].reset();
 	I.before_snap[pnum] = {};
+	I.carried[pnum].clear();
 #if DXX_BUILD_DESCENT == 2
 	I.guided[pnum] = {};
 	I.guided[pnum].track.reset(I.tick_period);
@@ -396,6 +447,23 @@ void net_interp_sweep_driven(const d_robot_info_array &Robot_info, const vmobjpt
 	}
 }
 
+void net_interp_carry_flash(const vcobjptridx_t ship, const vcobjptridx_t flash)
+{
+	if (!(Game_mode & GM_NETWORK) || Newdemo_state == ND_STATE_PLAYBACK)
+		return;
+	if (ship->type != object_type::OBJ_PLAYER || flash->type != object_type::OBJ_FIREBALL)
+		return;
+	const auto pnum{get_player_id(ship)};
+	if (pnum >= N_players || pnum >= MAX_PLAYERS || pnum == Player_num || vcplayerptr(pnum)->objnum != ship.get_unchecked_index())
+		return;
+	const auto offset{vm_vec_build_sub(flash->pos, ship->pos)};
+	I.carried[pnum].add({
+		.object = flash.get_unchecked_index(),
+		.signature = static_cast<uint16_t>(flash->signature),
+		.local = ::dcx::net_interp::to_ship_frame(axes_of(*ship), to_net_vec(offset)),
+	});
+}
+
 bool net_interp_player_lagging(const playernum_t pnum)
 {
 	return pnum < MAX_PLAYERS && pnum != Player_num && I.lag[pnum].lagging();
@@ -420,7 +488,10 @@ void net_interp_apply_all()
 			continue;
 		auto &plr = *vcplayerptr(i);
 		if (plr.connected != player_connection_status::playing)
+		{
+			I.carried[i].clear();
 			continue;
+		}
 		auto &t = I.ships[i];
 		t.delay.update(now);
 		if (!t.ring.empty())
@@ -440,6 +511,14 @@ void net_interp_apply_all()
 				}
 		}
 		I.before_snap[i] = {};
+		/* The flashes of the shots it fired since the last frame were
+		 * made at the gun where it was then (and drawn): put them back
+		 * on the gun where it is now, before this frame draws them.
+		 */
+		if (plr.objnum != object_none)
+			carry_effects(i, vmobjptridx(plr.objnum));
+		else
+			I.carried[i].clear();
 #if DXX_BUILD_DESCENT == 2
 		auto &g = I.guided[i];
 		g.track.delay.update(now);

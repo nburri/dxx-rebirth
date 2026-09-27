@@ -771,7 +771,8 @@ imobjptridx_t Laser_create_new(const vms_vector &direction, const vms_vector &po
 		if (parent != Viewer && parent->type != object_type::OBJ_WEAPON) {
 			// Muzzle flash
 			if (const auto flash_vclip = weapon_info.flash_vclip; Vclip.valid_index(flash_vclip))
-				object_create_explosion_without_damage(Vclip, vmsegptridx(obj->segnum), obj->pos, weapon_info.flash_size, flash_vclip);
+				if (const auto &&flash{object_create_explosion_without_damage(Vclip, vmsegptridx(obj->segnum), obj->pos, weapon_info.flash_size, flash_vclip)}; flash != object_none)
+					net_interp_carry_flash(parent, flash);
 		}
 
 		do_omega_stuff(vmsegptridx, parent, position, obj);
@@ -895,7 +896,11 @@ imobjptridx_t Laser_create_new(const vms_vector &direction, const vms_vector &po
 	if (( parent != Viewer ) && (parent->type != object_type::OBJ_WEAPON))	{
 		// Muzzle flash
 		if (const auto flash_vclip = weapon_info.flash_vclip; Vclip.valid_index(flash_vclip))
-			object_create_explosion_without_damage(Vclip, segnum.absolute_sibling(obj->segnum), obj->pos, weapon_info.flash_size, flash_vclip);
+			/* A remote player's ship moves on after its fire message
+			 * made the flash: the flash goes along (net_interp).
+			 */
+			if (const auto &&flash{object_create_explosion_without_damage(Vclip, segnum.absolute_sibling(obj->segnum), obj->pos, weapon_info.flash_size, flash_vclip)}; flash != object_none)
+				net_interp_carry_flash(parent, flash);
 	}
 
 	if (weapon_info.flash_sound != sound_effect::None)
