@@ -75,6 +75,7 @@ jobs:
           RC=windres
           sdl2=1
           d1x=0
+          d2x=1
 
       - name: Upload SConf log
         if: ${{ !cancelled() }}
@@ -102,5 +103,6 @@ jobs:
           RC=windres
           sdl2=1
           d1x=0
+          d2x=1
           check_header_includes=1
           build/{common,d2x-rebirth}/check_header_includes
