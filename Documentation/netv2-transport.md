@@ -66,7 +66,13 @@ exits with status 1; success ends with `all tests passed`.
 | grant closes tick | – | One packet built in tick 0, then exactly 2 (not 3) in tick 1. |
 | hostile ack | – | `ack` 5000 after 5 packets sent: `bad_ack`, no packet resolved, no resend, one protocol error; its replay is a duplicate; `ack` 5 is accepted. |
 | event head-of-line | – | Ten 4-byte events queued behind an 1161-byte one all go out beside a 300-byte state at once; the big one is dropped after 8 packets and fits when sent alone. |
-| zero tick period | – | `tick_period` 0 and `max_packets_per_tick` 0 are clamped to 1 and the connection sends. |
+| zero tick period | – | `tick_period` 0 and `max_packets_per_tick` 0 are clamped (to 1 and 2) and the connection sends. |
+| echo pinning | 30 ms | 600 forged packets over 5 s pinning one real old packet in `echo_seq` with `echo_delay` 0 (with `ack` equal to it, and with `ack` moving on): `srtt`, `rttvar` and the offset target are unchanged. |
+| corrupt acks | 40 ms | A packet with reliable messages is lost and the peer's next datagram falsely acks it but is corrupt: nothing of it is applied, the messages are retransmitted, all 200 arrive, one protocol error. |
+| stream stalled | – | Message 1 arrives, message 0 never does, the peer keeps sending state: the receiver closes with `stream_stalled` after 10 s. |
+| corrupted then intact | – | A corrupted copy of a packet, then the intact copy: the intact one is accepted and its message delivered; one protocol error. |
+| corrupted future seq | – | A corrupt datagram whose `seq` byte reads as a future sequence does not prevent the real packets 2, 3 and 4 from being accepted. |
+| state omitted | – | A 1 KiB message beside an 1100-byte state: the message goes out alone, the state with the next tick; `max_packets_per_tick` 1 is clamped to 2. |
 | 240 Hz caller | – | `build_outgoing` called four times per tick period with a 90 KiB backlog: never more than 2 packets in any 16.7 ms window, everything delivered. |
 | window in one packet | – | 300 empty messages queued at once: the first packet carries exactly 256, the receiver accepts it, the remaining 44 follow after the ack. |
 | packets per tick | 30 ms | A 90 KiB backlog of 1 KiB messages drains at no more than 2 packets per tick and arrives in order. |
@@ -111,23 +117,34 @@ message, or 100 ms have passed since the last packet (keepalive). The second
 call in a tick carries only reliable messages that did not fit beside the
 state chunk, and no more than `max_packets_per_tick` (2, §3.6) are built per
 tick; a backlog beyond that waits for later ticks. `begin_tick(now)` grants
-that budget for every whole `tick_period` elapsed since the last grant,
+that budget for every whole `tick_period` elapsed since the last grant, and
+judges the timeouts and the RTO once per grant (a retransmission cannot go out
+more often anyway),
 advancing the tick origin by whole periods (not resetting it to `now`), so a
 caller at any rate gets exactly one budget per period, a frame that spans two
 ticks gets both. A grant replaces whatever was left of the previous one and is
 capped at two ticks, so unused ticks never pile up into a spare and a long
 stall does not end in a burst. Within a tick the first packet goes out
-whenever anything is due; a second, up to `max_packets_per_tick`, only while
-reliable messages remain that did not fit in the previous one.
-`build_outgoing` calls `begin_tick` itself. `on_receive` applies the checks of §3.7
+whenever anything is due; a second, up to `max_packets_per_tick` (at least 2),
+only while reliable messages remain that did not fit in the previous one. A
+head message that does not fit beside the state chunk goes out without the
+state, which stays pending for the next packet or tick, so no message size can
+starve. `build_outgoing` calls `begin_tick` itself. `on_receive` applies the checks of §3.7
 in order and reports why a datagram was dropped (`receive_status`). A packet
-whose header validates but whose chunks do not (`malformed_chunk`) keeps its
-header effects (the peer's acks, the RTT sample, `last_heard`) but is not
-acknowledged and delivers nothing, so a conforming peer retransmits its
-reliable messages and the receive window cannot wedge. A packet whose `ack`
-names a sequence we have not sent (`bad_ack`) is rejected outright and counts
-as a protocol error, like a malformed packet; replays of either are
-duplicates. Packets with
+whose header validates but whose chunks do not (`malformed_chunk`) has no
+effect at all: not its acks (one corrupt ack bit would otherwise acknowledge a
+message that was never delivered and wedge the receiver's window), not its
+echo, not `last_heard`; it is not acknowledged, so a conforming peer
+retransmits. A packet whose `ack` names a sequence we have not sent
+(`bad_ack`) is rejected the same way. Each counts one protocol error per
+distinct `seq` (a 16-entry list of recently counted sequences, expired with
+the reorder window, suppresses further counts for replays); the list never
+rejects anything, so an intact copy of a sequence whose corrupted copy came
+first is accepted normally, and a corrupt `seq` byte cannot blackhole the real
+packet with that sequence. Should the receive window hold out-of-order
+messages for 10 s without the gap ever being filled while the peer keeps
+sending, the connection closes with `stream_stalled` rather than blaming the
+peer for a protocol error. Packets with
 `flags.UNCONNECTED` are reported as `unconnected` and left to the session
 layer (stage 1), which also decides which `connection` a datagram belongs to
 (`packet_header::read` gives it `session_id`, `peer_token` and `player_id`).
@@ -156,7 +173,7 @@ the connection neither sends nor accepts anything.
 
 | Field | Meaning |
 |---|---|
-| `rtt_valid`, `srtt`, `rttvar`, `rto` | §3.5 estimator, in net time units (1/65536 s; `× 1000 / 65536` for ms). Samples come only from the echo fields, so they exclude the peer's hold time; an echo is taken only if `echo_seq` names a packet in our log whose recorded `send_time` equals `echo_time` and it is not older than the last echo taken, and the sample is then `now − sent_at − echo_delay` from our own log, so the peer cannot steer the estimate. Acks contribute no samples: an ack is held until the peer's next tick and may ride a reordered packet, so it would only add noise on top of what the echo already measures. `rto` is `clamp(srtt + max(4·rttvar, tick) + tick, 50 ms, 1 s)` and 1 s before the first sample; the two ticks of slack cover the peer's ack hold and our own detection alignment, which the echo-based `srtt` deliberately excludes. This `srtt` is what the HUD will show as ping. |
+| `rtt_valid`, `srtt`, `rttvar`, `rto` | §3.5 estimator, in net time units (1/65536 s; `× 1000 / 65536` for ms). Samples come only from the echo fields, so they exclude the peer's hold time; an echo is taken only if `echo_seq` equals the packet's `ack` (a conforming peer echoes the newest packet it received, which is also its `ack`), names a packet in our log whose recorded `send_time` equals `echo_time`, and is strictly newer than the last echo taken (a repeated `echo_seq` is the same measurement held longer, so it yields no sample); the sample is then `now − sent_at − echo_delay` from our own log. A peer therefore cannot steer the estimate, not even by pinning one real old packet with a small delay. Acks contribute no samples: an ack is held until the peer's next tick and may ride a reordered packet, so it would only add noise on top of what the echo already measures. `rto` is `clamp(srtt + max(4·rttvar, tick) + tick, 50 ms, 1 s)` and 1 s before the first sample; the two ticks of slack cover the peer's ack hold and our own detection alignment, which the echo-based `srtt` deliberately excludes. This `srtt` is what the HUD will show as ping. |
 | `loss_estimate` | Moving average (1/64 per packet) of the fraction of our packets the peer never acknowledged. A packet counts as lost once the peer's `ack` is more than 64 ahead of it, or when its slot in the 256-entry packet log is reused without an ack (no acks at all), so the value lags by one to four seconds at 60 pps and settles slowly on a link that just became clean. |
 | `packets_sent/received/rejected/acked/lost` | Per direction. `rejected` counts every datagram `on_receive` dropped, including duplicates. |
 | `messages_enqueued/delivered` | Reliable messages queued here / delivered to the caller from the peer. |
@@ -173,10 +190,7 @@ the connection neither sends nor accepts anything.
 
 - Packet sequence numbers skip 0 on wrap so that `ack == 0 && ack_bits == 0`
   always means "nothing received yet".
-- RTT samples are taken from `echo_time`/`echo_delay`; the ack-based sample
-  (`sent_at` in the packet log) is used only for a packet whose ack arrived
-  without a usable echo, because the ack-based value includes the peer's
-  hold time up to one tick. In exchange the RTO adds
+- RTT samples are taken from the echo fields only. In exchange the RTO adds
   `max(4·rttvar, tick) + tick` instead of `4·rttvar`: with hold-free samples
   `rttvar` decays to zero on a steady link and the plain formula would
   retransmit every message whose ack is held for a tick.
@@ -189,19 +203,27 @@ the connection neither sends nor accepts anything.
 - The echo fields follow only the newest packet received; a reordered
   older packet is acknowledged and delivered but not echoed, since echoing
   it would add the reorder delay to the peer's RTT sample.
-- Malformed packets are never acknowledged, so their sequences are
-  remembered in a small set (16) and replays of them are rejected as
-  duplicates instead of counting another protocol error.
+- Protocol errors are counted once per distinct `seq` through a small list
+  (16) of recently counted sequences that expires with the reorder window;
+  the list never rejects a datagram, so an intact copy of a sequence whose
+  corrupt copy arrived first always gets through.
+- `close_reason::stream_stalled` (not in the design) closes a connection
+  whose receive window has held out-of-order messages for 10 s without the
+  gap being filled while the peer kept sending.
+- `max_packets_per_tick` is at least 2, and a head message that does not fit
+  beside the state chunk is sent without it: with one packet per tick and a
+  state every tick, such a message could otherwise never go out.
 - The packet log resolves an entry as lost when its slot is reused after
   256 packets without an ack, so a total ack blackout still shows as loss.
 - The 600-byte resend budget is cumulative, but the first resent message of
   a packet may exceed it; otherwise a message above 600 bytes could never be
   retransmitted.
-- A malformed packet delivers none of its chunks (not just the ones after
-  the bad chunk) and is not recorded in the replay window, so it is never
-  acknowledged; its header effects (acks, RTT, `last_heard`) are kept as
-  designed. The design text updates `ack_bits` at step 6 before the chunk
-  walk, which would acknowledge messages that were never delivered.
+- A malformed packet has no effect at all: it delivers nothing, is not
+  recorded in the replay window (so never acknowledged), and its header's
+  acks, echo and `last_heard` are not applied either. The design text
+  updates `ack_bits` at step 6 and keeps the header effects after a failed
+  chunk walk; both would let a corrupt datagram acknowledge messages that
+  were never delivered.
 - Acks contribute no RTT samples at all (the design feeds both echo and
   ack samples into one estimator): the echo already measures the round
   trip without the peer's hold, and ack-based samples, even from the packet

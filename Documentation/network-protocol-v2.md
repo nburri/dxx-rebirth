@@ -443,10 +443,14 @@ address with an implausible `seq` is dropped.
    taken (§2.2).
 8. Walk the chunks. Every chunk must fit; every `RELIABLE` message must fit
    its chunk; every `STATE`/`INPUT` record must have the exact size for its
-   flags. The first violation drops the *rest* of the packet but keeps the
-   header effects (acks, RTT) already applied, and increments a per-peer error
-   counter; 16 invalid packets within 10 s from one peer disconnect it
-   (`kick_player_reason::protocol_error`, new).
+   flags. The first violation drops the whole packet: nothing of it is
+   applied, not even the header's acks or echo (a corrupt ack bit would
+   otherwise acknowledge messages that were never delivered), and the packet
+   is not recorded in the replay window, so an intact copy of the same `seq`
+   is still accepted. One protocol error is counted per distinct `seq`; 16
+   within 10 s from one peer disconnect it
+   (`kick_player_reason::protocol_error`, new). The header effects of step 7
+   are therefore applied only after this step succeeds.
 9. Only then are messages delivered and the header's `ack`/`ack_bits`
    applied to the sender state.
 
