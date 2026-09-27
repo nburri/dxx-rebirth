@@ -82,11 +82,13 @@ exits with status 1; success ends with `all tests passed`.
 | frame-rate caller | – | 5000 frames at 500 Hz setting the state only when `begin_tick` opened a tick: 600 ticks, 600 states delivered, none dropped. |
 | update() first | – | The same pattern with `update()` called before `begin_tick`: 600 ticks still reported, none twice, 600 states delivered. |
 | event beside backlog | 30 ms | A 300-byte event per tick beside a standing backlog of 900-byte reliable messages: 60 of 60 events delivered, none dropped. |
+| reliable before events | 30 ms | A 700-byte state and a 700-byte event every tick with a 1 KiB message queued: the message goes out in the first tick (the round-12 event reservation starved it for good), all events delivered, none dropped. |
+| bound hold at 30 Hz | – | A caller building every second tick takes a 233 ms bound: the RTO covers it for the second of hold and has faded to less than a quarter half a second later, at wall-clock speed (aged per grant it would still be whole). |
 | send_unreliable types | – | `state`, `input`, `reliable`, `session` and an unknown type are refused (false, counted in `unreliable_dropped`); only `event_u` is queued. |
 | held message view | – | Message 2 arrives first and is held, its datagram buffer is overwritten, then message 1: both delivered intact, message 1 as a view into its own datagram. |
 | to_peer_time wrap | 30 ms | Client clock 2^32 units + 3 s ahead of the host: `to_peer_time` is within 5 ms of the host's wire stamp under `net_time_diff`. |
 | echo of an old unechoed packet | 30 ms | 60 pps host against a 10 pps client (five packets in six unechoed): a forged newest client packet echoing the 3 s old packet 61 with its true `send_time` and `echo_delay` 0 leaves `srtt`, `rttvar` and the offset target unchanged. |
-| bound excess | – | The estimator alone: 80 ms samples, then a 130 ms bound; the RTO covers 130 ms plus the slack right away, still after 100 more samples, while smaller bounds keep coming and for a second after the last, and is back at its steady value two seconds later. |
+| bound excess | – | The estimator alone: 80 ms samples, then a 130 ms bound; the RTO covers 130 ms plus the slack right away, still after 100 more samples, while smaller bounds keep coming and for a second after the last, and is back at its steady value two seconds later; a bound at `srtt` after wide samples leaves `rttvar` unchanged (widen only). |
 | parts after the first packet | – | A state and a message in the tick's first packet, then a 2 × 900-byte bundle: the budget follows, both parts go out in the same tick (three packets), the second message on the next. |
 | late peer packet | – | The peer's older packet arriving 4 s after its newer one: accepted, its acks honoured, `srtt` unchanged, `rttvar` widened by the delay. |
 | late ack of lost packets | – | Acks of packets 1–5 arriving after those of 6–70: the packets are given up and flagged, the late ack takes them back, no message is resent. |
@@ -121,11 +123,12 @@ connection c{{.session_id = sid, .peer_token = tok, .local_player_id = 0, .remot
 // connection_config also has tick (a period as numerator/denominator net
 // units, default 65536/60 = exactly 1/60 s), max_packets_per_tick
 // (default 2, at least 2) and peer_tick (default: same as tick; stage 1
-// sets it from the handshake).  report.reliable and report.unreliable hold
-// views: into `datagram` (valid while it is; unreliable ones with the §3.8
-// part index/count), or, for a message that had been held out of order,
-// into storage the connection keeps until its next on_receive.  Copy what
-// must outlive that.  to_peer_time(local) is a wire stamp (net_time): the
+// sets it from the handshake).  report.reliable and report.unreliable are
+// spans into connection storage (no allocation per datagram) holding views:
+// into `datagram` (valid while it is; unreliable ones with the §3.8 part
+// index/count), or, for a message that had been held out of order, into
+// storage the connection keeps until its next on_receive.  Copy what must
+// outlive that.  to_peer_time(local) is a wire stamp (net_time): the
 // offset is known modulo 2^32 only; compare with net_time_diff.
 // begin_tick returns the ticks granted since it was last asked (0 when
 // none); update() and build_outgoing grant ticks too but never consume that
@@ -153,36 +156,50 @@ for (auto &m : report.reliable) handle(m);         // in order, exactly once
 for (auto &u : report.unreliable) apply(u);        // newest state, every event
 ```
 
-`build_outgoing` produces a packet when there is a state chunk, an event, a
+`build_outgoing` produces a packet when there is a state part, an event, a
 reliable message to send or resend, an ack owed for a received reliable
-message, or 100 ms have passed since the last packet (keepalive). The second
-call in a tick carries only reliable messages that did not fit beside the
-state chunk, and no more than `max_packets_per_tick` (2, §3.6) are built per
-tick; a backlog beyond that waits for later ticks. `begin_tick(now)` grants
-that budget for every whole period elapsed since the last grant (in exact
-rational arithmetic with one unit of tolerance for the caller's clock
-rounding, so a true 60 Hz caller never sees a spurious double grant; the very
-first grant is a single tick, however long the connection existed before), and judges the timeouts and the RTO once per
-grant (a retransmission cannot go out more often anyway),
-advancing the tick origin by whole periods (not resetting it to `now`), so a
-caller at any rate gets exactly one budget per period, a frame that spans two
-ticks gets both. A grant replaces whatever was left of the previous one and is
-capped at two ticks, so unused ticks never pile up into a spare and a long
-stall does not end in a burst. Within a tick the first packet goes out
-whenever anything is due; a second, up to `max_packets_per_tick` (at least 2),
-only while reliable messages remain that did not fit in the previous one. The
-first packet of a tick always carries the state chunks that fit; a head message
-that does not fit beside them rides the tick's second packet, which normally
-has no state left to carry, so no message size can starve and no message
-stream can displace the state. A pending state part opens the second packet
-too, and so does an event that did not fit beside the state chunk; the first
-packet reserves room for the head pending event as well as for the state, so
-reliable messages cannot crowd events out. A bundle that needs several
-packets (§3.8) raises the tick's limit to one more than it needs, so a
-blocked head message still gets a packet of its own and never displaces a
-part; the limit is judged on every packet of the tick, not only its first,
-so parts set after the first packet still fit the tick. The tick's credit is
-spent only when a packet is really built. `build_outgoing` calls `begin_tick` itself. `on_receive` applies the checks of §3.7
+message, or 100 ms have passed since the last packet (keepalive). No more
+than `max_packets_per_tick` (2, §3.6) are built per tick, or one more than a
+bundle needs when it needs several (§3.8); a backlog beyond that waits for
+later ticks. `begin_tick(now)` grants that budget for every whole period
+elapsed since the last grant (in exact rational arithmetic with one unit of
+tolerance for the caller's clock rounding, so a true 60 Hz caller never sees
+a spurious double grant; the very first grant is a single tick, however long
+the connection existed before), and judges the timeouts, the RTO and the
+bound hold's age once per granted tick (a retransmission cannot go out more
+often anyway), advancing the tick origin by whole periods (not resetting it
+to `now`), so a caller at any rate gets exactly one budget per period, a
+frame that spans two ticks gets both. A grant replaces whatever was left of
+the previous one and is capped at two ticks, so unused ticks never pile up
+into a spare and a long stall does not end in a burst.
+
+Within a tick the packets are composed in one fixed priority order:
+
+1. **State/input parts.** The first packet carries every pending part that
+   fits, part 0 always; a part that does not fit opens a further packet,
+   and a bundle that needs n > 1 packets raises the tick's limit to n + 1
+   (judged on every packet of the tick, so parts set after the first packet
+   still fit it).
+2. **Reliable messages.** Resends first, then the queue in order, each only
+   if it fits, stopping at the first that does not (a message that does not
+   fit blocks the ones behind it, so a large one cannot be overtaken). A
+   head that does not fit beside the parts gets the tick's next packet, by
+   itself if need be: no message size can starve, and no message stream
+   can displace the state.
+3. **Events** (`send_unreliable`) fill whatever is left, in queue order; one
+   that does not fit is skipped, not a head-of-line block, and dropped after
+   `NET_V2_EVENT_SKIP_MAX` (8) skips. Only the tick's first packet reserves
+   room for the head event beside the parts (a head message it displaces
+   gets the next packet anyway); later packets put reliable messages first,
+   so a message blocked out of the first packet is never blocked again by an
+   event. Under a sustained reliable backlog events may therefore be skipped
+   and dropped: they are cosmetic.
+
+The first packet of a tick goes out whenever anything is due; a second and
+further one only while something is left over (a due message, a pending part
+or a pending event), within the limit above. The tick's credit is spent only
+when a packet is really built.
+`build_outgoing` calls `begin_tick` itself. `on_receive` applies the checks of §3.7
 in order and reports why a datagram was dropped (`receive_status`). A packet
 whose header validates but whose chunks do not (`malformed_chunk`) has no
 effect at all: not its acks (one corrupt ack bit would otherwise acknowledge a

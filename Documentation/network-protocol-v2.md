@@ -323,7 +323,8 @@ packet_log:  ring[256] of { u16 packet_seq; fix64 sent_at; vector<u16> msg_seqs;
 
 on_tick(build packet):
     header.seq = ++local_seq; header.ack/ack_bits = receiver state (below)
-    budget = 1200 - 34 - space reserved for the STATE/INPUT chunk of this tick
+    budget = 1200 - 34 - the STATE/INPUT parts that fit this packet (§3.8)
+                       - the head EVENT_U if it fits beside them (first packet of the tick only)
     first put messages marked RESEND (oldest first), then new messages from send_queue,
     each message only if 3 + msg_len fits in budget; stop at the first that does not fit
     (order is preserved: a message that does not fit blocks later ones, so a large
@@ -342,6 +343,19 @@ on_ack(header.ack, header.ack_bits):
         lost_by_rto = now - m.last_sent >= rto
         if lost_by_gap or lost_by_rto: mark RESEND (kept in in_flight, same msg seq)
 ```
+
+Within a tick the packets are composed in one fixed priority order: (a) the
+`STATE`/`INPUT` parts, the first packet carrying every part that fits (part 0
+always) and further parts opening further packets (a bundle that needs n > 1
+packets allows n + 1, §3.6); (b) reliable messages, resends first, then the
+queue in order, a head that does not fit beside the parts taking the tick's
+next packet by itself if need be, so that no message size can starve; (c)
+`EVENT_U` chunks fill whatever is left, in queue order, one that does not fit
+being skipped (not a head-of-line block) and dropped after 8 skips. Only the
+tick's first packet reserves room for the head event beside the parts; later
+packets put reliable messages first, so a message blocked out of the first
+packet is never blocked again by an event. Under a sustained reliable backlog
+events may be skipped and dropped: they are cosmetic (§6.9).
 
 Retransmissions are bounded per packet: at most `NET_V2_RESEND_BUDGET` = 600
 bytes of resent messages per packet, so a burst of loss cannot starve the
@@ -380,7 +394,7 @@ Per connection (Jacobson/Karels, RFC 6298 constants):
 first sample:   srtt = r;  rttvar = r/2
 later samples:  rttvar = 3/4 rttvar + 1/4 |srtt - r|;  srtt = 7/8 srtt + 1/8 r
 bound b:        rttvar = 3/4 rttvar + 1/4 |srtt - b|;  excess = max(excess, b - srtt)
-each tick, once no bound came for 1 s:  excess = 15/16 excess
+each tick (granted, not each grant), once no bound came for 1 s:  excess = 15/16 excess
 always:         rttvar = max(rttvar, hold/4)
 rto = clamp(srtt + max(4 rttvar, excess) + hold + tick, NET_V2_RTO_MIN = 50 ms, NET_V2_RTO_MAX = 1000 ms)
 ```
@@ -429,7 +443,7 @@ before a delay that was just seen.
 | Limit | Value | On violation |
 |---|---|---|
 | Packet size | 1200 bytes | Sender: never built; receiver: dropped. |
-| Packets per tick per connection | 1 normally; 2 if the reliable backlog or a further bundle part does not fit next to the state chunk; a bundle that needs n > 1 packets allows n + 1 | – |
+| Packets per tick per connection | 1 normally; 2 if the reliable backlog, a further bundle part or a pending event does not fit next to the state chunk; a bundle that needs n > 1 packets allows n + 1 | – |
 | Reliable send queue (queued + in flight) per connection | 512 messages or 96 KiB | Host: kick that client, `kick_player_reason::queue_overflow` (new reason). Client: leave the game with the message "Connection to host too slow". |
 | Messages in flight | 256 (receiver window) | Sender stops taking new messages from the queue until acks arrive. |
 | Oldest unacked reliable message | 10 s | Same as queue overflow (this replaces the v1 `pkttimeout`; a message unacked for 10 s means the link is dead or unusable). |
