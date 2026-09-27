@@ -233,7 +233,10 @@ struct sim_peer
 	connection conn;
 	/* This peer's local clock is the simulation clock plus this bias. */
 	net_clock bias;
-	std::vector<reliable_message> delivered;
+	/* Copies: the report's messages are views that end with the next
+	 * on_receive.
+	 */
+	std::vector<sent_message> delivered;
 	std::vector<sent_message> sent;
 	std::vector<std::uint32_t> states_seen;
 	std::array<unsigned, NET_V2_STATE_MAX_PARTS> part_counts{};
@@ -269,8 +272,8 @@ struct sim_peer
 				++rejected_other;
 				break;
 		}
-		for (auto &m : report.reliable)
-			delivered.push_back(std::move(m));
+		for (const auto &m : report.reliable)
+			delivered.push_back({.type = m.type, .payload = {m.payload.begin(), m.payload.end()}});
 		for (const auto &u : report.unreliable)
 		{
 			if (u.payload.size() < 4)
@@ -907,8 +910,15 @@ void test_unreliable_chunks_per_packet()
 	const std::array<std::uint8_t, 3> part0{{0, 0, 0}}, part1{{1, 1, 1}}, later{{2, 2, 2}}, event{{9, 9, 9}};
 	a.set_unreliable_state(chunk_type::state, 0, 2, part0);
 	a.set_unreliable_state(chunk_type::state, 1, 2, part1);
-	/* Events only through send_unreliable. */
+	/* Only events through send_unreliable: state/input have their own
+	 * path, and anything else the peer would reject as malformed.
+	 */
 	CHECK(!a.send_unreliable(chunk_type::state, part1));
+	CHECK(!a.send_unreliable(chunk_type::input, part1));
+	CHECK(!a.send_unreliable(chunk_type::reliable, part1));
+	CHECK(!a.send_unreliable(chunk_type::session, part1));
+	CHECK(!a.send_unreliable(static_cast<chunk_type>(200), part1));
+	CHECK(a.stats().unreliable_dropped == 5);
 	const auto p1{a.build_outgoing(TICK)};
 	const auto r1{b.on_receive(p1, TICK + 1)};
 	CHECK(r1.status == receive_status::accepted);
@@ -929,6 +939,64 @@ void test_unreliable_chunks_per_packet()
 	CHECK(r2.status == receive_status::accepted);
 	CHECK_MSG(r2.unreliable.size() == 1 && r2.unreliable[0].type == chunk_type::event_u, "reordered packet delivered " + std::to_string(r2.unreliable.size()) + " chunks");
 	std::printf("    two STATE chunks in one packet both delivered; an older packet's STATE dropped, its EVENT_U kept\n");
+}
+
+/* Thirteenth review round. */
+
+/* 5. Delivered reliable messages are views: a message delivered while
+ * nothing is held views the datagram, one that went through the receive
+ * window views storage the connection keeps until its next on_receive,
+ * so the datagram it came in may be gone by then.
+ */
+void test_held_message_view_lifetime()
+{
+	begin("held message delivered as a view");
+	connection a{host_side, 0};
+	connection b{client_side, 0};
+	const std::array<std::uint8_t, 6> x1{{1, 1, 1, 1, 1, 1}}, x2{{2, 2, 2, 2, 2, 2}};
+	CHECK(a.enqueue_reliable(1, x1) == enqueue_result::ok);
+	const datagram p1{[&] { const auto p{a.build_outgoing(0)}; return datagram{p.begin(), p.end()}; }()};
+	CHECK(a.enqueue_reliable(2, x2) == enqueue_result::ok);
+	datagram p2{[&] { const auto p{a.build_outgoing(TICK)}; return datagram{p.begin(), p.end()}; }()};
+	/* Packet 2 first: its message is held. */
+	const auto r2{b.on_receive(p2, TICK + 1)};
+	CHECK(r2.status == receive_status::accepted && r2.reliable.empty());
+	/* The datagram buffer is reused before packet 1 arrives. */
+	std::ranges::fill(p2, std::uint8_t{0xff});
+	const auto r1{b.on_receive(p1, TICK + 2)};
+	CHECK(r1.status == receive_status::accepted);
+	CHECK_MSG(r1.reliable.size() == 2, "delivered " + std::to_string(r1.reliable.size()));
+	CHECK(r1.reliable[0].type == 1 && std::ranges::equal(r1.reliable[0].payload, x1));
+	CHECK(r1.reliable[1].type == 2 && std::ranges::equal(r1.reliable[1].payload, x2));
+	/* Nothing held any more: the next message is a view into its own
+	 * datagram.
+	 */
+	const std::array<std::uint8_t, 6> x3{{3, 3, 3, 3, 3, 3}};
+	CHECK(a.enqueue_reliable(3, x3) == enqueue_result::ok);
+	const datagram p3{[&] { const auto p{a.build_outgoing(2 * TICK)}; return datagram{p.begin(), p.end()}; }()};
+	const auto r3{b.on_receive(p3, 2 * TICK + 1)};
+	CHECK(r3.status == receive_status::accepted && r3.reliable.size() == 1 && std::ranges::equal(r3.reliable[0].payload, x3));
+	CHECK(r3.reliable[0].payload.data() >= p3.data() && r3.reliable[0].payload.data() < p3.data() + p3.size());
+	std::printf("    message 2 held, its datagram overwritten, then message 1: both delivered intact; message 3, nothing held, is a view into its datagram\n");
+}
+
+/* 6. to_peer_time is a wire timestamp: the offset is known modulo 2^32,
+ * so a peer whose clock is 2^32 units ahead is still read correctly
+ * against its stamps.
+ */
+void test_to_peer_time_wraps(const std::uint64_t seed)
+{
+	begin("to_peer_time modulo 2^32");
+	rng r{seed};
+	const net_clock bias{(net_clock{1} << 32) + net_seconds(3)};
+	sim_world w{r, link_params{.latency = net_milliseconds(30)}, {{0, bias}}};
+	w.run(180, [&](const unsigned i) { w.set_state(i); });
+	CHECK(w.peers[1].conn.stats().clock_offset_valid);
+	const auto client_view{w.peers[1].conn.to_peer_time(w.peers[1].clock(w.now))};
+	const auto host_stamp{to_net_time(w.peers[0].clock(w.now))};
+	const auto err{net_time_diff(client_view, host_stamp)};
+	CHECK_MSG((err < 0 ? -err : err) < net_milliseconds(5), "peer time error " + std::to_string(err) + " units");
+	std::printf("    client clock 2^32 + 3 s ahead of the host: to_peer_time within %.2f ms of the host's stamp\n", to_ms(err));
 }
 
 /* Twelfth review round. */
@@ -2729,7 +2797,7 @@ void test_clock(const std::uint64_t seed)
 	const auto host_offset{w.peers[0].conn.stats().clock_offset};
 	const auto host_err{host_offset + truth()};
 	CHECK((host_err < 0 ? -host_err : host_err) < net_milliseconds(5));
-	const auto peer_time_err{w.peers[1].conn.to_peer_time(w.peers[1].clock(w.now)) - w.peers[0].clock(w.now)};
+	const auto peer_time_err{net_time_diff(w.peers[1].conn.to_peer_time(w.peers[1].clock(w.now)), to_net_time(w.peers[0].clock(w.now)))};
 	CHECK((peer_time_err < 0 ? -peer_time_err : peer_time_err) < net_milliseconds(5));
 	/* A 300 ms step of the client clock is followed within one window. */
 	w.peers[1].bias += net_milliseconds(300);
@@ -2830,6 +2898,8 @@ int main(const int argc, char **const argv)
 	test_bounds(seed);
 	test_timeouts(seed);
 	test_replay(seed);
+	test_held_message_view_lifetime();
+	test_to_peer_time_wraps(seed);
 	test_echo_of_old_unechoed_packet();
 	test_bound_excess();
 	test_parts_after_first_packet();

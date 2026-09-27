@@ -190,10 +190,19 @@ enum class receive_status : std::uint8_t
 	closed,
 };
 
+/* A reliable message as delivered: a view, like unreliable_view.  A
+ * message delivered while nothing is held out of order points into the
+ * datagram the caller passed to on_receive; one that went through the
+ * receive window (held itself, or arriving while others were held)
+ * points into storage the connection keeps until its next on_receive.
+ * Either way the view is valid until the next on_receive at the latest
+ * (and no longer than the caller's datagram buffer): copy what must
+ * outlive that.
+ */
 struct reliable_message
 {
 	std::uint8_t type{};
-	std::vector<std::uint8_t> payload;
+	std::span<const std::uint8_t> payload;
 };
 
 struct unreliable_chunk
@@ -219,7 +228,9 @@ struct unreliable_view
 struct receive_report
 {
 	receive_status status{receive_status::bad_length};
-	/* Reliable messages that became deliverable, in sequence order. */
+	/* Reliable messages that became deliverable, in sequence order.
+	 * Views, see reliable_message.
+	 */
 	std::vector<reliable_message> reliable;
 	/* Every unreliable chunk of the packet, in packet order, except
 	 * `state`/`input` chunks from a packet older than one already seen
@@ -570,6 +581,11 @@ class connection
 	std::uint16_t m_next_expected{};
 	std::array<recv_slot, NET_V2_RECV_WINDOW> m_recv_window{};
 	std::size_t m_recv_window_pending{};
+	/* Payloads of messages held out of order and delivered by the last
+	 * on_receive: the report's views point into them.  Cleared by the
+	 * next on_receive.
+	 */
+	std::vector<std::vector<std::uint8_t>> m_delivered_held;
 	/* When the window last went from empty to holding out-of-order
 	 * messages, or last advanced; the stream_stalled clock.
 	 */
@@ -650,7 +666,9 @@ public:
 	 * room for it, never retransmitted.  An event that does not fit does
 	 * not hold up the ones behind it and is dropped after
 	 * NET_V2_EVENT_SKIP_MAX packets.  Returns false if it was dropped at
-	 * once; `state`/`input` are refused (use set_unreliable_state).
+	 * once.  Only `event_u` is accepted: `state`/`input` go through
+	 * set_unreliable_state, and any other type (`reliable`, `session`,
+	 * unknown) would be rejected by the peer as malformed.
 	 */
 	bool send_unreliable(chunk_type type, std::span<const std::uint8_t> payload);
 
@@ -736,11 +754,19 @@ public:
 	[[nodiscard]]
 	connection_stats stats() const;
 
-	/* Peer time for a local time, once the clock offset is known. */
+	/* The peer's clock at a local time, once the offset is known, as a
+	 * wire timestamp (net_time, wrapping every 2^32 units = 65536 s).
+	 * The offset is learnt from the peer's 32-bit `send_time` stamps and
+	 * is therefore known modulo 2^32 only: a full-width result would be
+	 * off by some multiple of 2^32 whenever the peer's clock does not
+	 * share the local epoch, and a stage 1 consumer comparing it with a
+	 * wire stamp would be wrong without noticing.  Compare with
+	 * net_time_diff against `send_time` or the stamps in the bundle.
+	 */
 	[[nodiscard]]
-	net_clock to_peer_time(const net_clock local) const
+	net_time to_peer_time(const net_clock local) const
 	{
-		return local + m_clock.offset();
+		return to_net_time(local + m_clock.offset());
 	}
 };
 
