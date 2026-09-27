@@ -334,7 +334,8 @@ on_tick(build packet):
 
 on_ack(header.ack, header.ack_bits):
     for each packet_seq in {ack} ∪ {ack-1-i | bit i set}, not yet acked:
-        mark acked; if a later packet was echoed before this one was acked, rtt sample from its sent_at (§3.5)
+        mark acked (also if it had been given up as lost: a late ack still counts);
+        if a later packet was echoed before this one was acked, rtt sample from its sent_at (§3.5)
         for each msg_seq in it: erase from in_flight
     for each in_flight message m not acked:
         lost_by_gap = acked packets after m.in_packet_seq >= 3   // ack itself + set bits between
@@ -457,7 +458,10 @@ address with an implausible `seq` is dropped.
 7. Update the peer's `last_heard`; RTT and clock sample from `echo_*` if
    `ack` names a logged packet whose `send_time` is `echo_time`,
    `echo_delay < 65535`, and that packet has not been sampled before (each
-   packet at most once; a repeated echo yields no sample, §2.2).
+   packet at most once; a repeated echo yields no sample, §2.2). Only the
+   newest packet received measures `srtt`; a reordered older one carries
+   its own reorder delay, which is what a late ack costs, so its echo
+   widens `rttvar` only.
 8. Walk the chunks. Every chunk must fit; every `RELIABLE` message must fit
    its chunk; every `STATE`/`INPUT` record must have the exact size for its
    flags. The first violation drops the whole packet: nothing of it is
