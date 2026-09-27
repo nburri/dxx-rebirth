@@ -78,6 +78,7 @@ window_event_result gc_axisbutton_handler(const SDL_ControllerAxisEvent *cae);
 window_event_result gc_device_added(const SDL_ControllerDeviceEvent *cde);
 window_event_result gc_device_removed(const SDL_ControllerDeviceEvent *cde);
 
+bool gamecontroller_use_for_device(int device_index);
 void gamecontroller_init();
 void gamecontroller_flush();
 void gamecontroller_close();
