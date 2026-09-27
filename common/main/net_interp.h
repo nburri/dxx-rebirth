@@ -17,7 +17,9 @@
  * - `delay_estimator`: the interpolation delay of one entity, from the
  *   lateness of its snapshots;
  * - `lag_indicator`: the "lagging" marker, with hysteresis;
- * - `tick_accumulator`: the network tick counter.
+ * - `tick_accumulator`: the network tick counter;
+ * - `carried_effects`, `to_ship_frame`, `from_ship_frame`: the muzzle
+ *   flashes a remote ship carries along.
  *
  * Everything is a pure function of the times passed in, so the result
  * of a frame depends on the time it is rendered at, never on the frame
@@ -404,6 +406,110 @@ inline bool is_sweepable_move(const net_vec &a, const net_vec &b)
 {
 	return detail::distance(a, b) <= NET_INTERP_SNAP_DISTANCE;
 }
+
+/* A ship's axes: the right, up and forward unit vectors (fix), the rows
+ * of the engine's orientation matrix.
+ */
+struct ship_axes
+{
+	net_vec rvec, uvec, fvec;
+};
+
+/* `offset`, a vector in the world (from the ship's centre), in the ship's
+ * own frame: its right, up and forward components (vm_vec_rotate).
+ */
+[[nodiscard]]
+inline net_vec to_ship_frame(const ship_axes &a, const net_vec &offset)
+{
+	const auto dot{[&offset](const net_vec &v) {
+		return detail::round_fix((static_cast<double>(v.x) * offset.x + static_cast<double>(v.y) * offset.y + static_cast<double>(v.z) * offset.z) / 65536);
+	}};
+	return {dot(a.rvec), dot(a.uvec), dot(a.fvec)};
+}
+
+/* The inverse of to_ship_frame: a vector given in the ship's frame, in the
+ * world.
+ */
+[[nodiscard]]
+inline net_vec from_ship_frame(const ship_axes &a, const net_vec &local)
+{
+	const auto axis{[&local](const std::int32_t r, const std::int32_t u, const std::int32_t f) {
+		return detail::round_fix((static_cast<double>(r) * local.x + static_cast<double>(u) * local.y + static_cast<double>(f) * local.z) / 65536);
+	}};
+	return {
+		axis(a.rvec.x, a.uvec.x, a.fvec.x),
+		axis(a.rvec.y, a.uvec.y, a.fvec.y),
+		axis(a.rvec.z, a.uvec.z, a.fvec.z),
+	};
+}
+
+constexpr std::size_t NET_INTERP_CARRIED_MAX{16};
+
+/* The effects a remote ship carries along: the muzzle flashes of its
+ * shots.  A muzzle flash is an object that does not move, which is right
+ * for a ship that fires at the end of its frame and is drawn there (the
+ * local player's, which makes no flash for its own view anyway, or a
+ * robot, which is slow), but a remote ship is moved on by the
+ * interpolation every frame after its fire message made the flash, so
+ * a flash that stays put is left behind it, the further the faster it
+ * flies (several ship lengths over a flash's life with the afterburner).
+ * Each entry is the flash's object number and signature (the object may
+ * be gone and its slot reused) and its offset from the ship's centre in
+ * the ship's frame at the moment it was made: the gun it came from.
+ * When the list is full, the oldest entry is dropped (that flash then
+ * stays where it is).
+ */
+class carried_effects
+{
+public:
+	struct entry
+	{
+		std::uint16_t object{};
+		std::uint16_t signature{};
+		net_vec local;
+	};
+private:
+	std::array<entry, NET_INTERP_CARRIED_MAX> m_buf{};
+	std::size_t m_count{};
+public:
+	void add(const entry &e)
+	{
+		/* A new object in the slot of one that is gone. */
+		remove_if([&e](const entry &o) { return o.object == e.object; });
+		if (m_count == m_buf.size())
+		{
+			std::move(m_buf.begin() + 1, m_buf.end(), m_buf.begin());
+			--m_count;
+		}
+		m_buf[m_count++] = e;
+	}
+	/* Remove every entry for which `pred` is true, keeping the order. */
+	template <typename P>
+	void remove_if(P &&pred)
+	{
+		const auto end{std::remove_if(m_buf.begin(), m_buf.begin() + m_count, pred)};
+		m_count = static_cast<std::size_t>(end - m_buf.begin());
+	}
+	void clear()
+	{
+		m_count = 0;
+	}
+	[[nodiscard]]
+	std::size_t size() const
+	{
+		return m_count;
+	}
+	[[nodiscard]]
+	bool empty() const
+	{
+		return !m_count;
+	}
+	[[nodiscard]]
+	const entry &operator[](const std::size_t i) const
+	{
+		return m_buf[i];
+	}
+};
 
 /* Section 5.4: the interpolation delay of one entity,
  *

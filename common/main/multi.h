@@ -1002,6 +1002,11 @@ void net_interp_snap_to_newest(playernum_t pnum);
  * (phys_sweep_objects).
  */
 void net_interp_sweep_driven(const d_robot_info_array &Robot_info, vmobjptridx_t obj);
+/* Laser_create_new, for the muzzle flash of a shot of a remote player's
+ * ship: net_interp_apply_all keeps the flash on the gun it came from as
+ * the ship moves on (the flash object itself does not move).
+ */
+void net_interp_carry_flash(vcobjptridx_t ship, vcobjptridx_t flash);
 
 }
 #endif
@@ -1039,6 +1044,10 @@ static inline bool net_interp_drives(const vcobjidx_t)
 }
 
 static inline void net_interp_sweep_driven(const d_robot_info_array &, vmobjptridx_t)
+{
+}
+
+static inline void net_interp_carry_flash(vcobjptridx_t, vcobjptridx_t)
 {
 }
 

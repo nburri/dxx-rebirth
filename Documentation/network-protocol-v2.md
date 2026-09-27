@@ -1885,6 +1885,25 @@ where the text was open or did not work as written:
   bundle's age, when a time limit is set and the difference exceeds
   50 ms), the stage 1 position records and ping list. The thief's
   position stays a legacy record.
+- **Muzzle flashes of remote ships.** A fire message is read in
+  `multi_do_frame`, before `object_move_all`, so the shot and its muzzle
+  flash are made at the gun of the pose the ship was drawn at in the
+  previous frame (not the newest snapshot, not the owner's own position:
+  the message carries only the direction), and the shot (which, except
+  for bombs, inherits no velocity from its ship) then flies ahead of the
+  ship as a local shot does. The flash, however, is an object that does
+  not move (`object_create_explosion_without_damage`), made for every
+  ship but the viewer's own; the interpolation moves the ship on under
+  it every frame, so it was left behind the ship for its whole life (the
+  "green splash behind a ship firing plasma": several ship lengths with
+  the afterburner). `Laser_create_new` now registers the flash of a
+  remote player's shot (`net_interp_carry_flash`) with its offset in the
+  ship's frame, and `net_interp_apply_all`, after it writes the ship's
+  pose, puts each of the ship's flashes back on its gun
+  (`carried_effects`, up to 16 per ship, forgotten when the flash is
+  gone, the ship is not a ship, or the point is outside the mine, when
+  the flash stays where it is). Nothing changes on the wire, and the shot
+  itself, which decides the hits, is unchanged.
 - **Pings and lag.** Each peer's bundle carries the ping list once per
   second (`HAS_PINGS`, u8 in 4 ms). A player is marked as lagging when
   `max(sample_age, input_age × tick)` of its newest record exceeds 250 ms,
@@ -1899,7 +1918,9 @@ where the text was open or did not work as written:
   discontinuity snaps; equality of shuffled and ordered delivery; the
   delay estimator (clean link, 20 ms jitter, negative and huge lateness,
   adaptation within the slew bound and the same trajectory at 500 fps and
-  10 fps, tick rate change); the lag marker hysteresis; the tick
+  10 fps, tick rate change); the lag marker hysteresis; the muzzle flash carried on a turning ship
+  at 500 fps (on the gun within 0.002 unit, where a fixed flash ends
+  more than 15 units behind) and the carried list's bounds; the tick
   accumulator at 30/60/120 Hz with frame times from 2 ms to 100 ms and
   random ones (exact over a minute, a true 60 Hz caller gets exactly one
   tick per frame); the transport's per-connection tick grants at the same
