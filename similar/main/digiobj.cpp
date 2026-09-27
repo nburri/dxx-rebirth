@@ -48,6 +48,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "d_levelstate.h"
 #include <iterator>
 #include <utility>
+#include "frame_probe.h"
 
 using std::max;
 
@@ -854,4 +855,9 @@ void digi_start_sound_queued(sound_effect soundnum, fix volume)
 	SoundQ_process();
 }
 
+}
+
+unsigned dcx::frame_probe::stats::active_sound_objects()
+{
+	return ::dcx::N_active_sound_objects;
 }

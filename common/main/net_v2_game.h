@@ -172,6 +172,11 @@ void game_broadcast(uint8_t type, std::span<const uint8_t> payload, playernum_t 
 /* On the host, to player `slot` (if connected). */
 void game_send_to(playernum_t slot, uint8_t type, std::span<const uint8_t> payload);
 
+/* Log the sizes of the session's queues (for the -verbose frame
+ * probe's session report).
+ */
+void probe_report();
+
 /* Apply the level start data in Netgame to the local game state (the v1
  * read_sync_packet without the parsing): player list, scores, ship
  * placement.  Called by the host after host_send_level_start and by a
