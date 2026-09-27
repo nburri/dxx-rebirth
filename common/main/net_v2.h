@@ -63,6 +63,23 @@ constexpr std::uint8_t NET_V2_PLAYER_ID_NONE{0xff};
 constexpr std::size_t NET_V2_CHUNK_HEADER_SIZE{3};
 constexpr std::size_t NET_V2_MAX_CHUNK_PAYLOAD{NET_V2_MAX_PACKET - NET_V2_HEADER_SIZE - NET_V2_CHUNK_HEADER_SIZE};	/* 1161 */
 
+/* Section 3.8: a STATE or INPUT chunk payload starts with one byte, the
+ * part index in the low nibble and the part count (1..NET_V2_STATE_MAX_PARTS)
+ * in the high nibble, so that a bundle split over two packets is applied
+ * part by part, each part latest-wins on its own.  (Addition to the
+ * design text, which leaves the parts self-describing at the application
+ * layer only.)
+ */
+constexpr std::size_t NET_V2_STATE_PART_HEADER_SIZE{1};
+constexpr unsigned NET_V2_STATE_MAX_PARTS{4};
+constexpr std::size_t NET_V2_MAX_STATE_PART{NET_V2_MAX_CHUNK_PAYLOAD - NET_V2_STATE_PART_HEADER_SIZE};
+
+[[nodiscard]]
+constexpr std::uint8_t net_state_part_byte(const unsigned part, const unsigned count)
+{
+	return static_cast<std::uint8_t>((count << 4) | (part & 0x0f));
+}
+
 /* Section 3.4 */
 constexpr std::size_t NET_V2_RELIABLE_RUN_HEADER_SIZE{3};	/* first_seq, count */
 constexpr std::size_t NET_V2_MESSAGE_HEADER_SIZE{3};	/* msg_type, msg_len */

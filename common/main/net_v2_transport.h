@@ -63,8 +63,27 @@ constexpr std::size_t NET_V2_EVENT_QUEUE_MAX{64};
  */
 constexpr unsigned NET_V2_EVENT_SKIP_MAX{8};
 
+/* A tick period as a ratio of net time units, so that 1/60 s (65536/60,
+ * not a whole number of units) is exact and a tick origin advanced by
+ * whole periods never drifts against a true 60 Hz caller.
+ */
+struct tick_period
+{
+	net_clock numerator{net_seconds(1)};
+	net_clock denominator{60};
+	/* The period in whole units, rounded up: for slack, never for
+	 * scheduling.
+	 */
+	[[nodiscard]]
+	constexpr net_clock units() const
+	{
+		return (numerator + denominator - 1) / denominator;
+	}
+};
+
 /* Section 2.3: the default network tick, 60 Hz. */
-constexpr net_clock NET_V2_DEFAULT_TICK_PERIOD{net_seconds(1) / 60};
+constexpr tick_period NET_V2_DEFAULT_TICK{};
+constexpr net_clock NET_V2_DEFAULT_TICK_PERIOD{NET_V2_DEFAULT_TICK.units()};
 
 /* Section 3.6: packets per tick per connection. */
 constexpr unsigned NET_V2_DEFAULT_MAX_PACKETS_PER_TICK{2};
@@ -76,19 +95,19 @@ struct connection_config
 	std::uint8_t local_player_id{NET_V2_PLAYER_ID_NONE};
 	std::uint8_t remote_player_id{NET_V2_PLAYER_ID_NONE};
 	/* The network tick.  A packet budget of max_packets_per_tick opens
-	 * once per tick_period (see begin_tick), and the RTO is padded by
-	 * it for the peer's ack hold time.  The connection clamps the period
-	 * to at least 1 and the budget to at least 2: with one packet per
-	 * tick and a state chunk every tick, a reliable message larger than
-	 * the space beside the state could never go out.
+	 * once per tick (see begin_tick), and the RTO is padded by the tick
+	 * for the peer's ack hold time.  The connection clamps both terms of
+	 * the period to at least 1 and the budget to at least 2: with one
+	 * packet per tick and a state chunk every tick, a reliable message
+	 * larger than the space beside the state could never go out.
 	 */
-	net_clock tick_period{NET_V2_DEFAULT_TICK_PERIOD};
+	tick_period tick{};
 	unsigned max_packets_per_tick{NET_V2_DEFAULT_MAX_PACKETS_PER_TICK};
-	/* The peer's tick period: it holds its acks up to this long.  0 means
-	 * the same as tick_period; the session layer sets it from the
+	/* The peer's tick: it holds its acks up to this long.  A zero term
+	 * means the same as `tick`; the session layer sets it from the
 	 * handshake (stage 1).
 	 */
-	net_clock peer_tick_period{};
+	tick_period peer_tick{0, 0};
 };
 
 enum class connection_state : std::uint8_t
@@ -180,11 +199,15 @@ struct unreliable_chunk
 
 /* An unreliable chunk as delivered: a view into the datagram the caller
  * passed to on_receive, valid only as long as that buffer is, and at the
- * latest until the next on_receive.
+ * latest until the next on_receive.  For `state`/`input`, `part` and
+ * `part_count` are the bundle part (§3.8); the part byte is not in the
+ * payload.  Events have part 0 of 1.
  */
 struct unreliable_view
 {
 	chunk_type type{};
+	std::uint8_t part{};
+	std::uint8_t part_count{1};
 	std::span<const std::uint8_t> payload;
 };
 
@@ -379,11 +402,27 @@ class connection
 		std::uint8_t type{};
 		std::vector<std::uint8_t> payload;
 	};
-	/* Per latest-wins chunk type: the newest packet that carried one. */
+	/* Per latest-wins chunk type and part: the newest packet that
+	 * carried one.
+	 */
 	struct latest_packet
 	{
 		bool valid{};
 		std::uint16_t seq{};
+	};
+	/* One pending part of the outgoing latest-wins bundle, copied into a
+	 * fixed buffer: no allocation per tick.
+	 */
+	struct state_part
+	{
+		bool pending{};
+		std::size_t size{};
+		std::array<std::uint8_t, NET_V2_MAX_STATE_PART> data{};
+	};
+	struct state_bundle
+	{
+		unsigned count{1};
+		std::array<state_part, NET_V2_STATE_MAX_PARTS> parts{};
 	};
 	/* Sequences of malformed packets already counted as a protocol
 	 * error; a replay of one counts no further error.  Never used to
@@ -410,6 +449,8 @@ class connection
 	struct parsed_chunk
 	{
 		chunk_type type;
+		std::uint8_t part;
+		std::uint8_t part_count;
 		std::span<const std::uint8_t> payload;
 	};
 
@@ -444,10 +485,13 @@ class connection
 	std::uint16_t m_last_echoed_seq{};
 	net_clock m_last_sent{};
 	/* Tick budget (see begin_tick): the origin of the last granted
-	 * period, the ticks granted but not yet started, and the packets
-	 * built in the tick currently open.
+	 * period in units scaled by the period's denominator (exact
+	 * arithmetic), whether a tick was ever granted (the first grant is a
+	 * single tick), the ticks granted but not yet started, and the
+	 * packets built in the tick currently open.
 	 */
-	net_clock m_tick_start{};
+	net_clock m_tick_origin{};
+	bool m_tick_granted{};
 	unsigned m_tick_credit{};
 	bool m_tick_open{};
 	unsigned m_tick_packets{};
@@ -457,13 +501,12 @@ class connection
 	packet_buffer m_outgoing{};
 	std::vector<out_msg *> m_carried;
 	std::vector<selected_run> m_runs;
-	/* The latest-wins chunk of this tick, copied straight into a fixed
-	 * buffer: no allocation per tick.
+	/* The outgoing latest-wins bundles, [0] state and [1] input. */
+	std::array<state_bundle, 2> m_state_out{};
+	/* Alternation between a pending state part and a head message that
+	 * does not fit beside it in the tick's second packet.
 	 */
-	bool m_state_pending{};
-	chunk_type m_state_type{};
-	std::size_t m_state_size{};
-	std::array<std::uint8_t, NET_V2_MAX_CHUNK_PAYLOAD> m_state_buffer{};
+	bool m_yield_to_message{};
 	std::deque<pending_event> m_pending_events;
 
 	/* Receiver side */
@@ -483,8 +526,7 @@ class connection
 	 * messages, or last advanced; the stream_stalled clock.
 	 */
 	net_clock m_recv_gap_since{};
-	latest_packet m_latest_state{};
-	latest_packet m_latest_input{};
+	std::array<std::array<latest_packet, NET_V2_STATE_MAX_PARTS>, 2> m_latest{};
 	recent_malformed m_recent_malformed{};
 	std::deque<net_clock> m_protocol_error_times;
 	std::vector<parsed_message> m_parsed_messages;
@@ -514,7 +556,15 @@ class connection
 	[[nodiscard]]
 	bool count_protocol_error(std::uint16_t seq, net_clock now);
 	[[nodiscard]]
-	latest_packet &latest_for(chunk_type type);
+	latest_packet &latest_for(chunk_type type, unsigned part);
+	[[nodiscard]]
+	bool any_state_pending() const;
+	/* Bytes of the pending state parts that the next packet carries: in
+	 * order, as far as they fit in an otherwise empty payload.
+	 */
+	[[nodiscard]]
+	std::size_t reserved_state_bytes() const;
+	void write_state_parts(std::uint8_t *buf, std::size_t &pos);
 	/* §3.7 step 8.  Fills m_parsed_messages and m_parsed_chunks. */
 	[[nodiscard]]
 	bool validate_chunks(std::span<const std::uint8_t> payload, std::uint8_t flags);
@@ -530,28 +580,37 @@ public:
 	 */
 	enqueue_result enqueue_reliable(std::uint8_t type, std::span<const std::uint8_t> payload);
 
-	/* The latest-wins chunk of this tick (`state` or `input`).  It is
-	 * carried by the next packet built and then forgotten; calling again
-	 * before that replaces it.  Payloads above NET_V2_MAX_CHUNK_PAYLOAD
-	 * are ignored and counted as dropped.
+	/* The latest-wins chunk of this tick (`state` or `input`), as one
+	 * part (0 of 1) or as part `part` of a bundle of `part_count` parts
+	 * (§3.8, at most NET_V2_STATE_MAX_PARTS).  Each part is carried by
+	 * the next packet with room for it and then forgotten; setting the
+	 * same part again before that replaces it.  Parts that do not fit
+	 * beside each other open the tick's second packet, like a reliable
+	 * backlog does.  Payloads above NET_V2_MAX_STATE_PART, and invalid
+	 * part numbers, are ignored and counted as dropped.
 	 */
 	void set_unreliable_state(chunk_type type, std::span<const std::uint8_t> payload);
+	void set_unreliable_state(chunk_type type, unsigned part, unsigned part_count, std::span<const std::uint8_t> payload);
 
-	/* A best-effort chunk (`event_u`, or a further `state` part): sent
-	 * once in the next packet with room for it, never retransmitted.  An
-	 * event that does not fit does not hold up the ones behind it and is
-	 * dropped after NET_V2_EVENT_SKIP_MAX packets.  Returns false if it
-	 * was dropped at once.
+	/* A best-effort `event_u` chunk: sent once in the next packet with
+	 * room for it, never retransmitted.  An event that does not fit does
+	 * not hold up the ones behind it and is dropped after
+	 * NET_V2_EVENT_SKIP_MAX packets.  Returns false if it was dropped at
+	 * once; `state`/`input` are refused (use set_unreliable_state).
 	 */
 	bool send_unreliable(chunk_type type, std::span<const std::uint8_t> payload);
 
-	/* Grant one tick for every full config.tick_period that has elapsed
-	 * since the last grant, keeping the tick phase (the origin advances
-	 * by whole periods, it is not reset to `now`), so a caller at any
-	 * rate gets exactly one tick per period and a frame that spans two
-	 * ticks gets both.  A grant replaces whatever was left of the
-	 * previous one and is capped at two ticks, so unused ticks never
-	 * pile up into a spare and a long stall does not end in a burst.
+	/* Grant one tick for every full period that has elapsed since the
+	 * last grant, keeping the tick phase (the origin advances by whole
+	 * periods in exact rational arithmetic, it is not reset to `now`),
+	 * so a caller at any rate gets exactly one tick per period, a true
+	 * 60 Hz caller never sees a double grant from a truncated period
+	 * (one unit of tolerance covers its own clock rounding), and a frame
+	 * that spans two ticks gets both.  The very first grant is a
+	 * single tick, however long the connection existed before.  A grant
+	 * replaces whatever was left of the previous one and is capped at two
+	 * ticks, so unused ticks never pile up into a spare and a long stall
+	 * does not end in a burst.
 	 * Within a tick, §3.6 allows one packet, and further ones up to
 	 * config.max_packets_per_tick only while reliable messages remain
 	 * that did not fit.  A grant closes the tick that was open, so an

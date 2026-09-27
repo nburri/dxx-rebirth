@@ -96,7 +96,11 @@ public:
 
 /* Time helpers */
 
-constexpr net_clock TICK{net_seconds(1) / 60};
+/* One 60 Hz period rounded up (1093 units): stepping a connection by TICK
+ * always covers a full period.  The simulation itself runs on the exact
+ * period, tick_count * 65536 / 60.
+ */
+constexpr net_clock TICK{NET_V2_DEFAULT_TICK.units()};
 
 double to_ms(const net_clock t)
 {
@@ -231,6 +235,7 @@ struct sim_peer
 	std::vector<reliable_message> delivered;
 	std::vector<sent_message> sent;
 	std::vector<std::uint32_t> states_seen;
+	std::array<unsigned, NET_V2_STATE_MAX_PARTS> part_counts{};
 	std::vector<std::uint32_t> events_seen;
 	std::uint64_t malformed{}, duplicates{}, rejected_other{};
 
@@ -273,7 +278,10 @@ struct sim_peer
 			if (u.type == chunk_type::event_u)
 				events_seen.push_back(value);
 			else
+			{
 				states_seen.push_back(value);
+				++part_counts[u.part];
+			}
 		}
 	}
 };
@@ -314,8 +322,8 @@ public:
 	 */
 	void tick(const std::function<void(unsigned)> &act = {})
 	{
-		now += TICK;
 		++tick_count;
+		now = net_clock{tick_count} * net_seconds(1) / 60;
 		for (unsigned i{}; i != 2; ++i)
 		{
 			if (tick_count % tick_every[i] != 0)
@@ -368,6 +376,20 @@ public:
 		net_put_le32(state.data(), tick_count);
 		net_put_le32(state.data() + 4, 0xabad1dea);
 		peers[from].conn.set_unreliable_state(from == 0 ? chunk_type::state : chunk_type::input, state);
+	}
+
+	/* A bundle of `count` parts of `size` bytes each, tagged with the
+	 * tick and the part number.
+	 */
+	void set_state_parts(const unsigned from, const unsigned count, const std::size_t size)
+	{
+		datagram part(size);
+		for (unsigned i{}; i != count; ++i)
+		{
+			net_put_le32(part.data(), tick_count);
+			part[4] = static_cast<std::uint8_t>(i);
+			peers[from].conn.set_unreliable_state(from == 0 ? chunk_type::state : chunk_type::input, i, count, part);
+		}
 	}
 
 	void send_event(const unsigned from, const std::uint32_t value)
@@ -799,7 +821,7 @@ void test_unaligned_peers(const std::uint64_t seed)
 			check_delivery(w, i);
 			const auto s{w.peers[i].conn.stats()};
 			CHECK_MSG(s.message_resends == 0, "round " + std::to_string(round) + (i ? " client" : " host") + " resends " + std::to_string(s.message_resends) + " (rto " + std::to_string(s.resends_by_rto) + ")");
-			CHECK(s.rto >= s.srtt + w.peers[i].conn.config().tick_period);
+			CHECK(s.rto >= s.srtt + w.peers[i].conn.config().tick.units());
 		}
 		std::printf("    phases %.1f/%.1f ms, latency %.0f ms: 0 resends, srtt %.1f ms, rto %.1f ms\n",
 			to_ms(w.phase[0]), to_ms(w.phase[1]), to_ms(w.link.params.latency), to_ms(w.peers[0].conn.stats().srtt), to_ms(w.peers[0].conn.stats().rto));
@@ -862,8 +884,10 @@ void test_unreliable_chunks_per_packet()
 	connection a{host_side, 0};
 	connection b{client_side, 0};
 	const std::array<std::uint8_t, 3> part0{{0, 0, 0}}, part1{{1, 1, 1}}, later{{2, 2, 2}}, event{{9, 9, 9}};
-	a.set_unreliable_state(chunk_type::state, part0);
-	CHECK(a.send_unreliable(chunk_type::state, part1));
+	a.set_unreliable_state(chunk_type::state, 0, 2, part0);
+	a.set_unreliable_state(chunk_type::state, 1, 2, part1);
+	/* Events only through send_unreliable. */
+	CHECK(!a.send_unreliable(chunk_type::state, part1));
 	const auto p1{a.build_outgoing(TICK)};
 	const auto r1{b.on_receive(p1, TICK + 1)};
 	CHECK(r1.status == receive_status::accepted);
@@ -884,6 +908,142 @@ void test_unreliable_chunks_per_packet()
 	CHECK(r2.status == receive_status::accepted);
 	CHECK_MSG(r2.unreliable.size() == 1 && r2.unreliable[0].type == chunk_type::event_u, "reordered packet delivered " + std::to_string(r2.unreliable.size()) + " chunks");
 	std::printf("    two STATE chunks in one packet both delivered; an older packet's STATE dropped, its EVENT_U kept\n");
+}
+
+/* Seventh review round. */
+
+/* 1. A two-part bundle (§3.8) leaves the transport every tick: the
+ * second part opens the tick's second packet.
+ */
+void test_state_parts(const std::uint64_t seed)
+{
+	begin("two-part state bundle every tick");
+	rng r{seed};
+	sim_world w{r, link_params{.latency = net_milliseconds(30)}};
+	w.run(200, [&](const unsigned i) {
+		if (i == 0)
+		{
+			w.set_state_parts(0, 2, 900);
+			if (w.tick_count % 3 == 0)
+			{
+				/* Messages that fit beside a part.  (A 1 KiB message
+				 * beside 900-byte parts would make a part and the
+				 * message alternate, by design.)
+				 */
+				datagram m(100, static_cast<std::uint8_t>(w.tick_count));
+				CHECK(w.peers[0].conn.enqueue_reliable(7, m) == enqueue_result::ok);
+				w.peers[0].sent.push_back({.type = 7, .payload = std::move(m)});
+			}
+		}
+		else
+			w.set_state(1);
+	});
+	w.run(5);
+	check_delivery(w, 0);
+	const auto host{w.peers[0].conn.stats()};
+	const auto &counts{w.peers[1].part_counts};
+	CHECK_MSG(host.unreliable_dropped == 0, "parts dropped " + std::to_string(host.unreliable_dropped));
+	CHECK_MSG(counts[0] == 200 && counts[1] == 200, "parts delivered: " + std::to_string(counts[0]) + " / " + std::to_string(counts[1]));
+	CHECK(host.packets_sent >= 400);
+	std::printf("    2 x 900-byte parts per tick (plus messages): part 0 delivered %u times, part 1 %u times, none dropped\n", counts[0], counts[1]);
+}
+
+/* 1b. Latest-wins is keyed per part: a late part 0 with a lower seq than
+ * the newest part 1 is applied; a stale part never overrides a newer one
+ * of the same part.
+ */
+void test_state_parts_reorder()
+{
+	begin("state parts reordered");
+	connection a{host_side, 0};
+	connection b{client_side, 0};
+	const auto build_pair{[&](const net_clock t, const std::uint8_t tag) {
+		datagram part(900, tag);
+		a.set_unreliable_state(chunk_type::state, 0, 2, part);
+		part[0] = static_cast<std::uint8_t>(tag + 1);
+		a.set_unreliable_state(chunk_type::state, 1, 2, part);
+		const auto p0{a.build_outgoing(t)};
+		CHECK(p0.size() == NET_V2_HEADER_SIZE + 3 + 1 + 900);
+		const datagram d0{p0.begin(), p0.end()};
+		const auto p1{a.build_outgoing(t)};
+		CHECK(p1.size() == NET_V2_HEADER_SIZE + 3 + 1 + 900);
+		CHECK(a.build_outgoing(t).empty());
+		return std::pair{d0, datagram{p1.begin(), p1.end()}};
+	}};
+	const auto [a0, b0]{build_pair(0, 10)};
+	/* Part 1 (the later packet) first, then part 0: both applied. */
+	auto r{b.on_receive(b0, 100)};
+	CHECK(r.status == receive_status::accepted && r.unreliable.size() == 1 && r.unreliable[0].part == 1 && r.unreliable[0].part_count == 2 && r.unreliable[0].payload.size() == 900 && r.unreliable[0].payload[0] == 11);
+	r = b.on_receive(a0, 101);
+	CHECK(r.status == receive_status::accepted && r.unreliable.size() == 1 && r.unreliable[0].part == 0 && r.unreliable[0].payload[0] == 10);
+	/* Two more ticks; deliver A2, B1, A1, B2: the old part 0 (A1) is
+	 * stale behind A2 and dropped, the old part 1 (B1) is still the
+	 * newest of its part and applied.
+	 */
+	const auto [a1, b1]{build_pair(TICK, 20)};
+	const auto [a2, b2]{build_pair(2 * TICK, 30)};
+	r = b.on_receive(a2, 200);
+	CHECK(r.unreliable.size() == 1 && r.unreliable[0].part == 0 && r.unreliable[0].payload[0] == 30);
+	r = b.on_receive(b1, 201);
+	CHECK(r.unreliable.size() == 1 && r.unreliable[0].part == 1 && r.unreliable[0].payload[0] == 21);
+	r = b.on_receive(a1, 202);
+	CHECK(r.status == receive_status::accepted && r.unreliable.empty());
+	r = b.on_receive(b2, 203);
+	CHECK(r.unreliable.size() == 1 && r.unreliable[0].part == 1 && r.unreliable[0].payload[0] == 31);
+	std::printf("    part 1 before part 0 of one tick: both applied; a stale part 0 dropped while an older part 1 still applies\n");
+}
+
+/* 4. The first grant is a single tick, however early the connection was
+ * created.
+ */
+void test_first_grant_single()
+{
+	begin("first grant is one tick");
+	connection a{host_side, 0};
+	const datagram big(NET_V2_MAX_MESSAGE);
+	for (unsigned i{}; i != 6; ++i)
+		CHECK(a.enqueue_reliable(9, big) == enqueue_result::ok);
+	unsigned n{};
+	while (!a.build_outgoing(net_seconds(3)).empty())
+		++n;
+	CHECK_MSG(n == NET_V2_DEFAULT_MAX_PACKETS_PER_TICK, "first build 3 s after creation: " + std::to_string(n) + " packets");
+	std::printf("    created at 0, first build at 3 s: %u packets, not a burst\n", n);
+}
+
+/* 5. A caller at exactly 60 Hz for ten minutes never gets a double grant
+ * from a truncated period.
+ */
+void test_exact_caller_no_double_grant()
+{
+	begin("exact 60 Hz caller, no double grant");
+	connection a{host_side, 0};
+	connection b{client_side, 0};
+	const datagram big(NET_V2_MAX_MESSAGE);
+	std::uint64_t total{}, worst{};
+	for (unsigned k{}; k != 36000; ++k)
+	{
+		const net_clock now{net_clock{k} * net_seconds(1) / 60};
+		while (a.stats().queue_messages < 6)
+			CHECK(a.enqueue_reliable(9, big) == enqueue_result::ok);
+		unsigned n{};
+		for (;;)
+		{
+			const auto p{a.build_outgoing(now)};
+			if (p.empty())
+				break;
+			++n;
+			CHECK(b.on_receive(p, now + 1).status == receive_status::accepted);
+		}
+		worst = std::max<std::uint64_t>(worst, n);
+		total += n;
+		const auto ack{b.build_outgoing(now + 2)};
+		if (!ack.empty())
+			CHECK(a.on_receive(ack, now + 3).status == receive_status::accepted);
+	}
+	CHECK_MSG(worst == NET_V2_DEFAULT_MAX_PACKETS_PER_TICK, "most packets in one step: " + std::to_string(worst));
+	CHECK_MSG(total >= 2 * 36000 - 4, "packets in 10 min: " + std::to_string(total));
+	std::printf("    36000 steps of exactly 1/60 s with a backlog: never more than %llu packets per step, %llu in all\n",
+		static_cast<unsigned long long>(worst), static_cast<unsigned long long>(total));
 }
 
 /* Fifth review round. */
@@ -1092,7 +1252,7 @@ void test_big_message_rides_second_packet()
 	a.set_unreliable_state(chunk_type::state, state);
 	/* Built at the construction time, so exactly one tick is granted. */
 	const auto p1{a.build_outgoing(0)};
-	CHECK_MSG(p1.size() == NET_V2_HEADER_SIZE + 3 + 1100, "first packet " + std::to_string(p1.size()) + " bytes");
+	CHECK_MSG(p1.size() == NET_V2_HEADER_SIZE + 3 + NET_V2_STATE_PART_HEADER_SIZE + 1100, "first packet " + std::to_string(p1.size()) + " bytes");
 	CHECK(!packet_header::read(p1)->has_flag(packet_flag::has_reliable));
 	const auto p2{a.build_outgoing(0)};
 	CHECK_MSG(p2.size() == NET_V2_HEADER_SIZE + 6 + 3 + NET_V2_MAX_MESSAGE, "second packet " + std::to_string(p2.size()) + " bytes");
@@ -1137,9 +1297,9 @@ void test_peer_tick_period(const std::uint64_t seed)
 	begin("peer tick period");
 	rng r{seed};
 	connection_config h{host_side}, c{client_side};
-	h.peer_tick_period = 2 * TICK;
-	c.tick_period = 2 * TICK;
-	c.peer_tick_period = TICK;
+	h.peer_tick = {net_seconds(1), 30};
+	c.tick = {net_seconds(1), 30};
+	c.peer_tick = {net_seconds(1), 60};
 	for (unsigned round{}; round != 4; ++round)
 	{
 		sim_world w{r, link_params{.latency = net_milliseconds(10 + 25 * round)}, {}, {{h, c}}};
@@ -1172,8 +1332,8 @@ void test_latest_wins_wrap()
 {
 	begin("latest-wins after a sequence wrap");
 	connection_config h{host_side}, c{client_side};
-	h.tick_period = 1;
-	c.tick_period = 1;
+	h.tick = {1, 1};
+	c.tick = {1, 1};
 	connection a{h, 0};
 	connection b{c, 0};
 	const std::array<std::uint8_t, 4> x{{1, 2, 3, 4}};
@@ -1278,7 +1438,7 @@ void test_event_head_of_line()
 		CHECK(a.send_unreliable(chunk_type::event_u, tiny));
 	a.set_unreliable_state(chunk_type::state, state);
 	const auto p0{a.build_outgoing(0)};
-	CHECK_MSG(p0.size() == NET_V2_HEADER_SIZE + (3 + 300) + 10 * (3 + 4), "first packet " + std::to_string(p0.size()) + " bytes");
+	CHECK_MSG(p0.size() == NET_V2_HEADER_SIZE + (3 + NET_V2_STATE_PART_HEADER_SIZE + 300) + 10 * (3 + 4), "first packet " + std::to_string(p0.size()) + " bytes");
 	CHECK(a.stats().unreliable_dropped == 0);
 	unsigned ticks_until_dropped{};
 	for (unsigned t{1}; t != 20 && a.stats().unreliable_dropped == 0; ++t)
@@ -1301,10 +1461,10 @@ void test_zero_tick_period()
 {
 	begin("zero tick period");
 	connection_config h{host_side};
-	h.tick_period = 0;
+	h.tick = {0, 0};
 	h.max_packets_per_tick = 0;
 	connection a{h, 0};
-	CHECK(a.config().tick_period == 1 && a.config().max_packets_per_tick == 2);
+	CHECK(a.config().tick.numerator == 1 && a.config().tick.denominator == 1 && a.config().max_packets_per_tick == 2);
 	a.set_unreliable_state(chunk_type::state, std::array<std::uint8_t, 1>{{1}});
 	CHECK(!a.build_outgoing(1).empty());
 	std::printf("    tick_period 0 and max_packets_per_tick 0 are clamped to 1 and 2\n");
@@ -1633,7 +1793,10 @@ void test_high_rate_caller()
 	for (unsigned f{}; f != 4 * 200; ++f)
 	{
 		const net_clock now{f * frame};
-		const auto tick_index{static_cast<std::size_t>(now / TICK)};
+		/* Windows of four frames (a period, within the one unit of
+		 * rounding tolerance the scheduler allows).
+		 */
+		const auto tick_index{static_cast<std::size_t>(f / 4)};
 		if (per_tick.size() <= tick_index)
 			per_tick.resize(tick_index + 1);
 		bool any{};
@@ -1975,6 +2138,10 @@ int main(const int argc, char **const argv)
 	test_bounds(seed);
 	test_timeouts(seed);
 	test_replay(seed);
+	test_state_parts(seed);
+	test_state_parts_reorder();
+	test_first_grant_single();
+	test_exact_caller_no_double_grant();
 	test_echo_pinning(seed);
 	test_corrupt_ack_not_applied(seed);
 	test_stream_stalled();

@@ -49,6 +49,13 @@ constexpr bool is_latest_wins(const chunk_type type)
 	return type == chunk_type::state || type == chunk_type::input;
 }
 
+/* Index into the per-type bundle arrays. */
+[[nodiscard]]
+constexpr std::size_t state_index(const chunk_type type)
+{
+	return type == chunk_type::input ? 1 : 0;
+}
+
 }
 
 /* rtt_estimator (§3.5) */
@@ -139,16 +146,17 @@ namespace {
 [[nodiscard]]
 connection_config sanitized(connection_config config)
 {
-	/* A zero period would divide by zero in begin_tick; a zero budget
+	/* A zero term would divide by zero in begin_tick; a zero budget
 	 * could never send.
 	 */
-	config.tick_period = std::max<net_clock>(config.tick_period, 1);
+	config.tick.numerator = std::max<net_clock>(config.tick.numerator, 1);
+	config.tick.denominator = std::max<net_clock>(config.tick.denominator, 1);
 	/* Two at least: the second packet of a tick is what carries a
 	 * reliable message that does not fit beside the state chunk.
 	 */
 	config.max_packets_per_tick = std::max(config.max_packets_per_tick, 2u);
-	if (config.peer_tick_period < 1)
-		config.peer_tick_period = config.tick_period;
+	if (config.peer_tick.numerator < 1 || config.peer_tick.denominator < 1)
+		config.peer_tick = config.tick;
 	return config;
 }
 
@@ -159,13 +167,13 @@ connection::connection(const connection_config &config, const net_clock now) :
 	/* Make the first build_outgoing produce a packet at once. */
 	m_last_sent{now - NET_V2_KEEPALIVE_INTERVAL},
 	/* One full period behind, so the first begin_tick grants a budget. */
-	m_tick_start{now - m_config.tick_period},
+	m_tick_origin{now * m_config.tick.denominator - m_config.tick.numerator},
 	m_last_heard{now},
 	/* The ack hold is the longer of the two periods: the peer holds our
 	 * packet's ack until its tick, and its ack rides to us in a packet we
 	 * only look at on ours.
 	 */
-	m_rtt{m_config.tick_period, std::max(m_config.tick_period, m_config.peer_tick_period)}
+	m_rtt{m_config.tick.units(), std::max(m_config.tick.units(), m_config.peer_tick.units())}
 {
 }
 
@@ -214,23 +222,91 @@ enqueue_result connection::enqueue_reliable(const std::uint8_t type, const std::
 
 void connection::set_unreliable_state(const chunk_type type, const std::span<const std::uint8_t> payload)
 {
-	if (payload.size() > NET_V2_MAX_CHUNK_PAYLOAD)
+	set_unreliable_state(type, 0, 1, payload);
+}
+
+void connection::set_unreliable_state(const chunk_type type, const unsigned part, const unsigned part_count, const std::span<const std::uint8_t> payload)
+{
+	if (!is_latest_wins(type) || part_count < 1 || part_count > NET_V2_STATE_MAX_PARTS || part >= part_count || payload.size() > NET_V2_MAX_STATE_PART)
 	{
 		++m_stats.unreliable_dropped;
 		return;
 	}
-	if (m_state_pending)
+	auto &bundle{m_state_out[state_index(type)]};
+	if (bundle.count != part_count)
+	{
+		/* A new layout: parts of the old one still pending are stale. */
+		for (auto &p : bundle.parts)
+			if (p.pending)
+			{
+				p.pending = false;
+				++m_stats.unreliable_dropped;
+			}
+		bundle.count = part_count;
+	}
+	auto &p{bundle.parts[part]};
+	if (p.pending)
 		/* Replaced before it was sent. */
 		++m_stats.unreliable_dropped;
-	m_state_pending = true;
-	m_state_type = type;
-	m_state_size = payload.size();
-	std::ranges::copy(payload, m_state_buffer.data());
+	p.pending = true;
+	p.size = payload.size();
+	std::ranges::copy(payload, p.data.data());
+}
+
+bool connection::any_state_pending() const
+{
+	for (const auto &bundle : m_state_out)
+		for (unsigned i{}; i != bundle.count; ++i)
+			if (bundle.parts[i].pending)
+				return true;
+	return false;
+}
+
+std::size_t connection::reserved_state_bytes() const
+{
+	const std::size_t available{NET_V2_MAX_PACKET - NET_V2_HEADER_SIZE};
+	std::size_t total{};
+	for (const auto &bundle : m_state_out)
+		for (unsigned i{}; i != bundle.count; ++i)
+		{
+			const auto &p{bundle.parts[i]};
+			if (!p.pending)
+				continue;
+			const auto wire{chunk_wire_size(NET_V2_STATE_PART_HEADER_SIZE + p.size)};
+			if (total + wire > available)
+				/* In order: the rest waits for the next packet. */
+				return total;
+			total += wire;
+		}
+	return total;
+}
+
+void connection::write_state_parts(std::uint8_t *const buf, std::size_t &pos)
+{
+	for (std::size_t t{}; t != m_state_out.size(); ++t)
+	{
+		auto &bundle{m_state_out[t]};
+		for (unsigned i{}; i != bundle.count; ++i)
+		{
+			auto &p{bundle.parts[i]};
+			if (!p.pending)
+				continue;
+			const auto wire{chunk_wire_size(NET_V2_STATE_PART_HEADER_SIZE + p.size)};
+			if (wire > NET_V2_MAX_PACKET - pos)
+				return;
+			chunk_header{.type = static_cast<std::uint8_t>(t == 0 ? chunk_type::state : chunk_type::input), .length = static_cast<std::uint16_t>(NET_V2_STATE_PART_HEADER_SIZE + p.size)}.write(buf + pos);
+			pos += NET_V2_CHUNK_HEADER_SIZE;
+			buf[pos++] = net_state_part_byte(i, bundle.count);
+			std::copy_n(p.data.data(), p.size, buf + pos);
+			pos += p.size;
+			p.pending = false;
+		}
+	}
 }
 
 bool connection::send_unreliable(const chunk_type type, const std::span<const std::uint8_t> payload)
 {
-	if (payload.size() > NET_V2_MAX_CHUNK_PAYLOAD)
+	if (is_latest_wins(type) || payload.size() > NET_V2_MAX_CHUNK_PAYLOAD)
 	{
 		++m_stats.unreliable_dropped;
 		return false;
@@ -319,11 +395,29 @@ void connection::update(const net_clock now)
 
 void connection::begin_tick(const net_clock now)
 {
-	const auto elapsed{now - m_tick_start};
-	if (elapsed < m_config.tick_period)
+	/* Exact: times scaled by the period's denominator, periods in units
+	 * of the numerator.
+	 */
+	const auto &tick{m_config.tick};
+	/* One unit of tolerance: a caller whose integer clock rounds the
+	 * period down by a unit (floor(k * 65536 / 60) does, 14 steps in 15)
+	 * is on time, not late; without it that step would grant nothing and
+	 * the next one two.  The origin still advances by exact periods, so
+	 * the tolerance never accumulates.
+	 */
+	const auto elapsed{now * tick.denominator - m_tick_origin + tick.denominator};
+	if (elapsed < tick.numerator)
 		return;
-	const auto ticks{elapsed / m_config.tick_period};
-	m_tick_start += ticks * m_config.tick_period;
+	auto ticks{elapsed / tick.numerator};
+	m_tick_origin += ticks * tick.numerator;
+	if (!m_tick_granted)
+	{
+		/* However long the connection existed before its first tick, it
+		 * is not owed a burst for that time.
+		 */
+		m_tick_granted = true;
+		ticks = 1;
+	}
 	m_tick_credit = static_cast<unsigned>(std::min<net_clock>(ticks, NET_V2_TICK_GRANT_MAX));
 	/* Whatever was left of the previous tick is not carried on top. */
 	m_tick_open = false;
@@ -346,7 +440,7 @@ std::span<const std::uint8_t> connection::build_outgoing(const net_clock now)
 	 * above has run begin_tick).  The tick is opened, and its credit
 	 * spent, only once a packet is really built.
 	 */
-	const bool header_due{m_state_pending || !m_pending_events.empty() || m_ack_owed || now - m_last_sent >= NET_V2_KEEPALIVE_INTERVAL};
+	const bool header_due{any_state_pending() || !m_pending_events.empty() || m_ack_owed || now - m_last_sent >= NET_V2_KEEPALIVE_INTERVAL};
 	const bool messages_due{any_message_due()};
 	if (!header_due && !messages_due)
 		return {};
@@ -407,15 +501,19 @@ std::span<const std::uint8_t> connection::build_outgoing(const net_clock now)
 				break;
 		}
 	}};
-	const std::size_t state_size{m_state_pending ? chunk_wire_size(m_state_size) : 0};
+	const std::size_t state_size{reserved_state_bytes()};
 	select(state_size);
-	/* The first packet of a tick always carries the state chunk.  A head
-	 * message that does not fit beside it rides the tick's second packet
-	 * (max_packets_per_tick is at least 2), which normally has no state
-	 * left to carry; only if a state was set again in between does that
-	 * packet omit it, so that the message is never starved.
+	/* The first packet of a tick always carries the state chunk(s) that
+	 * fit.  A head message that does not fit beside them rides the tick's
+	 * second packet (max_packets_per_tick is at least 2), which normally
+	 * has no state left to carry.  When it still has (a second bundle
+	 * part, or a state set again in between), the two alternate: one
+	 * packet the part, the next tick the message, so neither starves.
 	 */
-	const bool omit_state{m_carried.empty() && messages_due && state_size != 0 && packets_in_tick != 0};
+	const bool head_blocked{m_carried.empty() && messages_due && state_size != 0 && packets_in_tick != 0};
+	const bool omit_state{head_blocked && m_yield_to_message};
+	if (head_blocked)
+		m_yield_to_message = !omit_state;
 	if (omit_state)
 		select(0);
 	if (!header_due && m_carried.empty())
@@ -486,33 +584,32 @@ std::span<const std::uint8_t> connection::build_outgoing(const net_clock now)
 		}
 		chunk_header{.type = static_cast<std::uint8_t>(chunk_type::reliable), .length = static_cast<std::uint16_t>(pos - chunk_at - NET_V2_CHUNK_HEADER_SIZE)}.write(buf + chunk_at);
 	}
-	if (m_state_pending && !omit_state)
-	{
-		chunk_header{.type = static_cast<std::uint8_t>(m_state_type), .length = static_cast<std::uint16_t>(m_state_size)}.write(buf + pos);
-		pos += NET_V2_CHUNK_HEADER_SIZE;
-		std::copy_n(m_state_buffer.data(), m_state_size, buf + pos);
-		pos += m_state_size;
-		m_state_pending = false;
-	}
+	if (!omit_state)
+		write_state_parts(buf, pos);
 	/* Events: every one that fits, in queue order; one that does not fit
 	 * is skipped (not a head-of-line block) and dropped once it has been
 	 * skipped NET_V2_EVENT_SKIP_MAX times.
 	 */
-	std::erase_if(m_pending_events, [&](pending_event &e) {
-		const auto &c{e.chunk};
+	for (auto it{m_pending_events.begin()}; it != m_pending_events.end();)
+	{
+		const auto &c{it->chunk};
 		if (chunk_wire_size(c.payload.size()) > NET_V2_MAX_PACKET - pos)
 		{
-			if (++e.skipped < NET_V2_EVENT_SKIP_MAX)
-				return false;
+			if (++it->skipped < NET_V2_EVENT_SKIP_MAX)
+			{
+				++it;
+				continue;
+			}
 			++m_stats.unreliable_dropped;
-			return true;
+			it = m_pending_events.erase(it);
+			continue;
 		}
 		chunk_header{.type = static_cast<std::uint8_t>(c.type), .length = static_cast<std::uint16_t>(c.payload.size())}.write(buf + pos);
 		pos += NET_V2_CHUNK_HEADER_SIZE;
 		std::ranges::copy(c.payload, buf + pos);
 		pos += c.payload.size();
-		return true;
-	});
+		it = m_pending_events.erase(it);
+	}
 
 	packet_header h;
 	h.session_id = m_config.session_id;
@@ -548,7 +645,7 @@ std::span<const std::uint8_t> connection::build_outgoing(const net_clock now)
 	/* Judged now, not at the next call: messages queued in between
 	 * belong to the next tick.
 	 */
-	m_tick_backlog = any_message_due();
+	m_tick_backlog = any_message_due() || any_state_pending();
 	m_ack_owed = false;
 	++m_stats.packets_sent;
 	return {buf, pos};
@@ -740,11 +837,21 @@ bool connection::validate_chunks(const std::span<const std::uint8_t> payload, co
 			}
 			case chunk_type::state:
 			case chunk_type::input:
-			case chunk_type::event_u:
-				/* Opaque to the transport; record sizes are checked by
-				 * the consumer (stage 2).
+			{
+				/* The part byte (§3.8); the records behind it are opaque
+				 * to the transport and checked by the consumer (stage 2).
 				 */
-				m_parsed_chunks.push_back({.type = type, .payload = body});
+				if (body.size() < NET_V2_STATE_PART_HEADER_SIZE)
+					return false;
+				const unsigned part{static_cast<unsigned>(body[0] & 0x0f)};
+				const unsigned count{static_cast<unsigned>(body[0] >> 4)};
+				if (count < 1 || count > NET_V2_STATE_MAX_PARTS || part >= count)
+					return false;
+				m_parsed_chunks.push_back({.type = type, .part = static_cast<std::uint8_t>(part), .part_count = static_cast<std::uint8_t>(count), .payload = body.subspan(NET_V2_STATE_PART_HEADER_SIZE)});
+				break;
+			}
+			case chunk_type::event_u:
+				m_parsed_chunks.push_back({.type = type, .part = 0, .part_count = 1, .payload = body});
 				break;
 			case chunk_type::session:
 				/* Only valid with flags.UNCONNECTED, which never reaches
@@ -802,9 +909,9 @@ void connection::deliver_reliable(const net_clock now, receive_report &report)
 	m_ack_owed = true;
 }
 
-connection::latest_packet &connection::latest_for(const chunk_type type)
+connection::latest_packet &connection::latest_for(const chunk_type type, const unsigned part)
 {
-	return type == chunk_type::state ? m_latest_state : m_latest_input;
+	return m_latest[state_index(type)][part];
 }
 
 void connection::deliver_unreliable(const std::uint16_t packet_seq, receive_report &report)
@@ -813,8 +920,8 @@ void connection::deliver_unreliable(const std::uint16_t packet_seq, receive_repo
 	{
 		if (is_latest_wins(c.type))
 		{
-			auto &latest{latest_for(c.type)};
-			/* The last packet that carried this type is a reference only
+			auto &latest{latest_for(c.type, c.part)};
+			/* The last packet that carried this part is a reference only
 			 * while it is inside the reorder window; anything older has
 			 * been superseded by every packet since, and its sequence
 			 * may even have wrapped (a type not seen for 32 768 packets
@@ -831,7 +938,7 @@ void connection::deliver_unreliable(const std::uint16_t packet_seq, receive_repo
 			latest.valid = true;
 			latest.seq = packet_seq;
 		}
-		report.unreliable.push_back({.type = c.type, .payload = c.payload});
+		report.unreliable.push_back({.type = c.type, .part = c.part, .part_count = c.part_count, .payload = c.payload});
 	}
 }
 
