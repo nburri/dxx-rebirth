@@ -65,12 +65,16 @@ exits with status 1; success ends with `all tests passed`.
 | latest-wins wrap | – | 33 000 event-only packets, then 200 `state` chunks: none dropped; a reordered older `state` still is. |
 | grant closes tick | – | One packet built in tick 0, then exactly 2 (not 3) in tick 1. |
 | hostile ack | – | `ack` 5000 after 5 packets sent: `bad_ack`, no packet resolved, no resend, one protocol error; its replay is `bad_ack` again, not counted; `ack` 5 is accepted. |
-| event head-of-line | – | Ten 4-byte events queued behind an 1161-byte one all go out beside a 300-byte state at once; the big one is dropped after 8 packets and fits when sent alone. |
+| event head-of-line | – | A 256-byte event is refused; ten 4-byte events queued behind a 255-byte one all go out beside a 1000-byte state at once; the big one is dropped after 8 packets and fits when sent alone; of 70 queued events the oldest six make room and the 64 newest go out in order. |
 | zero tick period | – | `tick_period` 0 and `max_packets_per_tick` 0 are clamped (to 1 and 2) and the connection sends. |
 | echo pinning | 30 ms | 600 forged packets over 5 s whose `ack` names one real old packet with its true `send_time` and `echo_delay` 0 (and a variant naming the next packet with the stale time): `srtt`, `rttvar` and the offset target are unchanged. |
 | corrupt acks | 40 ms | A packet with reliable messages is lost and the peer's next datagram falsely acks it but is corrupt: nothing of it is applied, the messages are retransmitted, all 200 arrive, one protocol error. |
 | stream stalled | – | Message 1 arrives, message 0 never does, the peer keeps sending state: the receiver closes with `stream_stalled` after 10 s. |
 | corrupted then intact | – | A corrupted copy of a packet, then the intact copy: the intact one is accepted and its message delivered; one protocol error. |
+| held buffers retained | – | Fifty ticks of a message held out of order and released by the next packet: zero allocations inside `on_receive` after a ten-tick warm-up (the test binary counts every `operator new`). |
+| sequence jump bound | – | A 240 Hz host sending four-part bundles through a 4.5 s blackout (4320 packets, more than the old fixed 4096): the client, told the peer's tick, resumes without a `bad_seq`. |
+| wrapped ack | – | Acks 40000 and 1 on a fresh connection, and 11 and 40000 after ten packets: `bad_ack`; 1 and 10 after ten packets: accepted. |
+| sequence wrap | 60 ± 15 ms, 15 % loss, 15 % reorder, 3 % duplication | 140 000 ticks (two packet-sequence wraps per side, four message-sequence wraps): every message delivered in order, nothing rejected but duplicates and malformed-free, no protocol errors, the state stream monotonic. |
 | forged seq far ahead | – | A well-formed keepalive with bit 14 of its `seq` flipped: `bad_seq`, one protocol error (a replay counts none), the stream continues and the peer sees no `bad_ack`. |
 | clock stall | 50 ms | A 50 ms clock step being slewed, then a 2.5 s stall: the applied offset moves while samples remain in the window and holds once it is empty; the target equals the applied value. |
 | corrupted future seq | – | A corrupt datagram whose `seq` byte reads as a future sequence does not prevent the real packets 2, 3 and 4 from being accepted. |
@@ -83,8 +87,8 @@ exits with status 1; success ends with `all tests passed`.
 | two packets per tick | 30 ms | A host sending two packets per tick against a one-packet peer: `srtt` within 5 %. |
 | frame-rate caller | – | 5000 frames at 500 Hz setting the state only when `begin_tick` opened a tick: 600 ticks, 600 states delivered, none dropped. |
 | update() first | – | The same pattern with `update()` called before `begin_tick`: 600 ticks still reported, none twice, 600 states delivered. |
-| event beside backlog | 30 ms | A 300-byte event per tick beside a standing backlog of 900-byte reliable messages: 60 of 60 events delivered, none dropped. |
-| reliable before events | 30 ms | A 700-byte state and a 700-byte event every tick with a 1 KiB message queued: the message goes out in the first tick (the round-12 event reservation starved it for good), all events delivered, none dropped. |
+| event beside backlog | 30 ms | A 250-byte event per tick beside a standing backlog of 900-byte reliable messages: 60 of 60 events delivered, none dropped. |
+| reliable before events | 30 ms | A 1000-byte state and a 250-byte event every tick with a 1 KiB message queued: the message goes out in the first tick (the round-12 event reservation starved it for good), all events delivered, none dropped. |
 | bound hold at 30 Hz | – | A caller building every second tick takes a 233 ms bound: the RTO covers it for the second of hold and has faded to less than a quarter half a second later, at wall-clock speed (aged per grant it would still be whole). |
 | send_unreliable types | – | `state`, `input`, `reliable`, `session` and an unknown type are refused (false, counted in `unreliable_dropped`); only `event_u` is queued. |
 | held message view | – | Message 2 arrives first and is held, its datagram buffer is overwritten, then message 1: both delivered intact, message 1 as a view into its own datagram. |
@@ -94,7 +98,7 @@ exits with status 1; success ends with `all tests passed`.
 | parts after the first packet | – | A state and a message in the tick's first packet, then a 2 × 900-byte bundle: the budget follows, both parts go out in the same tick (three packets), the second message on the next. |
 | late peer packet | – | The peer's older packet arriving 4 s after its newer one: accepted, its acks honoured, `srtt` unchanged, `rttvar` widened by the delay. |
 | late ack of lost packets | – | Acks of packets 1–5 arriving after those of 6–70: the packets are given up and flagged, the late ack takes them back, no message is resent. |
-| event beside a big state | 30 ms | A 700-byte state and a 700-byte event every tick: all 100 events delivered in the tick's second packet, none dropped. |
+| event beside a big state | 30 ms | A 1000-byte state and a 250-byte event every tick: all 100 events delivered in the tick's second packet, none dropped. |
 | gap rule counts acks | – | Six packets, only the sixth acknowledged first: no gap resend; packets 4–6 acknowledged and 1–3 lost: three gap resends. |
 | rejected sample | – | A forged echo with `echo_delay` beyond the round trip is rejected without spending the packet's sample; the genuine echo that follows is taken. |
 | set_peer_tick | – | Setting the peer's tick to 1/10 s on a live connection grows `rto` by exactly the hold difference and leaves `srtt` alone; zero terms restore the own tick. |
@@ -213,12 +217,20 @@ distinct `seq` (a 16-entry list of recently counted sequences, expired with
 the reorder window, suppresses further counts for replays); the list never
 rejects anything, so an intact copy of a sequence whose corrupted copy came
 first is accepted normally, and a corrupt `seq` byte cannot blackhole the real
-packet with that sequence. A well-formed packet whose `seq` is more than
-`NET_V2_MAX_SEQ_JUMP` (4096) ahead of the newest seen (`bad_seq`) is rejected
-and counted the same way: a conforming peer cannot send that many packets
-within the 5 s timeout, and taking it as the new highest would reject every
-real packet that follows as a duplicate until the timeout and make our acks
-protocol errors at the peer. Should the receive window hold out-of-order
+packet with that sequence. A well-formed packet whose `seq` is further
+ahead of the newest seen than the peer could have sent within the 5 s
+timeout (`bad_seq`) is rejected and counted the same way: taking it as the
+new highest would reject every real packet that follows as a duplicate until
+the timeout and make our acks protocol errors at the peer. The bound follows
+the peer's tick (`set_peer_tick`): the ticks in the timeout, times the
+packets a tick may carry (`max_packets_per_tick` or a full bundle's parts + 1,
+whichever is more), times a margin of `NET_V2_SEQ_JUMP_MARGIN` (2), capped at
+32767; 3000 for a 60 Hz peer, 12010 for one at 240 Hz. `bad_ack` covers
+acks ahead of our newest packet and, until half the sequence space has been
+used, acks further behind it than we have sent packets (a forged ack 32768
+or more ahead reads as one far behind); after that an honest ack may lag by
+any distance following a one-way blackout, so only "ahead" is an error, and
+a far-behind ack is harmless since the packet log is consulted by sequence. Should the receive window hold out-of-order
 messages for 10 s without the gap ever being filled while the peer keeps
 sending, the connection closes with `stream_stalled` rather than blaming the
 peer for a protocol error. Packets with
@@ -238,9 +250,14 @@ arrives whole and in order. The transport keeps no copy of the latest state;
 the consumer keeps what it needs from the report. Events (`send_unreliable`)
 go out in queue order as far as they fit; one that does not fit beside the
 state chunk is skipped, not a head-of-line block, and dropped after
-`NET_V2_EVENT_SKIP_MAX` (8) packets. They wait in a fixed ring of
-`NET_V2_EVENT_QUEUE_MAX` (64) slots of `NET_V2_MAX_CHUNK_PAYLOAD` bytes, so
-queueing one allocates nothing; when the ring is full the oldest is dropped.
+`NET_V2_EVENT_SKIP_MAX` (8) packets. An event payload is at most
+`NET_V2_MAX_EVENT` (255) bytes (events are cosmetic; §6.9 gives each a u8
+length): they wait in `NET_V2_EVENT_QUEUE_MAX` (64) fixed slots queued by a
+ring of slot indices, so queueing one allocates nothing and skipping one
+copies nothing; when the ring is full the oldest is dropped. Reliable
+messages held out of order are copied into window slots whose buffers are
+swapped with the retained delivery buffers and never freed, so a held
+message allocates nothing either once the connection has warmed up.
 
 `state()` is `connecting` until the first valid packet arrives, then
 `connected`, and `closed` with a `close_reason` (`timeout`,

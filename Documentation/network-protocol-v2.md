@@ -481,11 +481,13 @@ address with an implausible `seq` is dropped.
    name a live connection whose `player_id` equals the header's, else drop.
    Clients additionally require the source address to be the host's address
    *or* the token to match with a plausible `seq` (the host may also rebind).
-6. Replay/reorder: `d = seq - highest_seen` (wrapping `i16`). `d > 4096`
-   (`NET_V2_MAX_SEQ_JUMP`, more than a conforming peer can send within the
-   5 s timeout): a corrupted or forged sequence; drop and count a protocol
-   error (once per `seq`), so that one bad packet cannot move the window
-   past every real one. `0 < d ≤ 4096`: new highest, shift `ack_bits`.
+6. Replay/reorder: `d = seq - highest_seen` (wrapping `i16`). `d` beyond
+   what the peer can send within the 5 s timeout (the ticks in the timeout
+   at the peer's tick × the packets a tick may carry × a margin of 2,
+   capped at 32767; 3000 at 60 Hz): a corrupted or forged sequence; drop
+   and count a protocol error (once per `seq`), so that one bad packet
+   cannot move the window past every real one. Otherwise `d > 0`: new
+   highest, shift `ack_bits`.
    `-64 ≤ d ≤ 0` and bit not yet set: old but new to us, set the bit,
    process. Otherwise (duplicate or older than 64 packets): drop. This is
    done before any chunk is parsed, so a replayed packet never reaches the
@@ -1322,8 +1324,10 @@ live in `SNAPSHOT_GAME` and `STOLEN_ITEMS` (host).
 
 ### 6.9 Cosmetic events (`EVENT_U`)
 
-Chunk payload: `n` u8, then `n` events of `{type u8, len u8, payload}`. Sent
-once, relayed once by the host, never retransmitted. Receivers apply them if
+Chunk payload: `n` u8, then `n` events of `{type u8, len u8, payload}`; the
+transport takes at most 255 bytes per `EVENT_U` chunk (`NET_V2_MAX_EVENT`),
+a handful of events. Sent once, relayed once by the host, never
+retransmitted. Receivers apply them if
 the referenced player exists. Types: `PLAY_SOUND` (v1 `MULTI_PLAY_SOUND`
 payload + `pid`), `CREATE_EXPLOSION` (`pid`), `DROP_BLOB` (`pid`),
 `SOUND_FUNCTION` (`pid`, function, sound), `TYPING_STATE` (`pid`, state).
