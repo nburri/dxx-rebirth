@@ -2390,7 +2390,7 @@ void do_missile_firing(const secondary_weapon_index weapon, const vmobjptridx_t 
 			 * state bundle names a guided missile by its owner's object
 			 * number.
 			 */
-			const bool send_objnum{weapon_index_is_player_bomb(weapon)
+			const bool send_objnum{static_cast<bool>(weapon_index_is_player_bomb(weapon))
 #if DXX_BUILD_DESCENT == 2
 				|| weapon == secondary_weapon_index::guided
 #endif
