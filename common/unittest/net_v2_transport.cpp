@@ -923,6 +923,158 @@ void test_unreliable_chunks_per_packet()
 	std::printf("    two STATE chunks in one packet both delivered; an older packet's STATE dropped, its EVENT_U kept\n");
 }
 
+/* Tenth review round. */
+
+/* 1. An event that does not fit beside the state chunk gets the tick's
+ * second packet instead of being skipped to death.
+ */
+void test_event_beside_big_state(const std::uint64_t seed)
+{
+	begin("event beside a big state");
+	rng r{seed};
+	sim_world w{r, link_params{.latency = net_milliseconds(30)}};
+	const datagram event(700);
+	std::uint32_t sent{};
+	w.run(100, [&](const unsigned i) {
+		if (i == 0)
+		{
+			w.set_state_parts(0, 1, 700);
+			datagram e{event};
+			net_put_le32(e.data(), sent++);
+			CHECK(w.peers[0].conn.send_unreliable(chunk_type::event_u, e));
+		}
+		else
+			w.set_state(1);
+	});
+	w.run(5);
+	const auto host{w.peers[0].conn.stats()};
+	const auto &events{w.peers[1].events_seen};
+	CHECK_MSG(host.unreliable_dropped == 0, "events dropped " + std::to_string(host.unreliable_dropped));
+	CHECK_MSG(events.size() == 100, "events delivered " + std::to_string(events.size()) + " of 100");
+	CHECK(w.peers[1].part_counts[0] == 100);
+	std::printf("    700-byte state and 700-byte event every tick: %zu of 100 events delivered, none dropped\n", events.size());
+}
+
+/* 2. The gap rule counts acknowledged packets after the message's own,
+ * not the distance to the highest ack: one reordered ack far ahead
+ * acknowledges one packet and resends nothing.
+ */
+void test_gap_rule_counts_acks()
+{
+	begin("gap rule counts acknowledged packets");
+	connection a{host_side, 0};
+	connection b{client_side, 0};
+	const std::array<std::uint8_t, 4> x{{1, 2, 3, 4}};
+	std::vector<datagram> packets;
+	for (unsigned i{}; i != 6; ++i)
+	{
+		CHECK(a.enqueue_reliable(static_cast<std::uint8_t>(i + 1), x) == enqueue_result::ok);
+		const auto p{a.build_outgoing(net_clock{i + 1} * TICK)};
+		CHECK(!p.empty());
+		packets.emplace_back(p.begin(), p.end());
+	}
+	/* Only the sixth packet reaches the peer for now. */
+	const net_clock t{7 * TICK};
+	CHECK(b.on_receive(packets[5], t).status == receive_status::accepted);
+	b.set_unreliable_state(chunk_type::input, x);
+	CHECK(a.on_receive(b.build_outgoing(t + 1), t + 2).status == receive_status::accepted);
+	auto s{a.stats()};
+	CHECK_MSG(s.resends_by_gap == 0, "gap resends after a lone ack of packet 6: " + std::to_string(s.resends_by_gap));
+	CHECK(s.in_flight == 5);
+	/* Now the rest arrives; nothing was ever resent. */
+	for (unsigned i{}; i != 5; ++i)
+		CHECK(b.on_receive(packets[i], t + 3 + i).status == receive_status::accepted);
+	b.set_unreliable_state(chunk_type::input, x);
+	/* A tick later: the peer's budget for this tick is spent. */
+	CHECK(a.on_receive(b.build_outgoing(t + TICK), t + TICK + 1).status == receive_status::accepted);
+	s = a.stats();
+	CHECK(s.in_flight == 0 && s.message_resends == 0 && s.resends_by_gap == 0);
+	CHECK(b.stats().messages_delivered == 6);
+	/* And a genuine gap still fires: packets 1..3 of a fresh set lost,
+	 * 4..6 acknowledged.
+	 */
+	connection c{host_side, 0};
+	connection d{client_side, 0};
+	std::vector<datagram> second;
+	for (unsigned i{}; i != 6; ++i)
+	{
+		CHECK(c.enqueue_reliable(1, x) == enqueue_result::ok);
+		const auto p{c.build_outgoing(net_clock{i + 1} * TICK)};
+		second.emplace_back(p.begin(), p.end());
+	}
+	for (unsigned i{3}; i != 6; ++i)
+		CHECK(d.on_receive(second[i], t + i).status == receive_status::accepted);
+	d.set_unreliable_state(chunk_type::input, x);
+	CHECK(c.on_receive(d.build_outgoing(t + 20), t + 21).status == receive_status::accepted);
+	CHECK_MSG(c.stats().resends_by_gap == 3, "gap resends with three later packets acked: " + std::to_string(c.stats().resends_by_gap));
+	std::printf("    lone ack of packet 6: 0 gap resends; packets 4-6 acked, 1-3 lost: 3 gap resends\n");
+}
+
+/* 3. A rejected sample (hostile echo_delay beyond the round trip) does
+ * not spend the packet's one sample: the real echo still counts.
+ */
+void test_rejected_sample_keeps_packet()
+{
+	begin("rejected sample keeps the packet's sample");
+	connection a{host_side, 0};
+	connection b{client_side, 0};
+	const std::array<std::uint8_t, 2> x{};
+	a.set_unreliable_state(chunk_type::state, x);
+	const auto p1{a.build_outgoing(0)};
+	/* b's first sequence goes to waste, so a forged seq 1 stays unique. */
+	b.set_unreliable_state(chunk_type::input, x);
+	CHECK(!b.build_outgoing(500).empty());
+	CHECK(b.on_receive(p1, 1000).status == receive_status::accepted);
+	packet_header h;
+	h.session_id = client_side.session_id;
+	h.peer_token = client_side.peer_token;
+	h.player_id = client_side.local_player_id;
+	h.flags = static_cast<std::uint8_t>(packet_flag::keepalive);
+	h.seq = 1;
+	h.ack = 1;
+	h.echo_time = 0;	/* p1's true send_time */
+	h.echo_delay = 0xfffe;	/* far beyond the round trip: rtt < 0 */
+	std::array<std::uint8_t, NET_V2_HEADER_SIZE> d{};
+	h.write(d.data());
+	CHECK(a.on_receive(d, 2000).status == receive_status::accepted);
+	CHECK(!a.stats().rtt_valid);
+	/* The genuine echo of packet 1 follows and is taken. */
+	b.set_unreliable_state(chunk_type::input, x);
+	const auto pb{b.build_outgoing(2500)};
+	CHECK(packet_header::read(pb)->ack == 1 && packet_header::read(pb)->echo_delay == 1500);
+	CHECK(a.on_receive(pb, 3000).status == receive_status::accepted);
+	const auto s{a.stats()};
+	CHECK_MSG(s.rtt_valid && s.srtt == 1500, "srtt " + std::to_string(s.srtt) + " units, expected 1500");
+	std::printf("    hostile echo_delay rejected, the real echo of the same packet still sampled (1500 units)\n");
+}
+
+/* 4. The peer's tick can be set on a live connection; the RTO's hold
+ * term follows.
+ */
+void test_set_peer_tick()
+{
+	begin("set_peer_tick on a live connection");
+	connection a{host_side, 0};
+	connection b{client_side, 0};
+	const std::array<std::uint8_t, 2> x{};
+	a.set_unreliable_state(chunk_type::state, x);
+	CHECK(b.on_receive(a.build_outgoing(0), 500).status == receive_status::accepted);
+	b.set_unreliable_state(chunk_type::input, x);
+	CHECK(a.on_receive(b.build_outgoing(600), 1000).status == receive_status::accepted);
+	const auto before{a.stats()};
+	CHECK(before.rtt_valid && before.rto > NET_V2_RTO_MIN && before.rto < NET_V2_RTO_MAX);
+	a.set_peer_tick({net_seconds(1), 10});
+	const auto after{a.stats()};
+	const auto expected{tick_period{net_seconds(1), 10}.units() - NET_V2_DEFAULT_TICK.units()};
+	CHECK_MSG(after.rto - before.rto == expected, "rto grew by " + std::to_string(to_ms(after.rto - before.rto)) + " ms, expected " + std::to_string(to_ms(expected)));
+	CHECK(after.srtt == before.srtt);
+	CHECK(a.config().peer_tick.denominator == 10);
+	/* Zero terms mean "same as our tick". */
+	a.set_peer_tick({0, 0});
+	CHECK(a.stats().rto == before.rto);
+	std::printf("    peer tick 1/60 -> 1/10 s: rto +%.1f ms, srtt unchanged; back to own tick restores it\n", to_ms(expected));
+}
+
 /* Ninth review round. */
 
 /* 1a. A peer that sends far fewer packets than we do (keepalives at
@@ -2249,17 +2401,25 @@ void test_clock(const std::uint64_t seed)
 	const auto after_step{s.clock_offset - truth()};
 	std::printf("    300 ms step: applied error %.2f ms after 2.5 s\n", to_ms(after_step));
 	CHECK((after_step < 0 ? -after_step : after_step) < net_milliseconds(5));
-	/* A small drift is slewed, not jumped: after 20 ms of drift the
-	 * applied offset is still moving toward the target.
+	/* A small drift is slewed, not jumped.  The min-RTT window keeps the
+	 * old target for up to 2 s; once it has expired the applied offset
+	 * moves toward the new one at NET_V2_CLOCK_SLEW_PER_SECOND, so over
+	 * the following second the error shrinks by about 5 ms.
 	 */
 	w.peers[1].bias += net_milliseconds(20);
+	const auto applied_error{[&] {
+		const auto e{w.peers[1].conn.stats().clock_offset - truth()};
+		return e < 0 ? -e : e;
+	}};
+	w.run(120, [&](const unsigned i) { w.set_state(i); });
+	const auto e1{applied_error()};
 	w.run(60, [&](const unsigned i) { w.set_state(i); });
-	s = w.peers[1].conn.stats();
-	const auto during_slew{s.clock_offset - truth()};
-	std::printf("    20 ms step: applied error %.2f ms after 1 s (slewing at %.0f ms/s)\n", to_ms(during_slew), to_ms(NET_V2_CLOCK_SLEW_PER_SECOND));
-	CHECK(during_slew < 0 ? -during_slew > net_milliseconds(10) : during_slew > net_milliseconds(10));
+	const auto e2{applied_error()};
+	std::printf("    20 ms step: applied error %.2f ms after 2 s, %.2f ms after 3 s (slew %.0f ms/s)\n", to_ms(e1), to_ms(e2), to_ms(NET_V2_CLOCK_SLEW_PER_SECOND));
+	CHECK_MSG(e1 >= net_milliseconds(8), "error after 2 s " + std::to_string(to_ms(e1)) + " ms");
+	CHECK_MSG(e1 - e2 >= net_milliseconds(7) / 2 && e1 - e2 <= net_milliseconds(13) / 2, "slewed " + std::to_string(to_ms(e1 - e2)) + " ms in 1 s");
 	/* 20 ms at 5 ms/s is 4 s; allow for the estimate noise on top. */
-	w.run(360, [&](const unsigned i) { w.set_state(i); });
+	w.run(300, [&](const unsigned i) { w.set_state(i); });
 	s = w.peers[1].conn.stats();
 	const auto after_slew{s.clock_offset - truth()};
 	CHECK((after_slew < 0 ? -after_slew : after_slew) < net_milliseconds(5));
@@ -2333,6 +2493,10 @@ int main(const int argc, char **const argv)
 	test_bounds(seed);
 	test_timeouts(seed);
 	test_replay(seed);
+	test_event_beside_big_state(seed);
+	test_gap_rule_counts_acks();
+	test_rejected_sample_keeps_packet();
+	test_set_peer_tick();
 	test_slow_peer_srtt(seed);
 	test_two_packets_per_tick_srtt(seed);
 	test_bundle_with_backlog(seed);

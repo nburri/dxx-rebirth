@@ -290,6 +290,11 @@ public:
 	{
 	}
 	void add_sample(net_clock r);
+	/* The hold term changed (the peer's tick became known). */
+	void set_hold_period(const net_clock hold_period)
+	{
+		m_hold_period = hold_period;
+	}
 	[[nodiscard]]
 	bool valid() const
 	{
@@ -450,6 +455,14 @@ class connection
 		std::uint8_t part_count;
 		std::span<const std::uint8_t> payload;
 	};
+	/* How the pending bundle parts pack, in send order. */
+	struct state_plan
+	{
+		/* Bytes the next packet carries (the parts that fit first). */
+		std::size_t first_packet_bytes;
+		/* Packets all pending parts need; 0 if none is pending. */
+		unsigned packets;
+	};
 
 	connection_config m_config;
 	connection_state m_state{connection_state::connecting};
@@ -561,14 +574,8 @@ class connection
 	latest_packet &latest_for(chunk_type type, unsigned part);
 	[[nodiscard]]
 	bool any_state_pending() const;
-	/* Bytes of the pending state parts that the next packet carries: in
-	 * order, as far as they fit in an otherwise empty payload.
-	 */
 	[[nodiscard]]
-	std::size_t reserved_state_bytes() const;
-	/* Packets the pending state parts need, in order. */
-	[[nodiscard]]
-	unsigned state_packets_needed() const;
+	state_plan plan_state_parts() const;
 	void write_state_parts(std::uint8_t *buf, std::size_t &pos);
 	/* §3.7 step 8.  Fills m_parsed_messages and m_parsed_chunks. */
 	[[nodiscard]]
@@ -653,6 +660,11 @@ public:
 	/* Validate one received datagram (section 3.7) and apply it. */
 	[[nodiscard]]
 	receive_report on_receive(std::span<const std::uint8_t> datagram, net_clock now);
+
+	/* The peer's tick became known (stage 1 learns it in the handshake):
+	 * the RTO's hold term follows.  Zero terms mean the same as `tick`.
+	 */
+	void set_peer_tick(tick_period peer_tick);
 
 	/* Advance the clock slew and, once per tick period, the timeouts
 	 * and the RTO loss detection (begin_tick), without building a packet.

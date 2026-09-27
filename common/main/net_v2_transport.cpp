@@ -10,6 +10,8 @@
  */
 
 #include <algorithm>
+#include <bit>
+#include <cassert>
 #include <cstdlib>
 #include <utility>
 
@@ -137,17 +139,30 @@ void clock_sync::update(const net_clock now)
 	m_last_update = now;
 	const auto diff{m_target - m_offset};
 	const auto magnitude{diff < 0 ? -diff : diff};
+	if (magnitude == 0)
+	{
+		m_slew_remainder = 0;
+		return;
+	}
 	if (magnitude > NET_V2_CLOCK_JUMP_THRESHOLD || now - m_first_sample < NET_V2_CLOCK_SAMPLE_WINDOW)
 	{
 		m_offset = m_target;
+		m_slew_remainder = 0;
 		return;
 	}
 	/* Carry the sub-unit remainder so that short ticks still add up to
-	 * the full slew rate.
+	 * the full slew rate; a step clamped at the target leaves nothing to
+	 * carry.
 	 */
 	const auto scaled{elapsed * NET_V2_CLOCK_SLEW_PER_SECOND + m_slew_remainder};
-	m_slew_remainder = scaled % net_seconds(1);
-	const auto step{std::min(magnitude, scaled / net_seconds(1))};
+	auto step{scaled / net_seconds(1)};
+	if (step >= magnitude)
+	{
+		step = magnitude;
+		m_slew_remainder = 0;
+	}
+	else
+		m_slew_remainder = scaled % net_seconds(1);
 	m_offset += diff < 0 ? -step : step;
 }
 
@@ -187,6 +202,14 @@ connection::connection(const connection_config &config, const net_clock now) :
 	 */
 	m_rtt{m_config.tick.units(), std::max(m_config.tick.units(), m_config.peer_tick.units())}
 {
+}
+
+void connection::set_peer_tick(tick_period peer_tick)
+{
+	if (peer_tick.numerator < 1 || peer_tick.denominator < 1)
+		peer_tick = m_config.tick;
+	m_config.peer_tick = peer_tick;
+	m_rtt.set_hold_period(std::max(m_config.tick.units(), peer_tick.units()));
 }
 
 void connection::close_with(const close_reason reason)
@@ -267,79 +290,86 @@ void connection::set_unreliable_state(const chunk_type type, const unsigned part
 	std::ranges::copy(payload, p.data.data());
 }
 
+namespace {
+
+/* The one walk over the pending bundle parts, in send order (state
+ * before input, part index ascending): f(type, part index, count, part).
+ * Stops when f returns false.
+ */
+template <typename Bundles, typename F>
+void for_each_pending_part(Bundles &bundles, F &&f)
+{
+	for (std::size_t t{}; t != bundles.size(); ++t)
+	{
+		auto &bundle{bundles[t]};
+		for (unsigned i{}; i != bundle.count; ++i)
+		{
+			auto &p{bundle.parts[i]};
+			if (p.pending && !f(t == 0 ? chunk_type::state : chunk_type::input, i, bundle.count, p))
+				return;
+		}
+	}
+}
+
+[[nodiscard]]
+constexpr std::size_t state_part_wire_size(const std::size_t payload_size)
+{
+	return chunk_wire_size(NET_V2_STATE_PART_HEADER_SIZE + payload_size);
+}
+
+}
+
 bool connection::any_state_pending() const
 {
-	for (const auto &bundle : m_state_out)
-		for (unsigned i{}; i != bundle.count; ++i)
-			if (bundle.parts[i].pending)
-				return true;
-	return false;
-}
-
-std::size_t connection::reserved_state_bytes() const
-{
-	const std::size_t available{NET_V2_MAX_PACKET - NET_V2_HEADER_SIZE};
-	std::size_t total{};
-	for (const auto &bundle : m_state_out)
-		for (unsigned i{}; i != bundle.count; ++i)
-		{
-			const auto &p{bundle.parts[i]};
-			if (!p.pending)
-				continue;
-			const auto wire{chunk_wire_size(NET_V2_STATE_PART_HEADER_SIZE + p.size)};
-			if (total + wire > available)
-				/* In order: the rest waits for the next packet. */
-				return total;
-			total += wire;
-		}
-	return total;
-}
-
-unsigned connection::state_packets_needed() const
-{
-	const std::size_t available{NET_V2_MAX_PACKET - NET_V2_HEADER_SIZE};
-	unsigned packets{1};
-	std::size_t filled{};
 	bool any{};
-	for (const auto &bundle : m_state_out)
-		for (unsigned i{}; i != bundle.count; ++i)
+	for_each_pending_part(m_state_out, [&](chunk_type, unsigned, unsigned, const state_part &) {
+		any = true;
+		return false;
+	});
+	return any;
+}
+
+connection::state_plan connection::plan_state_parts() const
+{
+	/* Greedy, in order: a part that does not fit starts the next packet
+	 * and everything behind it waits.  The same walk write_state_parts
+	 * makes, so the reservation and the layout agree.
+	 */
+	const std::size_t available{NET_V2_MAX_PACKET - NET_V2_HEADER_SIZE};
+	state_plan plan{.first_packet_bytes = 0, .packets = 0};
+	std::size_t filled{};
+	for_each_pending_part(m_state_out, [&](chunk_type, unsigned, unsigned, const state_part &p) {
+		const auto wire{state_part_wire_size(p.size)};
+		if (plan.packets == 0 || filled + wire > available)
 		{
-			const auto &p{bundle.parts[i]};
-			if (!p.pending)
-				continue;
-			any = true;
-			const auto wire{chunk_wire_size(NET_V2_STATE_PART_HEADER_SIZE + p.size)};
-			if (filled + wire > available)
-			{
-				++packets;
-				filled = 0;
-			}
-			filled += wire;
+			++plan.packets;
+			filled = 0;
 		}
-	return any ? packets : 0;
+		filled += wire;
+		if (plan.packets == 1)
+			plan.first_packet_bytes = filled;
+		return true;
+	});
+	return plan;
 }
 
 void connection::write_state_parts(std::uint8_t *const buf, std::size_t &pos)
 {
-	for (std::size_t t{}; t != m_state_out.size(); ++t)
-	{
-		auto &bundle{m_state_out[t]};
-		for (unsigned i{}; i != bundle.count; ++i)
-		{
-			auto &p{bundle.parts[i]};
-			if (!p.pending)
-				continue;
-			const auto wire{chunk_wire_size(NET_V2_STATE_PART_HEADER_SIZE + p.size)};
-			if (wire > NET_V2_MAX_PACKET - pos)
-				return;
-			chunk_header{.type = static_cast<std::uint8_t>(t == 0 ? chunk_type::state : chunk_type::input), .length = static_cast<std::uint16_t>(NET_V2_STATE_PART_HEADER_SIZE + p.size)}.write(buf + pos);
-			pos += NET_V2_CHUNK_HEADER_SIZE;
-			buf[pos++] = net_state_part_byte(i, bundle.count);
-			std::copy_n(p.data.data(), p.size, buf + pos);
-			pos += p.size;
-			p.pending = false;
-		}
-	}
+	for_each_pending_part(m_state_out, [&](const chunk_type type, const unsigned part, const unsigned count, state_part &p) {
+		const auto wire{state_part_wire_size(p.size)};
+		if (wire > NET_V2_MAX_PACKET - pos)
+			/* The hard bound: whatever the reservation said, nothing is
+			 * written past the buffer.  The rest waits.
+			 */
+			return false;
+		chunk_header{.type = static_cast<std::uint8_t>(type), .length = static_cast<std::uint16_t>(NET_V2_STATE_PART_HEADER_SIZE + p.size)}.write(buf + pos);
+		pos += NET_V2_CHUNK_HEADER_SIZE;
+		buf[pos++] = net_state_part_byte(part, count);
+		std::copy_n(p.data.data(), p.size, buf + pos);
+		pos += p.size;
+		p.pending = false;
+		return true;
+	});
 }
 
 bool connection::send_unreliable(const chunk_type type, const std::span<const std::uint8_t> payload)
@@ -545,7 +575,7 @@ std::span<const std::uint8_t> connection::build_outgoing(const net_clock now)
 	 * that does not fit beside them rides a later packet of the tick,
 	 * which the budget below always leaves room for.
 	 */
-	const std::size_t state_size{reserved_state_bytes()};
+	const std::size_t state_size{plan_state_parts().first_packet_bytes};
 	select(state_size);
 	if (!header_due && m_carried.empty())
 		/* Something is due but did not fit this time; never emit an
@@ -561,7 +591,7 @@ std::span<const std::uint8_t> connection::build_outgoing(const net_clock now)
 		 * than one packet (§3.8) gets one packet more than it needs, so
 		 * that a blocked head message never displaces a part.
 		 */
-		const auto needed{state_packets_needed()};
+		const auto needed{plan_state_parts().packets};
 		m_tick_budget = std::max(m_config.max_packets_per_tick, needed > 1 ? needed + 1 : 0u);
 	}
 
@@ -589,13 +619,23 @@ std::span<const std::uint8_t> connection::build_outgoing(const net_clock now)
 	for (const auto &run : m_runs)
 	{
 		const auto chunk_at{pos};
-		pos += NET_V2_CHUNK_HEADER_SIZE;
-		net_put_le16(buf + pos, m_carried[run.first]->seq);
-		buf[pos + 2] = static_cast<std::uint8_t>(run.count);
-		pos += NET_V2_RELIABLE_RUN_HEADER_SIZE;
+		if (NET_V2_CHUNK_HEADER_SIZE + NET_V2_RELIABLE_RUN_HEADER_SIZE > NET_V2_MAX_PACKET - pos)
+		{
+			/* Selection and layout disagree: a bug, never an overflow. */
+			assert(!"reliable run selected beyond the packet");
+			break;
+		}
+		pos += NET_V2_CHUNK_HEADER_SIZE + NET_V2_RELIABLE_RUN_HEADER_SIZE;
+		unsigned written{};
 		for (auto j{run.first}; j != run.first + run.count; ++j)
 		{
 			auto &m{*m_carried[j]};
+			if (message_wire_size(m.payload.size()) > NET_V2_MAX_PACKET - pos)
+			{
+				assert(!"reliable message selected beyond the packet");
+				break;
+			}
+			++written;
 			buf[pos] = m.type;
 			net_put_le16(buf + pos + 1, static_cast<std::uint16_t>(m.payload.size()));
 			pos += NET_V2_MESSAGE_HEADER_SIZE;
@@ -619,7 +659,14 @@ std::span<const std::uint8_t> connection::build_outgoing(const net_clock now)
 			++m_stats.message_sends;
 			log.msg_seqs.push_back(m.seq);
 		}
+		if (written == 0)
+		{
+			pos = chunk_at;
+			break;
+		}
 		chunk_header{.type = static_cast<std::uint8_t>(chunk_type::reliable), .length = static_cast<std::uint16_t>(pos - chunk_at - NET_V2_CHUNK_HEADER_SIZE)}.write(buf + chunk_at);
+		net_put_le16(buf + chunk_at + NET_V2_CHUNK_HEADER_SIZE, m_carried[run.first]->seq);
+		buf[chunk_at + NET_V2_CHUNK_HEADER_SIZE + 2] = static_cast<std::uint8_t>(written);
 	}
 	write_state_parts(buf, pos);
 	/* Events: every one that fits, in queue order; one that does not fit
@@ -651,7 +698,7 @@ std::span<const std::uint8_t> connection::build_outgoing(const net_clock now)
 	h.session_id = m_config.session_id;
 	h.peer_token = m_config.peer_token;
 	h.player_id = m_config.local_player_id;
-	if (!m_carried.empty())
+	if (!log.msg_seqs.empty())
 		h.flags |= static_cast<std::uint8_t>(packet_flag::has_reliable);
 	if (pos == NET_V2_HEADER_SIZE)
 		h.flags |= static_cast<std::uint8_t>(packet_flag::keepalive);
@@ -681,7 +728,11 @@ std::span<const std::uint8_t> connection::build_outgoing(const net_clock now)
 	/* Judged now, not at the next call: messages queued in between
 	 * belong to the next tick.
 	 */
-	m_tick_backlog = any_message_due() || any_state_pending();
+	/* Skipped events count as backlog too: one that did not fit beside
+	 * the state chunk gets the tick's second packet, like a blocked
+	 * reliable head.
+	 */
+	m_tick_backlog = any_message_due() || any_state_pending() || !m_pending_events.empty();
 	m_ack_owed = false;
 	++m_stats.packets_sent;
 	return {buf, pos};
@@ -763,10 +814,12 @@ void connection::process_acks(const std::uint16_t ack, const std::uint64_t ack_b
 			 * the peer's hold at full weight into srtt, the HUD ping and
 			 * the host's rewind.
 			 */
-			e.echoed = true;
 			const auto r{now - e.sent_at};
 			if (r >= 0 && r <= NET_V2_RTT_SAMPLE_MAX)
+			{
+				e.echoed = true;
 				m_rtt.add_sample(r);
+			}
 		}
 		resolve_packet(e, true);
 	}
@@ -783,15 +836,25 @@ void connection::process_acks(const std::uint16_t ack, const std::uint64_t ack_b
 			++m_lost_scan_seq;
 	}
 	pop_acked_messages();
-	/* Gap rule: a message whose packet is 3 or more behind the highest
-	 * acked packet is retransmitted without waiting for the RTO.
+	/* Gap rule: a message is retransmitted without waiting for the RTO
+	 * once three packets sent after its own are acknowledged: `ack`
+	 * itself and the set bits between the message's packet and `ack`.
+	 * A lone reordered ack far ahead acknowledges one packet, not three.
 	 */
+	const auto acked_after{[&](const std::uint16_t packet) -> unsigned {
+		const auto d{seq_diff(ack, packet)};
+		if (d <= 0)
+			return 0;
+		const auto between{static_cast<unsigned>(d) - 1};
+		const std::uint64_t mask{between >= NET_V2_ACK_BITS ? ~std::uint64_t{} : (std::uint64_t{1} << between) - 1};
+		return 1 + static_cast<unsigned>(std::popcount(ack_bits & mask));
+	}};
 	for (std::size_t i{}; i != m_sent_count; ++i)
 	{
 		auto &m{m_messages[i]};
 		if (m.acked || m.resend)
 			continue;
-		if (seq_diff(ack, m.in_packet_seq) >= static_cast<std::int16_t>(NET_V2_GAP_LOSS_THRESHOLD))
+		if (acked_after(m.in_packet_seq) >= NET_V2_GAP_LOSS_THRESHOLD)
 		{
 			flag_resend(m);
 			++m_stats.resends_by_gap;
@@ -1098,15 +1161,20 @@ receive_report connection::on_receive(const std::span<const std::uint8_t> datagr
 		auto &e{m_packet_log[h.ack % NET_V2_RECV_WINDOW]};
 		if (e.valid && e.seq == h.ack && !e.echoed && to_net_time(e.sent_at) == h.echo_time)
 		{
-			e.echoed = true;
-			if (!m_echo_sampled_any || seq_diff(h.ack, m_echo_sampled_seq) > 0)
-			{
-				m_echo_sampled_any = true;
-				m_echo_sampled_seq = h.ack;
-			}
 			const net_clock rtt{now - e.sent_at - h.echo_delay};
+			/* A sample out of range (a hostile or absurd echo_delay) is
+			 * rejected without spending the packet's one sample or
+			 * moving the echo mark, which would make older packets look
+			 * reordered.
+			 */
 			if (rtt >= 0 && rtt <= NET_V2_RTT_SAMPLE_MAX)
 			{
+				e.echoed = true;
+				if (!m_echo_sampled_any || seq_diff(h.ack, m_echo_sampled_seq) > 0)
+				{
+					m_echo_sampled_any = true;
+					m_echo_sampled_seq = h.ack;
+				}
 				m_rtt.add_sample(rtt);
 				const net_time peer_now{h.send_time + static_cast<net_time>(rtt / 2)};
 				m_clock.add_sample(now, rtt, net_time_diff(peer_now, to_net_time(now)));
