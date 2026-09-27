@@ -69,6 +69,22 @@ void phys_apply_rot(object &obj, const vms_vector &force_vec);
 // (hopefully) maintain the object's current velocity
 namespace dcx {
 void set_thrust_from_velocity(object_base &obj);
+/* The response of a thrust-driven object to a constant full thrust:
+ * its velocity tends to `steady_velocity` (fix units per second; for
+ * rotation, fix revolutions per second) with the time constant
+ * `time_constant` (seconds), at any frame rate.  The bots plan with it
+ * (Documentation/multiplayer-bots.md section 3.4).  Zero if the object
+ * has no drag.
+ */
+struct physics_thrust_response
+{
+	double steady_velocity;
+	double time_constant;
+};
+[[nodiscard]]
+physics_thrust_response compute_thrust_response(fix mass, fix drag, fix max_thrust);
+[[nodiscard]]
+physics_thrust_response compute_rotation_response(fix mass, fix drag, fix max_rotthrust);
 // the factor by which set_thrust_from_velocity scales the velocity
 [[nodiscard]]
 fix compute_thrust_scale_holding_velocity(fix mass, fix drag);

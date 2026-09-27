@@ -11,6 +11,7 @@
  *
  */
 
+#include <algorithm>
 #include <string>
 #include <vector>
 #include <stdlib.h>
@@ -348,6 +349,8 @@ static void ReadCmdArgs(Inilist &ini, Arglist &&Args)
 		{
 			arg_port_number(pp, end, CGameArg.MplUdpMyPort, false);
 		}
+		else if (!d_stricmp(p, "-bots"))
+			CGameArg.MplBots = static_cast<uint8_t>(std::clamp<long>(arg_integer(pp, end), 0, 7));
 		else if (!d_stricmp(p, "-no-tracker"))
 		{
 			/* Always recognized.  No-op if tracker support compiled

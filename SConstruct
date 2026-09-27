@@ -5020,6 +5020,16 @@ class DXXArchive(DXXCommon):
 		RuntimeTest('test-spawn-site', (
 			'common/unittest/spawn_site.cpp',
 			)),
+		# Test of the bots' navigation: A*, string pulling, stuck
+		# recovery (bot_nav.h, Documentation/multiplayer-bots.md).
+		RuntimeTest('test-bot-nav', (
+			'common/unittest/bot_nav.cpp',
+			)),
+		# Test of the bots' brain: aim, reaction, targets, steering, the
+		# tick schedule and the skill tables (bot_brain.h).
+		RuntimeTest('test-bot-brain', (
+			'common/unittest/bot_brain.cpp',
+			)),
 			)
 	del RuntimeTest
 
@@ -5530,6 +5540,8 @@ class DXXProgram(DXXCommon):
 	def get_objects_common(self,
 		__get_objects_common=__get_objects_common,
 		__get_objects_multiplayer=DXXCommon.create_lazy_object_states_getter((LazyObjectState(sources=(
+'similar/main/bot.cpp',
+'similar/main/bot_menu.cpp',
 'similar/main/multi.cpp',
 'similar/main/multibot.cpp',
 'similar/main/net_interp.cpp',

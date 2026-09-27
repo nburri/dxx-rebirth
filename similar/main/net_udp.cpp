@@ -40,6 +40,7 @@
 #include "game.h"
 #include "gauges.h"
 #include "multi.h"
+#include "bot.h"
 #include "palette.h"
 #include "powerup.h"
 #include "menu.h"
@@ -150,6 +151,7 @@ net_udp_select_teams_menu_items::net_udp_select_teams_menu_items(const unsigned 
 	const unsigned num_blue_players = (num_players + 1) >> 1;
 	// Put first half of players on team A
 	team_vector = ((1 << num_players) - 1) & ~((1 << num_blue_players) - 1);
+	bots_apply_team_preferences(team_vector, num_players);
 	/* Blue team label is always in the same position.  Red team label
 	 * varies based on how many players are on the blue team, so the red
 	 * team label is set by setup_team_sensitive_entries.
@@ -1050,7 +1052,10 @@ int dispatch_table::end_current_level(
 
 	Network_status = network_state::endlevel; // We are between levels
 	if (multi_i_am_master())
+	{
 		net_v2::host_end_level();
+		bots_level_end();
+	}
 	net_udp_listen();
 	/* Reliable now: once is enough. */
 	dispatch->send_endlevel_packet();
@@ -1800,15 +1805,20 @@ struct param_opt
 		label_level,
 		level,
 	};
-	int start_game, mode, mode_end, moreopts;
+	int start_game, mode, mode_end, moreopts, bots;
 	int closed, refuse, maxnet, anarchy, team_anarchy, robot_anarchy, coop, bounty;
 #if DXX_BUILD_DESCENT == 2
 	int capture, hoard, team_hoard;
 #endif
 	std::array<char, sizeof("S100")> slevel{{"1"}};
 	char srmaxnet[sizeof("Maximum players: 99")];
+	char sbots[sizeof("Bots: not in this mode") + 8];
 	ntstring<NM_MAX_TEXT_LEN> max_numplayers_saved_text;
-	std::array<newmenu_item, 22> m;
+	std::array<newmenu_item, 23> m;
+	void update_bots_label()
+	{
+		bots_setup_label(sbots, sizeof(sbots), Netgame.gamemode);
+	}
 	void update_netgame_max_players()
 	{
 		Netgame.max_numplayers = m[maxnet].value + 2;
@@ -1910,6 +1920,7 @@ static int net_udp_game_param_handler( newmenu *menu,const d_event &event, param
 			else
 				Netgame.game_flag &= ~netgame_rule_flags::closed;
 			Netgame.RefusePlayers=menus[opt->refuse].value;
+			opt->update_bots_label();
 			break;
 		}
 		case event_type::newmenu_selected:
@@ -1930,6 +1941,12 @@ static int net_udp_game_param_handler( newmenu *menu,const d_event &event, param
 			if (citem==opt->moreopts)
 			{
 				more_game_options_menu::net_udp_more_game_options(menus[opt->coop].value);
+				return 1;
+			}
+			if (citem == opt->bots)
+			{
+				bots_setup_menu(Netgame.gamemode, Netgame.max_numplayers);
+				opt->update_bots_label();
 				return 1;
 			}
 			if (citem==opt->start_game)
@@ -2067,11 +2084,17 @@ window_event_result net_udp_setup_game(const d_select_event &)
 	opt.maxnet = optnum;
 	opt.update_max_players_string();
 	nm_set_item_slider(m[optnum], opt.srmaxnet, Netgame.max_numplayers - 2, 0, Netgame.max_numplayers - 2, opt.max_numplayers_saved_text); optnum++;
+
+	/* Documentation/multiplayer-bots.md section 6.1. */
+	bots_setup_init();
+	opt.bots = optnum;
+	opt.update_bots_label();
+	nm_set_item_menu(m[optnum], opt.sbots); optnum++;
 	
 	opt.moreopts=optnum;
 	nm_set_item_menu(  m[optnum], "Advanced Options"); optnum++;
 
-	Assert(optnum <= 20);
+	Assert(optnum <= 21);
 
 #if DXX_USE_TRACKER
 	if (Netgame.TrackerNATWarned == TrackerNATHolePunchWarn::Unset)
@@ -2162,7 +2185,7 @@ static int net_udp_send_sync(void)
 		Netgame.numplayers = 0;
 		for (unsigned i = 1; i < N_players; ++i)
 		{
-			if (vcplayerptr(i)->connected == player_connection_status::disconnected)
+			if (vcplayerptr(i)->connected == player_connection_status::disconnected || bot_is_local(i))
 				continue;
 			multi::udp::dispatch->kick_player(Netgame.players[i].protocol.udp.addr, kick_player_reason::aborted);
 		}
@@ -2286,7 +2309,7 @@ abort:
 		// Tell everyone we're bailing
 		for (unsigned i = 1; i < save_nplayers; ++i)
 		{
-			if (vcplayerptr(i)->connected == player_connection_status::disconnected)
+			if (vcplayerptr(i)->connected == player_connection_status::disconnected || bot_is_local(i))
 				continue;
 			multi::udp::dispatch->kick_player(Netgame.players[i].protocol.udp.addr, kick_player_reason::aborted);
 		}
@@ -2345,6 +2368,11 @@ abort:
 		i.callsign = {};
 		i.rank = netplayer_info::player_rank::None;
 	}
+	/* The bots take the free slots below the player limit
+	 * (Documentation/multiplayer-bots.md section 2.3).
+	 */
+	if (const auto placed{bots_allocate_slots()}; placed < Bot_setup.count && bots_allowed_in_mode(Netgame.gamemode))
+		nm_messagebox(menu_title{nullptr}, {TXT_OK}, "Only %u of %u bots fit\nbelow the player limit.", placed, Bot_setup.count);
 
 #if DXX_BUILD_DESCENT == 1
 	if (Netgame.gamemode == network_game_type::team_anarchy)
@@ -2490,7 +2518,7 @@ menu:
 
 		for (unsigned i = 0; i < N_players; ++i)
 		{
-			if (vcplayerptr(i)->connected != player_connection_status::disconnected && i != Player_num)
+			if (vcplayerptr(i)->connected != player_connection_status::disconnected && i != Player_num && !bot_is_local(i))
 			{
 				multi::udp::dispatch->kick_player(Netgame.players[i].protocol.udp.addr, kick_player_reason::aborted);
 			}

@@ -78,6 +78,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "endlevel.h"
 #include "kmatrix.h"
 #include "net_udp.h"
+#include "bot.h"
 #include "playsave.h"
 #include "fireball.h"
 #include "kconfig.h"
@@ -2104,6 +2105,8 @@ window_event_result StartNewLevelSub(const d_robot_info_array &Robot_info, const
 	}
 	else
 		StartLevel(0);		// Note link to above if!
+	/* The host's bots enter the level after the host's own ship. */
+	bots_level_start();
 
 	copy_defaults_to_robot_all(Robot_info);
 	init_controlcen_for_level(Robot_info);
@@ -2428,7 +2431,7 @@ static void StartLevel(int random_flag)
 	{
 		if (+(Game_mode & GM_MULTI_COOP))
 			multi_send_score();
-	 	multi_send_reappear();
+	 	multi_send_reappear(Player_num);
 		multi::dispatch->do_protocol_frame(1, 1);
 	}
 	else // in Singleplayer, after we died ...

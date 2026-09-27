@@ -1103,6 +1103,27 @@ static double compute_thrust_per_velocity(const fix mass, const fix drag)
 
 }
 
+physics_thrust_response compute_thrust_response(const fix mass, const fix drag, const fix max_thrust)
+{
+	if (drag <= 0 || mass <= 0)
+		return {};
+	const auto model{build_drag_model(drag)};
+	if (!(model.decay_per_frame > 0))
+		return {};
+	/* The acceleration as do_physics_sim computes it from the thrust. */
+	const double accel{static_cast<double>(fixmul(max_thrust, fixdiv(F1_0, mass)))};
+	return {
+		.steady_velocity = accel * model.steady_state_per_accel,
+		.time_constant = (static_cast<double>(drag_reference_frametime) / F1_0) / model.decay_per_frame,
+	};
+}
+
+physics_thrust_response compute_rotation_response(const fix mass, const fix drag, const fix max_rotthrust)
+{
+	/* do_physics_sim_rot: the rotational drag is 5/2 of the drag. */
+	return compute_thrust_response(mass, (drag * 5) / 2, max_rotthrust);
+}
+
 fix compute_thrust_scale_holding_velocity(const fix mass, const fix drag)
 {
 	return static_cast<fix>(std::min<double>(std::round(F1_0 * compute_thrust_per_velocity(mass, drag)), std::numeric_limits<fix>::max()));

@@ -49,6 +49,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "ai.h"
 #include "powerup.h"
 #include "multi.h"
+#include "bot.h"
 #include "physics.h"
 #include "multi.h"
 #include "fwd-wall.h"
@@ -1566,7 +1567,7 @@ void Flare_create(const vmobjptridx_t obj)
 #endif
 
 		if (+(Game_mode & GM_MULTI))
-			multi_send_fire(plrobj.orient, FLARE_ADJUST, laser_level::_1	/* unused */, 0, object_none, object_none);
+			multi_send_fire(plrobj.orient, FLARE_ADJUST, laser_level::_1	/* unused */, 0, object_none, object_none, Player_num);
 	}
 
 }
@@ -1830,6 +1831,11 @@ void do_laser_firing_player(pilot &p, const vmobjptridx_t plrobjidx)
 
 	if (p.dead_state != player_dead_state::no)
 		return;
+	/* The human at this machine: its weapon autoselect (its PlayerCfg
+	 * order, HUD text) and cheats.  A bot chooses its own weapon
+	 * (bot.cpp) and has no cheats.
+	 */
+	const bool human{&p == &Local_pilot};
 
 	auto &plrobj = *plrobjidx;
 
@@ -1859,7 +1865,7 @@ void do_laser_firing_player(pilot &p, const vmobjptridx_t plrobjidx)
 		base_energy_used
 	};
 
-	if	(!(sufficient_energy(energy_used, pl_energy) && sufficient_ammo(ammo_used, uses_vulcan_ammo, player_info.vulcan_ammo)))
+	if	(human && !(sufficient_energy(energy_used, pl_energy) && sufficient_ammo(ammo_used, uses_vulcan_ammo, player_info.vulcan_ammo)))
 		auto_select_primary_weapon(player_info);		//	Make sure the player can fire from this weapon.
 
 	auto &Next_laser_fire_time = player_info.Next_laser_fire_time;
@@ -1903,7 +1909,7 @@ void do_laser_firing_player(pilot &p, const vmobjptridx_t plrobjidx)
 			if (!shot_fired)
 				break;
 			rval += shot_fired;
-			Next_laser_fire_time = GameTime64 - fire_frame_overhead + (unlikely(cheats.rapidfire)
+			Next_laser_fire_time = GameTime64 - fire_frame_overhead + (unlikely(human && cheats.rapidfire)
 				? (F1_0 / 25)
 				: (
 #if DXX_BUILD_DESCENT == 2
@@ -1935,7 +1941,8 @@ void do_laser_firing_player(pilot &p, const vmobjptridx_t plrobjidx)
 			break;	//	Couldn't fire weapon, so abort.
 		}
 	}
-	auto_select_primary_weapon(player_info);		//	Make sure the player can fire from this weapon.
+	if (human)
+		auto_select_primary_weapon(player_info);		//	Make sure the player can fire from this weapon.
 }
 
 //	--------------------------------------------------------------------------------------------------
@@ -2099,9 +2106,14 @@ int do_laser_firing(vmobjptridx_t objp, const primary_weapon_index weapon_num, c
 	}
 
 	// Set values to be recognized during comunication phase, if we are the
-	//  one shooting
-	if (+(Game_mode & GM_MULTI) && objp == get_local_player().objnum)
-		multi_send_fire(objp->orient, underlying_value(weapon_num), level, flags, Network_laser_track, object_none);
+	//  one shooting: the local player, or on the host a bot it flies.
+	if (+(Game_mode & GM_MULTI))
+	{
+		if (objp == get_local_player().objnum)
+			multi_send_fire(objp->orient, underlying_value(weapon_num), level, flags, Network_laser_track, object_none, Player_num);
+		else if (objp->type == object_type::OBJ_PLAYER && bot_is_local(get_player_id(objp)))
+			multi_send_fire(objp->orient, underlying_value(weapon_num), level, flags, Network_laser_track, object_none, get_player_id(objp));
+	}
 	return 1;
 }
 

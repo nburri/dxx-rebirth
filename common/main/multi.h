@@ -449,12 +449,15 @@ static constexpr player_ship_color get_player_color(const playernum_t pnum)
 
 extern std::array<objnum_t, MAX_NET_CREATE_OBJECTS> Net_create_objnums;
 extern unsigned Net_create_loc;
-int multi_maybe_disable_friendly_fire(const object_base *attacker);
+/* Friendly fire is off and `attacker` is a teammate of `victim`: the
+ * damage does not apply.
+ */
+int multi_maybe_disable_friendly_fire(const object_base *attacker, playernum_t victim);
 }
 
 namespace dsx {
 
-void multi_send_fire(const vms_matrix &orient, int laser_gun, laser_level, int laser_flags, objnum_t laser_track, imobjptridx_t is_bomb_objnum, playernum_t pnum = Player_num);
+void multi_send_fire(const vms_matrix &orient, int laser_gun, laser_level, int laser_flags, objnum_t laser_track, imobjptridx_t is_bomb_objnum, playernum_t pnum);
 void multi_send_destroy_controlcen(objnum_t objnum, playernum_t player);
 void multi_send_kill(vmobjptridx_t objnum);
 void multi_send_remobj(vmobjidx_t objnum);
@@ -511,15 +514,16 @@ static inline void multi_send_endlevel_start(multi_endlevel_type)
 	multi_send_endlevel_start();
 }
 #endif
-void multi_send_player_deres(deres_type_t type, playernum_t pnum = Player_num);
+/* Player `pnum` (the local player, or on the host a bot) exploded. */
+void multi_send_player_deres(deres_type_t type, playernum_t pnum);
 }
 void multi_send_play_sound(sound_effect sound_num, fix volume, sound_stack once);
-void multi_send_reappear(playernum_t pnum = Player_num);
+void multi_send_reappear(playernum_t pnum);
 void multi_send_create_explosion(playernum_t);
 void multi_send_controlcen_fire(const vms_vector &to_target, int gun_num, objnum_t objnum);
 namespace dcx {
-void multi_send_cloak(playernum_t pnum = Player_num);
-void multi_send_decloak(playernum_t pnum = Player_num);
+void multi_send_cloak(playernum_t pnum);
+void multi_send_decloak(playernum_t pnum);
 }
 void multi_digi_play_sample(sound_effect sndnum, fix max_volume);
 void multi_digi_play_sample_once(sound_effect soundnum, fix max_volume);
@@ -1063,6 +1067,12 @@ bool net_objects_request_drop(powerup_type_t id, uint32_t count);
  * drop and a death, so the host decides with the current inventory).
  */
 void net_objects_flush_inventory();
+/* The host: player `pnum` is a ship the host flies itself (a bot).  Its
+ * ship's inventory is the truth: bring the host's copy up to date (it
+ * drops the eggs from it) and tell the clients if it changed (`force`:
+ * now, even if only energy or ammunition changed).
+ */
+void net_objects_host_own_ship_inventory(playernum_t pnum, bool force);
 /* The host: send every player's inventory to everyone (the extras of a
  * join in progress).
  */

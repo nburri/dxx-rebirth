@@ -163,6 +163,16 @@ void host_kick_all(kick_player_reason reason);
  * the next level start would not reach it; it may join the next level.
  */
 void host_end_level();
+/* Player `slot` has a connection, even one that is closing (a lobby
+ * player left out of the game, a kicked or leaving player's linger).
+ */
+[[nodiscard]]
+bool host_slot_has_peer(playernum_t slot);
+/* Remove player `slot`, which has no connection (a bot), from the game:
+ * the others are told it left for `why`, and the host drops what it
+ * carried (multi_disconnect_player).
+ */
+void host_remove_player(playernum_t slot, kick_player_reason why);
 
 /* Stage 3 (similar/main/net_objects.cpp): a reliable game message of
  * type `type` (net_v2_session.h).  On the host, to every player in the

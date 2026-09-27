@@ -104,6 +104,16 @@ struct authority_state
 	nv::inventory last_sent{};
 	bool have_last_sent{};
 	fix64 last_sent_time{};
+	/* Host: the last INVENTORY sent for each ship it flies itself (the
+	 * bots).
+	 */
+	struct own_ship_report
+	{
+		nv::inventory inv{};
+		bool have{};
+		fix64 time{};
+	};
+	std::array<own_ship_report, MAX_PLAYERS> own_ships{};
 };
 
 authority_state A;
@@ -945,6 +955,7 @@ void net_objects_level_start()
 	A.applied_grants = 0;
 	A.life.reset();
 	A.have_last_sent = false;
+	A.own_ships = {};
 	auto &Objects{LevelUniqueObjectState.Objects};
 	for (unsigned i = 0; i < MAX_PLAYERS; ++i)
 	{
@@ -1215,6 +1226,32 @@ void net_objects_flush_inventory()
 	if (!net_objects_active())
 		return;
 	send_own_inventory(true);
+}
+
+void net_objects_host_own_ship_inventory(const playernum_t pnum, const bool force)
+{
+	if (!net_objects_active() || !multi_i_am_master() || pnum == Player_num || pnum >= MAX_PLAYERS || pnum >= N_players)
+		return;
+	/* Dropped with its death: the copy stays empty until it reappears. */
+	if (A.dropped[pnum])
+		return;
+	auto &Objects{LevelUniqueObjectState.Objects};
+	const auto &ship{*Objects.vcptr(vcplayerptr(pnum)->objnum)};
+	if (ship.type != object_type::OBJ_PLAYER)
+		return;
+	const auto inv{inventory_of(ship)};
+	A.mirrors[pnum].assign(inv);
+	auto &last{A.own_ships[pnum]};
+	if (last.have && inv == last.inv)
+		return;
+	const fix64 now{timer_query()};
+	if (!force && last.have && nv::inventory_differs_only_in_consumables(inv, last.inv) && now < last.time + INVENTORY_REPORT_INTERVAL)
+		return;
+	nv::inventory_msg m{static_cast<uint8_t>(pnum), 0, inv};
+	std::array<uint8_t, nv::inventory_msg::SIZE> buf;
+	m.write(buf);
+	send(session_msg::inventory, buf);
+	last = {inv, true, now};
 }
 
 void net_objects_send_all_inventories()

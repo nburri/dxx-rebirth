@@ -556,6 +556,14 @@ public:
 		pending_count_ = 0;
 		life_ = static_cast<std::uint8_t>(life_ + 1);
 	}
+	/* The host flies this player's ship itself (a bot): the ship is the
+	 * truth, and no grant is on its way.  The life goes on.
+	 */
+	void assign(const inventory &inv)
+	{
+		base_ = current_ = inv;
+		pending_count_ = 0;
+	}
 	/* The life the grants to this player are for (PICKUP_GRANT `life`). */
 	[[nodiscard]]
 	std::uint8_t life() const

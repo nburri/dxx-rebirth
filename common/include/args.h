@@ -129,6 +129,8 @@ struct CArg : prohibit_void_ptr<>
 	int SysRenderZoomAdjustment;
 	uint16_t MplUdpHostPort;
 	uint16_t MplUdpMyPort;
+	/* -bots N: the initial number of bots in the host setup menu. */
+	uint8_t MplBots;
 #if DXX_USE_TRACKER
 	uint16_t MplTrackerPort;
 	std::string MplTrackerAddr;
