@@ -109,6 +109,8 @@ arch_atexit arch_init()
 		 * recognized through that file is opened both as a joystick and
 		 * as a gamecontroller, and every hat/D-pad press is delivered
 		 * twice (SDL_JOYHATMOTION and SDL_CONTROLLERBUTTONDOWN).
+		 * gamecontroller_use_for_device() decides which of the two
+		 * layers opens each device.
 		 */
 		gamecontroller_init();
 #endif
