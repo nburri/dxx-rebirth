@@ -594,6 +594,8 @@ constexpr std::size_t BACKLOG_PUMP_MESSAGES{256};
 constexpr std::size_t BACKLOG_MAX_BYTES{4u << 20};
 
 constexpr fix64 GAME_INFO_BROADCAST_INTERVAL{F1_0 * 10};
+/* A transport statistics line per connection on the console. */
+constexpr fix64 STATS_INTERVAL{F1_0 * 5};
 constexpr fix64 ENDLEVEL_INTERVAL{F1_0};
 constexpr fix64 EXTRAS_INTERVAL{F1_0 / 50};
 
@@ -3736,6 +3738,54 @@ void client_join_frame()
 	send_unconnected(S.join_addr, S.session_id, 0, NET_V2_PLAYER_ID_NONE, session_msg::join_request, buf);
 }
 
+[[nodiscard]]
+unsigned net_clock_to_ms(const ::dcx::net_v2::net_clock t)
+{
+	return static_cast<unsigned>((t * 1000) / 65536);
+}
+
+/* The per-connection statistics of connection::stats() on the console
+ * (Documentation/netv2-transport.md, "What the stats mean"), and the
+ * host's smoothed round trip as the player's ping (section 3.5).
+ */
+void report_stats(peer &p)
+{
+	const auto slot{peer_slot(p)};
+	const auto stats{p.conn->stats()};
+	if (multi_i_am_master())
+		Netgame.players[slot].ping = stats.rtt_valid ? static_cast<fix>(net_clock_to_ms(stats.srtt)) : 0;
+	if (S.now < p.next_stats)
+		return;
+	p.next_stats = S.now + STATS_INTERVAL;
+	con_printf(CON_NORMAL, "net P#%u: rtt %u ms (var %u) rto %u ms loss %.1f%% | pkts sent %llu recv %llu rejected %llu lost %llu | msgs sent %llu resent %llu (gap %llu rto %llu) delivered %llu | queue %zu msgs %zu B in flight %zu held %zu | events dropped %llu proto errors %llu%s",
+		slot,
+		stats.rtt_valid ? net_clock_to_ms(stats.srtt) : 0u,
+		stats.rtt_valid ? net_clock_to_ms(stats.rttvar) : 0u,
+		net_clock_to_ms(stats.rto),
+		stats.loss_estimate * 100.0,
+		static_cast<unsigned long long>(stats.packets_sent),
+		static_cast<unsigned long long>(stats.packets_received),
+		static_cast<unsigned long long>(stats.packets_rejected),
+		static_cast<unsigned long long>(stats.packets_lost),
+		static_cast<unsigned long long>(stats.message_sends),
+		static_cast<unsigned long long>(stats.message_resends),
+		static_cast<unsigned long long>(stats.resends_by_gap),
+		static_cast<unsigned long long>(stats.resends_by_rto),
+		static_cast<unsigned long long>(stats.messages_delivered),
+		stats.queue_messages,
+		stats.queue_bytes,
+		stats.in_flight,
+		stats.recv_window_pending,
+		static_cast<unsigned long long>(stats.unreliable_dropped),
+		static_cast<unsigned long long>(stats.protocol_errors),
+		p.backlog.empty() ? "" : " (backlog)");
+	if (S.rejected_datagrams)
+	{
+		con_printf(CON_NORMAL, "net: %u datagrams rejected before or by the transport", S.rejected_datagrams);
+		S.rejected_datagrams = 0;
+	}
+}
+
 /* A connection closed by the transport (timeout, unacknowledged data,
  * overflow, protocol errors).
  */
@@ -3806,6 +3856,7 @@ void frame(const bool listen)
 				handle_closed_connection(p);
 			continue;
 		}
+		report_stats(p);
 		if (p.ph == peer::phase::closing && S.now >= p.close_at)
 		{
 			if (multi_i_am_master())
