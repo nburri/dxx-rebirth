@@ -610,7 +610,7 @@ int do_powerup(const vmobjptridx_t obj, const powerup_pickup_mode mode)
 				player_info.powerup_flags |= player_flag::cloaked;
 				ai_do_cloak_stuff();
 				if (+(Game_mode & GM_MULTI))
-					multi_send_cloak();
+					multi_send_cloak(Player_num);
 				powerup_basic(-10,-10,-10, CLOAK_SCORE, "%s!",TXT_CLOAKING_DEVICE);
 				used = 1;
 				break;

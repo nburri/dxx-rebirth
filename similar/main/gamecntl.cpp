@@ -1430,7 +1430,7 @@ static window_event_result HandleTestKey(const d_level_shared_robot_info_state &
 			pl_flags ^= player_flag::cloaked;
 			if (+(pl_flags & player_flag::cloaked)) {
 				if (+(Game_mode & GM_MULTI))
-					multi_send_cloak();
+					multi_send_cloak(Player_num);
 				ai_do_cloak_stuff();
 				player_info.cloak_time = {GameTime64};
 			}
@@ -2072,7 +2072,7 @@ public:
 		if (n)
 		{
 			if (+(Game_mode & GM_MULTI))
-				multi_send_cloak();
+				multi_send_cloak(Player_num);
 			ai_do_cloak_stuff();
 			get().cloak_time = {GameTime64};
 		}

@@ -90,6 +90,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "songs.h"
 
 #include "multi.h"
+#include "bot.h"
 #include "cntrlcen.h"
 #include "pcx.h"
 #include "state.h"
@@ -1112,7 +1113,7 @@ static void do_cloak_stuff()
 						continue;
 					maybe_drop_net_powerup(powerup_type_t::POW_CLOAK, 1, 0);
 					if ( Newdemo_state != ND_STATE_PLAYBACK )
-						multi_send_decloak(); // For demo recording
+						multi_send_decloak(Player_num); // For demo recording
 #endif
 				}
 			}
@@ -2160,6 +2161,10 @@ window_event_result GameProcessFrame(const d_level_shared_robot_info_state &Leve
 #ifndef NEWHOMER
 		player_info.homing_object_dist = -1; // Assume not being tracked.  Laser_do_weapon_sequence modifies this.
 #endif
+		/* The bots' brains and controls for this frame, before anything
+		 * moves (Documentation/multiplayer-bots.md section 3.3).
+		 */
+		bots_frame(LevelSharedRobotInfoState.Robot_info);
 		{
 			const frame_probe::scope probe{frame_probe::phase::objects};
 			result = std::max(game_move_all_objects(LevelSharedRobotInfoState), result);
@@ -2199,6 +2204,7 @@ window_event_result GameProcessFrame(const d_level_shared_robot_info_state &Leve
 		if (laser_firing_count)
 			do_laser_firing_player(Local_pilot, Objects.vmptridx(get_local_player().objnum));
 		delayed_autoselect(player_info, Controls);
+		bots_fire();
 	}
 
 	if (Do_appearance_effect) {

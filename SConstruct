@@ -5540,6 +5540,8 @@ class DXXProgram(DXXCommon):
 	def get_objects_common(self,
 		__get_objects_common=__get_objects_common,
 		__get_objects_multiplayer=DXXCommon.create_lazy_object_states_getter((LazyObjectState(sources=(
+'similar/main/bot.cpp',
+'similar/main/bot_menu.cpp',
 'similar/main/multi.cpp',
 'similar/main/multibot.cpp',
 'similar/main/net_interp.cpp',

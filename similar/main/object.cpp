@@ -66,6 +66,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "weapon.h"
 #include "gauges.h"
 #include "multi.h"
+#include "bot.h"
 #include "text.h"
 #include "piggy.h"
 #include "switch.h"
@@ -1572,14 +1573,14 @@ void drop_local_player_eggs(const vmobjptridx_t cobjp)
 {
 	if (+(Game_mode & GM_NETWORK))
 	{
-		multi_send_player_deres(deres_explode);
+		multi_send_player_deres(deres_explode, Player_num);
 		drop_player_armed_bombs(cobjp);
 		net_objects_host_drop_player_eggs(Player_num);
 		return;
 	}
 	drop_player_eggs(cobjp);
 	if (+(Game_mode & GM_MULTI))
-		multi_send_player_deres(deres_explode);
+		multi_send_player_deres(deres_explode, Player_num);
 }
 
 }
@@ -2044,7 +2045,12 @@ static window_event_result object_move_one(const d_level_shared_robot_info_state
 			break;		//doesn't do anything
 
 		case object::control_type::remote:
-			break;		//doesn't do anything
+			/* A remote ship: the network places it, unless it is a bot
+			 * the host flies (Documentation/multiplayer-bots.md section
+			 * 3.3).
+			 */
+			bot_apply_controls(obj);
+			break;
 
 		case object::control_type::cntrlcen:
 			do_controlcen_frame(LevelSharedRobotInfoState.Robot_info, obj);

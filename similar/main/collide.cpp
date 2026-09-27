@@ -62,6 +62,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "effects.h"
 #include "textures.h"
 #include "multi.h"
+#include "bot.h"
 #include "cntrlcen.h"
 #include "newdemo.h"
 #include "endlevel.h"
@@ -393,6 +394,11 @@ static void collide_player_and_wall(const vmobjptridx_t playerobj, const fix hit
 	auto &vmobjptr = Objects.vmptr;
 	auto &TmapInfo = LevelUniqueTmapInfoState.TmapInfo;
 
+	/* A bot opens the doors it flies into (and takes no wall damage in
+	 * stage B1).
+	 */
+	if (bot_hit_wall(playerobj, hitseg, hitwall))
+		return;
 	if (get_player_id(playerobj) != Player_num) // Execute only for local player
 		return;
 
@@ -2275,6 +2281,12 @@ void apply_damage_to_player(object &playerobj, const icobjptridx_t killer, const
 #if DXX_BUILD_DESCENT == 2
 	auto &BuddyState = LevelUniqueObjectState.BuddyState;
 #endif
+	/* A bot's ship on the host (Documentation/multiplayer-bots.md
+	 * section 7.1: the victim's machine decides, and the host flies the
+	 * bot).
+	 */
+	if (bot_take_damage(playerobj, killer, damage, possibly_friendly != apply_damage_player::always))
+		return;
 	if (Player_dead_state != player_dead_state::no)
 		return;
 
@@ -2282,7 +2294,7 @@ void apply_damage_to_player(object &playerobj, const icobjptridx_t killer, const
 	if (+(player_info.powerup_flags & player_flag::invulnerable))
 		return;
 
-	if (possibly_friendly != apply_damage_player::always && multi_maybe_disable_friendly_fire(static_cast<const object *>(killer)))
+	if (possibly_friendly != apply_damage_player::always && multi_maybe_disable_friendly_fire(static_cast<const object *>(killer), Player_num))
 		return;
 
 	if (Endlevel_sequence)

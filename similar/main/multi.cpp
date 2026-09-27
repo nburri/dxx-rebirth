@@ -40,6 +40,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "strutil.h"
 #include "game.h"
 #include "multi.h"
+#include "bot.h"
 #include "multiinternal.h"
 #include "net_v2_state.h"
 #include "net_v2_objects.h"
@@ -580,6 +581,11 @@ kmatrix_result multi_endlevel_score()
 		if (plr.connected != player_connection_status::died_in_mine)
 			plr.connected = player_connection_status::end_menu;
 		Network_status = network_state::endlevel;
+		/* The host's bots are done with the level too: the score screen
+		 * waits for every player still in it.
+		 */
+		if (multi_i_am_master())
+			bots_level_end();
 	}
 
 	// Do the actual screen we wish to show
@@ -1134,7 +1140,7 @@ void multi_leave_game()
 		const auto cobjp = vmobjptridx(get_local_player().objnum);
 		auto &player_info = cobjp->ctype.player_info;
 		player_info.Player_eggs_dropped = true;
-		multi_send_player_deres(deres_drop);
+		multi_send_player_deres(deres_drop, Player_num);
 	}
 
 	multi_send_quit();
@@ -2593,13 +2599,17 @@ void multi_send_player_deres(deres_type_t type, const playernum_t pnum)
 {
 	auto &Objects = LevelUniqueObjectState.Objects;
 	auto &vmobjptr = Objects.vmptr;
-	/* The local player's inventory goes first: the host drops the eggs
-	 * from it, the others arm the mines from it (protocol v2 stage 3).
-	 * The host's copy of a ship it flies itself is already current.
+	/* The inventory goes first: the host drops the eggs from its copy,
+	 * the others arm the mines from it (protocol v2 stage 3).  For the
+	 * local player that is its INVENTORY report; for a ship the host
+	 * flies itself (a bot), the host's copy is brought up to date from
+	 * the ship and sent.
 	 */
 	const auto local_player{pnum == Player_num};
 	if (local_player)
 		net_objects_flush_inventory();
+	else if (multi_i_am_master())
+		net_objects_host_own_ship_inventory(pnum, true);
 	multi_command<multiplayer_command_t::MULTI_PLAYER_DERES> multibuf;
 	multibuf[1] = pnum;
 	multibuf[2] = type;
@@ -2698,7 +2708,11 @@ void multi_send_kill(const vmobjptridx_t objnum)
 	if (local_is_host)
 	{
 		multi_compute_kill(LevelSharedRobotInfoState.Robot_info, imobjptridx(killer_objnum), objnum);
-		multi_send_data(multibuf.h, multiplayer_data_priority::_2, pnum);
+		/* From the host, whoever died: clients take MULTI_KILL_HOST only
+		 * from the host (multi_do_kill_host), and read the victim from
+		 * byte 1.
+		 */
+		multi_send_data(multibuf.h, multiplayer_data_priority::_2, Player_num);
 	}
 	else
 		multi_send_data_direct(multibuf.c, multi_who_is_master(), 2); // I am just a client so I'll only send my kill but not compute it, yet. I'll get response from host so I can compute it correctly
@@ -2816,7 +2830,8 @@ void multi_send_create_explosion(const playernum_t pnum)
 	multibuf[count] = static_cast<int8_t>(pnum);                  count += 1;
 	//                                                                                                      -----------
 	//                                                                                                      Total size = 2
-	multi_send_data(multibuf, multiplayer_data_priority::_0);
+	/* The receivers put the explosion on the originator's ship. */
+	multi_send_data(multibuf, multiplayer_data_priority::_0, pnum);
 }
 
 void multi_send_controlcen_fire(const vms_vector &to_goal, int best_gun_num, objnum_t objnum)
@@ -4453,7 +4468,7 @@ static void multi_do_ranking(const playernum_t pnum, const multiplayer_rspan<mul
 namespace dcx {
 
 // Decide if fire from "killer" is friendly. If yes return 1 (no harm to me) otherwise 0 (damage me)
-int multi_maybe_disable_friendly_fire(const object_base *const killer)
+int multi_maybe_disable_friendly_fire(const object_base *const killer, const playernum_t victim)
 {
 	if (!(Game_mode & GM_NETWORK)) // no Multiplayer game -> always harm me!
 		return 0;
@@ -4467,7 +4482,7 @@ int multi_maybe_disable_friendly_fire(const object_base *const killer)
 		return is_coop;
 	else if (+(Game_mode & GM_TEAM)) // team mode - find out if killer is in my team
 	{
-		if (multi_get_team_from_player(Netgame, Player_num) == multi_get_team_from_player(Netgame, get_player_id(*killer))) // in my team -> don't harm me!
+		if (multi_get_team_from_player(Netgame, victim) == multi_get_team_from_player(Netgame, get_player_id(*killer))) // in my team -> don't harm me!
 			return 1;
 		else // opposite team -> harm me!
 			return 0;

@@ -50,6 +50,7 @@
 #include "net_interp.h"
 #include "game.h"
 #include "multi.h"
+#include "bot.h"
 #include "multiinternal.h"
 #include "powerup.h"
 #include "gameseg.h"
@@ -1837,9 +1838,13 @@ void build_common_bundle(state_bundle &s)
 			continue;
 		auto &obj = *vcobjptr(plr.objnum);
 		player_record rec;
-		if (i == Player_num)
+		/* The host's own ship, and the ships of its bots
+		 * (Documentation/multiplayer-bots.md section 2.2): the pose from
+		 * the object, sampled now.
+		 */
+		if (const bool bot{bot_is_local(i)}; i == Player_num || bot)
 		{
-			if (!local_ship_in_level())
+			if (bot ? obj.type != object_type::OBJ_PLAYER : !local_ship_in_level())
 			{
 				rec.flags = flag_bit(player_record_flag::ghost);
 				s.players[i] = rec;
@@ -1847,7 +1852,7 @@ void build_common_bundle(state_bundle &s)
 			}
 			rec.pose = pose_of(obj);
 			rec.flags = flag_bit(player_record_flag::alive);
-			if (Player_dead_state != player_dead_state::no)
+			if (bot ? bot_ship_dying(i) : Player_dead_state != player_dead_state::no)
 				rec.flags |= flag_bit(player_record_flag::dying);
 			fill_record_status(rec, obj, underlying_value(obj.ctype.player_info.Primary_weapon.get_active()));
 		}
@@ -4564,6 +4569,7 @@ void game_send_to(const playernum_t slot, const uint8_t type, const std::span<co
 
 void session_reset()
 {
+	bots_session_reset();
 	for (auto &p : S.peers)
 		drop_peer(p);
 	S.session_id = 0;
@@ -4740,6 +4746,14 @@ void host_begin_level_wait()
 		auto &plr = *vmplayerptr(static_cast<playernum_t>(i));
 		if (plr.connected == player_connection_status::disconnected)
 			continue;
+		/* A bot is ready at once (Documentation/multiplayer-bots.md
+		 * section 2.3): it has no peer to report LEVEL_READY.
+		 */
+		if (bot_is_local(static_cast<playernum_t>(i)))
+		{
+			plr.connected = player_connection_status::playing;
+			continue;
+		}
 		if (p.conn && p.has_ready && p.ready_level == Current_level_num)
 		{
 			if (p.ready_checksum != my_segments_checksum)
