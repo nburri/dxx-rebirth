@@ -190,7 +190,12 @@ public:
 	}
 	uint32_t next()
 	{
-		return static_cast<uint32_t>(m_engine());
+		/* The engine's result type is uint_fast32_t, which is uint32_t on
+		 * Windows (where a cast would be useless) and wider elsewhere;
+		 * minstd_rand values always fit in 32 bits.
+		 */
+		const uint32_t r = m_engine();
+		return r;
 	}
 	/* Uniform in [0, 1). */
 	double uniform()
