@@ -108,6 +108,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "d_range.h"
 #include "d_underlying_value.h"
 #include "d_zip.h"
+#include "spawn_site.h"
 
 #if DXX_BUILD_DESCENT == 1
 #include "custom.h"
@@ -2250,9 +2251,11 @@ class respawn_locations
 	unsigned max_usable_spawn_sites;
 	per_player_array<site> sites;
 public:
-	respawn_locations(fvmobjptr &vmobjptr, fvcsegptridx &vcsegptridx)
+	/* The spawn sites for player `player_num`, ranked by their distance
+	 * to the nearest other player ship.
+	 */
+	respawn_locations(fvmobjptr &vmobjptr, fvcsegptridx &vcsegptridx, const playernum_t player_num)
 	{
-		const auto player_num{Player_num};
 		const auto find_closest_player = [player_num, &vmobjptr, &vcsegptridx](const obj_position &candidate) {
 			fix closest_dist = INT32_MAX;
 			const auto &&candidate_segp = vcsegptridx(candidate.segnum);
@@ -2276,30 +2279,62 @@ public:
 			s.first = i;
 			s.second = find_closest_player(Player_init[i]);
 		}
-		const unsigned SecludedSpawns = Netgame.SecludedSpawns + 1;
-		if (max_spawn_sites > SecludedSpawns)
-		{
-			max_usable_spawn_sites = SecludedSpawns;
-			const auto &&predicate = [](const site &a, const site &b) {
-				return a.second > b.second;
-			};
-			const auto b = sites.begin();
-			const auto m = std::next(b, SecludedSpawns);
-			const auto e = std::next(b, max_spawn_sites);
-			std::partial_sort(b, m, e, predicate);
-		}
-		else
-			max_usable_spawn_sites = max_spawn_sites;
+		max_usable_spawn_sites = rank_secluded_spawn_sites(std::span<site>(sites.data(), max_spawn_sites), Netgame.SecludedSpawns + 1);
 	}
 	unsigned get_usable_sites() const
 	{
 		return max_usable_spawn_sites;
 	}
-	const site &operator[](const playernum_t i) const
+	std::span<const site> get_sites() const
 	{
-		return sites[i];
+		return {sites.data(), max_usable_spawn_sites};
 	}
 };
+
+}
+
+spawn_choice choose_spawn(fvmobjptr &vmobjptr, const playernum_t pnum, const int random_flag)
+{
+	if (! (+(Game_mode & GM_MULTI) && !(Game_mode & GM_MULTI_COOP))) // If not deathmatch
+		return {spawn_choice::kind::site, pnum};
+	else if (random_flag == 1)
+	{
+		const respawn_locations locations(vmobjptr, vcsegptridx, pnum);
+		if (!locations.get_usable_sites())
+			return {spawn_choice::kind::none, 0};
+		d_srand(static_cast<fix>(timer_update()));
+		const auto site{pick_spawn_site(locations.get_sites(), locations.get_usable_sites(), i2f(15*20), MAX_PLAYERS * 2, d_rand)};
+		return {spawn_choice::kind::site, static_cast<unsigned>(site)};
+	}
+	else
+		// If deathmatch and not random, positions were already determined by sync packet
+		return {spawn_choice::kind::in_place, 0};
+}
+
+void place_player(fvmsegptridx &vmsegptridx, const vmobjptridx_t plrobj, const spawn_choice spawn)
+{
+	switch (spawn.what)
+	{
+		case spawn_choice::kind::none:
+			return;
+		case spawn_choice::kind::in_place:
+			break;
+		case spawn_choice::kind::site:
+		{
+			auto &Objects = LevelUniqueObjectState.Objects;
+			auto &vmobjptr = Objects.vmptr;
+			const auto NewPlayer{spawn.site};
+			Assert(NewPlayer < NumNetPlayerPositions);
+			plrobj->pos = Player_init[NewPlayer].pos;
+			plrobj->orient = Player_init[NewPlayer].orient;
+			obj_relink(vmobjptr, vmsegptr, plrobj, vmsegptridx(Player_init[NewPlayer].segnum));
+			break;
+		}
+	}
+	reset_player_object(*plrobj);
+}
+
+namespace {
 
 //initialize the player object position & orientation (at start of game, or new ship)
 static void InitPlayerPosition(fvmobjptridx &vmobjptridx, fvmsegptridx &vmsegptridx, int random_flag)
@@ -2307,37 +2342,7 @@ static void InitPlayerPosition(fvmobjptridx &vmobjptridx, fvmsegptridx &vmsegptr
 	auto &Objects = LevelUniqueObjectState.Objects;
 	auto &vmobjptr = Objects.vmptr;
 	reset_cruise();
-	int NewPlayer{0};
-
-	if (! (+(Game_mode & GM_MULTI) && !(Game_mode & GM_MULTI_COOP))) // If not deathmatch
-		NewPlayer = Player_num;
-	else if (random_flag == 1)
-	{
-		const respawn_locations locations(vmobjptr, vcsegptridx);
-		if (!locations.get_usable_sites())
-			return;
-		uint_fast32_t trys{0};
-		d_srand(static_cast<fix>(timer_update()));
-		do {
-			trys++;
-			NewPlayer = d_rand() % locations.get_usable_sites();
-			const auto closest_dist = locations[NewPlayer].second;
-			if (closest_dist >= i2f(15*20))
-				break;
-		} while (trys < MAX_PLAYERS * 2);
-		NewPlayer = locations[NewPlayer].first;
-	}
-	else {
-		// If deathmatch and not random, positions were already determined by sync packet
-		reset_player_object(*ConsoleObject);
-		return;
-	}
-	Assert(NewPlayer >= 0);
-	Assert(NewPlayer < NumNetPlayerPositions);
-	ConsoleObject->pos = Player_init[NewPlayer].pos;
-	ConsoleObject->orient = Player_init[NewPlayer].orient;
-	obj_relink(vmobjptr, vmsegptr, vmobjptridx(ConsoleObject), vmsegptridx(Player_init[NewPlayer].segnum));
-	reset_player_object(*ConsoleObject);
+	place_player(vmsegptridx, vmobjptridx(ConsoleObject), choose_spawn(vmobjptr, Player_num, random_flag));
 }
 
 }
