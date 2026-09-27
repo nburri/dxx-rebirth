@@ -1,8 +1,15 @@
 # v2 network transport: library and simulation test (stage 0)
 
 This is stage 0 of the plan in `network-protocol-v2.md` §8: the transport
-layer as a self-contained library plus a simulation test. Nothing in the
-game uses it yet; stage 1 puts it under the existing UDP socket.
+layer as a self-contained library plus a simulation test. Stage 1
+(`similar/main/net_v2.cpp`) drives it from the game's frame loop: one
+`connection` per peer, `begin_tick`/`build_outgoing`/`on_receive` on the
+game timer (`fix64`, the same unit as `net_clock`), the session layer of
+§4 on top, and the v1 gameplay records inside reliable messages and
+`event_u` chunks (§6.10, "Stage 1" column). The game-independent part of
+the session layer, `common/main/net_v2_session.h`, has its own standalone
+test, `common/unittest/net_v2_session.cpp` (`test-net-v2-session`, built
+and run like the transport test below).
 
 ## Files
 

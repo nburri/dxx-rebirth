@@ -643,17 +643,29 @@ same rules as v1 §2.5.1 unless noted):
 | Condition | Result |
 |---|---|
 | `game_id`, version or `proto` mismatch | `JOIN_DENY(version)` with the host's values |
-| Same `client_nonce` and callsign as an existing connection | Resend the same `JOIN_ACCEPT` (retry of a request whose accept was lost) |
+| Same `client_nonce` and address as an existing connection | Resend the same `JOIN_ACCEPT` while the connection is still connecting (the accept was lost); ignore once it is established (a delayed or reordered retry, never a second admission) |
+| Another join in progress (`JOIN_ACCEPT` sent, `CLIENT_READY` or the extras still pending) | No answer; the client retries (v1 behaviour) |
 | `RefusePlayers` set | Prompt as in v1 (`net_udp_do_refuse_stuff`); no answer until accepted; `JOIN_DENY(dork)` after 8 s |
 | Host in `endlevel` or reactor destroyed | `JOIN_DENY(endlevel)` |
 | Callsign matches a `disconnected` slot | Rejoin into that slot (keeps scores) |
 | Callsign matches a connected slot | `JOIN_DENY(duplicate_callsign)` (new reason; v1 silently ignored, which looked like a hang) |
 | Game closed | `JOIN_DENY(closed)` |
-| Free slot, or a disconnected slot to take over (oldest `LastPacketTime`) | Accept |
+| Free slot below `max_numplayers`, or a disconnected slot below it to take over (oldest `LastPacketTime`) | Accept |
 | Otherwise | `JOIN_DENY(full)` |
 
-The v1 refusal "host is already sending objects to someone else" disappears:
-snapshots are ordinary reliable streams and several can be in progress.
+As in v1, the host serves one join in progress at a time: a second
+`JOIN_REQUEST` gets no answer until the first joiner's `CLIENT_READY` and
+extras are done (the client's 10 s retry window covers a normal join).
+Snapshots themselves are ordinary reliable streams and could overlap, but the
+join bookkeeping (the new player's slot at `N_players`, the per-player extras
+of stage 1) assumes one joiner. A player late for a level start (§4.3) also
+gets a snapshot; its extras wait for the running ones.
+
+The client accepts a `JOIN_DENY` only with its attempt's `client_nonce` and
+from the host it sent the request to; a `JOIN_DENY(version)` with nonce 0
+(the answer to `GAME_INFO_REQ`) only from the host it asked. A `GAME_INFO`
+is accepted only from the host last asked and never while a join is under
+way, so a stray answer cannot replace the game being joined.
 
 `JOIN_ACCEPT` (0x06), 22 bytes, header: `UNCONNECTED`, `session_id`,
 `peer_token` = the new token (so the client learns it from the header),
@@ -1335,61 +1347,78 @@ Chat (`MESSAGE`) is reliable because a lost chat line is noticed.
 
 ### 6.10 Mapping of every v1 `MULTI_*` message
 
-| v1 message (id) | v2 | Notes |
-|---|---|---|
-| `MULTI_POSITION` (0) | gone | Position is `INPUT` → bundle. The "send position before an important event" pattern is unnecessary: every event carries its own coordinates. |
-| `MULTI_REAPPEAR` (1) | `PLAYER_SPAWN` (host) | Host picks the spawn point. |
-| `MULTI_FIRE` (2), `FIRE_TRACK` (3), `FIRE_BOMB` (4) | `FIRE` | One message; `track_netid` and projectile `netid` fields cover all three. |
-| `MULTI_REMOVE_OBJECT` (5) | `OBJ_REMOVE` (host) | Clients never remove. |
-| `MULTI_MESSAGE` (6) | `MESSAGE` | Reliable now; `pid` explicit. Same 35-byte text. |
-| `MULTI_QUIT` (7) | `LEAVE` / `PLAYER_LEFT` / `HOST_SHUTDOWN` | Acked. |
-| `MULTI_PLAY_SOUND` (8) | `EVENT_U PLAY_SOUND` | |
-| `MULTI_CONTROLCEN` (9) | `REACTOR_DESTROYED` (host) | |
-| `MULTI_ROBOT_CLAIM` (10), `ROBOT_RELEASE` (21) | gone | Host owns robots. |
-| `MULTI_CLOAK` (11), `DECLOAK` (16) | bundle flag bit 1 + `INVENTORY` | Cloak start time = first tick with the bit set. |
-| `MULTI_ENDLEVEL_START` (12) | `ESCAPED` | |
-| `MULTI_CREATE_EXPLOSION` (13) | `EVENT_U CREATE_EXPLOSION` | |
-| `MULTI_CONTROLCEN_FIRE` (14) | `FIRE` with `pid` 0xFE | Host only. |
-| `MULTI_CREATE_POWERUP` (15) | `OBJ_CREATE` (host) | No client-side spawns; explicit velocity. |
-| `MULTI_ROBOT_POSITION` (17) | robot records in the bundle | |
-| `MULTI_PLAYER_DERES` (18) | `PLAYER_KILLED` + `dying` flag + host `OBJ_CREATE` × n + `INVENTORY` | |
-| `MULTI_DOOR_OPEN` (19), `WALL_STATUS` (49), `HOSTAGE_DOOR` (32) | `WALL_STATE` (host); `WALL_REQUEST` (client) | One wall message. |
-| `MULTI_ROBOT_EXPLODE` (20) | `ROBOT_KILLED` (host) | |
-| `MULTI_ROBOT_FIRE` (22) | `FIRE` with `pid` 0xFD | Host only. |
-| `MULTI_SCORE` (23) | `SCORE_UPDATE` (host) | |
-| `MULTI_CREATE_ROBOT` (24), `BOSS_CREATE_ROBOT` (30) | `OBJ_CREATE` type robot (host) | |
-| `MULTI_TRIGGER` (25) | `TRIGGER` (host); `TRIGGER_REQUEST` (client) | |
-| `MULTI_BOSS_TELEPORT` (26), `BOSS_CLOAK` (27), `BOSS_START_GATE` (28), `BOSS_STOP_GATE` (29) | `BOSS_ACTION{netid, action, segnum}` (host) | |
-| `MULTI_CREATE_ROBOT_POWERUPS` (31) | n × `OBJ_CREATE` (host) | |
-| `MULTI_SAVE_GAME` (33), `RESTORE_GAME` (34) | same payloads, host only | |
-| `MULTI_HEARTBEAT` (35) | bundle header `level_time` | 60 Hz instead of 1 Hz. |
-| `MULTI_KILLGOALS` (36), `DO_BOUNTY` (37), `GMODE_UPDATE` (39) | `GAME_MODE_STATE` (host) | |
-| `MULTI_TYPING_STATE` (38) | `EVENT_U TYPING_STATE` | |
-| `MULTI_KILL_HOST` (40), `KILL_CLIENT` (41) | `PLAYER_KILLED` (host) | Clients never report their own death; the host knows. |
-| `MULTI_RANK` (42) | `RANK{pid, rank}` | |
-| `MULTI_DROP_WEAPON` (43) | `DROP_WEAPON_REQUEST{primary}` → host `OBJ_CREATE` + `INVENTORY` | No seed. |
-| `MULTI_VULWPN_AMMO_ADJ` (44) | `OBJ_AMMO` (host) | |
-| `MULTI_PLAYER_INV` (45) | `INVENTORY` (host, on change) | Not periodic. |
-| `MULTI_MARKER` (46) | `MARKER_REQUEST{index, text}` → host `OBJ_CREATE` type marker + `MARKER_TEXT{pid, index, text}` | Owner explicit (fixes v1 §8.4). |
-| `MULTI_GUIDED` (47) | guided record in `INPUT`/bundle; `GUIDED_RELEASE{pid}` reliable | |
-| `MULTI_STOLEN_ITEMS` (48) | `STOLEN_ITEMS` (host) + snapshot | |
-| `MULTI_SEISMIC` (50) | `SEISMIC` (host) | |
-| `MULTI_LIGHT` (51) | `LIGHT_STATE` (host) + snapshot | |
-| `MULTI_START_TRIGGER` (52) | `SNAPSHOT_TRIGGERS` / `TRIGGER_DISABLE` (host) | |
-| `MULTI_FLAGS` (53), `GOT_FLAG` (57), `GOT_ORB` (61) | `INVENTORY` | `pid` explicit (fixes v1 §8.4). |
-| `MULTI_DROP_BLOB` (54), `SOUND_FUNCTION` (55) | `EVENT_U` | |
-| `MULTI_CAPTURE_BONUS` (56) | `CAPTURE` (host) | |
-| `MULTI_DROP_FLAG` (58) | `DROP_FLAG_REQUEST` → host `OBJ_CREATE` | No seed (fixes v1 §8.5 for good). |
-| `MULTI_FINISH_GAME` (59) | `LEVEL_END(reason=finish)` (host) | |
-| `MULTI_ORB_BONUS` (60) | `ORB_BONUS` (host) | |
-| `MULTI_EFFECT_BLOWUP` (62) | `EFFECT_BLOWUP` (host) after `WEAPON_HIT` kind 4 | |
-| `MULTI_UPDATE_BUDDY_STATE` (63) | `BUDDY_STATE` (host; guide-bot is host-owned) | |
-| fork's `PICKUP_REQUEST`/`REPLY`/`RELEASE` (#5) | `PICKUP_REQUEST`, `PICKUP_GRANT`, `PICKUP_DENY` | Release is unnecessary: the host decides usability before granting. |
-| v1 `pdata` | `INPUT` / bundle | |
-| v1 `ping`/`pong` | header `send_time`/`echo_*` | |
-| v1 `endlevel_h`/`endlevel_c` | `LEVEL_STATUS`, `LEVEL_END`, `SCORES` | |
-| v1 `object_data` | `SNAPSHOT_*` | |
-| v1 `sync`, `game_info`, `addplayer`, `request`, `dump`, `quit_joining`, `version_deny` | `GAME_SETTINGS`, `PLAYER_LIST`, `LEVEL_START`, `LEVEL_GO`, `PLAYER_JOINED`, `JOIN_REQUEST`, `KICK`/`JOIN_DENY`, `LEAVE(cancelled)` | |
+| v1 message (id) | v2 | Notes | Stage 1 |
+|---|---|---|---|
+| `MULTI_POSITION` (0) | gone | Position is `INPUT` → bundle. The "send position before an important event" pattern is unnecessary: every event carries its own coordinates. | `EVENT_U` legacy; rides the next reliable record when queued right before it (the v1 priority 0 rule) |
+| `MULTI_REAPPEAR` (1) | `PLAYER_SPAWN` (host) | Host picks the spawn point. | `LEGACY_MDATA` (reliable) |
+| `MULTI_FIRE` (2), `FIRE_TRACK` (3), `FIRE_BOMB` (4) | `FIRE` | One message; `track_netid` and projectile `netid` fields cover all three. | `LEGACY_MDATA` (reliable) |
+| `MULTI_REMOVE_OBJECT` (5) | `OBJ_REMOVE` (host) | Clients never remove. | `LEGACY_MDATA` (reliable) |
+| `MULTI_MESSAGE` (6) | `MESSAGE` | Reliable now; `pid` explicit. Same 35-byte text. | `LEGACY_MDATA` (reliable) |
+| `MULTI_QUIT` (7) | `LEAVE` / `PLAYER_LEFT` / `HOST_SHUTDOWN` | Acked. | `LEGACY_MDATA` (reliable) |
+| `MULTI_PLAY_SOUND` (8) | `EVENT_U PLAY_SOUND` | | `EVENT_U` legacy |
+| `MULTI_CONTROLCEN` (9) | `REACTOR_DESTROYED` (host) | | `LEGACY_MDATA` (reliable) |
+| `MULTI_ROBOT_CLAIM` (10), `ROBOT_RELEASE` (21) | gone | Host owns robots. | `LEGACY_MDATA` (reliable) |
+| `MULTI_CLOAK` (11), `DECLOAK` (16) | bundle flag bit 1 + `INVENTORY` | Cloak start time = first tick with the bit set. | `LEGACY_MDATA` (reliable) |
+| `MULTI_ENDLEVEL_START` (12) | `ESCAPED` | | `LEGACY_MDATA` (reliable) |
+| `MULTI_CREATE_EXPLOSION` (13) | `EVENT_U CREATE_EXPLOSION` | | `EVENT_U` legacy |
+| `MULTI_CONTROLCEN_FIRE` (14) | `FIRE` with `pid` 0xFE | Host only. | `LEGACY_MDATA` (reliable) |
+| `MULTI_CREATE_POWERUP` (15) | `OBJ_CREATE` (host) | No client-side spawns; explicit velocity. | `LEGACY_MDATA` (reliable) |
+| `MULTI_ROBOT_POSITION` (17) | robot records in the bundle | | `EVENT_U` legacy |
+| `MULTI_PLAYER_DERES` (18) | `PLAYER_KILLED` + `dying` flag + host `OBJ_CREATE` × n + `INVENTORY` | | `LEGACY_MDATA` (reliable) |
+| `MULTI_DOOR_OPEN` (19), `WALL_STATUS` (49), `HOSTAGE_DOOR` (32) | `WALL_STATE` (host); `WALL_REQUEST` (client) | One wall message. | `LEGACY_MDATA` (reliable) |
+| `MULTI_ROBOT_EXPLODE` (20) | `ROBOT_KILLED` (host) | | `LEGACY_MDATA` (reliable) |
+| `MULTI_ROBOT_FIRE` (22) | `FIRE` with `pid` 0xFD | Host only. | `LEGACY_MDATA` (reliable) |
+| `MULTI_SCORE` (23) | `SCORE_UPDATE` (host) | | `LEGACY_MDATA` (reliable) |
+| `MULTI_CREATE_ROBOT` (24), `BOSS_CREATE_ROBOT` (30) | `OBJ_CREATE` type robot (host) | | `LEGACY_MDATA` (reliable) |
+| `MULTI_TRIGGER` (25) | `TRIGGER` (host); `TRIGGER_REQUEST` (client) | | `LEGACY_MDATA` (reliable) |
+| `MULTI_BOSS_TELEPORT` (26), `BOSS_CLOAK` (27), `BOSS_START_GATE` (28), `BOSS_STOP_GATE` (29) | `BOSS_ACTION{netid, action, segnum}` (host) | | `LEGACY_MDATA` (reliable) |
+| `MULTI_CREATE_ROBOT_POWERUPS` (31) | n × `OBJ_CREATE` (host) | | `LEGACY_MDATA` (reliable) |
+| `MULTI_SAVE_GAME` (33), `RESTORE_GAME` (34) | same payloads, host only | | `LEGACY_MDATA` (reliable) |
+| `MULTI_HEARTBEAT` (35) | bundle header `level_time` | 60 Hz instead of 1 Hz. | `EVENT_U` legacy at priority 0/1, `LEGACY_MDATA` at priority 2 |
+| `MULTI_KILLGOALS` (36), `DO_BOUNTY` (37), `GMODE_UPDATE` (39) | `GAME_MODE_STATE` (host) | | `EVENT_U` legacy |
+| `MULTI_TYPING_STATE` (38) | `EVENT_U TYPING_STATE` | | `EVENT_U` legacy |
+| `MULTI_KILL_HOST` (40), `KILL_CLIENT` (41) | `PLAYER_KILLED` (host) | Clients never report their own death; the host knows. | `LEGACY_MDATA` (reliable) |
+| `MULTI_RANK` (42) | `RANK{pid, rank}` | | `LEGACY_MDATA` (reliable) |
+| `MULTI_DROP_WEAPON` (43) | `DROP_WEAPON_REQUEST{primary}` → host `OBJ_CREATE` + `INVENTORY` | No seed. | `LEGACY_MDATA` (reliable) |
+| `MULTI_VULWPN_AMMO_ADJ` (44) | `OBJ_AMMO` (host) | | `LEGACY_MDATA` (reliable) |
+| `MULTI_PLAYER_INV` (45) | `INVENTORY` (host, on change) | Not periodic. | `EVENT_U` legacy at priority 0/1, `LEGACY_MDATA` at priority 2 |
+| `MULTI_MARKER` (46) | `MARKER_REQUEST{index, text}` → host `OBJ_CREATE` type marker + `MARKER_TEXT{pid, index, text}` | Owner explicit (fixes v1 §8.4). | `LEGACY_MDATA` (reliable) |
+| `MULTI_GUIDED` (47) | guided record in `INPUT`/bundle; `GUIDED_RELEASE{pid}` reliable | | `EVENT_U` legacy |
+| `MULTI_STOLEN_ITEMS` (48) | `STOLEN_ITEMS` (host) + snapshot | | `LEGACY_MDATA` (reliable) |
+| `MULTI_SEISMIC` (50) | `SEISMIC` (host) | | `LEGACY_MDATA` (reliable) |
+| `MULTI_LIGHT` (51) | `LIGHT_STATE` (host) + snapshot | | `LEGACY_MDATA` (reliable) |
+| `MULTI_START_TRIGGER` (52) | `SNAPSHOT_TRIGGERS` / `TRIGGER_DISABLE` (host) | | `LEGACY_MDATA` (reliable) |
+| `MULTI_FLAGS` (53), `GOT_FLAG` (57), `GOT_ORB` (61) | `INVENTORY` | `pid` explicit (fixes v1 §8.4). | `LEGACY_MDATA` (reliable) |
+| `MULTI_DROP_BLOB` (54), `SOUND_FUNCTION` (55) | `EVENT_U` | | `EVENT_U` legacy |
+| `MULTI_CAPTURE_BONUS` (56) | `CAPTURE` (host) | | `LEGACY_MDATA` (reliable) |
+| `MULTI_DROP_FLAG` (58) | `DROP_FLAG_REQUEST` → host `OBJ_CREATE` | No seed (fixes v1 §8.5 for good). | `LEGACY_MDATA` (reliable) |
+| `MULTI_FINISH_GAME` (59) | `LEVEL_END(reason=finish)` (host) | | `LEGACY_MDATA` (reliable) |
+| `MULTI_ORB_BONUS` (60) | `ORB_BONUS` (host) | | `LEGACY_MDATA` (reliable) |
+| `MULTI_EFFECT_BLOWUP` (62) | `EFFECT_BLOWUP` (host) after `WEAPON_HIT` kind 4 | | `LEGACY_MDATA` (reliable) |
+| `MULTI_UPDATE_BUDDY_STATE` (63) | `BUDDY_STATE` (host; guide-bot is host-owned) | | `LEGACY_MDATA` (reliable) |
+| fork's `PICKUP_REQUEST`/`REPLY`/`RELEASE` (#5) | `PICKUP_REQUEST`, `PICKUP_GRANT`, `PICKUP_DENY` | Release is unnecessary: the host decides usability before granting. | `LEGACY_MDATA` (reliable) |
+| v1 `pdata` | `INPUT` / bundle | | `INPUT` chunk (client → host) and `STATE` chunk (host → clients: ping list + the newest record of every other player), the v1 46-byte record with player id and connection state in front |
+| v1 `ping`/`pong` | header `send_time`/`echo_*` | | gone: `srtt` of the host's connection, distributed in the `STATE` chunk |
+| v1 `endlevel_h`/`endlevel_c` | `LEVEL_STATUS`, `LEVEL_END`, `SCORES` | | `LEGACY_ENDLEVEL_HOST` (0x7C) / `LEGACY_ENDLEVEL_CLIENT` (0x7D), v1 payloads as reliable messages |
+| v1 `object_data` | `SNAPSHOT_*` | | `SNAPSHOT_BEGIN`, `SNAPSHOT_OBJECTS` (v1 entries: objnum, owner, remote objnum, `object_rw`; 3 per message), `SNAPSHOT_GAME`, `SNAPSHOT_END` with CRC-32 |
+| v1 `sync`, `game_info`, `addplayer`, `request`, `dump`, `quit_joining`, `version_deny` | `GAME_SETTINGS`, `PLAYER_LIST`, `LEVEL_START`, `LEVEL_GO`, `PLAYER_JOINED`, `JOIN_REQUEST`, `KICK`/`JOIN_DENY`, `LEAVE(cancelled)` | | `GAME_INFO` (session id + `GAME_SETTINGS` + `PLAYER_LIST`), `GAME_SETTINGS`, `PLAYER_LIST`, `LEVEL_START`, `SNAPSHOT_GAME`, `LEVEL_GO`, `PLAYER_JOINED`, `PLAYER_LEFT`, `JOIN_REQUEST`, `JOIN_ACCEPT`, `JOIN_DENY`, `KICK`, `LEAVE`, `HOST_SHUTDOWN` |
+
+The "Stage 1" column is what the experimental build sends today: the
+gameplay layer still produces the v1 records, and the session layer
+(`similar/main/net_v2.cpp`, `legacy_record_is_event`) classes them by type.
+Everything that changes game state is carried as `LEGACY_MDATA` (0x7F: the
+originator's player id, then a run of v1 records), whatever priority the
+sender asked for; the records that are latest-wins or cosmetic (positions,
+sounds, explosions, blobs, the afterburner sound, typing state, the periodic
+heartbeat, inventory and game mode updates, robot and guided missile
+positions) go as one `EVENT_U` chunk per tick with the payload
+`{kind = 0x7F, originator, records}`. A record a sender marks priority 2 is
+always reliable (the scheduled heartbeat, the inventory sent to a joining
+player). As in v1, records still waiting in the event buffer travel with the
+next reliable record, so the `MULTI_POSITION` queued right before
+`PLAYER_DERES`, `REAPPEAR`, `CREATE_POWERUP` and `DROP_WEAPON` arrives
+reliably and first. The host relays both carriers to the other clients and
+`multi_process_bigdata` receives the same bytes as in v1.
 
 Message type numbering: session 0x01–0x1F (§4), `INVENTORY` 0x20,
 `OBJ_CREATE` 0x21, `OBJ_REMOVE` 0x22, `OBJ_AMMO` 0x23, `PICKUP_REQUEST` 0x24,
@@ -1550,6 +1579,86 @@ set to a final value at stage 7.
   after `kill -9`; 4-player anarchy for 20 minutes with `tc qdisc … netem
   loss 10% delay 80ms 20ms` on one client; no "failed sending important
   packets" kicks.
+
+#### Stage 1 as implemented
+
+The implementation (`similar/main/net_v2.cpp`, `common/main/net_v2_game.h`,
+`common/main/net_v2_session.h`; menus and level start flow in
+`similar/main/net_udp.cpp`) follows §4 with these stage 1 specifics:
+
+- **Session messages** use the ids of §6.10; the game-independent part
+  (unconnected framing, handshake layouts, admission table, join schedule)
+  is in `net_v2_session.h` and tested by `test-net-v2-session`.
+- **`GAME_INFO`** is prefixed with the session id (4 bytes) before the
+  `GAME_SETTINGS` and `PLAYER_LIST` blocks, since a manual join has no
+  `GAME_INFO_LITE` to learn it from. A `GAME_INFO_REQ` from another version
+  is answered with `JOIN_DENY(version)`, nonce 0, session id 0 (the requester
+  knows no session yet).
+- **Admission**: the table of §4.2 plus one refinement: a callsign still
+  connected from the *same address* is a restarted client and replaces its
+  stale connection at once instead of being denied as a duplicate for the
+  timeout. The joining slot counts as occupied from `JOIN_ACCEPT` on, so two
+  joiners cannot get the same slot. Joins in progress are serialised (§4.2);
+  a client that restarts during its own join replaces the stale attempt.
+  Game data (`LEGACY_MDATA`, `EVENT_U`, `INPUT`, the endlevel status) is
+  accepted and relayed only from a peer in the `playing` phase, not from one
+  still joining or syncing, nor from one closing.
+- **Lobby** (`starting`): slots are never renumbered, since every peer's
+  player id is fixed by its `JOIN_ACCEPT`. Instead the lobby admits players
+  only into slots below `max_numplayers` (holes first, then the next slot;
+  `JOIN_DENY(full)` beyond), so every slot has a start position and fits the
+  per-player tables; the host can therefore no longer collect more joiners
+  than the limit and pick among them. A player who leaves or is not
+  selected leaves a disconnected hole, refilled by the next joiner; trailing
+  holes are trimmed.
+- **Level start**: every client sends `LEVEL_READY` once from the level sync
+  menu; the host counts a player as ready only with a `LEVEL_READY` for the
+  current level (checksum mismatch → `KICK(checksum)`), the others are
+  `waiting` until then. `LEVEL_START` is followed by a `SNAPSHOT_GAME` (scores
+  and connection states) and `LEVEL_GO` on every level, so scores carry over
+  as the v1 sync did. `LEVEL_GO` is also sent to a joining player after its
+  `CLIENT_READY`, so a client enters the level on `LEVEL_GO` in both cases.
+  "Start without waiting" in the host's level wait keeps the unready players
+  `waiting` in their slots (v1 cut `N_players` to 1): they get no
+  `LEVEL_START`, and their `LEVEL_READY` later makes them a join in progress
+  (snapshot, `CLIENT_READY`, `LEVEL_GO`, keeping their scores); the other
+  clients see them enter through their position records. A player that was
+  never in the level when it ends (still loading or syncing, or late for its
+  start) gets `KICK(endlevel)` at the level end, since the next level start
+  would not reach it; it can join the next level.
+- **Snapshot**: serialised at the moment `LEVEL_READY` arrives, into a
+  per-peer backlog that feeds the connection while it holds fewer than 256
+  messages / 48 KiB; everything the game sends to that peer afterwards is
+  ordered behind it. `SNAPSHOT_OBJECTS` carries the v1 object entries (object
+  number, owner, remote object number, `object_rw`), three per message; the
+  net ids of §6.1 come with stage 3. The other snapshot parts of §4.4 (walls,
+  triggers, lights, markers, inventory) are still the v1 "extras", sent as
+  reliable `MULTI_*` records after `CLIENT_READY`. A failed snapshot sends
+  `LEAVE(snapshot_failed)` and shows `TXT_NET_SYNC_FAILED`.
+- **Positions**: the client's v1 `quaternionpos` record (player id,
+  connection state, 46 bytes) as the `INPUT` chunk at every tick; the host's
+  `STATE` chunk is the ping list (8 × u16 ms) followed by every position
+  record newer than the one last relayed to that client, its own included.
+  Applied on receive as v1 did (`extract_quaternionpos`); interpolation and
+  the bundle of §5.2 are stage 2.
+- **Level end**: the v1 `endlevel_h`/`endlevel_c` payloads as
+  `LEGACY_ENDLEVEL_HOST`/`_CLIENT`, once per second, reliable.
+- **Leaving**: a client sends `LEAVE` (also after the v1 `MULTI_QUIT`, which
+  the gameplay layer still sends), the host `HOST_SHUTDOWN`; the connection
+  lingers for one second so that the message is acknowledged, and a peer the
+  host disconnects for any reason lingers the same way so that its `LEAVE`
+  is still acknowledged. Every host-side disconnect broadcasts
+  `PLAYER_LEFT(reason)`; a new player is announced with `PLAYER_JOINED`, a
+  returning one is noticed through its position record's connection state,
+  as in v1.
+- **Statistics**: every 5 s each connection prints its `connection_stats`
+  on the console; the host's `srtt` per client is the ping shown in the
+  kill list.
+- **Not yet**: hole punching from the join menu works as in v1 (after 4 s),
+  but NAT rebinding on the client side only adopts the host's new address
+  after a validated packet; the clock offset is computed but unused until
+  stage 2; robot games are not greyed out yet (decision 3 is a menu change
+  for a later stage).
 
 ### Stage 2 — Clock, tick, state bundle, interpolation
 

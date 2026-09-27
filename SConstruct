@@ -4995,6 +4995,10 @@ class DXXArchive(DXXCommon):
 			'common/unittest/net_v2_transport.cpp',
 			'common/main/net_v2_transport.cpp',
 			)),
+		# Test of the game-independent session layer (net_v2_session.h).
+		RuntimeTest('test-net-v2-session', (
+			'common/unittest/net_v2_session.cpp',
+			)),
 			)
 	del RuntimeTest
 
@@ -5512,6 +5516,7 @@ class DXXProgram(DXXCommon):
 	)),
 		__get_objects_use_udp=DXXCommon.create_lazy_object_states_getter((LazyObjectState(sources=(
 'similar/main/net_udp.cpp',
+'similar/main/net_v2.cpp',
 ),
 		transform_env= _apply_env_version_seq,
 		transform_target=_apply_target_name,

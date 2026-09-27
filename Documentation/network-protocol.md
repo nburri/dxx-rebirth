@@ -1,5 +1,12 @@
 # DXX-Rebirth multiplayer network protocol (UDP)
 
+**This is the v1 protocol.** On the experimental branch it has been replaced
+by the v2 protocol of `network-protocol-v2.md` (stage 1: the transport of
+`netv2-transport.md` under the session layer of its §4; the gameplay
+messages of section 5 below are unchanged and travel as described in
+§6.10 there). This document stays as the reference for the message payloads
+and for the behaviour v2 replaces.
+
 This document describes the UDP multiplayer protocol implemented by DXX-Rebirth,
 with a focus on D2X-Rebirth (`DXX_BUILD_DESCENT == 2`). Differences in
 D1X-Rebirth (`DXX_BUILD_DESCENT == 1`) are called out where they exist.

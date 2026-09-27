@@ -121,21 +121,41 @@ enum class multiplayer_data_priority : uint8_t
 	_2,
 };
 
-/* These values are sent over the network.  If new values are added or existing
+/* These values are sent over the network (JOIN_DENY, KICK, LEAVE and
+ * PLAYER_LEFT of the v2 session layer).  If new values are added or existing
  * entries are renumbered, the multiplayer protocol version must be changed.
  */
 enum class kick_player_reason : uint8_t
 {
-	// reasons for a packet with type UPID_DUMP
 	closed, // no new players allowed after game started
 	full, // player count maxed out
 	endlevel,
 	dork,
 	aborted,
-	connected, // never used
 	level,
 	kicked,
-	pkttimeout,
+	/* Program or protocol version mismatch (JOIN_DENY only). */
+	version,
+	/* The callsign is already connected from another address. */
+	duplicate_callsign,
+	/* The reliable queue to this peer overflowed or a message stayed
+	 * unacknowledged for too long: the link is too slow or dead.
+	 */
+	queue_overflow,
+	/* Too many malformed packets from this peer. */
+	protocol_error,
+	/* The level checksum of the peer does not match the host's. */
+	checksum,
+	/* The level snapshot could not be applied. */
+	snapshot_failed,
+	/* No packet from the peer for the transport timeout. */
+	timeout,
+	/* The peer left on its own (LEAVE, PLAYER_LEFT). */
+	quit,
+	/* The peer left the game before it started (LEAVE while starting). */
+	cancelled,
+	/* The host ended the game (HOST_SHUTDOWN). */
+	host_shutdown,
 };
 
 enum class player_ship_color : uint8_t;
@@ -147,13 +167,26 @@ static inline player_ship_color get_team_color(const team_number tnum)
 
 }
 
-// What version of the multiplayer protocol is this? Increment each time something drastic changes in Multiplayer without the version number changes. Reset to 0 each time the version of the game changes
-constexpr std::uint16_t MULTI_PROTO_VERSION{16};
+/* What version of the multiplayer protocol is this?  Increment each time
+ * something drastic changes in multiplayer without the version number changing.
+ * 100 is the first version of the v2 protocol
+ * (Documentation/network-protocol-v2.md); it is bumped by one per stage that
+ * changes the wire format, so that mismatched experimental builds refuse each
+ * other instead of misbehaving.  It equals NET_V2_PROTO_VERSION in net_v2.h.
+ */
+constexpr std::uint16_t MULTI_PROTO_VERSION{100};
 // PROTOCOL VARIABLES AND DEFINES - END
 
-// limits for Packets (i.e. positional updates) per sec
-#define MIN_PPS 5
-#define MAX_PPS 40
+/* The network tick rate (positions per second, and the pacing of every
+ * connection), chosen by the host: 30, 60 or 120 Hz
+ * (Documentation/network-protocol-v2.md, section 2.3 and decision 1).
+ */
+constexpr uint8_t NETGAME_TICK_RATE_DEFAULT{60};
+[[nodiscard]]
+constexpr bool netgame_tick_rate_valid(const unsigned rate)
+{
+	return rate == 30 || rate == 60 || rate == 120;
+}
 
 #ifdef DXX_BUILD_DESCENT
 #if DXX_BUILD_DESCENT == 1
@@ -250,7 +283,6 @@ struct dispatch_table
 	}
 	virtual void send_data(std::span<const uint8_t> data, multiplayer_data_priority) const = 0;
 	virtual void send_data_direct(std::span<const uint8_t> data, playernum_t pnum, int needack) const = 0;
-	virtual int objnum_is_past(objnum_t objnum) const = 0;
 	virtual void do_protocol_frame(int force, int listen) const = 0;
 	virtual window_event_result level_sync() const = 0;
 	virtual void send_endlevel_packet() const = 0;
@@ -450,7 +482,6 @@ owned_remote_objnum objnum_local_to_remote(objnum_t local);
 void map_objnum_local_to_remote(objnum_t local, int remote, int owner);
 void map_objnum_local_to_local(objnum_t objnum);
 void reset_network_objects();
-void multi_do_ping_frame();
 
 void multi_init_objects(void);
 window_event_result multi_do_frame();
@@ -511,7 +542,6 @@ void multi_add_lifetime_kills(int count);
 void multi_send_bounty( void );
 
 void multi_consistency_error(int reset);
-window_event_result multi_level_sync();
 #ifdef DXX_BUILD_DESCENT
 namespace dsx {
 void multi_send_vulcan_weapon_ammo_adjust(const vmobjptridx_t objnum);
@@ -571,12 +601,8 @@ std::optional<network_state> build_network_state_from_untrusted(uint8_t untruste
 extern network_state Network_status;
 
 // IMPORTANT: These variables needed for player rejoining done by protocol-specific code
-extern int Network_send_objects;
-extern int Network_send_object_mode;
-extern int Network_send_objnum;
 extern int Network_rejoined;
 extern int Network_sending_extras;
-extern int VerifyPlayerJoined;
 extern int Player_joining_extras;
 
 extern per_player_array<per_player_array<uint16_t>> kill_matrix;
@@ -815,8 +841,8 @@ struct netgame_info : prohibit_void_ptr<>
 			struct _sockaddr		addr; // IP address of this netgame's host
 			std::array<short, 4>			program_iver; // IVER of program for version checking
 			sbyte				valid; // Status of Netgame info: -1 = Failed, Wrong version; 0 = No info, yet; 1 = Success
-			uint8_t				your_index; // Tell player his designated (re)join position in players[]
-			fix				GameID;
+			uint8_t				your_index; // The local player's (re)join position in players[]
+			uint32_t			session_id; // Random id of the session, chosen by the host (v2 protocol, section 3.1)
 		} udp;
 #endif
 	} protocol;	
@@ -862,8 +888,8 @@ struct netgame_info : prohibit_void_ptr<>
 	fix						level_time;
 	int						control_invul_time;
 	int						monitor_vector;
-	uint8_t	PacketsPerSec{30};
-	ubyte						PacketLossPrevention;
+	/* Network tick rate in Hz (30, 60 or 120); replaces PacketsPerSec. */
+	uint8_t	TickRate{NETGAME_TICK_RATE_DEFAULT};
 	ubyte						NoFriendlyFire;
 	per_team_array<callsign_t>						team_name;
 	per_player_array<uint32_t>						locations;

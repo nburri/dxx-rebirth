@@ -79,7 +79,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #define KillGoalStr "KillGoal"
 #define PlayTimeAllowedStr "PlayTimeAllowed"
 #define ControlInvulTimeStr "control_invul_time"
-#define PacketsPerSecStr "PacketsPerSec"
+#define TickRateStr "TickRate"
 #define NoFriendlyFireStr "NoFriendlyFire"
 #define MouselookFlagsStr "Mouselook"
 #define PitchLockFlagsStr "PitchLockRelease"
@@ -1787,8 +1787,11 @@ void read_netgame_profile(netgame_info *ng)
 		}
 		else if (compare_nonterminated_name(name, ControlInvulTimeStr))
 			convert_integer(ng->control_invul_time, value);
-		else if (compare_nonterminated_name(name, PacketsPerSecStr))
-			convert_integer(ng->PacketsPerSec, value);
+		else if (compare_nonterminated_name(name, TickRateStr))
+		{
+			if (const auto r{convert_integer<unsigned>(value)}; r && netgame_tick_rate_valid(*r))
+				ng->TickRate = *r;
+		}
 		else if (compare_nonterminated_name(name, NoFriendlyFireStr))
 			convert_integer(ng->NoFriendlyFire, value);
 		else if (compare_nonterminated_name(name, MouselookFlagsStr))
@@ -1845,7 +1848,7 @@ void write_netgame_profile(const netgame_info *ng)
 	PHYSFSX_printf(file, KillGoalStr "=%i\n", ng->KillGoal);
 	PHYSFSX_printf(file, PlayTimeAllowedStr "=%i\n", std::chrono::duration_cast<std::chrono::duration<int, netgame_info::play_time_allowed_abi_ratio>>(ng->PlayTimeAllowed).count());
 	PHYSFSX_printf(file, ControlInvulTimeStr "=%i\n", ng->control_invul_time);
-	PHYSFSX_printf(file, PacketsPerSecStr "=%i\n", ng->PacketsPerSec);
+	PHYSFSX_printf(file, TickRateStr "=%i\n", ng->TickRate);
 	PHYSFSX_printf(file, NoFriendlyFireStr "=%i\n", ng->NoFriendlyFire);
 	PHYSFSX_printf(file, MouselookFlagsStr "=%i\n", ng->MouselookFlags);
 	PHYSFSX_printf(file, PitchLockFlagsStr "=%i\n", ng->PitchLockFlags);
