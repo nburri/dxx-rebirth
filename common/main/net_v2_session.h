@@ -584,6 +584,19 @@ constexpr std::optional<unsigned> choose_lobby_slot(const std::span<const bool> 
 	return std::nullopt;
 }
 
+/* The player count a player in `slot` must see: the game it is in
+ * includes its own slot.  The host counts a player joining a level in
+ * progress only when it has applied the snapshot (CLIENT_READY), so the
+ * count at the time the snapshot is sent does not include it yet; a
+ * client whose N_players left out its own slot would drop every kill
+ * message about itself and leave itself out of the kill list.
+ */
+[[nodiscard]]
+constexpr unsigned player_count_including(const unsigned numplayers, const unsigned slot)
+{
+	return numplayers > slot ? numplayers : slot + 1;
+}
+
 /* Section 4.2: a JOIN_REQUEST compared with an existing connection.  A
  * request carrying the nonce of the connection's own join attempt, from
  * its address, is a retry: while the connection is still `connecting` the

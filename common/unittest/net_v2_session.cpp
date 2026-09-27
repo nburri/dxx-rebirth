@@ -8,8 +8,9 @@
  * Test of the game-independent session layer (net_v2_session.h): the
  * UNCONNECTED datagram framing and its validation order, the handshake
  * message layouts, the admission table of section 4.2, the lobby slot
- * choice, the recognition of retried join requests and of join denials,
- * the client's join schedule and the rate limiter.
+ * choice, the player count a joining player sees, the recognition of
+ * retried join requests and of join denials, the client's join schedule
+ * and the rate limiter.
  *
  * Build and run with SCons:
  *
@@ -302,6 +303,19 @@ void test_lobby_slot()
 	}
 }
 
+void test_player_count_including()
+{
+	/* A player joining in progress in the next slot: counted. */
+	CHECK(player_count_including(1, 1) == 2);
+	CHECK(player_count_including(2, 3) == 4);
+	/* Already counted (lobby player, rejoin, lower hole). */
+	CHECK(player_count_including(2, 1) == 2);
+	CHECK(player_count_including(4, 1) == 4);
+	CHECK(player_count_including(1, 0) == 1);
+	/* Nobody counted yet. */
+	CHECK(player_count_including(0, 0) == 1);
+}
+
 void test_duplicate_join()
 {
 	/* Other address or other nonce: a different attempt. */
@@ -399,6 +413,7 @@ int main()
 	test_message_layouts();
 	test_admission();
 	test_lobby_slot();
+	test_player_count_including();
 	test_duplicate_join();
 	test_join_deny();
 	test_join_attempt();

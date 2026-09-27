@@ -2309,6 +2309,22 @@ void queue_snapshot(peer &p)
 	const auto slot{peer_slot(p)};
 	net_udp_update_netgame();
 	fill_netgame_scores();
+	if (p.is_new)
+	{
+		/* A new player enters the game (new_player) only with its
+		 * CLIENT_READY, after this snapshot.  Describe the game it enters:
+		 * its slot counted in the player count (otherwise its N_players
+		 * leaves itself out, so that it drops every MULTI_KILL_HOST about
+		 * its own deaths and misses itself in the kill list) and its
+		 * scores as new_player will reset them, not those of a player who
+		 * held the slot before.
+		 */
+		Netgame.numplayers = static_cast<uint8_t>(::dcx::net_v2::player_count_including(Netgame.numplayers, slot));
+		Netgame.kills[slot] = {};
+		Netgame.killed[slot] = 0;
+		Netgame.player_kills[slot] = 0;
+		Netgame.player_score[slot] = 0;
+	}
 	Netgame.level_time = get_local_player().time_level;
 	Netgame.monitor_vector = create_monitor_vector();
 	send_game_settings(p);
@@ -2550,7 +2566,8 @@ void apply_level_go_internal()
 	auto &vmobjptr = Objects.vmptr;
 	auto &vmobjptridx = Objects.vmptridx;
 
-	N_players = Netgame.numplayers;
+	/* The game includes this client's own slot, whatever the count says. */
+	N_players = ::dcx::net_v2::player_count_including(Netgame.numplayers, Player_num);
 	GameUniqueState.Difficulty_level = Netgame.difficulty;
 
 	for (unsigned i = 0; i < N_players; ++i)

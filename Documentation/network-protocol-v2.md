@@ -1640,7 +1640,13 @@ The implementation (`similar/main/net_v2.cpp`, `common/main/net_v2_game.h`,
   net ids of §6.1 come with stage 3. The other snapshot parts of §4.4 (walls,
   triggers, lights, markers, inventory) are still the v1 "extras", sent as
   reliable `MULTI_*` records after `CLIENT_READY`. A failed snapshot sends
-  `LEAVE(snapshot_failed)` and shows `TXT_NET_SYNC_FAILED`.
+  `LEAVE(snapshot_failed)` and shows `TXT_NET_SYNC_FAILED`. A new player is
+  counted by the host only at its `CLIENT_READY`, so the `GAME_SETTINGS` and
+  `SNAPSHOT_GAME` of its snapshot count its slot in `numplayers` and carry
+  zero scores for it (as `new_player` then sets them); the client also never
+  sets `N_players` below its own slot + 1. (Playtest fix: a player joining in
+  progress had `N_players` = 1, so it dropped every `MULTI_KILL_HOST` about
+  its own deaths and was missing from its own kill list.)
 - **Positions**: the client's v1 `quaternionpos` record (player id,
   connection state, 46 bytes) as the `INPUT` chunk at every tick; the host's
   `STATE` chunk is the ping list (8 × u16 ms) followed by every position
