@@ -126,8 +126,10 @@ Pain points from the fork changelog (`Documentation/fork-changelog.md`):
   but only if `echo_seq` equals the packet's `ack` (a conforming peer echoes
   the newest packet it received, which is also its `ack`), names a packet
   still in the local packet log whose recorded `send_time` equals
-  `echo_time`, and is strictly newer than the last echo taken: a repeated
-  `echo_seq` is the same measurement held longer and yields no sample.
+  `echo_time`, and has not been sampled before: each packet yields one
+  sample at most, whichever of the peer's packets carries its echo first,
+  so a reordered echo counts once and a repeated one (the same measurement
+  held longer) not at all.
   Anything else is ignored: the host later rewinds hits by the client's
   RTT, so a peer must not be able to steer it with numbers unrelated to
   real packets, nor by pinning one real old packet.
@@ -240,7 +242,7 @@ Every UDP datagram, connected or not, starts with this header.
 | 24 | 4 | `send_time` | Sender's local clock (net time units) when the packet was built. |
 | 28 | 4 | `echo_time` | `send_time` of the most recent packet received from the peer, or 0. |
 | 32 | 2 | `echo_delay` | Time between receiving that packet and sending this one, in net time units, saturated at 65535 (1 s). Peers send at least every 100 ms (§3.6), so saturation only happens on a stalled link and the RTT sample is then discarded. |
-| 34 | 2 | `echo_seq` | `seq` of the packet whose `send_time` is echoed, or 0; always equal to `ack`, since both name the newest packet received. The receiver of the echo takes a sample only if `echo_seq == ack`, the pair matches its packet log, and `echo_seq` is strictly newer than the last echo it took (§2.2). The echo fields follow only the newest packet received, never a reordered older one. |
+| 34 | 2 | `echo_seq` | `seq` of the packet whose `send_time` is echoed, or 0; always equal to `ack`, since both name the newest packet received. The receiver of the echo takes a sample only if `echo_seq == ack`, the pair matches its packet log, and it has not sampled `echo_seq` before (§2.2). The echo fields follow only the newest packet received, never a reordered older one. |
 
 Maximum UDP payload: `NET_V2_MAX_PACKET` = 1200 bytes (header included). This
 is below the 1280-byte IPv6 minimum MTU minus headers, so no path in practice
@@ -334,8 +336,7 @@ on_tick(build packet):
 
 on_ack(header.ack, header.ack_bits):
     for each packet_seq in {ack} ∪ {ack-1-i | bit i set}, not yet acked:
-        mark acked; rtt sample from its sent_at (only if sends of all its messages == 1,
-        Karn's rule: no RTT from retransmissions)
+        mark acked; if no echo ever came for it, rtt sample from its sent_at (§3.5)
         for each msg_seq in it: erase from in_flight
     for each in_flight message m not acked:
         lost_by_gap = (ack - m.in_packet_seq) >= 3 wrapping      // 3 later packets acked
@@ -379,12 +380,25 @@ Per connection (Jacobson/Karels, RFC 6298 constants):
 ```
 first sample:   srtt = r;  rttvar = r/2
 later samples:  rttvar = 3/4 rttvar + 1/4 |srtt - r|;  srtt = 7/8 srtt + 1/8 r
-rto = clamp(srtt + 4 rttvar, NET_V2_RTO_MIN = 50 ms, NET_V2_RTO_MAX = 1000 ms)
+always:         rttvar = max(rttvar, hold/4)
+rto = clamp(srtt + 4 rttvar + hold + tick, NET_V2_RTO_MIN = 50 ms, NET_V2_RTO_MAX = 1000 ms)
 ```
 
-- RTT samples come from acked packets (`sent_at` in `packet_log`) and from the
-  `echo_time`/`echo_delay` of each received packet (§2.2). Both feed the same
-  estimator.
+where `tick` is the sender's own tick period and `hold` the longer of its own
+and the peer's (the peer holds an ack until its next tick; the sender looks
+for losses only at its own). The two holds are added because the samples
+exclude them: on a steady link `rttvar` alone would not cover them, and the
+floor keeps `rttvar` from collapsing to zero.
+
+- RTT samples come from the echo fields (`echo_seq`, `echo_time`,
+  `echo_delay`, §2.2): one sample per packet sent, at most, when a received
+  packet with `echo_seq == ack` names it, its `send_time` matches, and it was
+  not sampled before. An ack measures a packet only if no echo ever came for
+  it (the peer received it out of order and echoed a newer one, or the echo's
+  carrier was lost); that value includes the peer's hold and the wait for
+  the next surviving carrier, and it is the one measurement of such a
+  delayed round trip, which the RTO must cover. Karn's rule is moot: packets
+  are never retransmitted, only messages are.
 - A message is retransmitted by the gap rule (3 later packets acked) *or* by
   the RTO, whichever comes first. With 60 packets per second the gap rule fires
   about 50 ms after the loss; the RTO is the fallback for the tail of a burst.
@@ -442,8 +456,9 @@ address with an implausible `seq` is dropped.
    packet never reaches the game layer twice.
 7. Update the peer's `last_heard`; RTT and clock sample from `echo_*` if
    `echo_seq == ack`, `echo_seq` names a logged packet whose `send_time`
-   is `echo_time`, `echo_delay < 65535`, and `echo_seq` is strictly newer
-   than the last echo taken (a repeated echo yields no sample, §2.2).
+   is `echo_time`, `echo_delay < 65535`, and `echo_seq` has not been
+   sampled before (each packet at most once; a repeated echo yields no
+   sample, §2.2).
 8. Walk the chunks. Every chunk must fit; every `RELIABLE` message must fit
    its chunk; every `STATE`/`INPUT` record must have the exact size for its
    flags. The first violation drops the whole packet: nothing of it is
