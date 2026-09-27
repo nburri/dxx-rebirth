@@ -1072,9 +1072,8 @@ static void sort_seg_children(fvcvertptr &vcvertptr, const vms_vector &Viewer_ey
 
 static void add_obj_to_seglist(render_state_t &rstate, objnum_t objnum, segnum_t segnum)
 {
-	auto p = rstate.render_seg_map.emplace(segnum, render_state_t::per_segment_state_t{});
-	auto &o = p.first->second.objects;
-	if (p.second)
+	auto &o = rstate.render_seg_map[segnum].objects;
+	if (!o.capacity())
 		o.reserve(16);
 	o.emplace_back(render_state_t::per_segment_state_t::distant_object{objnum});
 }
@@ -1567,7 +1566,13 @@ void render_mine(grs_canvas &canvas, const vms_vector &Viewer_eye, const vcsegid
 	auto &vcwallptr = Walls.vcptr;
 #endif
 	using std::advance;
-	render_state_t rstate;
+	/* Reused from frame to frame, so that its buffers are allocated only
+	 * once.  render_mine is not re-entered: views are rendered one after
+	 * the other.
+	 */
+	static render_state_t rstate;
+	rstate.render_seg_map.clear();
+	rstate.N_render_segs = 0;
 	#ifndef NDEBUG
 	object_rendered = {};
 	#endif
