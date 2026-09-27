@@ -364,12 +364,8 @@ namespace dcx {
 
 // For rejoin object syncing (used here and all protocols - globally)
 
-int Network_send_objects{0};  // Are we in the process of sending objects to a player?
-int Network_send_object_mode{0}; // What type of objects are we sending, static or dynamic?
-int 	Network_send_objnum = -1;   // What object are we sending next?
 int Network_rejoined{0};       // Did WE rejoin this game?
 int Network_sending_extras{0};
-int     VerifyPlayerJoined=-1;      // Player (num) to enter game before any ingame/extra stuff is being sent
 int     Player_joining_extras=-1;  // This is so we know who to send 'latecomer' packets to.
 
 ushort my_segments_checksum{0};
@@ -1837,11 +1833,6 @@ static void multi_do_player_deres(const d_robot_info_array &Robot_info, object_a
 	Assert(pnum < N_players);
 #endif
 
-	// If we are in the process of sending objects to a new player, reset that process
-	if (Network_send_objects)
-	{
-		Network_send_objnum = -1;
-	}
 
 	// Stuff the Players structure to prepare for the explosion
 
@@ -2057,10 +2048,6 @@ static void multi_do_remobj(fvmobjptr &vmobjptr, const multiplayer_rspan<multipl
 		return;
 	}
 
-	if (Network_send_objects && multi::dispatch->objnum_is_past(local_objnum))
-	{
-		Network_send_objnum = -1;
-	}
 
 	obj.flags |= OF_SHOULD_BE_DEAD; // quick and painless
 }
@@ -2298,10 +2285,6 @@ static void multi_do_create_powerup(fvmsegptridx &vmsegptridx, const playernum_t
 	if (my_objnum == object_none)
 		return;
 
-	if (Network_send_objects && multi::dispatch->objnum_is_past(my_objnum))
-	{
-		Network_send_objnum = -1;
-	}
 
 	map_objnum_local_to_remote(my_objnum, objnum, pnum);
 
@@ -2731,10 +2714,6 @@ void multi_send_player_deres(deres_type_t type)
 	auto &vmobjptr = Objects.vmptr;
 	auto &vmobjptridx = Objects.vmptridx;
 	int count{0};
-	if (Network_send_objects)
-	{
-		Network_send_objnum = -1;
-	}
 
 	multi_send_position(vmobjptridx(get_local_player().objnum));
 
@@ -2929,10 +2908,6 @@ void multi_send_remobj(const vmobjidx_t objnum)
 
 	multi_send_data(multibuf, multiplayer_data_priority::_2);
 
-	if (Network_send_objects && multi::dispatch->objnum_is_past(objnum))
-	{
-		Network_send_objnum = -1;
-	}
 }
 
 }
@@ -3074,10 +3049,6 @@ void multi_send_create_powerup(const powerup_type_t powerup_type, const vcsegidx
 	//                                                                                                            Total =  19
 	multi_send_data(multibuf, multiplayer_data_priority::_2);
 
-	if (Network_send_objects && multi::dispatch->objnum_is_past(objnum))
-	{
-		Network_send_objnum = -1;
-	}
 
 	map_objnum_local_to_local(objnum);
 }
@@ -3456,7 +3427,7 @@ public:
 /*
  * The place to do objects operations such as:
  * Robot deletion for non-robot games, Powerup duplication, AllowedItems, Initial powerup counting.
- * MUST be done before multi_level_sync() in case we join a running game and get updated objects there. We want the initial powerup setup for a level here!
+ * MUST be done before multi::dispatch->level_sync() in case we join a running game and get updated objects there. We want the initial powerup setup for a level here!
  */
 void multi_prep_level_objects(const d_powerup_info_array &Powerup_info, const d_vclip_array &Vclip)
 {
@@ -3949,10 +3920,6 @@ void multi_send_vulcan_weapon_ammo_adjust(const vmobjptridx_t objnum)
 
 	multi_send_data(multibuf, multiplayer_data_priority::_2);
 
-	if (Network_send_objects && multi::dispatch->objnum_is_past(objnum))
-	{
-		Network_send_objnum = -1;
-	}
 }
 
 namespace {
@@ -3982,10 +3949,6 @@ static void multi_do_vulcan_weapon_ammo_adjust(fvmobjptr &vmobjptr, const multip
 		return;
 	}
 
-	if (Network_send_objects && multi::dispatch->objnum_is_past(local_objnum))
-	{
-		Network_send_objnum = -1;
-	}
 
 	const auto ammo{GET_INTEL_SHORT(&buf[4])};
 		obj->ctype.powerup_info.count = ammo;

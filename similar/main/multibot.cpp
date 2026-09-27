@@ -935,10 +935,6 @@ int multi_explode_robot_sub(const d_robot_info_array &Robot_info, const vmobjptr
 
 	// Data seems valid, explode the sucker
 
-	if (Network_send_objects && multi::dispatch->objnum_is_past(robot))
-	{
-		Network_send_objnum = -1;
-	}
 
 	// Drop non-random KEY powerups locally only!
 	if (objrobot.contains.count > 0 && objrobot.contains.type == contained_object_type::powerup && +(Game_mode & GM_MULTI_COOP) && objrobot.contains.id.powerup >= powerup_type_t::POW_KEY_BLUE && objrobot.contains.id.powerup <= powerup_type_t::POW_KEY_GOLD)

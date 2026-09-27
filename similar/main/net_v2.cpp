@@ -4217,12 +4217,6 @@ void dispatch_table::send_data_direct(const std::span<const uint8_t> data, const
 	net_v2::send_to_slot(pnum, ::dcx::net_v2::session_msg::legacy_mdata, msg);
 }
 
-int dispatch_table::objnum_is_past(objnum_t) const
-{
-	/* The level snapshot is serialised at once; nothing is ever past. */
-	return 0;
-}
-
 void dispatch_table::do_protocol_frame(int, int listen) const
 {
 	auto &LevelUniqueControlCenterState = LevelUniqueObjectState.ControlCenterState;

@@ -283,7 +283,6 @@ struct dispatch_table
 	}
 	virtual void send_data(std::span<const uint8_t> data, multiplayer_data_priority) const = 0;
 	virtual void send_data_direct(std::span<const uint8_t> data, playernum_t pnum, int needack) const = 0;
-	virtual int objnum_is_past(objnum_t objnum) const = 0;
 	virtual void do_protocol_frame(int force, int listen) const = 0;
 	virtual window_event_result level_sync() const = 0;
 	virtual void send_endlevel_packet() const = 0;
@@ -483,7 +482,6 @@ owned_remote_objnum objnum_local_to_remote(objnum_t local);
 void map_objnum_local_to_remote(objnum_t local, int remote, int owner);
 void map_objnum_local_to_local(objnum_t objnum);
 void reset_network_objects();
-void multi_do_ping_frame();
 
 void multi_init_objects(void);
 window_event_result multi_do_frame();
@@ -544,7 +542,6 @@ void multi_add_lifetime_kills(int count);
 void multi_send_bounty( void );
 
 void multi_consistency_error(int reset);
-window_event_result multi_level_sync();
 #ifdef DXX_BUILD_DESCENT
 namespace dsx {
 void multi_send_vulcan_weapon_ammo_adjust(const vmobjptridx_t objnum);
@@ -604,12 +601,8 @@ std::optional<network_state> build_network_state_from_untrusted(uint8_t untruste
 extern network_state Network_status;
 
 // IMPORTANT: These variables needed for player rejoining done by protocol-specific code
-extern int Network_send_objects;
-extern int Network_send_object_mode;
-extern int Network_send_objnum;
 extern int Network_rejoined;
 extern int Network_sending_extras;
-extern int VerifyPlayerJoined;
 extern int Player_joining_extras;
 
 extern per_player_array<per_player_array<uint16_t>> kill_matrix;

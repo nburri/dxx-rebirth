@@ -34,7 +34,6 @@ struct dispatch_table final : multi::dispatch_table
 {
 	virtual void send_data(std::span<const uint8_t> data, multiplayer_data_priority priority) const override;
 	virtual void send_data_direct(std::span<const uint8_t> data, playernum_t pnum, int needack) const override;
-	virtual int objnum_is_past(objnum_t objnum) const override;
 	virtual void do_protocol_frame(int force, int listen) const override;
 	virtual window_event_result level_sync() const override;
 	virtual void send_endlevel_packet() const override;
