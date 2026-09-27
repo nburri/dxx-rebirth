@@ -44,24 +44,19 @@ constexpr net_clock net_milliseconds(const net_clock ms)
 	return (ms * 65536) / 1000;
 }
 
-/* Section 3.1.  The header is 36 bytes: the design's 34 plus `echo_seq`
- * at offset 34, which names the packet whose `send_time` is echoed so
- * that the receiver of the echo can verify it against its own packet log
- * before taking an RTT or clock sample from it.
- */
-/* The value MULTI_PROTO_VERSION (multi.h) takes once stage 1 switches
+/* Section 3.1.  The value MULTI_PROTO_VERSION (multi.h) takes once stage 1 switches
  * the game to this protocol; named differently so that the two never
  * shadow each other in a translation unit that sees both.
  */
 constexpr std::uint16_t NET_V2_PROTO_VERSION{100};
-constexpr std::size_t NET_V2_HEADER_SIZE{36};
+constexpr std::size_t NET_V2_HEADER_SIZE{34};
 constexpr std::size_t NET_V2_MAX_PACKET{1200};
 constexpr std::size_t NET_V2_ACK_BITS{64};
 constexpr std::uint8_t NET_V2_PLAYER_ID_NONE{0xff};
 
 /* Section 3.2 */
 constexpr std::size_t NET_V2_CHUNK_HEADER_SIZE{3};
-constexpr std::size_t NET_V2_MAX_CHUNK_PAYLOAD{NET_V2_MAX_PACKET - NET_V2_HEADER_SIZE - NET_V2_CHUNK_HEADER_SIZE};	/* 1161 */
+constexpr std::size_t NET_V2_MAX_CHUNK_PAYLOAD{NET_V2_MAX_PACKET - NET_V2_HEADER_SIZE - NET_V2_CHUNK_HEADER_SIZE};	/* 1163 */
 
 /* Section 3.8: a STATE or INPUT chunk payload starts with one byte, the
  * part index in the low nibble and the part count (1..NET_V2_STATE_MAX_PARTS)
@@ -189,7 +184,7 @@ constexpr net_time to_net_time(const net_clock t)
 	return static_cast<net_time>(static_cast<std::uint64_t>(t));
 }
 
-/* Section 3.1: the 36-byte header at the start of every datagram.
+/* Section 3.1: the 34-byte header at the start of every datagram.
  *
  *	| 0 | 2 | proto        | 100
  *	| 2 | 4 | session_id   |
@@ -200,9 +195,8 @@ constexpr net_time to_net_time(const net_clock t)
  *	| 14 | 2 | ack         |
  *	| 16 | 8 | ack_bits    |
  *	| 24 | 4 | send_time   |
- *	| 28 | 4 | echo_time   | send_time of the newest packet received from the peer, or 0
+ *	| 28 | 4 | echo_time   | send_time of the newest packet received from the peer (the one `ack` names), or 0
  *	| 32 | 2 | echo_delay  | time held since receiving it, saturated at 65535
- *	| 34 | 2 | echo_seq    | seq of that packet, or 0 (addition to the design text)
  */
 struct packet_header
 {
@@ -217,7 +211,6 @@ struct packet_header
 	net_time send_time{};
 	net_time echo_time{};
 	std::uint16_t echo_delay{};
-	std::uint16_t echo_seq{};
 
 	[[nodiscard]]
 	constexpr bool has_flag(const packet_flag f) const
@@ -238,7 +231,6 @@ struct packet_header
 		net_put_le32(p + 24, send_time);
 		net_put_le32(p + 28, echo_time);
 		net_put_le16(p + 32, echo_delay);
-		net_put_le16(p + 34, echo_seq);
 	}
 
 	/* Parse the header.  Returns nothing if the buffer is too short.  No
@@ -262,7 +254,6 @@ struct packet_header
 		h.send_time = net_get_le32(p + 24);
 		h.echo_time = net_get_le32(p + 28);
 		h.echo_delay = net_get_le16(p + 32);
-		h.echo_seq = net_get_le16(p + 34);
 		return h;
 	}
 };

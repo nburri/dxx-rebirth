@@ -4023,7 +4023,7 @@ class DXXCommon(LazyObjectConstructor):
 					('register_compile_target', True, 'report compile targets to SCons core'),
 					('register_cpp_output_targets', None, None),
 					('register_runtime_test_link_targets', False, None),
-					('register_runtime_test_plain_link_targets', False, None),
+					('register_runtime_test_plain_link_targets', False, 'register link targets for the runtime tests that do not use Boost.Test (build one with `scons <test-name>`)'),
 					('enable_build_failure_summary', True, 'print failed nodes and their commands'),
 					('wrap_PHYSFS_read', False, None),
 					('wrap_PHYSFS_write', False, None),

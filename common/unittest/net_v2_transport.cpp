@@ -564,16 +564,13 @@ void test_rtt(const std::uint64_t seed)
 			CHECK(s.rtt_valid);
 			const auto expected{2 * latency};
 			const auto err{s.srtt > expected ? s.srtt - expected : expected - s.srtt};
-			/* Within 10 % on a clean link.  Under 30 % loss a third of the
-			 * packets lose their echo and are measured by their ack, which
-			 * waits for the next surviving carrier: within 20 % then.
+			/* Within 10 %, with or without loss: a lost echo carrier does
+			 * not make its packet's ack a measurement.
 			 */
-			const net_clock parts{loss > 0 ? 5 : 10};
-			CHECK_MSG(err * parts < expected, "srtt " + std::to_string(to_ms(s.srtt)) + " ms vs " + std::to_string(to_ms(expected)) + " ms at " + std::to_string(loss * 100) + "% loss");
+			CHECK_MSG(err * 10 < expected, "srtt " + std::to_string(to_ms(s.srtt)) + " ms vs " + std::to_string(to_ms(expected)) + " ms at " + std::to_string(loss * 100) + "% loss");
 			CHECK(s.rto >= s.srtt);
 			CHECK(s.rto >= NET_V2_RTO_MIN && s.rto <= NET_V2_RTO_MAX);
-			/* Under loss the packets measured by their acks widen rttvar. */
-			CHECK(s.rttvar < net_milliseconds(loss > 0 ? 50 : 30));
+			CHECK(s.rttvar < net_milliseconds(30));
 		}
 	}
 	/* The formula and its clamp: a 700 ms link gives RTO_MAX; a 1 ms
@@ -926,6 +923,138 @@ void test_unreliable_chunks_per_packet()
 	std::printf("    two STATE chunks in one packet both delivered; an older packet's STATE dropped, its EVENT_U kept\n");
 }
 
+/* Ninth review round. */
+
+/* 1a. A peer that sends far fewer packets than we do (keepalives at
+ * 10 Hz against our 60 Hz) must not inflate our srtt with its ack hold.
+ */
+void test_slow_peer_srtt(const std::uint64_t seed)
+{
+	begin("slow peer, srtt unbiased");
+	rng r{seed};
+	connection_config h{host_side}, c{client_side};
+	h.peer_tick = {net_seconds(1), 10};
+	c.tick = {net_seconds(1), 10};
+	c.peer_tick = {net_seconds(1), 60};
+	sim_world w{r, link_params{.latency = net_milliseconds(60)}, {}, {{h, c}}};
+	w.tick_every = {{1, 6}};
+	w.run(600, [&](const unsigned i) { w.set_state(i); });
+	const auto s{w.peers[0].conn.stats()};
+	const auto expected{2 * net_milliseconds(60)};
+	const auto err{s.srtt > expected ? s.srtt - expected : expected - s.srtt};
+	CHECK_MSG(err * 20 < expected, "host srtt " + std::to_string(to_ms(s.srtt)) + " ms vs " + std::to_string(to_ms(expected)) + " ms");
+	CHECK(s.state == connection_state::connected && s.message_resends == 0);
+	std::printf("    60 Hz host, 10 Hz peer, 60 ms link: host srtt %.1f ms (rto %.1f ms)\n", to_ms(s.srtt), to_ms(s.rto));
+}
+
+/* 1b. Two packets per tick against a one-packet peer: the unechoed one
+ * of each pair is not measured by its ack.
+ */
+void test_two_packets_per_tick_srtt(const std::uint64_t seed)
+{
+	begin("two packets per tick, srtt unbiased");
+	rng r{seed};
+	sim_world w{r, link_params{.latency = net_milliseconds(30)}};
+	const datagram big(NET_V2_MAX_MESSAGE);
+	w.run(600, [&](const unsigned i) {
+		if (i == 0)
+		{
+			/* A state too big to share a packet with a 1 KiB message. */
+			w.set_state_parts(0, 1, 300);
+			if (w.peers[0].conn.stats().queue_messages < 4)
+			{
+				CHECK(w.peers[0].conn.enqueue_reliable(9, big) == enqueue_result::ok);
+				w.peers[0].sent.push_back({.type = 9, .payload = big});
+			}
+		}
+		else
+			w.set_state(1);
+	});
+	const auto s{w.peers[0].conn.stats()};
+	const auto expected{2 * net_milliseconds(30)};
+	const auto err{s.srtt > expected ? s.srtt - expected : expected - s.srtt};
+	CHECK_MSG(err * 20 < expected, "host srtt " + std::to_string(to_ms(s.srtt)) + " ms vs " + std::to_string(to_ms(expected)) + " ms");
+	CHECK_MSG(s.packets_sent >= 1100, "packets " + std::to_string(s.packets_sent));
+	std::printf("    %llu host packets in 600 ticks: srtt %.1f ms\n", static_cast<unsigned long long>(s.packets_sent), to_ms(s.srtt));
+}
+
+/* 2. A two-part bundle with a standing reliable backlog: both parts every
+ * tick, the messages drain, at most three packets per tick.
+ */
+void test_bundle_with_backlog(const std::uint64_t seed)
+{
+	begin("two-part bundle with a standing backlog");
+	rng r{seed};
+	sim_world w{r, link_params{.latency = net_milliseconds(30)}};
+	const datagram big(NET_V2_MAX_MESSAGE);
+	std::uint64_t worst{};
+	auto before{w.peers[0].conn.stats().packets_sent};
+	w.run(200, [&](const unsigned i) {
+		if (i == 0)
+		{
+			w.set_state_parts(0, 2, 900);
+			CHECK(w.peers[0].conn.enqueue_reliable(9, big) == enqueue_result::ok);
+			w.peers[0].sent.push_back({.type = 9, .payload = big});
+		}
+		else
+		{
+			w.set_state(1);
+			const auto sent{w.peers[0].conn.stats().packets_sent};
+			worst = std::max(worst, sent - before);
+			before = sent;
+		}
+	});
+	/* Drain without new parts, so that the last ones arrive. */
+	w.run(10);
+	check_delivery(w, 0);
+	const auto host{w.peers[0].conn.stats()};
+	const auto &counts{w.peers[1].part_counts};
+	CHECK_MSG(host.unreliable_dropped == 0, "parts dropped " + std::to_string(host.unreliable_dropped));
+	CHECK_MSG(counts[0] == 200 && counts[1] == 200, "parts delivered: " + std::to_string(counts[0]) + " / " + std::to_string(counts[1]));
+	CHECK_MSG(worst == 3, "most packets in one tick " + std::to_string(worst));
+	std::printf("    2 x 900-byte parts and a 1 KiB message every tick: parts %u/%u, 200 messages delivered, %llu packets per tick at most\n", counts[0], counts[1], static_cast<unsigned long long>(worst));
+}
+
+/* 3. A game loop at 500 fps sets the state only when begin_tick opened a
+ * tick, so no state is ever replaced before it was sent.
+ */
+void test_frame_rate_caller()
+{
+	begin("500 Hz caller with begin_tick");
+	connection a{host_side, 0};
+	connection b{client_side, 0};
+	const std::array<std::uint8_t, 40> state{};
+	unsigned ticks{}, states{};
+	for (unsigned f{}; f != 5000; ++f)
+	{
+		const net_clock now{net_clock{f} * net_seconds(1) / 500};
+		if (a.begin_tick(now))
+		{
+			++ticks;
+			a.set_unreliable_state(chunk_type::state, state);
+		}
+		for (;;)
+		{
+			const auto p{a.build_outgoing(now)};
+			if (p.empty())
+				break;
+			const auto report{b.on_receive(p, now + 1)};
+			CHECK(report.status == receive_status::accepted);
+			states += static_cast<unsigned>(report.unreliable.size());
+		}
+		if (f % 8 == 7)
+		{
+			const auto ack{b.build_outgoing(now + 2)};
+			if (!ack.empty())
+				CHECK(a.on_receive(ack, now + 3).status == receive_status::accepted);
+		}
+	}
+	CHECK_MSG(a.stats().unreliable_dropped == 0, "states dropped " + std::to_string(a.stats().unreliable_dropped));
+	CHECK_MSG(ticks >= 599 && ticks <= 601, "ticks " + std::to_string(ticks));
+	CHECK(states == ticks);
+	std::printf("    5000 frames, %u ticks opened, %u states delivered, none dropped\n", ticks, states);
+}
+
 /* Eighth review round. */
 
 /* 1. Packets held back (not lost) must not be resent by the RTO: their
@@ -1122,7 +1251,7 @@ void test_echo_pinning(const std::uint64_t seed)
 	const auto pinned{static_cast<std::uint16_t>(latest_seq - 5)};
 	const auto pinned_time{to_net_time(w.peers[0].clock(net_clock{pinned} * TICK))};
 	std::uint16_t forged_seq{3000};
-	const auto forge{[&](const std::uint16_t ack, const std::uint16_t echo_seq, const net_clock at) {
+	const auto forge{[&](const std::uint16_t ack, const net_clock at) {
 		packet_header h;
 		h.session_id = host_side.session_id;
 		h.peer_token = host_side.peer_token;
@@ -1131,7 +1260,6 @@ void test_echo_pinning(const std::uint64_t seed)
 		h.seq = ++forged_seq;
 		h.send_time = to_net_time(at);
 		h.ack = ack;
-		h.echo_seq = echo_seq;
 		h.echo_time = pinned_time;
 		h.echo_delay = 0;
 		std::array<std::uint8_t, NET_V2_HEADER_SIZE> d{};
@@ -1142,11 +1270,12 @@ void test_echo_pinning(const std::uint64_t seed)
 	for (unsigned i{}; i != 300; ++i)
 	{
 		const auto at{w.peers[0].clock(w.now) + net_clock{i + 1} * TICK};
-		forge(pinned, pinned, at);
-		/* Also the variant where ack moves on but the echo stays (the
-		 * ack names a packet long acked, so it measures nothing either).
+		forge(pinned, at);
+		/* Also the variant where ack moves on but the echo time stays
+		 * (the ack names a packet long acked and its send_time does not
+		 * match, so it measures nothing either).
 		 */
-		forge(static_cast<std::uint16_t>(pinned + 1), pinned, at);
+		forge(static_cast<std::uint16_t>(pinned + 1), at);
 	}
 	const auto after{a.stats()};
 	CHECK_MSG(after.srtt == before.srtt && after.rttvar == before.rttvar, "srtt " + std::to_string(to_ms(after.srtt)) + " ms vs " + std::to_string(to_ms(before.srtt)));
@@ -1556,7 +1685,6 @@ void test_echo_authentication(const std::uint64_t seed)
 		h.seq = ++forged_seq;
 		h.send_time = to_net_time(now);
 		h.ack = echo_seq;
-		h.echo_seq = echo_seq;
 		h.echo_time = echo_time;
 		h.echo_delay = echo_delay;
 		std::array<std::uint8_t, NET_V2_HEADER_SIZE> d{};
@@ -1578,7 +1706,7 @@ void test_echo_authentication(const std::uint64_t seed)
 		 * echo already seen.
 		 */
 		forge(1, to_net_time(w.peers[0].clock(TICK)), 0);
-		/* echo_seq 0 with a plausible time: no packet named. */
+		/* ack 0 with a plausible time: no packet named. */
 		forge(0, to_net_time(now - net_milliseconds(60)), 0);
 	}
 	const auto after{a.stats()};
@@ -1663,17 +1791,18 @@ void test_reordered_echo()
 	b.set_unreliable_state(chunk_type::input, x);
 	const auto ack{b.build_outgoing(TICK + 2000)};
 	const auto h{*packet_header::read(ack)};
-	CHECK_MSG(h.echo_seq == 2, "echoed seq " + std::to_string(h.echo_seq));
+	CHECK_MSG(h.ack == 2, "echoed (acked) seq " + std::to_string(h.ack));
 	CHECK(h.echo_time == to_net_time(TICK) && h.echo_delay == 1000);
 	CHECK(a.on_receive(ack, TICK + 3000).status == receive_status::accepted);
 	const auto s{a.stats()};
 	CHECK(s.rtt_valid);
-	/* Packet 2's echo is the exact 2000; packet 1, never echoed, is then
-	 * measured once by its ack, TICK + 3000 including its reorder delay.
+	/* Packet 2's echo is the exact 2000.  Packet 1 is acked in the same
+	 * peer packet, so nothing of ours had been echoed before it was
+	 * acked: it is not measured by its ack (that would carry the peer's
+	 * hold), and srtt stays exact.
 	 */
-	const auto expected_srtt{(7 * 2000 + (TICK + 3000)) / 8};
-	CHECK_MSG(s.srtt == expected_srtt, "srtt " + std::to_string(s.srtt) + " units, expected " + std::to_string(expected_srtt));
-	std::printf("    late packet 1 after packet 2: echo names 2 (exact 2000 units); packet 1 measured once by its ack\n");
+	CHECK_MSG(s.srtt == 2000, "srtt " + std::to_string(s.srtt) + " units, expected 2000");
+	std::printf("    late packet 1 after packet 2: echo names 2, srtt exact (2000 units)\n");
 }
 
 /* 5. After a long ack blackout the loss scan is still in range: packets
@@ -1809,7 +1938,7 @@ void test_hostile_echo()
 {
 	begin("hostile echo fields");
 	connection c{host_side, 0};
-	/* One real packet, so that echo_seq 1 names a logged packet. */
+	/* One real packet, so that ack 1 names a logged packet. */
 	c.set_unreliable_state(chunk_type::state, std::array<std::uint8_t, 1>{{1}});
 	CHECK(!c.build_outgoing(0).empty());
 	std::uint16_t seq{};
@@ -1828,7 +1957,6 @@ void test_hostile_echo()
 		h.flags = static_cast<std::uint8_t>(packet_flag::keepalive);
 		h.seq = ++seq;
 		h.ack = 1;
-		h.echo_seq = 1;
 		h.echo_time = echo_time;
 		h.echo_delay = echo_delay;
 		std::array<std::uint8_t, NET_V2_HEADER_SIZE> d{};
@@ -1837,10 +1965,10 @@ void test_hostile_echo()
 		CHECK(report.status == receive_status::accepted);
 	}
 	const auto s{c.stats()};
-	/* The only sample is packet 1's own ack (0 units at time 0); none of
-	 * the forged echo values got in.
+	/* None of the forged echo values got in, and packet 1's ack is not a
+	 * measurement either (nothing later was echoed before it).
 	 */
-	CHECK_MSG(s.rtt_valid && s.srtt == 0, "srtt " + std::to_string(s.srtt));
+	CHECK_MSG(!s.rtt_valid, "srtt " + std::to_string(s.srtt));
 	std::printf("    extreme echo_time/echo_delay/now combinations: no overflow, no bogus sample\n");
 }
 
@@ -2143,8 +2271,8 @@ void test_clock(const std::uint64_t seed)
 void test_header_layout()
 {
 	begin("header layout");
-	static_assert(NET_V2_HEADER_SIZE == 36);
-	static_assert(NET_V2_MAX_CHUNK_PAYLOAD == 1161);
+	static_assert(NET_V2_HEADER_SIZE == 34);
+	static_assert(NET_V2_MAX_CHUNK_PAYLOAD == 1163);
 	packet_header h;
 	h.session_id = 0x04030201;
 	h.peer_token = 0x08070605;
@@ -2156,7 +2284,6 @@ void test_header_layout()
 	h.send_time = 0x18171615;
 	h.echo_time = 0x1c1b1a19;
 	h.echo_delay = 0x1e1d;
-	h.echo_seq = 0x201f;
 	std::array<std::uint8_t, NET_V2_HEADER_SIZE> buf{};
 	h.write(buf.data());
 	const std::array<std::uint8_t, NET_V2_HEADER_SIZE> expected{{
@@ -2171,12 +2298,11 @@ void test_header_layout()
 		21, 22, 23, 24,
 		25, 26, 27, 28,
 		29, 30,
-		31, 32,
 	}};
 	CHECK(buf == expected);
 	const auto back{packet_header::read(buf)};
 	CHECK(back.has_value());
-	CHECK(back->proto == 100 && back->session_id == h.session_id && back->peer_token == h.peer_token && back->player_id == 7 && back->flags == 3 && back->seq == h.seq && back->ack == h.ack && back->ack_bits == h.ack_bits && back->send_time == h.send_time && back->echo_time == h.echo_time && back->echo_delay == h.echo_delay && back->echo_seq == h.echo_seq);
+	CHECK(back->proto == 100 && back->session_id == h.session_id && back->peer_token == h.peer_token && back->player_id == 7 && back->flags == 3 && back->seq == h.seq && back->ack == h.ack && back->ack_bits == h.ack_bits && back->send_time == h.send_time && back->echo_time == h.echo_time && back->echo_delay == h.echo_delay);
 	CHECK(!packet_header::read(std::span{buf}.first(NET_V2_HEADER_SIZE - 1)).has_value());
 	/* A packet that a v1 build would parse: first byte 100 is not a
 	 * valid upid.  A v2 build drops anything without proto 100.
@@ -2191,7 +2317,7 @@ void test_header_layout()
 	CHECK(c.on_receive(buf, 0).status == receive_status::unconnected);
 	buf[11] = 0x02;
 	CHECK(c.on_receive(buf, 0).status == receive_status::bad_session);
-	std::printf("    36-byte header round-trips with the documented offsets\n");
+	std::printf("    34-byte header round-trips with the documented offsets\n");
 }
 
 }
@@ -2207,6 +2333,10 @@ int main(const int argc, char **const argv)
 	test_bounds(seed);
 	test_timeouts(seed);
 	test_replay(seed);
+	test_slow_peer_srtt(seed);
+	test_two_packets_per_tick_srtt(seed);
+	test_bundle_with_backlog(seed);
+	test_frame_rate_caller();
 	test_held_packets(seed);
 	test_closed_refuses_unreliable();
 	test_state_parts(seed);

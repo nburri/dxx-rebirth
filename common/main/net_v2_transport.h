@@ -430,16 +430,7 @@ class connection
 		unsigned count{1};
 		std::array<state_part, NET_V2_STATE_MAX_PARTS> parts{};
 	};
-	/* Sequences of malformed packets already counted as a protocol
-	 * error; a replay of one counts no further error.  Never used to
-	 * reject anything: an intact copy of the sequence is accepted.
-	 */
-	struct recent_malformed
-	{
-		std::array<std::uint16_t, 16> seqs{};
-		std::size_t count{};
-		std::size_t next{};
-	};
+
 	struct pending_event
 	{
 		unreliable_chunk chunk;
@@ -496,6 +487,10 @@ class connection
 	unsigned m_tick_credit{};
 	bool m_tick_open{};
 	unsigned m_tick_packets{};
+	/* Packets allowed in the open tick: max_packets_per_tick, or one
+	 * more than a pending bundle needs when it needs more than one.
+	 */
+	unsigned m_tick_budget{};
 	/* Reliable messages were due but did not fit in the last packet. */
 	bool m_tick_backlog{};
 	bool m_ack_owed{};
@@ -504,11 +499,13 @@ class connection
 	std::vector<selected_run> m_runs;
 	/* The outgoing latest-wins bundles, [0] state and [1] input. */
 	std::array<state_bundle, 2> m_state_out{};
-	/* Alternation between a pending state part and a head message that
-	 * does not fit beside it in the tick's second packet.
-	 */
-	bool m_yield_to_message{};
 	std::deque<pending_event> m_pending_events;
+	/* The newest of our packets sampled through an echo.  A packet acked
+	 * only after a later one was already echoed arrived out of order at
+	 * the peer, so its ack is its one measurement.
+	 */
+	bool m_echo_sampled_any{};
+	std::uint16_t m_echo_sampled_seq{};
 
 	/* Receiver side */
 	bool m_any_received{};
@@ -528,7 +525,11 @@ class connection
 	 */
 	net_clock m_recv_gap_since{};
 	std::array<std::array<latest_packet, NET_V2_STATE_MAX_PARTS>, 2> m_latest{};
-	recent_malformed m_recent_malformed{};
+	/* Sequences of malformed packets already counted as a protocol
+	 * error, oldest first; a replay of one counts no further error.
+	 * Never used to reject anything: an intact copy is accepted.
+	 */
+	std::deque<std::uint16_t> m_recent_malformed;
 	std::deque<net_clock> m_protocol_error_times;
 	std::vector<parsed_message> m_parsed_messages;
 	std::vector<parsed_chunk> m_parsed_chunks;
@@ -544,7 +545,7 @@ class connection
 	void check_timeouts(net_clock now);
 	void detect_rto_losses(net_clock now);
 	void flag_resend(out_msg &m);
-	void process_acks(std::uint16_t ack, std::uint64_t ack_bits, net_clock now);
+	void process_acks(std::uint16_t ack, std::uint64_t ack_bits, net_clock now, bool echo_before_valid, std::uint16_t echo_before);
 	void resolve_packet(packet_log_entry &e, bool acked);
 	void pop_acked_messages();
 	[[nodiscard]]
@@ -565,6 +566,9 @@ class connection
 	 */
 	[[nodiscard]]
 	std::size_t reserved_state_bytes() const;
+	/* Packets the pending state parts need, in order. */
+	[[nodiscard]]
+	unsigned state_packets_needed() const;
 	void write_state_parts(std::uint8_t *buf, std::size_t &pos);
 	/* §3.7 step 8.  Fills m_parsed_messages and m_parsed_chunks. */
 	[[nodiscard]]
@@ -614,13 +618,25 @@ public:
 	 * ticks, so unused ticks never pile up into a spare and a long stall
 	 * does not end in a burst.
 	 * Within a tick, §3.6 allows one packet, and further ones up to
-	 * config.max_packets_per_tick only while reliable messages remain
-	 * that did not fit.  A grant closes the tick that was open, so an
-	 * unfinished allowance is never spent on top of the new one.
-	 * build_outgoing calls this itself; calling it explicitly at the
-	 * tick merely documents the tick.
+	 * config.max_packets_per_tick only while reliable messages or bundle
+	 * parts remain that did not fit; a bundle that needs several packets
+	 * raises that limit to one more than it needs, so a blocked head
+	 * message still gets a packet of its own.  A grant closes the tick
+	 * that was open, so an unfinished allowance is never spent on top of
+	 * the new one.
+	 *
+	 * Returns the ticks granted by this call (0 if none).  build_outgoing
+	 * calls this itself; a caller running faster than the tick (a game
+	 * loop at frame rate) calls it first and sets the state chunk only
+	 * when it returned non-zero, so that a state is never replaced
+	 * before it was sent:
+	 *
+	 *	if (c.begin_tick(now))
+	 *		c.set_unreliable_state(chunk_type::state, bundle);
+	 *	while (!(packet = c.build_outgoing(now)).empty())
+	 *		send(packet);
 	 */
-	void begin_tick(net_clock now);
+	unsigned begin_tick(net_clock now);
 
 	/* Build the next datagram to send, or return an empty span if nothing
 	 * is due or the tick's packet budget is spent.  A packet is due when
