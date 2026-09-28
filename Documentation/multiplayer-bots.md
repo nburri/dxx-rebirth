@@ -1305,6 +1305,15 @@ autoselect now apply to `Local_pilot` only (as `do_laser_firing_player`
 does for the primary): the host's cheat never speeds up a bot, and a bot
 has no autoselect (it chooses its missiles itself).
 
+**A bot's mines are filed under the bot.** `multi_send_fire` maps a bomb
+(or guided missile) it sends with `map_objnum_local_to_local(objnum,
+pnum)`, under the originator: for a human that is `Player_num` as
+before; for a bot flown on the host it is the bot, the owner the clients
+file their copy under (`map_objnum_local_to_remote(..., pnum)`). So a
+homing target, an object removal or the late joiner's snapshot that
+names a bot's mine resolves to the same object on the host and the
+clients (it was filed under the host before).
+
 **Homing for a bot.** `Laser_player_fire` picked a homing missile's
 target (`find_homing_object`) only for `ConsoleObject`; for any other
 shooter it took the target from the `MULTI_FIRE`. A bot's missile on the
@@ -1324,11 +1333,11 @@ in order:
 
 | Weapon | Rule |
 |---|---|
-| Smart mine, proximity bomb | the bot flies away (retreat, collect, refuel) at more than 15 units/s with its target seen within 1 s behind it (more than 107° off its flight) within 100 units, or 150 at a doorway on its path (the next path point is a side's centre); the smart mine first; one per `mine_interval` (Hotshot 3 s) |
+| Smart mine, proximity bomb | the bot flies away (retreat, collect, refuel) at more than 15 units/s with its target seen within 1 s behind it (more than 107° off its flight) within 100 units, or 150 at a doorway on its path (the next path point is a side's centre); the smart mine first; one per `mine_interval` (Hotshot 3 s); never with a teammate following (team game, friendly fire on: a teammate in sight behind the bot within 40 units, or within 150 flying towards it) |
 | Earthshaker | a clear shot, 110–260 units, at least 2 blast radii + 12 away |
 | Mega | a clear shot, 70–220 units, at least 1.5 blast radii + 12 away |
 | (both) | not cloaked, at most one per 8 s and one per target per 25 s; below Ace only at a target crossing slower than 30 units/s |
-| Smart | 30–120 units, a clear shot, or the target seen within 1 s (its children find it round a corner) |
+| Smart | 30–120 units, a clear shot, or the target out of sight but seen within 1 s (its children find it round a corner); a target in sight needs the clear shot, as for the others |
 | Flash | a clear shot within 100 units at a target that faces the bot (within 30°) |
 | Homing | 40–200 units, a clear shot, the target crossing faster than 25 units/s or further than 90 |
 | Mercury, then concussion | 30–200 units, a clear shot |
@@ -1338,14 +1347,20 @@ in order:
 Missiles go at most one per `missile_interval` (Rookie 4 s, Hotshot 2.5
 s, Ace 1.8 s, Insane 1.2 s). A missile is released when the nose is
 within its cone (the fire cone; homing 20°, smart 30°: they find the
-target themselves) and the first wall along the nose, or the target if
-nearer, is far enough for its blast (`blast_safe`: 2 blast radii for the
+target themselves) and the first wall along the nose, or the target (or
+another enemy ship first on the line of fire) if nearer, is far enough
+for its blast (`blast_safe`: 2 blast radii for the
 earthshaker, whose children burst around the impact, 1.5 for the mega, 1
 for the others, plus 12 units). The blast radius is the weapon data's
 `damage_radius`. So a bot never fires a mega or an earthshaker at point
 blank, nor into a wall next to it (the user's own death by an earthshaker
 fired near a wall), whatever the target's distance. An invulnerable bot
-only avoids point blank (30 units).
+only avoids point blank (30 units), and only while the invulnerability
+covers the danger: it must be real (not the spawn's faked one, which
+the first hit ends) and last longer than the missile's flight to the
+impact (at half its speed for a thrust missile), plus 2 s for the
+earthshaker's children and 0.5 s spare (`blast_danger_seconds`);
+otherwise the full rule applies.
 
 **Skill (section 5.1).** Trainee fires no secondary; Rookie concussion,
 homing, flash and mercury; Hotshot and better all but the guided missile.

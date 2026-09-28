@@ -226,6 +226,10 @@ struct bot_state
 	std::optional<uint8_t> target;
 	b::delay_line<percept, 16> seen;
 	bool shot_clear{};
+	/* Along a clear line of fire, how far the first ship on it is (the
+	 * target, or another enemy in front of it): where a missile bursts.
+	 */
+	double shot_first_hit{1e9};
 	uint8_t last_attacker{0xff};
 	uint32_t attacked_tick{};
 	b::aim_error aim;
@@ -305,6 +309,7 @@ struct bot_state
 		target.reset();
 		seen.clear();
 		shot_clear = false;
+		shot_first_hit = 1e9;
 		attacked_tick = tick;
 		aim.reset();
 		lead.reset();
@@ -503,11 +508,13 @@ bool same_team(const playernum_t a, const playernum_t c)
 
 /* Section 4.4, trigger discipline: nothing but the target (or another
  * enemy) is first on the line of fire, never a teammate or the reactor
- * (decision 6 of section 11).
+ * (decision 6 of section 11).  `first_hit` gets the distance of the ship
+ * first on a clear line (a missile's blast is checked against it).
  */
 [[nodiscard]]
-bool shot_line_clear(const bot_state &bs, const object &obj, const object &target)
+bool shot_line_clear(const bot_state &bs, const object &obj, const object &target, double &first_hit)
 {
+	first_hit = 1e9;
 	auto &Objects = LevelUniqueObjectState.Objects;
 	fvi_info hit;
 	const auto type{find_vector_intersection(fvi_query{
@@ -532,7 +539,10 @@ bool shot_line_clear(const bot_state &bs, const object &obj, const object &targe
 		case object_type::OBJ_PLAYER:
 		{
 			const auto who{get_player_id(o)};
-			return who != bs.pid && !same_team(bs.pid, who);
+			if (who == bs.pid || same_team(bs.pid, who))
+				return false;
+			first_hit = b::distance(to_vec(obj.pos), to_vec(hit.hit_pnt));
+			return true;
 		}
 		default:
 			/* The reactor, robots, clutter. */
@@ -947,6 +957,7 @@ void perceive(bot_state &bs, const object &obj, const uint32_t tick)
 	}
 	percept p;
 	bs.shot_clear = false;
+	bs.shot_first_hit = 1e9;
 	if (bs.target)
 	{
 		const auto t{*bs.target};
@@ -955,7 +966,7 @@ void perceive(bot_state &bs, const object &obj, const uint32_t tick)
 		p.pos = bs.memory[t].pos;
 		p.vel = bs.memory[t].vel;
 		if (p.visible)
-			bs.shot_clear = shot_line_clear(bs, obj, *Objects.vcptr(vcplayerptr(t)->objnum));
+			bs.shot_clear = shot_line_clear(bs, obj, *Objects.vcptr(vcplayerptr(t)->objnum), bs.shot_first_hit);
 	}
 	bs.seen.push(p);
 	/* Section 4.3: string pulling, at most `lookahead` probes. */
@@ -1666,6 +1677,39 @@ double wall_distance(const object &obj, const vec3 &dir, const double limit)
 	return b::distance(pos, to_vec(hit.hit_pnt));
 }
 
+/* Section 9.4: a mine dropped now would be met by a teammate following
+ * the bot (a team game with friendly fire on): one close behind, or
+ * further behind but flying the bot's way, in sight.
+ */
+[[nodiscard]]
+bool teammate_behind(const bot_state &bs, const object &obj)
+{
+	if (!(Game_mode & GM_TEAM) || Netgame.NoFriendlyFire)
+		return false;
+	auto &Objects = LevelUniqueObjectState.Objects;
+	const auto pos{to_vec(obj.pos)};
+	const auto dir{b::normalized(to_vec(obj.mtype.phys_info.velocity))};
+	for (playernum_t i = 0; i < N_players && i < MAX_PLAYERS; ++i)
+	{
+		if (i == bs.pid || !same_team(bs.pid, i))
+			continue;
+		const auto &plr{*vcplayerptr(i)};
+		if (plr.connected != player_connection_status::playing)
+			continue;
+		const auto &t{*Objects.vcptr(plr.objnum)};
+		if (t.type != object_type::OBJ_PLAYER)
+			continue;
+		const auto to{to_vec(t.pos) - pos};
+		const double dist{b::length(to)};
+		if (dist > b::MINE_TEAMMATE_DISTANCE || b::dot(dir, b::normalized(to)) > 0)
+			continue;
+		const bool coming{b::dot(to_vec(t.mtype.phys_info.velocity), -to) > 0};
+		if ((dist <= b::MINE_TEAMMATE_CLOSE || coming) && line_clear(obj, obj.pos, obj.segnum, t.pos, 0, true))
+			return true;
+	}
+	return false;
+}
+
 /* Stage B4 (section 9.4): missiles and mines.  At each tick the bot
  * either waits for the release of the missile it chose (the aim within
  * its cone, the blast along the nose far enough away) or chooses one
@@ -1687,7 +1731,13 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 	const auto frame{to_frame(obj.orient)};
 	const auto vel{to_vec(obj.mtype.phys_info.velocity)};
 	const auto res_cloaked{has_flag(pi, player_flag::cloaked)};
-	const bool invulnerable{has_flag(pi, player_flag::invulnerable)};
+	/* Real invulnerability only (the faked respawn one ends at the first
+	 * hit), in seconds left: the blast safety relaxes only while it
+	 * outlasts the missile (b::blast_safe).
+	 */
+	const double invulnerable_left{has_flag(pi, player_flag::invulnerable) && !pi.FakingInvul
+		? std::max(0.0, static_cast<double>(pi.invulnerable_time + INVULNERABLE_TIME_MAX - GameTime64) / 65536.0)
+		: 0};
 	/* The target, as the tactics layer sees it (a reaction time late),
 	 * or as remembered.
 	 */
@@ -1711,7 +1761,7 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 		m.has_target = target_pos.has_value();
 		m.target_visible = target_visible;
 		m.shot_clear = target_visible && bs.shot_clear;
-		m.invulnerable = invulnerable;
+		m.invulnerable_left = invulnerable_left;
 		m.cloaked = res_cloaked;
 		m.since_missile = seconds_since(bs.last_missile);
 		m.since_heavy = seconds_since(bs.last_heavy);
@@ -1744,6 +1794,7 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 				{
 					m.chased = true;
 					m.pursuer_distance = b::length(to);
+					m.teammate_behind = teammate_behind(bs, obj);
 				}
 			}
 		}
@@ -1765,10 +1816,13 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 	const auto role{b::role_of(s)};
 	if (role != b::missile_role::mine)
 	{
-		/* The target: in sight, or a smart missile's seen a moment ago. */
+		/* The target: in sight, or a smart missile's seen a moment ago.
+		 * In sight, the line of fire must be clear for every missile,
+		 * the smart one too (no teammate, reactor or robot first).
+		 */
 		if (!target_pos || (!target_visible && role != b::missile_role::smart))
 			return;
-		if (target_visible && !bs.shot_clear && role != b::missile_role::smart)
+		if (target_visible && !bs.shot_clear)
 			return;
 	}
 	double err{0}, impact{1e9};
@@ -1781,9 +1835,9 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 		 */
 		impact = wall_distance(obj, frame.f, 400);
 		if (target_visible)
-			impact = std::min(impact, b::distance(pos, *target_pos));
+			impact = std::min({impact, b::distance(pos, *target_pos), bs.shot_first_hit});
 	}
-	if (!b::missile_release(s, err, b::radians(sk.fire_cone_deg), impact, md.blast_radius, invulnerable))
+	if (!b::missile_release(s, err, b::radians(sk.fire_cone_deg), impact, md, invulnerable_left))
 		return;
 	bs.missile.reset();
 	bs.missile_fire = s;

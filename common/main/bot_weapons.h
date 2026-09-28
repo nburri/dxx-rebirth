@@ -148,6 +148,11 @@ constexpr double SHAKER_MAX_DISTANCE{260};
 constexpr double FLASH_MAX_DISTANCE{100};
 /* A mine is dropped for a pursuer this close behind. */
 constexpr double MINE_PURSUER_DISTANCE{100};
+/* A teammate this close behind, or further but flying the bot's way
+ * (up to MINE_TEAMMATE_DISTANCE), would meet a mine dropped now.
+ */
+constexpr double MINE_TEAMMATE_CLOSE{40};
+constexpr double MINE_TEAMMATE_DISTANCE{150};
 /* While cloaked, no missile beyond this (the launch shows where the bot
  * is), and no heavy one at all.
  */
@@ -173,9 +178,14 @@ constexpr double MISSILE_PENDING_SECONDS{1.5};
  * away, plus a margin for the ship and the blast's rounding.  The
  * earthshaker gets 2 (its children spread from the blast and explode
  * too), the mega 1.5, the others 1.  Invulnerable, only point blank is
- * avoided.
+ * avoided, but only if the invulnerability outlasts the danger: it must
+ * be real (not the faked respawn one, which a hit ends) and last beyond
+ * the missile's flight, plus the earthshaker's children
+ * (SHAKER_CHILDREN_SECONDS) and a spare.
  */
 constexpr double BLAST_MARGIN{12};
+constexpr double SHAKER_CHILDREN_SECONDS{2};
+constexpr double INVULNERABLE_SPARE{0.5};
 
 [[nodiscard]]
 constexpr double blast_factor(const missile_role r)
@@ -194,15 +204,29 @@ constexpr double blast_factor(const missile_role r)
 	}
 }
 
+/* Seconds until a missile fired now can no longer hurt the bot: its
+ * flight to the impact (a thrust missile starts at half its speed: that
+ * speed is taken throughout), then the earthshaker's children.
+ */
 [[nodiscard]]
-constexpr bool blast_safe(const missile_role r, const double impact_distance, const double blast_radius, const bool invulnerable)
+constexpr double blast_danger_seconds(const missile_role r, const double impact_distance, const missile_data &md)
 {
-	if (invulnerable)
-		return impact_distance >= MISSILE_MIN_DISTANCE;
+	const double speed{std::max(md.thrust ? md.speed / 2 : md.speed, 1.0)};
+	return std::max(impact_distance, 0.0) / speed + (r == missile_role::shaker ? SHAKER_CHILDREN_SECONDS : 0) + INVULNERABLE_SPARE;
+}
+
+/* `invulnerable_left`: seconds of real invulnerability left (0 when not
+ * invulnerable, or only faking it).
+ */
+[[nodiscard]]
+constexpr bool blast_safe(const missile_role r, const double impact_distance, const missile_data &md, const double invulnerable_left)
+{
 	const double f{blast_factor(r)};
 	if (!(f > 0))
 		return true;
-	return impact_distance >= f * std::max(blast_radius, 0.0) + BLAST_MARGIN;
+	if (invulnerable_left > blast_danger_seconds(r, impact_distance, md))
+		return impact_distance >= MISSILE_MIN_DISTANCE;
+	return impact_distance >= f * std::max(md.blast_radius, 0.0) + BLAST_MARGIN;
 }
 
 /* What the missile choice looks at (the tactics layer fills it). */
@@ -229,7 +253,8 @@ struct missile_situation
 	double since_missile{1e9};
 	double since_heavy{1e9};
 	double since_mine{1e9};
-	bool invulnerable{};
+	/* Seconds of real invulnerability left (0: none, or faked). */
+	double invulnerable_left{};
 	bool cloaked{};
 	/* Flying away from an enemy (retreat, collect, refuel) with that
 	 * enemy behind, at this distance; at a doorway on the path.
@@ -237,6 +262,10 @@ struct missile_situation
 	bool chased{};
 	double pursuer_distance{1e9};
 	bool at_doorway{};
+	/* A teammate follows the bot (team game, friendly fire on), close
+	 * enough behind to fly into a mine dropped now.
+	 */
+	bool teammate_behind{};
 };
 
 /* Section 4.5 and 9.4: the secondary the bot wants to fire now, if any.
@@ -251,8 +280,9 @@ constexpr std::optional<secondary> choose_secondary(const missile_situation &m)
 	}};
 	/* Mines: dropped for a pursuer close behind, further at a doorway
 	 * (it must pass there); the smart mine (its children home) first.
+	 * Never with a teammate following on the same route.
 	 */
-	if (m.chased && m.since_mine >= mine_interval(m.smarts) && m.pursuer_distance < MINE_PURSUER_DISTANCE * (m.at_doorway ? 1.5 : 1))
+	if (m.chased && !m.teammate_behind && m.since_mine >= mine_interval(m.smarts) && m.pursuer_distance < MINE_PURSUER_DISTANCE * (m.at_doorway ? 1.5 : 1))
 	{
 		if (usable(secondary::smart_mine))
 			return secondary::smart_mine;
@@ -273,10 +303,10 @@ constexpr std::optional<secondary> choose_secondary(const missile_situation &m)
 	if (heavy_ok)
 	{
 		if (usable(secondary::earthshaker) && d >= SHAKER_MIN_DISTANCE && d <= SHAKER_MAX_DISTANCE &&
-			blast_safe(missile_role::shaker, d, m.data[static_cast<unsigned>(secondary::earthshaker)].blast_radius, m.invulnerable))
+			blast_safe(missile_role::shaker, d, m.data[static_cast<unsigned>(secondary::earthshaker)], m.invulnerable_left))
 			return secondary::earthshaker;
 		if (usable(secondary::mega) && d >= HEAVY_MIN_DISTANCE && d <= HEAVY_MAX_DISTANCE &&
-			blast_safe(missile_role::heavy, d, m.data[static_cast<unsigned>(secondary::mega)].blast_radius, m.invulnerable))
+			blast_safe(missile_role::heavy, d, m.data[static_cast<unsigned>(secondary::mega)], m.invulnerable_left))
 			return secondary::mega;
 	}
 	/* Smart: its children find the target, even round a corner seen a
@@ -332,14 +362,14 @@ constexpr double missile_cone(const missile_role r, const double fire_cone)
  * neither.
  */
 [[nodiscard]]
-constexpr bool missile_release(const secondary s, const double aim_error, const double fire_cone, const double impact_distance, const double blast_radius, const bool invulnerable)
+constexpr bool missile_release(const secondary s, const double aim_error, const double fire_cone, const double impact_distance, const missile_data &md, const double invulnerable_left)
 {
 	const auto r{role_of(s)};
 	if (r == missile_role::none)
 		return false;
 	if (r == missile_role::mine)
 		return true;
-	return aim_error <= missile_cone(r, fire_cone) && blast_safe(r, impact_distance, blast_radius, invulnerable);
+	return aim_error <= missile_cone(r, fire_cone) && blast_safe(r, impact_distance, md, invulnerable_left);
 }
 
 /* Whether the aim uses the missile's speed while it waits for the

@@ -46,6 +46,12 @@ constexpr unsigned idx(const secondary s)
 constexpr double MEGA_BLAST{40};
 constexpr double SHAKER_BLAST{45};
 
+/* A missile of this blast radius at the speed of the game's. */
+constexpr missile_data blast(const double radius)
+{
+	return {.speed = 160, .blast_radius = radius, .thrust = true};
+}
+
 /* A bot with one of each, a visible target 80 units away crossing
  * slowly, nothing fired yet.
  */
@@ -93,7 +99,7 @@ void test_roles_and_skills()
 	 */
 	CHECK(role_of(secondary::guided) == missile_role::none);
 	CHECK(min_smarts(secondary::guided) > 4);
-	CHECK(!missile_release(secondary::guided, 0, 1, 1000, 0, false));
+	CHECK(!missile_release(secondary::guided, 0, 1, 1000, blast(0), 0));
 	CHECK(secondary_value(idx(secondary::guided)) < 0.5);
 	/* Section 5.1: Trainee fires none; Rookie concussion, homing, flash,
 	 * mercury; Hotshot all the rest.
@@ -226,18 +232,18 @@ void test_heavy_safety()
 	 * user's own death: an earthshaker fired at a far target with a wall
 	 * right in front.
 	 */
-	CHECK(missile_release(secondary::earthshaker, 0, 0.1, 2 * SHAKER_BLAST + BLAST_MARGIN, SHAKER_BLAST, false));
+	CHECK(missile_release(secondary::earthshaker, 0, 0.1, 2 * SHAKER_BLAST + BLAST_MARGIN, blast(SHAKER_BLAST), 0));
 	for (double wall = 0; wall < 2 * SHAKER_BLAST + BLAST_MARGIN; wall += 5)
-		CHECK(!missile_release(secondary::earthshaker, 0, 0.1, wall, SHAKER_BLAST, false));
+		CHECK(!missile_release(secondary::earthshaker, 0, 0.1, wall, blast(SHAKER_BLAST), 0));
 	for (double wall = 0; wall < 1.5 * MEGA_BLAST + BLAST_MARGIN; wall += 5)
-		CHECK(!missile_release(secondary::mega, 0, 0.1, wall, MEGA_BLAST, false));
-	CHECK(missile_release(secondary::mega, 0, 0.1, 200, MEGA_BLAST, false));
+		CHECK(!missile_release(secondary::mega, 0, 0.1, wall, blast(MEGA_BLAST), 0));
+	CHECK(missile_release(secondary::mega, 0, 0.1, 200, blast(MEGA_BLAST), 0));
 	/* Every missile keeps its own blast off the bot. */
-	CHECK(!missile_release(secondary::concussion, 0, 0.1, 5, 10, false));
-	CHECK(missile_release(secondary::concussion, 0, 0.1, 30, 10, false));
+	CHECK(!missile_release(secondary::concussion, 0, 0.1, 5, blast(10), 0));
+	CHECK(missile_release(secondary::concussion, 0, 0.1, 30, blast(10), 0));
 	/* Invulnerable: only point blank is avoided. */
-	CHECK(missile_release(secondary::mega, 0, 0.1, 40, MEGA_BLAST, true));
-	CHECK(!missile_release(secondary::mega, 0, 0.1, 10, MEGA_BLAST, true));
+	CHECK(missile_release(secondary::mega, 0, 0.1, 40, blast(MEGA_BLAST), 30));
+	CHECK(!missile_release(secondary::mega, 0, 0.1, 10, blast(MEGA_BLAST), 30));
 	/* Cloaked: no heavy missile (it shows where the bot is), nothing
 	 * beyond 100.
 	 */
@@ -249,20 +255,61 @@ void test_heavy_safety()
 	CHECK(!choose_secondary(c));
 }
 
+/* Invulnerability relaxes the blast safety only while it outlasts the
+ * danger: the missile's flight (at half its speed, a thrust missile),
+ * the earthshaker's children (2 s) and a spare.  None left (not
+ * invulnerable, or the faked respawn invulnerability, which the caller
+ * passes as 0): the full rule.
+ */
+void test_invulnerable_blast()
+{
+	const auto mega{blast(MEGA_BLAST)};
+	const auto shaker{blast(SHAKER_BLAST)};
+	/* 40 units at 80 units/s: 0.5 s, plus the spare. */
+	CHECK(blast_danger_seconds(missile_role::heavy, 40, mega) == 40.0 / 80 + INVULNERABLE_SPARE);
+	CHECK(blast_danger_seconds(missile_role::shaker, 40, shaker) == 40.0 / 80 + SHAKER_CHILDREN_SECONDS + INVULNERABLE_SPARE);
+	/* A missile without thrust flies at its full speed. */
+	CHECK(blast_danger_seconds(missile_role::heavy, 40, missile_data{.speed = 160, .blast_radius = MEGA_BLAST, .thrust = false}) == 40.0 / 160 + INVULNERABLE_SPARE);
+	/* Faked (0): never at 30-40 units. */
+	CHECK(!missile_release(secondary::mega, 0, 0.1, 40, mega, 0));
+	CHECK(!missile_release(secondary::earthshaker, 0, 0.1, 40, shaker, 0));
+	/* Nearly expired: the mega's blast would outlast it. */
+	CHECK(!missile_release(secondary::mega, 0, 0.1, 40, mega, 0.9));
+	CHECK(missile_release(secondary::mega, 0, 0.1, 40, mega, 1.1));
+	/* The earthshaker needs 2 s more for its children. */
+	CHECK(!missile_release(secondary::earthshaker, 0, 0.1, 40, shaker, 1.1));
+	CHECK(!missile_release(secondary::earthshaker, 0, 0.1, 40, shaker, 2.9));
+	CHECK(missile_release(secondary::earthshaker, 0, 0.1, 40, shaker, 3.1));
+	/* Point blank stays out whatever is left. */
+	CHECK(!missile_release(secondary::earthshaker, 0, 0.1, 20, shaker, 30));
+	/* The choice follows: a mega of blast 60 at 70 units is short of
+	 * its normal 1.5 blast radii + margin; invulnerable, it needs
+	 * 70 / 80 s + the spare of cover.
+	 */
+	auto m{only(armed(), {secondary::mega})};
+	m.target_distance = HEAVY_MIN_DISTANCE;
+	m.data[idx(secondary::mega)] = blast(60);
+	CHECK(!choose_secondary(m));
+	m.invulnerable_left = 1;
+	CHECK(!choose_secondary(m));
+	m.invulnerable_left = 30;
+	CHECK(choose_secondary(m) == secondary::mega);
+}
+
 void test_release()
 {
 	const double cone{radians(6)};
 	/* Straight ones need the fire cone, homing and smart a wider one. */
-	CHECK(missile_release(secondary::concussion, radians(5), cone, 100, 10, false));
-	CHECK(!missile_release(secondary::concussion, radians(8), cone, 100, 10, false));
-	CHECK(missile_release(secondary::homing, radians(15), cone, 100, 10, false));
-	CHECK(!missile_release(secondary::homing, radians(25), cone, 100, 10, false));
-	CHECK(missile_release(secondary::smart, radians(25), cone, 100, 20, false));
+	CHECK(missile_release(secondary::concussion, radians(5), cone, 100, blast(10), 0));
+	CHECK(!missile_release(secondary::concussion, radians(8), cone, 100, blast(10), 0));
+	CHECK(missile_release(secondary::homing, radians(15), cone, 100, blast(10), 0));
+	CHECK(!missile_release(secondary::homing, radians(25), cone, 100, blast(10), 0));
+	CHECK(missile_release(secondary::smart, radians(25), cone, 100, blast(20), 0));
 	CHECK(missile_cone(missile_role::straight, cone) == cone);
 	CHECK(missile_cone(missile_role::homing, radians(30)) == radians(30));
 	/* Mines: at once. */
-	CHECK(missile_release(secondary::proximity, 3, cone, 0, 0, false));
-	CHECK(missile_release(secondary::smart_mine, 3, cone, 0, 0, false));
+	CHECK(missile_release(secondary::proximity, 3, cone, 0, blast(0), 0));
+	CHECK(missile_release(secondary::smart_mine, 3, cone, 0, blast(0), 0));
 	/* Aimed with the missile's speed: the ones that fly straight. */
 	CHECK(missile_aimed(secondary::concussion) && missile_aimed(secondary::mercury) && missile_aimed(secondary::mega) && missile_aimed(secondary::earthshaker) && missile_aimed(secondary::flash));
 	CHECK(!missile_aimed(secondary::homing) && !missile_aimed(secondary::smart) && !missile_aimed(secondary::proximity) && !missile_aimed(secondary::guided));
@@ -301,6 +348,16 @@ void test_mines()
 	r.chased = true;
 	r.pursuer_distance = 50;
 	CHECK(!choose_secondary(r));
+	/* A teammate following on the route: no mine. */
+	auto t{armed()};
+	t.has_target = false;
+	t.chased = true;
+	t.pursuer_distance = 50;
+	CHECK(choose_secondary(t) == secondary::smart_mine);
+	t.teammate_behind = true;
+	CHECK(!choose_secondary(t));
+	t.at_doorway = true;
+	CHECK(!choose_secondary(t));
 }
 
 void test_converter_and_tactics()
@@ -341,6 +398,7 @@ int main()
 	test_roles_and_skills();
 	test_missile_choice();
 	test_heavy_safety();
+	test_invulnerable_blast();
 	test_release();
 	test_mines();
 	test_converter_and_tactics();
