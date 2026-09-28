@@ -189,8 +189,11 @@ constexpr double MISSILE_PENDING_SECONDS{1.5};
  * away, plus a margin for the ship and the blast's rounding.  The blast
  * does no damage beyond its radius (object_create_explosion_with_damage:
  * the damage falls linearly to 0 at damage_radius).  The earthshaker
- * gets 1.5 (its children spread from the blast and explode too; B4: 2),
- * the mega 1.2 (B4: 1.5), the others 1.  Invulnerable, only point blank is
+ * gets 1.2 (its children spread from the blast and explode too, and do
+ * not home on their shooter; B4: 2), the mega 1 (B4: 1.5), the others 1,
+ * each plus the margin.  (Measured on the user's tight level "Earth
+ * Shaker", section 9.5: with 2 and 1.5 no engagement at the fight's
+ * 35-95 units allowed an earthshaker.)  Invulnerable, only point blank is
  * avoided, but only if the invulnerability outlasts the danger: it must
  * be real (not the faked respawn one, which a hit ends) and last beyond
  * the missile's flight, plus the earthshaker's children
@@ -206,9 +209,9 @@ constexpr double blast_factor(const missile_role r)
 	switch (r)
 	{
 		case missile_role::shaker:
-			return 1.5;
-		case missile_role::heavy:
 			return 1.2;
+		case missile_role::heavy:
+			return 1;
 		case missile_role::mine:
 		case missile_role::none:
 			return 0;
@@ -373,9 +376,15 @@ constexpr heavy_verdict heavy_check(const missile_situation &m, const secondary 
 	if (m.heavy_used_on_target)
 		return heavy_verdict::used_on_target;
 	const auto &md{m.data[i]};
-	if (!md.homing && m.smarts < 3 && m.target_lateral_speed >= HEAVY_MAX_LATERAL)
-		return heavy_verdict::too_fast;
 	const double d{m.target_distance};
+	/* A missile that does not home misses a crossing target by its
+	 * crossing during the flight; within most of the blast radius the
+	 * blast still hits it.  Below Ace the bot waits for a better moment
+	 * beyond that.
+	 */
+	if (!md.homing && m.smarts < 3 && m.target_lateral_speed >= HEAVY_MAX_LATERAL &&
+		m.target_lateral_speed * d / std::max(md.thrust ? md.speed * 0.75 : md.speed, 1.0) > 0.8 * std::max(md.blast_radius, 0.0))
+		return heavy_verdict::too_fast;
 	const auto r{role_of(s)};
 	if (d < (r == missile_role::shaker ? SHAKER_MIN_DISTANCE : HEAVY_MIN_DISTANCE))
 		return heavy_verdict::too_close;

@@ -129,7 +129,7 @@ void test_missile_choice()
 	m.since_missile = missile_interval(2) - 0.1;
 	CHECK(!choose_secondary(m));
 	/* Mid range, a slow crosser: the heavy missile first (a clear shot,
-	 * far enough: 80 units is beyond the earthshaker's 1.5 blast radii
+	 * far enough: 80 units is beyond the earthshaker's 1.2 blast radii
 	 * and the margin, section 9.5), then smart.
 	 */
 	m = armed();
@@ -195,10 +195,10 @@ void test_heavy_safety()
 {
 	auto m{only(armed(), {secondary::mega, secondary::concussion})};
 	const double mega_min{heavy_min_distance(secondary::mega, blast(MEGA_BLAST))};
-	/* Section 9.5: 1.2 blast radii and the margin (B4: 1.5), at least
+	/* Section 9.5: 1 blast radius and the margin (B4: 1.5), at least
 	 * HEAVY_MIN_DISTANCE.
 	 */
-	CHECK(mega_min == std::max(HEAVY_MIN_DISTANCE, 1.2 * MEGA_BLAST + BLAST_MARGIN));
+	CHECK(mega_min == std::max(HEAVY_MIN_DISTANCE, blast_factor(missile_role::heavy) * MEGA_BLAST + BLAST_MARGIN));
 	/* Point blank: not mega (concussion instead). */
 	for (double d = 0; d < mega_min; d += 5)
 	{
@@ -217,10 +217,10 @@ void test_heavy_safety()
 	CHECK(choose_secondary(m) == secondary::mega);
 	/* A big blast needs more room. */
 	m.target_distance = 100;
-	m.data[idx(secondary::mega)].blast_radius = 80;
+	m.data[idx(secondary::mega)].blast_radius = 100;
 	CHECK(choose_secondary(m) != secondary::mega);
 	CHECK(heavy_check(m) == heavy_verdict::blast);
-	m.target_distance = 1.2 * 80 + BLAST_MARGIN;
+	m.target_distance = blast_factor(missile_role::heavy) * 100 + BLAST_MARGIN;
 	CHECK(choose_secondary(m) == secondary::mega);
 	m.data[idx(secondary::mega)].blast_radius = MEGA_BLAST;
 	/* A fast crosser dodges one that does not home: Hotshot waits, Ace
@@ -236,6 +236,14 @@ void test_heavy_safety()
 	m.data[idx(secondary::mega)].homing = true;
 	CHECK(choose_secondary(m) == secondary::mega);
 	m.data[idx(secondary::mega)].homing = false;
+	/* ... unless the blast covers its crossing during the flight (a
+	 * blast of 60, 80 units away at 120 units/s: 0.67 s, 33 units).
+	 */
+	m.data[idx(secondary::mega)].blast_radius = 60;
+	m.target_distance = 80;
+	CHECK(heavy_check(m) == heavy_verdict::fire);
+	m.data[idx(secondary::mega)].blast_radius = MEGA_BLAST;
+	m.target_distance = 100;
 	m.target_lateral_speed = 10;
 	/* Once per target, and not too often. */
 	m.heavy_used_on_target = true;
@@ -269,10 +277,10 @@ void test_heavy_safety()
 		for (unsigned i = 0; i < heavy_verdict_names.size(); ++i)
 			CHECK(name_of(static_cast<heavy_verdict>(i)) != nullptr);
 	}
-	/* The earthshaker: further (1.5 blast radii), and before mega. */
+	/* The earthshaker: further (1.2 blast radii), and before mega. */
 	auto e{only(armed(), {secondary::earthshaker, secondary::mega})};
 	const double shaker_min{heavy_min_distance(secondary::earthshaker, blast(SHAKER_BLAST))};
-	CHECK(shaker_min == std::max(SHAKER_MIN_DISTANCE, 1.5 * SHAKER_BLAST + BLAST_MARGIN));
+	CHECK(shaker_min == std::max(SHAKER_MIN_DISTANCE, blast_factor(missile_role::shaker) * SHAKER_BLAST + BLAST_MARGIN));
 	CHECK(shaker_min < 95);
 	e.target_distance = shaker_min - 1;
 	CHECK(choose_secondary(e) == secondary::mega);
@@ -305,14 +313,14 @@ void test_heavy_safety()
 	 * user's own death: an earthshaker fired at a far target with a wall
 	 * right in front.
 	 */
-	const double shaker_blast_min{1.5 * SHAKER_BLAST + BLAST_MARGIN};
+	const double shaker_blast_min{blast_factor(missile_role::shaker) * SHAKER_BLAST + BLAST_MARGIN};
 	CHECK(missile_release(secondary::earthshaker, 0, 0.1, shaker_blast_min, blast(SHAKER_BLAST), 0));
 	for (double wall = 0; wall < shaker_blast_min; wall += 5)
 		CHECK(!missile_release(secondary::earthshaker, 0, 0.1, wall, blast(SHAKER_BLAST), 0));
-	for (double wall = 0; wall < 1.2 * MEGA_BLAST + BLAST_MARGIN; wall += 5)
+	for (double wall = 0; wall < blast_factor(missile_role::heavy) * MEGA_BLAST + BLAST_MARGIN; wall += 5)
 		CHECK(!missile_release(secondary::mega, 0, 0.1, wall, blast(MEGA_BLAST), 0));
 	/* The blast stays outside its radius (no damage there). */
-	CHECK(shaker_blast_min > SHAKER_BLAST + 10 && 1.2 * MEGA_BLAST + BLAST_MARGIN > MEGA_BLAST + 10);
+	CHECK(shaker_blast_min > SHAKER_BLAST + 10 && blast_factor(missile_role::heavy) * MEGA_BLAST + BLAST_MARGIN > MEGA_BLAST + 10);
 	CHECK(missile_release(secondary::mega, 0, 0.1, 200, blast(MEGA_BLAST), 0));
 	/* A homing heavy missile is released within a wider cone. */
 	auto homing_mega{blast(MEGA_BLAST)};
@@ -588,7 +596,7 @@ void test_corridor_shaker()
 	 * blast when the missile (80 units/s at first) bursts.
 	 */
 	CHECK(missile_release(secondary::earthshaker, 0, cone, 85, shaker, 0));
-	CHECK(distance_at_burst(85, shaker, 55) < 1.5 * SHAKER_BLAST + BLAST_MARGIN);
+	CHECK(distance_at_burst(85, shaker, 55) < blast_factor(missile_role::shaker) * SHAKER_BLAST + BLAST_MARGIN);
 	CHECK(!missile_release(secondary::earthshaker, 0, cone, 85, shaker, 0, 55));
 	m.target_distance = 85;
 	m.closing_speed = 55;
@@ -598,7 +606,7 @@ void test_corridor_shaker()
 	 */
 	CHECK(distance_at_burst(75, shaker, -40) == 75 + CLOSING_AWAY_CREDIT * 75 / 80);
 	CHECK(missile_release(secondary::earthshaker, 0, cone, 85, shaker, 0, -40));
-	CHECK(!missile_release(secondary::earthshaker, 0, cone, 75, shaker, 0, -40));
+	CHECK(!missile_release(secondary::earthshaker, 0, cone, 60, shaker, 0, -40));
 	/* No self-kill: whatever the distances and speeds, a released heavy
 	 * missile bursts outside its blast radius of the bot, where the bot
 	 * is at the burst (up to the credited 20 units/s away).

@@ -2168,15 +2168,21 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 		/* Section 9.5: the heavy missiles' verdict (the log), and the
 		 * distance to keep for them.
 		 */
-		bs.heavy_why = b::heavy_check(m);
+		const auto verdict{b::heavy_check(m)};
 		bs.standoff = b::heavy_standoff(m);
 		bs.heavy_min = 0;
+		const b::missile_data *heavy_md{nullptr};
 		for (const auto s : {b::secondary::earthshaker, b::secondary::mega})
 			if (m.ammo[static_cast<unsigned>(s)])
 			{
-				bs.heavy_min = b::heavy_min_distance(s, m.data[static_cast<unsigned>(s)]);
+				heavy_md = &m.data[static_cast<unsigned>(s)];
+				bs.heavy_min = b::heavy_min_distance(s, *heavy_md);
 				break;
 			}
+		/* The log: each change of the verdict while the bot has one. */
+		if (heavy_md && verdict != bs.heavy_why && bot_log_on())
+			con_printf(CON_VERBOSE, "bots: '%s' heavy missile: %s (target %.0f units, crossing %.0f, closing %.0f, needs %.0f, blast %.0f%s, keeps %.0f)", static_cast<const char *>(bs.cfg.name), b::name_of(verdict), m.has_target ? m.target_distance : -1.0, m.target_lateral_speed, m.closing_speed, bs.heavy_min, heavy_md->blast_radius, heavy_md->homing ? ", homing" : "", bs.standoff);
+		bs.heavy_why = verdict;
 		const auto chosen{b::choose_secondary(m)};
 		if (!chosen)
 			return;

@@ -1476,10 +1476,24 @@ the failing rule for the log):
 
 | | B4 | Now |
 |---|---|---|
-| Earthshaker | 110-260 units, 2 blast radii + 12 | 55-260 units, 1.5 blast radii + 12 |
-| Mega | 70-220 units, 1.5 blast radii + 12 | 45-220 units, 1.2 blast radii + 12 |
-| Crossing target (below Ace) | < 30 units/s | < 45 units/s, any speed if the missile homes (the data's `homing_flag`) |
+| Earthshaker | 110-260 units, 2 blast radii + 12 | 55-260 units, 1.2 blast radii + 12 |
+| Mega | 70-220 units, 1.5 blast radii + 12 | 45-220 units, 1 blast radius + 12 |
+| Crossing target (below Ace) | < 30 units/s | any speed if the missile homes (the data's `homing_flag`); else its crossing during the flight within 0.8 blast radii, or < 45 units/s |
 | Interval, per target | 8 s, 25 s | 5 s, 10 s |
+
+*Measured on the user's tight level "Earth Shaker"* (`eshaker.rl2`, 250
+segments; parsed outside the repository): 8710 sampled engagements
+(random points in two segments with a line of sight, 25-260 units
+apart; quartiles 62, 106, 140 units) against the rules, by blast radius
+(the game's data is not here; the log prints it).  At the fight's 35-95
+units B4 allowed an earthshaker in none of them for any radius from 40
+to 80, a mega in 43 % at radius 40 and none from 60 (before its
+crossing rule, which blocked most of the rest).  The first revision
+(1.5 and 1.2 blast radii) still allowed an earthshaker in 0-43 %.  Now:
+radius 40: earthshaker 60 %, mega 82 %; 50: 43 %, 50 %; 60: 18 %, 43 %;
+80: 0 %, 2 %; with the standoff (35-140 units) 78/90, 69/73, 55/69 and
+35/47 %.  The blast never reaches the bot (the damage is 0 beyond its
+radius; the unit test sweeps radii, distances and the bot's own speed).
 
 The blast does no damage beyond its radius (the damage falls linearly to
 0 at `damage_radius`), so the bot stays outside it; the release still
@@ -1578,7 +1592,10 @@ heavy missiles' last verdict (`fire`, `none-owned`, `skill`,
 `no-target`, `not-visible`, `no-clear-shot`, `cloaked`, `cooldown`,
 `used-on-target`, `too-fast`, `too-close`, `too-far`, `blast`, and once
 chosen `aiming` or `nose-blast`) with the distance it needs and the
-distance it keeps.  Events: each pickup (`takes powerup N (granted)`
+distance it keeps.  Each change of the heavy verdict while the bot has
+one is logged with the target's distance, crossing and closing speeds,
+the distance needed, the blast radius and whether the missile homes.
+Events: each pickup (`takes powerup N (granted)`
 with the inventory after it) or denied touch (`denied (gone | dead |
 range | spat | cannot-use | not-arbitrated | no-netid)`, once a second
 per powerup), each weapon switch with the band and scores, each heavy
