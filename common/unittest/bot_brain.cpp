@@ -23,6 +23,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <numbers>
 #include <vector>
 
 #include "bot_brain.h"
@@ -143,6 +144,236 @@ void test_aim_error()
 	/* Straight up with an up hint along it: still a valid result. */
 	const auto up{apply_aim_offset({0, 1, 0}, {0, 1, 0}, 0.1, 0)};
 	CHECK(near(length(up), 1, 1e-12));
+}
+
+/* Section 4.4: the lead factor is 1 on average, its spread shrinks
+ * with the skill, Trainee does not lead, Insane leads exactly.
+ */
+void test_aim_lead()
+{
+	double last_sd{1e9};
+	for (const auto &sk : skill_table)
+	{
+		bot_rng rng{4242};
+		aim_lead l;
+		const unsigned drift{ticks_from_ms(sk.aim_drift_ms)};
+		double sum{0}, sum2{0};
+		const unsigned n{200000};
+		for (unsigned i = 0; i < n; ++i)
+		{
+			l.update(rng, sk.lead, drift);
+			sum += l.factor();
+			sum2 += l.factor() * l.factor();
+			CHECK(l.factor() >= 0);
+		}
+		const double mean{sum / n};
+		const double sd{std::sqrt(std::max(0.0, sum2 / n - mean * mean))};
+		if (sk.lead <= 0)
+			CHECK(mean == 0 && sd == 0);
+		else
+		{
+			/* Unbiased: B1 used `lead` itself (Hotshot 0.7). */
+			CHECK(std::abs(mean - 1) < 0.02);
+			CHECK(sd <= last_sd);
+			last_sd = sd;
+		}
+		if (sk.lead >= 1)
+			CHECK(sd < 1e-9);
+	}
+	/* Spread weapons: a slightly wider cone; missiles: slower on
+	 * average than their top speed.
+	 */
+	CHECK(fire_cone_with_spread(0.1, 0) == 0.1);
+	CHECK(fire_cone_with_spread(0.1, 0.12) > 0.1 && fire_cone_with_spread(0.1, 0.12) < 0.1 + 0.12);
+	CHECK(fire_cone_with_spread(0.1, -1) == 0.1);
+	CHECK(effective_shot_speed(200, false) == 200);
+	CHECK(effective_shot_speed(200, true) < 200 && effective_shot_speed(200, true) > 100);
+}
+
+/* A shooting range for the aim (section 9.3, (c)): a bot with the
+ * Hotshot preset fires 4 shots a second at a ship at `distance` that
+ * strafes across the line of fire at 35-58 units/s, turning to a new
+ * direction every `run_lo`-`run_hi` seconds.  The bot sees it a reaction
+ * time late (dead reckoning from what it saw), leads with its lead
+ * factor (`fixed_lead` > 0: B1's fixed fraction instead), and aims with
+ * its drifting aim error; its nose follows the aim exactly (the flight
+ * test covers the tracking).  A shot hits when it passes within the
+ * ship's radius plus its own.  Returns the share of shots that hit.
+ */
+double shooting_range(const double shot_speed, const double distance, const double run_lo, const double run_hi, const double fixed_lead, const uint32_t seed)
+{
+	const auto &sk{skill_of(bot_skill::hotshot)};
+	bot_rng rng{seed};
+	constexpr double dt{1.0 / 240};
+	constexpr double radius{4.6 + 1};
+	vec3 tp{0, 0, distance}, tv;
+	double next_run{0};
+	aim_error aim;
+	aim_lead lead;
+	struct seen
+	{
+		vec3 pos, vel;
+	};
+	std::vector<seen> ring;
+	struct shot
+	{
+		vec3 pos, vel;
+		double age;
+	};
+	std::vector<shot> shots;
+	unsigned fired{0}, hits{0};
+	double t{0}, next_fire{1}, next_seen{0}, next_tick{0};
+	vec3 face{0, 0, 1};
+	const unsigned reaction_ticks{ticks_from_ms(sk.reaction_ms)};
+	const double delay{reaction_ticks / static_cast<double>(BOT_TICK_RATE)};
+	while (t < 60)
+	{
+		if (t >= next_run)
+		{
+			const double a{rng.uniform(0, 2 * std::numbers::pi)};
+			const double v{rng.uniform(35, 58)};
+			tv = {std::cos(a) * v, std::sin(a) * v, 0};
+			next_run = t + rng.uniform(run_lo, run_hi);
+		}
+		/* The ship stays in front of the bot. */
+		if (length(vec3{tp.x, tp.y, 0}) > 60)
+			tv = normalized(vec3{-tp.x, -tp.y, 0}) * 50;
+		tp += tv * dt;
+		if (t >= next_seen)
+		{
+			ring.push_back({tp, tv});
+			next_seen += 1.0 / (BOT_TICK_RATE / PERCEPTION_DIVISOR);
+		}
+		if (t >= next_tick)
+		{
+			next_tick += 1.0 / BOT_TICK_RATE;
+			aim.update(rng, radians(sk.aim_sigma_deg), ticks_from_ms(sk.aim_drift_ms));
+			lead.update(rng, sk.lead, ticks_from_ms(sk.aim_drift_ms));
+			const std::size_t k{reaction_ticks / PERCEPTION_DIVISOR};
+			const auto &p{ring[ring.size() > k ? ring.size() - 1 - k : 0]};
+			const auto est{p.pos + p.vel * delay};
+			const auto at{aim_point({}, est, p.vel, shot_speed, fixed_lead > 0 ? fixed_lead : lead.factor())};
+			face = apply_aim_offset(at, {0, 1, 0}, aim.yaw(), aim.pitch());
+		}
+		if (t >= next_fire)
+		{
+			shots.push_back({{}, face * shot_speed, 0});
+			++fired;
+			next_fire += 0.25;
+		}
+		for (auto it{shots.begin()}; it != shots.end();)
+		{
+			it->pos += it->vel * dt;
+			it->age += dt;
+			if (dcx::bot::distance(it->pos, tp) < radius)
+			{
+				++hits;
+				it = shots.erase(it);
+			}
+			else if (it->pos.z > distance + 30 || it->age > 4)
+				it = shots.erase(it);
+			else
+				++it;
+		}
+		t += dt;
+	}
+	return fired ? static_cast<double>(hits) / fired : 0;
+}
+
+double range_average(const double shot_speed, const double distance, const double run_lo, const double run_hi, const double fixed_lead)
+{
+	double sum{0};
+	constexpr unsigned seeds{6};
+	for (uint32_t s = 1; s <= seeds; ++s)
+		sum += shooting_range(shot_speed, distance, run_lo, run_hi, fixed_lead, s * 7919);
+	return sum / seeds;
+}
+
+/* Section 9.3, (c): shots at a ship that flies straight across the
+ * line of fire at 35-58 units/s (in any direction across it), at
+ * `distance`: only the aim error and the lead error make a shot miss.
+ * Each shot takes the aim and lead errors of a random moment.  Returns
+ * the share that pass within the ship's radius plus the shot's.
+ */
+double steady_target_hits(const double shot_speed, const double distance, const double fixed_lead)
+{
+	const auto &sk{skill_of(bot_skill::hotshot)};
+	bot_rng rng{31337};
+	aim_error aim;
+	aim_lead lead;
+	constexpr double radius{4.6 + 1};
+	constexpr unsigned shots{20000};
+	unsigned hits{0};
+	for (unsigned i = 0; i < shots; ++i)
+	{
+		for (unsigned k{1 + rng.below(30)}; k--;)
+		{
+			aim.update(rng, radians(sk.aim_sigma_deg), ticks_from_ms(sk.aim_drift_ms));
+			lead.update(rng, sk.lead, ticks_from_ms(sk.aim_drift_ms));
+		}
+		const double a{rng.uniform(0, 2 * std::numbers::pi)};
+		const double v{rng.uniform(35, 58)};
+		const vec3 pos{0, 0, distance}, vel{std::cos(a) * v, std::sin(a) * v, 0};
+		const auto at{aim_point({}, pos, vel, shot_speed, fixed_lead > 0 ? fixed_lead : lead.factor())};
+		const auto dir{apply_aim_offset(at, {0, 1, 0}, aim.yaw(), aim.pitch())};
+		/* The closest pass of the shot by the ship. */
+		const auto rel_vel{vel - dir * shot_speed};
+		const double t{std::max(0.0, -dot(pos, rel_vel) / dot(rel_vel, rel_vel))};
+		if (length(pos + rel_vel * t) < radius)
+			++hits;
+	}
+	return static_cast<double>(hits) / shots;
+}
+
+/* Section 9.3, (c): hits by shot speed.  The speeds span the game's
+ * primaries (the slow blobs to vulcan and gauss); the laser's 120 is
+ * the reference.
+ */
+void test_hit_rates_by_speed()
+{
+	constexpr std::array<double, 6> speeds{{80, 100, 120, 160, 200, 300}};
+	constexpr std::size_t laser{2};
+	for (const double distance : {40.0, 60.0, 90.0})
+	{
+		std::array<double, speeds.size()> now{}, b1{};
+		for (std::size_t i = 0; i < speeds.size(); ++i)
+		{
+			now[i] = steady_target_hits(speeds[i], distance, 0);
+			b1[i] = steady_target_hits(speeds[i], distance, skill_of(bot_skill::hotshot).lead);
+			std::printf("test-bot-brain: speed %3.0f, a ship crossing at %2.0f: %4.1f %% of the shots hit (B1 %4.1f %%)\n", speeds[i], distance, 100 * now[i], 100 * b1[i]);
+		}
+		for (std::size_t i = 0; i < speeds.size(); ++i)
+		{
+			/* Comparable to the laser whatever the speed: the lead is
+			 * right on average, so only its spread (which grows with the
+			 * flight time) and the aim error miss.
+			 */
+			CHECK(now[i] >= (speeds[i] < 100 ? 0.7 : 0.8) * now[laser]);
+			CHECK(now[i] <= 1.25 * now[laser]);
+			/* B1's fixed lead (0.7) fell with the flight time. */
+			if (speeds[i] <= 120)
+				CHECK(now[i] > b1[i]);
+		}
+		CHECK(now[laser] > 0.2);
+	}
+	/* B1 at 60 units: the slow shots hit far less than the laser. */
+	CHECK(steady_target_hits(80, 60, 0.7) < 0.6 * steady_target_hits(120, 60, 0.7));
+	/* Against a strafing and a juking ship the slow shots stay behind
+	 * (the ship has more time to turn away, as it has from a human's
+	 * shots); these only must not collapse.
+	 */
+	std::array<double, speeds.size()> strafer{}, juker{};
+	for (std::size_t i = 0; i < speeds.size(); ++i)
+	{
+		strafer[i] = range_average(speeds[i], 60, 1.5, 3, 0);
+		juker[i] = range_average(speeds[i], 45, 0.6, 1.4, 0);
+		std::printf("test-bot-brain: speed %3.0f: strafing ship at 60 %4.1f %%, juking at 45 %4.1f %%\n", speeds[i], 100 * strafer[i], 100 * juker[i]);
+	}
+	for (std::size_t i = 0; i < speeds.size(); ++i)
+	{
+		CHECK(strafer[i] >= (speeds[i] < 100 ? 0.4 : 0.6) * strafer[laser]);
+		CHECK(juker[i] >= (speeds[i] < 100 ? 0.25 : 0.5) * juker[laser]);
+	}
 }
 
 void test_reaction_and_memory()
@@ -694,6 +925,8 @@ int main()
 {
 	test_intercept();
 	test_aim_error();
+	test_aim_lead();
+	test_hit_rates_by_speed();
 	test_reaction_and_memory();
 	test_target_choice();
 	test_steering();

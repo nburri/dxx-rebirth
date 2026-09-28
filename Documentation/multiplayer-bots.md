@@ -397,8 +397,10 @@ gun point, and `w` is the weapon speed from `Weapon_info[...].speed`
 (`ai.cpp` `lead_player` uses the same idea with a linear time estimate).
 Skill enters in three places:
 
-- **Lead accuracy** `ℓ`: the bot uses `ℓ × V`. At `ℓ = 0` it aims at where
-  the target is.
+- **Lead accuracy** `ℓ`: the bot leads with `k × V`, where `k` is 1 on
+  average with an error of `(1 − ℓ) × 0.35`, drawn and held like the aim
+  error (section 9.3; B1 used `ℓ × V`, a systematic under-lead). At
+  `ℓ = 0` it aims at where the target is.
 - **Aim error**: an angular offset drawn from `N(0, σ)` in two axes, held for
   `aim_drift_period` and then eased toward a new sample. Aim therefore
   wanders smoothly instead of jittering, and a steady target is hit more
@@ -1172,7 +1174,9 @@ the energy weapons count half (the laser 0.8), between 20 and 50 they are
 spared a little; vulcan and gauss need rounds. The current weapon counts
 15 % more, so a switch (which costs `REARM_TIME`, as before) happens only
 for a clear gain. Below weapon smarts 2 (Trainee, Rookie) the fixed order
-of B1 stays. Far band trigger discipline: the bot holds fire when the
+of B1 stays. (The energy rule, the laser's close range row, the margin
+and the value of a better weapon were revised after the exp-12
+playtest, section 9.3.) Far band trigger discipline: the bot holds fire when the
 chance of a hit (the target's radius against the spread of the aim error
 and of half the target's lateral motion during the shot's flight) is below
 10 %.
@@ -1197,6 +1201,85 @@ the protocol (no new message; `MULTI_PROTO_VERSION` unchanged).
 
 **Not in B3:** secondary use, the converter, cloak/invulnerability tactics
 (B4); the presets and styles taking effect (B2); CTF/hoard items (B7).
+
+### 9.3 After the v0.61-exp-12 playtest: weapon choice and aim
+
+The playtest (one human against Hotshot bots) found bots that play much
+better but (a) still mostly fire the laser, (b) never fire missiles (B4,
+section 9.4) and (c) hit badly with the slow projectile guns (plasma,
+phoenix, helix, spreadfire) compared with the laser, vulcan and gauss.
+
+**(a) The laser.** Traced end to end: the pickups are right (a granted
+primary sets the ship's `primary_weapon_flags` through
+`host_grant_remote` → `write_inventory`; a cannon comes with its rounds),
+the choice is applied (`choose_weapon` writes the ship's
+`Primary_weapon`, which `do_laser_firing_player` fires; the human's
+autoselect runs only for `Local_pilot`), and nothing else writes a bot's
+`Primary_weapon`. The causes were in the scores:
+
+1. *Every life starts with the laser, and a better weapon was not worth a
+   detour in a fight.* A better primary was worth 5 whatever it replaced,
+   and with an enemy in sight the collection counts 0.35: plasma lying
+   80 units away scored 5 × 60/140 × 0.35 = 0.75 against an engagement's
+   1–2. Bots die often and fight most of the time, so they fought each
+   life with the spawn laser. Now an armament item is worth 3–7 by how
+   much stronger it makes the bot (`upgrade_ratio`, `upgrade_value`:
+   3 + 2 × (ratio − 1), capped at 7; the spawn laser to plasma is 7), and
+   one that makes it at least 1.5 times stronger (`BIG_UPGRADE_RATIO`)
+   counts 0.8 in a fight (`goal_inputs::collect_upgrade`). The bot shoots
+   at what it sees on its way (section 9.2).
+2. *The laser was spared by the energy rule.* Between 20 and 50 energy
+   every energy weapon but the laser lost up to 25 %, below 20 half (the
+   laser 20 %): with a strong laser the bot kept it after 15–20 s of fire.
+   Now each energy weapon is judged by the seconds of continuous fire its
+   own cost leaves (`energy_factor`: the game's `energy_usage /
+   fire_wait`, helix twice in multiplayer, filled per weapon by
+   `energy_rates` in bot.cpp): full for 8 s and more, down to one half
+   with nothing left.
+3. *The hysteresis kept the held laser.* The spawn weapon is always the
+   current one first, and the current one counted 15 % more: the super
+   lasers with quad (3.4 at close range) were within 15 % of spreadfire
+   (3.5) and helix (3.7), so the close range order never took effect. The
+   laser's close range row is now 0.9 and the margin 12 %. The margin was
+   there against flipping at a band border, which the fights (35–95
+   units) straddle at 60: the band itself now has a hysteresis of 8 units
+   (`band_of(distance, previous)`), and the test checks for every pair of
+   weapons that a switch at the border is not undone.
+
+**(c) Aim with slow shots.** Traced per weapon: the speed is the weapon
+data's `speed[Difficulty_level]` of the current primary, which is what
+`Laser_create_new` gives the shot (in multiplayer the netgame's
+difficulty); a shot does not inherit its shooter's velocity (only mines
+do), so the intercept with the target's velocity in the world is right;
+`speedvar` (a random slower shot) is the data's. The causes:
+
+1. *A systematic under-lead.* The lead used the fraction ℓ itself (Hotshot
+   0.7) of the target's velocity: 30 % of the shot's flight short, a miss
+   of 0.3 × the target's speed × the flight time. That grows with the
+   flight time, so it hit the slow shots hardest. Against a ship crossing
+   at 35–58 units/s, 60 units away, B1's Hotshot hit with 20 % of its
+   laser shots (speed 120), 2 % at speed 80 and 79 % at 300; at 90 units,
+   5 %, 0.2 % and 47 %. Now the lead factor is 1 on average with an error
+   drawn from N(0, (1 − ℓ) × 0.35), held for the aim drift period and
+   eased toward (`aim_lead`, like the aim error); Trainee (ℓ = 0) still
+   does not lead. The same ship at 60 units: 82 % at 120, 67 % at 80,
+   91 % at 300 (`test_hit_rates_by_speed`, which requires every speed to
+   hit at least 70 % (below 100 units/s) or 80 % as often as the laser).
+   Against a ship that strafes in new directions every 1.5–3 s the slow
+   shots stay behind (at 60 units: 15 % at 80, 29 % at 120, 54 % at 300),
+   as they do for a human: the ship has more time to turn away.
+2. *The lead was solved from the ship's centre*; the shots leave from
+   their guns and fly parallel to the nose. Now from the average of the
+   weapon's guns (`gun_local`: guns 0 and 1 for laser, plasma, phoenix,
+   fusion, 0–3 with quad, the centre gun for vulcan, spreadfire, gauss,
+   helix).
+3. *The pattern weapons had the single shot's cone.* Spreadfire and helix
+   fire patterns 1/16 and 2/16 off the nose; their fire cone is wider by
+   half the pattern's half angle (`fire_cone_with_spread`).
+4. Weapons with thrust (the missiles) are led with three quarters of
+   their top speed (`effective_shot_speed`; they start at half of it). The
+   reach (speed × lifetime × 0.8) no longer has a floor of 60 units that
+   could exceed it (now 20).
 
 ---
 

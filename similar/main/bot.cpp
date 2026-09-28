@@ -227,6 +227,10 @@ struct bot_state
 	uint8_t last_attacker{0xff};
 	uint32_t attacked_tick{};
 	b::aim_error aim;
+	/* Section 4.4: the lead factor, 1 on average (b::aim_lead). */
+	b::aim_lead lead;
+	/* Section 4.5: the range band of the weapon choice (hysteresis). */
+	std::optional<b::range_band> band;
 	b::juke_state juke;
 	/* Section 4.6, dodge: the salt of this life's rolls (b::dodge_roll),
 	 * and the dodge under way.
@@ -286,6 +290,8 @@ struct bot_state
 		shot_clear = false;
 		attacked_tick = tick;
 		aim.reset();
+		lead.reset();
+		band.reset();
 		juke.reset();
 		dodge_salt = rng.next();
 		dodge_dir = {};
@@ -509,20 +515,115 @@ bool shot_line_clear(const bot_state &bs, const object &obj, const object &targe
 	}
 }
 
-/* The primary weapon's speed and useful range, in game units. */
+/* The speed of the shots of the ship's primary weapon, in game units,
+ * as the lead needs it (section 4.4): the weapon data's speed at the
+ * game's difficulty, which is the speed Laser_create_new gives the shot
+ * (GameUniqueState.Difficulty_level: in multiplayer the netgame's).
+ */
 [[nodiscard]]
 double weapon_speed(const player_info &pi)
 {
 	const auto &wi{Weapon_info[Primary_weapon_to_weapon_info[pi.Primary_weapon]]};
-	return wi.speed[GameUniqueState.Difficulty_level] / 65536.0;
+	return b::effective_shot_speed(wi.speed[GameUniqueState.Difficulty_level] / 65536.0, wi.thrust != 0);
 }
 
+/* How far its shots fly before they expire: the bot does not fire
+ * beyond that (four fifths of it, with a floor for the data's odd
+ * weapons).
+ */
 [[nodiscard]]
 double weapon_range(const player_info &pi)
 {
 	const auto &wi{Weapon_info[Primary_weapon_to_weapon_info[pi.Primary_weapon]]};
 	const double r{weapon_speed(pi) * (wi.lifetime / 65536.0)};
-	return std::clamp(r * 0.8, 60.0, 400.0);
+	return std::clamp(r * 0.8, 20.0, 400.0);
+}
+
+/* The gun a primary's shots leave from, in the ship's frame (right, up,
+ * forward): the average of the guns do_laser_firing uses, since every
+ * shot flies parallel to the nose from its gun.  Section 4.4: the lead
+ * is solved from there, not from the ship's centre.
+ */
+[[nodiscard]]
+vec3 gun_local(const primary_weapon_index w, const bool quad)
+{
+	const auto gun{[](const player_gun_number g) {
+		return to_vec(Player_ship->gun_points[g]);
+	}};
+	switch (w)
+	{
+		case primary_weapon_index::laser:
+			if (quad)
+				return (gun(player_gun_number::_0) + gun(player_gun_number::_1) + gun(player_gun_number::_2) + gun(player_gun_number::_3)) * 0.25;
+			[[fallthrough]];
+		case primary_weapon_index::plasma:
+		case primary_weapon_index::fusion:
+#if DXX_BUILD_DESCENT == 2
+		case primary_weapon_index::phoenix:
+#endif
+			return (gun(player_gun_number::_0) + gun(player_gun_number::_1)) * 0.5;
+#if DXX_BUILD_DESCENT == 2
+		case primary_weapon_index::omega:
+			return gun(player_gun_number::_1);
+#endif
+		default:
+			return gun(player_gun_number::center);
+	}
+}
+
+/* The half angle (radians) of a primary's shot pattern (do_laser_firing:
+ * spreadfire's outer shots 1/16 off the nose, helix's 2/16).
+ */
+[[nodiscard]]
+double spread_half_angle(const primary_weapon_index w)
+{
+	switch (w)
+	{
+		case primary_weapon_index::spreadfire:
+			return std::atan(1.0 / 16);
+#if DXX_BUILD_DESCENT == 2
+		case primary_weapon_index::helix:
+			return std::atan(2.0 / 16);
+#endif
+		default:
+			return 0;
+	}
+}
+
+/* The energy a primary uses per second of continuous fire
+ * (do_laser_firing_player: the difficulty's cost per volley, helix twice
+ * in multiplayer, fire_wait between volleys); 0 for the ammunition
+ * weapons and omega (charged, not fired from the energy).
+ */
+[[nodiscard]]
+std::array<double, 10> energy_rates()
+{
+	std::array<double, 10> r{};
+	for (unsigned i = 0; i < r.size() && i < MAX_PRIMARY_WEAPONS; ++i)
+	{
+		const auto w{static_cast<primary_weapon_index>(i)};
+		const auto id{Primary_weapon_to_weapon_info[w]};
+		if (id >= N_weapon_types)
+			continue;
+		const auto &wi{Weapon_info[id]};
+		if (weapon_index_uses_vulcan_ammo(w))
+			continue;
+#if DXX_BUILD_DESCENT == 2
+		if (w == primary_weapon_index::omega)
+			continue;
+#endif
+		double e{wi.energy_usage / 65536.0};
+		const auto d{GameUniqueState.Difficulty_level};
+		if (d == Difficulty_level_type::_0 || d == Difficulty_level_type::_1)
+			e *= (underlying_value(d) + 2) / 4.0;
+#if DXX_BUILD_DESCENT == 2
+		if (id == weapon_id_type::HELIX_ID && +(Game_mode & GM_MULTI))
+			e *= 2;
+#endif
+		const double wait{std::max(wi.fire_wait / 65536.0, 0.01)};
+		r[i] = e / wait;
+	}
+	return r;
 }
 
 [[nodiscard]]
@@ -540,6 +641,7 @@ b::weapon_view weapons_of(const player_info &pi)
 		.quad = has_flag(pi, player_flag::quad_lasers),
 		.energy = pi.energy / 65536.0,
 		.vulcan_ammo = pi.vulcan_ammo,
+		.energy_rate = energy_rates(),
 	};
 }
 
@@ -1023,6 +1125,8 @@ struct goal_place
 	vec3 pos;
 	uint16_t key{0xffff}, sig{};
 	bool shields{};
+	/* A much stronger armament (b::BIG_UPGRADE_RATIO). */
+	bool upgrade{};
 };
 
 /* Section 4.7: the best powerup to collect, by value (its need) over the
@@ -1052,7 +1156,7 @@ goal_place best_collect(const bot_state &bs, const b::resource_view &res, const 
 		const double path{*cost + b::distance(B.graph.position(k.segment), k.pos)};
 		const double u{b::collect_utility(value, path)};
 		if (u > best.utility)
-			best = {u, path, k.segment, k.pos, k.key, k.signature, desc.kind == b::item::shield};
+			best = {u, path, k.segment, k.pos, k.key, k.signature, desc.kind == b::item::shield, b::upgrade_ratio(desc, res.weapons) >= b::BIG_UPGRADE_RATIO};
 	}
 	return best;
 }
@@ -1192,8 +1296,11 @@ void think(bot_state &bs, object &obj, const uint32_t tick)
 			}
 		target_visible = bs.visible_now[*bs.target];
 	}
-	/* Section 4.5: the primary for the range to the target. */
-	choose_weapon(bs, obj, target_distance ? std::optional<b::range_band>{b::band_of(*target_distance)} : std::nullopt);
+	/* Section 4.5: the primary for the range to the target; the band
+	 * changes only a little past its border.
+	 */
+	bs.band = target_distance ? std::optional<b::range_band>{b::band_of(*target_distance, bs.band)} : std::nullopt;
+	choose_weapon(bs, obj, bs.band);
 	/* Section 4.7: what it knows and what it needs. */
 	compute_distances(bs, obj);
 	learn_powerups(bs, obj, tick);
@@ -1221,6 +1328,7 @@ void think(bot_state &bs, object &obj, const uint32_t tick)
 		.invulnerable = res.invulnerable,
 		.collect = collect.utility,
 		.collect_path = collect.path,
+		.collect_upgrade = collect.upgrade,
 		.refuel = centre.utility,
 		.retreat_shields = st.retreat_shields,
 		.engage_weight = st.engage_weight,
@@ -1484,6 +1592,7 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 	if (b::layer_due(tick, b::STRATEGY_DIVISOR, bs.stagger))
 		think(bs, obj, tick);
 	bs.aim.update(bs.rng, b::radians(sk.aim_sigma_deg), b::ticks_from_ms(sk.aim_drift_ms));
+	bs.lead.update(bs.rng, sk.lead, b::ticks_from_ms(sk.aim_drift_ms));
 	const double range_scale{bs.style->range_scale};
 	bs.juke.update(bs.rng, b::ticks_from_ms(sk.strafe_min_ms), b::ticks_from_ms(sk.strafe_max_ms), BOT_RANGE_LO * range_scale, BOT_RANGE_HI * range_scale);
 	const auto pos{to_vec(obj.pos)};
@@ -1508,8 +1617,13 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 		 */
 		const double delay{reaction_ticks / static_cast<double>(b::BOT_TICK_RATE)};
 		const auto est{p->pos + p->vel * delay};
-		const auto aim{b::aim_point(pos, est, p->vel, weapon_speed(pi), sk.lead)};
-		bs.face_dir = b::apply_aim_offset(aim - pos, frame.u, bs.aim.yaw(), bs.aim.pitch());
+		/* Section 4.4: the lead from the gun the shots leave from, with
+		 * the current weapon's speed and the bot's lead factor.
+		 */
+		const auto primary_now{pi.Primary_weapon.get_active()};
+		const auto shooter{pos + frame.to_world(gun_local(primary_now, has_flag(pi, player_flag::quad_lasers)))};
+		const auto aim{b::aim_point(shooter, est, p->vel, weapon_speed(pi), bs.lead.factor())};
+		bs.face_dir = b::apply_aim_offset(aim - shooter, frame.u, bs.aim.yaw(), bs.aim.pitch());
 		/* The steering's feed-forward: how fast the line to the target
 		 * turns, as the bot reckons it.
 		 */
@@ -1541,7 +1655,8 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 		const auto los{b::normalized(to)};
 		const double lateral{b::length(rel_vel - los * b::dot(rel_vel, los))};
 		const auto &target_obj{ship_of(p->target)};
-		bs.fire = b::should_fire(err, b::radians(sk.fire_cone_deg), bs.shot_clear, dist, weapon_range(pi)) &&
+		const double cone{b::fire_cone_with_spread(b::radians(sk.fire_cone_deg), spread_half_angle(primary_now))};
+		bs.fire = b::should_fire(err, cone, bs.shot_clear, dist, weapon_range(pi)) &&
 			b::long_shot_worthwhile(dist, weapon_speed(pi), lateral, b::radians(sk.aim_sigma_deg), target_obj.size / 65536.0);
 	}
 	else
