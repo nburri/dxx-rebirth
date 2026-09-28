@@ -210,6 +210,9 @@ public:
 			scores = ::dcx::net_v2::capture_all_scores<MAX_PLAYERS>([&vcobjptr](const std::size_t i) {
 				return info_of(vcobjptr, static_cast<playernum_t>(i));
 			});
+		for (playernum_t i = 0; i < MAX_PLAYERS; ++i)
+			if (vcplayerptr(i)->connected != player_connection_status::disconnected)
+				con_printf(CON_VERBOSE, "net: level load: P#%u kills %i, deaths %i", i, scores[i].kills, scores[i].killed);
 	}
 	/* After gameseq_init_network_players: each slot has its new object. */
 	void restore(fvmobjptr &vmobjptr) const

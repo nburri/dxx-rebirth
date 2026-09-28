@@ -1043,6 +1043,7 @@ static void multi_compute_kill(const d_robot_info_array &Robot_info, const imobj
 		}
 	}
 
+	con_printf(CON_VERBOSE, "net: kill: P#%u by P#%u: kills %i, deaths %i; P#%u kills %i", killed_pnum, killer_pnum, killed.ctype.player_info.net_kills_total, killed.ctype.player_info.net_killed_total, killer_pnum, killer->ctype.player_info.net_kills_total);
 	multi_sort_kill_list();
 	multi_show_player_list();
 #if DXX_BUILD_DESCENT == 2

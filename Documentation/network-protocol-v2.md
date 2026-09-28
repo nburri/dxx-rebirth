@@ -1704,7 +1704,24 @@ The implementation (`similar/main/net_v2.cpp`, `common/main/net_v2_game.h`,
   Applied on receive as v1 did (`extract_quaternionpos`); interpolation and
   the bundle of §5.2 are stage 2.
 - **Level end**: the v1 `endlevel_h`/`endlevel_c` payloads as
-  `LEGACY_ENDLEVEL_HOST`/`_CLIENT`, once per second, reliable.
+  `LEGACY_ENDLEVEL_HOST`/`_CLIENT`, once per second, reliable. The host
+  computes every kill, so it takes only the connection state and the
+  countdown from a client's report, never its kills, deaths or kill matrix
+  row; a client takes the host's scores for the other slots. A report is
+  applied only while the level ends (score screen, or the countdown of the
+  reactor, kill goal or time limit), never once the next level plays
+  (`endlevel_report_applies` in `net_score_carry.h`, tested by
+  `test-net-score-carry`). (Playtest report: after a level ended by the
+  reactor and the exit, kills made during the countdown were missing at the
+  next level. The host adopted each client's self-reported row, which lags
+  the host by the kill relays still in flight, and sent that row to every
+  machine with the next level start. The report as filed, the host's own
+  count dropping about 8 in a game against bots only, is not explained by
+  this: no path found changes the host's own counts between the countdown
+  and the next level. The host now logs every slot whose kills or deaths
+  change at a level start (`net: level start: ...`, urgent on the host,
+  where it would be a bug), and with `-verbose` every slot's counts at the
+  level load and every player kill with both totals.)
 - **Leaving**: a client sends `LEAVE` (also after the v1 `MULTI_QUIT`, which
   the gameplay layer still sends), the host `HOST_SHUTDOWN`; the connection
   lingers for one second so that the message is acknowledged, and a peer the
