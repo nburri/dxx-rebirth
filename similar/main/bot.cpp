@@ -365,6 +365,36 @@ struct bot_state
 	double standoff{};
 	double blast_hold{};
 	uint32_t blast_hold_until{};
+	/* Section 9.6: the bot's appetite for risk (its skill and style),
+	 * the best aim of each heavy missile at the last weighing (index:
+	 * 0 earthshaker, 1 mega) and when that was, the aim of the heavy
+	 * missile chosen, the log's tallies.
+	 */
+	b::risk_profile risk;
+	std::array<b::aim_choice, 2> heavy_plan{};
+	uint32_t heavy_plan_tick{};
+	bool heavy_planned{};
+	std::optional<b::aim_option> heavy_aim;
+	/* Section 9.6, hugging: what the bot knows of each enemy's heavy
+	 * missiles (b::heavy_holding: it saw it pick them up, fire them),
+	 * the last shot of each counted, the heavy powerup next to each
+	 * visible enemy (a pickup when it is gone), the hug under way, when
+	 * it started or ended, the draw of this engagement.
+	 */
+	per_player_array<b::heavy_holding> heavy_holding{};
+	per_player_array<uint16_t> heavy_fire_sig{};
+	per_player_array<uint16_t> heavy_near_obj{};
+	per_player_array<uint16_t> heavy_near_sig{};
+	bool hugging{};
+	uint32_t hug_changed{};
+	/* Section 9.6: the rotation of the aim search (b::aim_search). */
+	unsigned heavy_plan_phase{};
+	double hug_keep{};
+	double hug_roll{1};
+	uint8_t hug_roll_target{0xff};
+	/* Section 9.6: breaking the line of sight before a heavy shot. */
+	std::optional<vec3> duck_point;
+	uint32_t duck_until{};
 	/* Section 9.5: after a hit from an unseen attacker, turn to it from
 	 * turn_from until turn_until.
 	 */
@@ -408,8 +438,9 @@ struct bot_state
 	fix64 died_at{};
 	fix64 respawn_at{};
 	explicit bot_state(const playernum_t p, const bot_config &c) :
-		pid{p}, cfg{c}, stagger{p}
+		pid{p}, cfg{c}, stagger{p}, risk{b::risk_profile_of(c.skill, c.style)}
 	{
+		heavy_near_obj.fill(0xffff);
 	}
 	void reset_for_life(const uint32_t tick)
 	{
@@ -443,6 +474,16 @@ struct bot_state
 		standoff = 0;
 		blast_hold = 0;
 		blast_hold_until = 0;
+		risk = b::risk_profile_of(cfg.skill, cfg.style);
+		heavy_plan = {};
+		heavy_planned = false;
+		heavy_aim.reset();
+		heavy_near_obj.fill(0xffff);
+		hugging = false;
+		hug_changed = 0;
+		hug_roll_target = 0xff;
+		duck_point.reset();
+		duck_until = 0;
 		turn_to = 0xff;
 		turn_from = turn_until = 0;
 		grabbing = false;
@@ -858,6 +899,13 @@ b::missile_data missile_data_of(const secondary_weapon_index w)
 		.thrust = wi.thrust != 0,
 		.homing = wi.homing_flag != 0,
 		.child_blast_radius = wi.children != weapon_id_type::unspecified && wi.children < N_weapon_types ? Weapon_info[wi.children].damage_radius / 65536.0 : 0,
+		/* Section 9.6: the blasts' damage (explode_badass_weapon: the
+		 * strength at the game's difficulty) and the children
+		 * (create_weapon_smart_children: NUM_SMART_CHILDREN).
+		 */
+		.damage = wi.strength[GameUniqueState.Difficulty_level] / 65536.0,
+		.child_damage = wi.children != weapon_id_type::unspecified && wi.children < N_weapon_types ? Weapon_info[wi.children].strength[GameUniqueState.Difficulty_level] / 65536.0 : 0,
+		.children = wi.children != weapon_id_type::unspecified && wi.children < N_weapon_types ? NUM_SMART_CHILDREN : 0u,
 	};
 }
 
@@ -1162,6 +1210,94 @@ void choose_roam_goal(bot_state &bs, const object &obj, const uint32_t tick)
 }
 
 /* Section 4.2: what the bot sees, at 20 Hz. */
+/* Section 9.6: the heavy missiles an enemy holds are known to a bot only
+ * as a human knows them: it saw the enemy fire one (it may hold more),
+ * or pick one up (a heavy powerup next to the enemy in sight is gone at
+ * the next look).  b::heavy_holding counts them and forgets the enemy's
+ * last known one fired; knowledge ends with the enemy's death (perceive
+ * clears it with the memory).
+ */
+constexpr double BOT_PICKUP_NOTICE{14};
+
+#if DXX_BUILD_DESCENT == 2
+[[nodiscard]]
+bool heavy_weapon_id(const weapon_id_type id)
+{
+	return id == weapon_id_type::MEGA_ID || id == weapon_id_type::EARTHSHAKER_ID;
+}
+
+[[nodiscard]]
+bool heavy_powerup_id(const powerup_type_t id)
+{
+	return id == powerup_type_t::POW_MEGA_WEAPON || id == powerup_type_t::POW_EARTHSHAKER_MISSILE;
+}
+#endif
+
+void notice_heavy_holders(bot_state &bs, const object &obj, const uint32_t tick)
+{
+#if DXX_BUILD_DESCENT == 2
+	auto &Objects = LevelUniqueObjectState.Objects;
+	const auto pos{to_vec(obj.pos)};
+	/* A pickup: the powerup seen next to the enemy is gone. */
+	for (playernum_t i = 0; i < MAX_PLAYERS; ++i)
+	{
+		const auto k{bs.heavy_near_obj[i]};
+		if (k == 0xffff)
+			continue;
+		bs.heavy_near_obj[i] = 0xffff;
+		if (!bs.memory[i].valid || k > Highest_object_index)
+			continue;
+		const auto &o{*Objects.vcptr(objnum_t{k})};
+		const bool still{o.type == object_type::OBJ_POWERUP && underlying_value(o.signature) == bs.heavy_near_sig[i] && !(o.flags & OF_SHOULD_BE_DEAD)};
+		if (!still && bs.visible_now[i])
+		{
+			bs.heavy_holding[i] = b::heavy_picked_up(bs.heavy_holding[i], tick);
+			if (bot_log_on())
+				con_printf(CON_VERBOSE, "bots: '%s' saw P#%u pick up a heavy missile (%u known)", static_cast<const char *>(bs.cfg.name), i, bs.heavy_holding[i].count);
+		}
+	}
+	const double awareness{bs.skill->awareness};
+	for (auto &&o : Objects.vcptridx)
+	{
+		if (o->type == object_type::OBJ_WEAPON && heavy_weapon_id(get_weapon_id(o)))
+		{
+			/* A heavy missile in flight from an enemy in sight range. */
+			const auto &li{o->ctype.laser_info};
+			if (li.parent_type != object_type::OBJ_PLAYER)
+				continue;
+			const auto &parent{*Objects.vcptr(li.parent_num)};
+			if (parent.type != object_type::OBJ_PLAYER || !laser_parent_is_matching_signature(li, parent))
+				continue;
+			const auto who{get_player_id(parent)};
+			/* Each shot counted once (its signature). */
+			const uint16_t sig{underlying_value(o->signature)};
+			if (who == bs.pid || who >= MAX_PLAYERS || same_team(bs.pid, who) || bs.heavy_fire_sig[who] == sig)
+				continue;
+			if (b::distance(pos, to_vec(o->pos)) > awareness || !line_clear(obj, obj.pos, obj.segnum, o->pos, 0, true))
+				continue;
+			bs.heavy_fire_sig[who] = sig;
+			bs.heavy_holding[who] = b::heavy_fired(bs.heavy_holding[who], tick);
+			if (bot_log_on())
+				con_printf(CON_VERBOSE, "bots: '%s' saw P#%u fire a heavy missile (%u more known%s)", static_cast<const char *>(bs.cfg.name), who, bs.heavy_holding[who].count, bs.heavy_holding[who].held(tick) ? "" : ", forgotten");
+		}
+		else if (o->type == object_type::OBJ_POWERUP && heavy_powerup_id(get_powerup_id(o)))
+		{
+			const auto ppos{to_vec(o->pos)};
+			for (playernum_t i = 0; i < MAX_PLAYERS; ++i)
+				if (bs.visible_now[i] && b::distance(bs.memory[i].pos, ppos) < BOT_PICKUP_NOTICE)
+				{
+					bs.heavy_near_obj[i] = o.get_unchecked_index();
+					bs.heavy_near_sig[i] = underlying_value(o->signature);
+				}
+		}
+	}
+#else
+	(void)bs;
+	(void)obj;
+	(void)tick;
+#endif
+}
+
 void perceive(bot_state &bs, const object &obj, const uint32_t tick)
 {
 	auto &Objects = LevelUniqueObjectState.Objects;
@@ -1187,6 +1323,8 @@ void perceive(bot_state &bs, const object &obj, const uint32_t tick)
 		if (t.type != object_type::OBJ_PLAYER || dying)
 		{
 			bs.memory[i] = {};
+			/* Section 9.6: its heavy missiles are dropped. */
+			bs.heavy_holding[i] = {};
 			continue;
 		}
 		if (same_team(bs.pid, i))
@@ -1320,6 +1458,8 @@ void perceive(bot_state &bs, const object &obj, const uint32_t tick)
 			break;
 		}
 	}
+	/* Section 9.6: who holds a heavy missile. */
+	notice_heavy_holders(bs, obj, tick);
 	/* The host's copy of the bot's inventory, and the clients' (the
 	 * energy and ammunition it spent).
 	 */
@@ -2047,6 +2187,228 @@ double wall_distance(const object &obj, const vec3 &dir, const double limit)
 	return b::distance(pos, to_vec(hit.hit_pnt));
 }
 
+/* Section 9.6: the fvi calls of the heavy missile tactics, all bots
+ * together, per brain tick: a weighing starts only while fewer than
+ * BOT_HEAVY_FVI_PER_TICK were made this tick (or when it has waited
+ * BOT_HEAVY_PLAN_OVERDUE ticks), a release check only while the tick's
+ * calls are below twice that.
+ */
+constexpr unsigned BOT_HEAVY_FVI_PER_TICK{300};
+/* The indirect aims weighed per heavy missile and plan (b::aim_search). */
+constexpr unsigned BOT_AIM_MAX_INDIRECT{8};
+constexpr uint32_t BOT_HEAVY_PLAN_OVERDUE{b::STRATEGY_DIVISOR};
+
+struct heavy_fvi_budget
+{
+	uint32_t tick{};
+	unsigned used{};
+	unsigned &at(const uint32_t t)
+	{
+		if (tick != t)
+		{
+			tick = t;
+			used = 0;
+		}
+		return used;
+	}
+};
+
+heavy_fvi_budget heavy_budget;
+
+/* Section 9.6: the level as the heavy missile tactics ask it
+ * (b::evaluate_burst): a missile's cast (fvi, walls only) and a blast's
+ * line of sight (through grates).  Each point's segment is found once per
+ * weighing (the cache), starting from the segment of the nearest point
+ * already known (the bot's, the target's, where casts ended), so
+ * find_point_seg traces a few segments instead of scanning the level.
+ * `calls` counts the fvi calls.
+ */
+struct fvi_geometry
+{
+	const object &obj;
+	/* The points whose segment is known (segment_none: outside), and
+	 * near the ends of casts, segments to start a search from.
+	 */
+	mutable std::vector<std::pair<vec3, segnum_t>> known;
+	mutable std::vector<std::pair<vec3, segnum_t>> hints;
+	mutable unsigned calls{};
+	fvi_geometry(const object &o, const std::initializer_list<std::pair<vec3, segnum_t>> k) :
+		obj{o}, known(k)
+	{
+		known.reserve(64);
+		hints.reserve(64);
+	}
+	[[nodiscard]]
+	segnum_t segment_of(const vec3 &p) const
+	{
+		segnum_t start{obj.segnum};
+		double nearest{1e18};
+		for (const auto &[kp, ks] : known)
+		{
+			const double d{b::distance(kp, p)};
+			if (d < 1e-6)
+				return ks;
+			if (ks != segment_none && d < nearest)
+			{
+				nearest = d;
+				start = ks;
+			}
+		}
+		for (const auto &[kp, ks] : hints)
+		{
+			const double d{b::distance(kp, p)};
+			if (d < nearest)
+			{
+				nearest = d;
+				start = ks;
+			}
+		}
+		const auto seg{find_point_seg(LevelSharedSegmentState, to_fixvec(p), vcsegptridx(start) DXX_lighting_hack_pass_parameter)};
+		segnum_t found{segment_none};
+		if (seg != segment_none)
+			found = seg;
+		if (known.size() < 256)
+			known.emplace_back(p, found);
+		return found;
+	}
+	[[nodiscard]]
+	double cast(const vec3 &from, const vec3 &dir, const double limit) const
+	{
+		const auto seg{segment_of(from)};
+		if (seg == segment_none)
+			return 0;
+		auto &Objects = LevelUniqueObjectState.Objects;
+		fvi_info hit;
+		++calls;
+		const auto type{find_vector_intersection(fvi_query{
+			to_fixvec(from),
+			to_fixvec(from + dir * limit),
+			fvi_query::unused_ignore_obj_list,
+			fvi_query::unused_LevelUniqueObjectState,
+			fvi_query::unused_Robot_info,
+			0,
+			Objects.vcptridx(&obj),
+		}, seg, 0, hit)};
+		if (type == fvi_hit_type::None)
+			return limit;
+		/* Where it ended: a start for the next lookups near it. */
+		const auto end{to_vec(hit.hit_pnt)};
+		if (hit.hit_seg != segment_none && hints.size() < 256)
+			hints.emplace_back(end, hit.hit_seg);
+		return b::distance(from, end);
+	}
+	[[nodiscard]]
+	bool sees(const vec3 &from, const vec3 &to) const
+	{
+		const auto seg{segment_of(from)};
+		if (seg == segment_none)
+			return false;
+		++calls;
+		return line_clear(obj, to_fixvec(from), seg, to_fixvec(to), 0, true);
+	}
+};
+
+/* Section 9.6: the objects on the line to an indirect aim point (fvi
+ * with the objects, as shot_line_clear): the aim is refused for a
+ * teammate, the reactor, a robot or clutter first on it, and for another
+ * enemy ship nearer than `nearest` (the missile would burst on it, near
+ * the bot).  The target on it is the meeting b::merge_meet weighs.  A
+ * wall before the point is the weighing's.
+ */
+[[nodiscard]]
+bool aim_line_clear(const bot_state &bs, const object &obj, const vec3 &point, const double nearest, unsigned &calls)
+{
+	auto &Objects = LevelUniqueObjectState.Objects;
+	fvi_info hit;
+	++calls;
+	const auto type{find_vector_intersection(fvi_query{
+		obj.pos,
+		to_fixvec(point),
+		fvi_query::unused_ignore_obj_list,
+		&LevelUniqueObjectState,
+		&LevelSharedRobotInfoState.Robot_info,
+		FQ_IGNORE_POWERUPS,
+		Objects.vcptridx(&obj),
+	}, obj.segnum, F1_0 / 2, hit)};
+	if (type != fvi_hit_type::Object)
+		return true;
+	if (hit.hit_object == object_none)
+		return false;
+	const auto &o{*Objects.vcptr(hit.hit_object)};
+	switch (o.type)
+	{
+		case object_type::OBJ_WEAPON:
+			/* Another shot in flight: it does not stop this one. */
+			return true;
+		case object_type::OBJ_PLAYER:
+		{
+			const auto who{get_player_id(o)};
+			if (who == bs.pid || same_team(bs.pid, who))
+				return false;
+			if (bs.target && who == *bs.target)
+				return true;
+			return b::distance(to_vec(obj.pos), to_vec(hit.hit_pnt)) >= nearest;
+		}
+		default:
+			/* The reactor, robots, clutter. */
+			return false;
+	}
+}
+
+/* Section 9.6: the scene of a heavy shot, as the bot knows it. */
+[[nodiscard]]
+b::blast_scene heavy_scene(const bot_state &bs, const object &obj, const vec3 &target_pos, const vec3 &target_vel, const bool target_visible, const double unseen_for, const double target_shields, const double invulnerable_left)
+{
+	return {
+		.bot = to_vec(obj.pos),
+		.bot_vel = to_vec(obj.mtype.phys_info.velocity),
+		.target = target_pos,
+		.target_vel = target_vel,
+		.target_visible = target_visible,
+		.unseen_for = unseen_for,
+		.aim_sigma = b::radians(bs.skill->aim_sigma_deg),
+		.shields = obj.shields / 65536.0,
+		.target_shields = target_shields,
+		.invulnerable_left = invulnerable_left,
+	};
+}
+
+/* Section 9.6: a place nearby that the target cannot see and the bot
+ * can fly to in a straight line: segment centres up to three segments
+ * away, 15-90 units, the best by b::duck_score first, at most
+ * BOT_DUCK_CHECKS of them checked.
+ */
+constexpr unsigned BOT_DUCK_CHECKS{6};
+constexpr uint32_t BOT_DUCK_TICKS{2 * b::BOT_TICK_RATE};
+
+[[nodiscard]]
+std::optional<vec3> find_duck_point(const object &obj, const vec3 &target_pos, const segnum_t target_seg)
+{
+	const auto pos{to_vec(obj.pos)};
+	std::array<uint32_t, 64> segs{};
+	std::size_t count{0};
+	segs[count++] = obj.segnum;
+	for (std::size_t head = 0, hop = 0, level_end = 1; head < count && hop < 3; ++hop)
+	{
+		for (; head < level_end; ++head)
+			for (const auto &e : B.graph.neighbours(segs[head]))
+				if (count < segs.size() && std::find(segs.begin(), segs.begin() + count, e.to) == segs.begin() + count)
+					segs[count++] = e.to;
+		level_end = count;
+	}
+	std::array<vec3, 64> points{};
+	for (std::size_t i = 0; i < count; ++i)
+		points[i] = B.graph.position(segs[i]);
+	const fix rad{obj.size * 2 / 3};
+	return b::pick_duck_point(std::span(points.data(), count), pos, target_pos, BOT_DUCK_CHECKS,
+		[&](const vec3 &p) {
+			return line_clear(obj, obj.pos, obj.segnum, to_fixvec(p), rad, false);
+		},
+		[&](const vec3 &p) {
+			return !line_clear(obj, to_fixvec(target_pos), target_seg, to_fixvec(p), 0, true);
+		});
+}
+
 /* Section 9.4: a mine dropped now would be met by a teammate following
  * the bot (a team game with friendly fire on): one close behind, or
  * further behind but flying the bot's way, in sight.
@@ -2080,20 +2442,177 @@ bool teammate_behind(const bot_state &bs, const object &obj)
 	return false;
 }
 
+/* Section 9.6: the heavy missiles' aims weighed (b::choose_heavy_aim) at
+ * the strategy rate, while the bot may fire one (the rules before the
+ * blast hold: a target in sight or hidden for less than
+ * b::CORNER_SEEN_WITHIN, no cooldown, not cloaked, not yet used on this
+ * target); m gets each one's verdict.  Also the hug (b::want_hug) and
+ * the duck (b::want_duck).
+ */
+void plan_heavy(bot_state &bs, const object &obj, const uint32_t tick, b::missile_situation &m, const bool target_visible, const std::optional<vec3> &target_pos, const double invulnerable_left)
+{
+	auto &Objects = LevelUniqueObjectState.Objects;
+	m.standoff_scale = bs.risk.standoff_scale;
+	const bool due{!bs.heavy_planned || tick - bs.heavy_plan_tick >= b::STRATEGY_DIVISOR};
+	/* The fvi budget of all bots this tick: a weighing waits for the
+	 * next tick when it is spent (up to twice it for one overdue).
+	 */
+	unsigned &fvi_used{heavy_budget.at(tick)};
+	const bool overdue{tick - bs.heavy_plan_tick >= b::STRATEGY_DIVISOR + BOT_HEAVY_PLAN_OVERDUE};
+	const bool weigh{due && (fvi_used < BOT_HEAVY_FVI_PER_TICK || (overdue && fvi_used < 2 * BOT_HEAVY_FVI_PER_TICK))};
+	const auto t{bs.target ? *bs.target : 0xffu};
+	const bool may{bs.target && target_pos && (target_visible || m.target_seen_ago <= b::CORNER_SEEN_WITHIN) &&
+		m.smarts >= b::min_smarts(b::secondary::mega) &&
+		m.since_missile >= b::missile_interval(m.smarts) && m.since_heavy >= b::HEAVY_INTERVAL &&
+		!m.cloaked && !m.heavy_used_on_target};
+	if (!may)
+		bs.heavy_planned = false;
+	else
+	{
+		const auto &mem{bs.memory[t]};
+		const auto &ship{*Objects.vcptr(vcplayerptr(t)->objnum)};
+		const auto scene{heavy_scene(bs, obj, *target_pos, mem.vel, target_visible, target_visible ? 0 : m.target_seen_ago, ship.shields / 65536.0, invulnerable_left)};
+		const fvi_geometry geo{obj, {{to_vec(obj.pos), obj.segnum}, {mem.pos, static_cast<segnum_t>(mem.segment)}}};
+		constexpr std::array<b::secondary, 2> heavies{{b::secondary::earthshaker, b::secondary::mega}};
+		for (std::size_t k = 0; k < heavies.size(); ++k)
+		{
+			const auto s{heavies[k]};
+			const auto i{static_cast<unsigned>(s)};
+			if (!m.ammo[i])
+			{
+				bs.heavy_plan[k] = {};
+				continue;
+			}
+			if (weigh)
+			{
+				/* Half the fan and probes per weighing, the most
+				 * promising indirect aims, the last best one again.
+				 */
+				b::aim_search search{.subsets = 2, .phase = bs.heavy_plan_phase, .max_indirect = BOT_AIM_MAX_INDIRECT, .previous = std::nullopt};
+				const auto &last{bs.heavy_plan[k].best};
+				if (bs.heavy_planned && last && last->kind != b::aim_kind::direct && last->kind != b::aim_kind::wall_behind)
+					search.previous = last->point;
+				const double nearest{std::max(m.data[i].blast_radius, 0.0) + b::BLAST_MARGIN};
+				bs.heavy_plan[k] = b::choose_heavy_aim(geo, scene, b::role_of(s), m.data[i], bs.risk, search, [&](const b::aim_option &a) {
+					return aim_line_clear(bs, obj, a.point, nearest, geo.calls);
+				});
+			}
+			else if (!bs.heavy_planned)
+				continue;
+			const auto &c{bs.heavy_plan[k]};
+			m.heavy_risk[i] = c.best ? b::heavy_verdict::fire : b::heavy_verdict_of(c.why);
+			m.heavy_aim[i] = c.best ? c.best->kind : b::aim_kind::direct;
+		}
+		if (weigh)
+		{
+			bs.heavy_planned = true;
+			bs.heavy_plan_tick = tick;
+			++bs.heavy_plan_phase;
+			fvi_used += geo.calls;
+		}
+	}
+	if (!due)
+		return;
+	const auto pos{to_vec(obj.pos)};
+	/* Hugging an enemy known to hold a heavy missile (b::want_hug): not
+	 * with its own heavy shot usable soon (the standoff then), each mode
+	 * held a moment, re-weighed while the enemy is out of sight.
+	 */
+	{
+		bool hug{false};
+		if (bs.target && target_pos && (target_visible || bs.hugging))
+		{
+			if (bs.hug_roll_target != t)
+			{
+				bs.hug_roll_target = static_cast<uint8_t>(t);
+				bs.hug_roll = bs.rng.uniform();
+			}
+			const auto pending{bs.missile ? b::role_of(*bs.missile) : b::missile_role::none};
+			const bool own_soon{b::heavy_usable_soon(m) || pending == b::missile_role::heavy || pending == b::missile_role::shaker};
+			hug = b::want_hug({
+				.enemy_heavy = bs.heavy_holding[t].held(tick),
+				.enemy_facing = target_visible && m.target_facing,
+				.distance = m.target_distance,
+				.hugging = bs.hugging,
+				.since_change = (tick - bs.hug_changed) / static_cast<double>(b::BOT_TICK_RATE),
+				.unseen_for = target_visible ? 0 : m.target_seen_ago,
+				.own_heavy_soon = own_soon,
+				.weak = obj.shields / 65536.0 < bs.style->retreat_shields,
+				.roll = bs.hug_roll,
+			}, bs.risk);
+		}
+		if (hug != bs.hugging)
+		{
+			if (bot_log_on())
+				con_printf(CON_VERBOSE, "bots: '%s' %s P#%u (%.0f units%s)", static_cast<const char *>(bs.cfg.name), hug ? "hugs" : "stops hugging", t, m.target_distance, target_visible ? "" : ", out of sight");
+			bs.hug_changed = tick;
+			/* One mode: no ducking while hugging. */
+			if (hug)
+				bs.duck_point.reset();
+		}
+		bs.hugging = hug;
+		if (hug)
+		{
+			double radius{0};
+			for (const auto w : {game_secondary(b::secondary::mega), game_secondary(b::secondary::earthshaker)})
+				if (static_cast<unsigned>(w) < MAX_SECONDARY_WEAPONS)
+					radius = std::max(radius, missile_data_of(w).blast_radius);
+			bs.hug_keep = b::hug_distance(radius);
+		}
+	}
+	/* Breaking the line of sight before a heavy shot. */
+	const bool own_heavy{m.ammo[static_cast<unsigned>(b::secondary::earthshaker)] || m.ammo[static_cast<unsigned>(b::secondary::mega)]};
+	if (bs.heavy_planned && own_heavy && !bs.hugging && bs.target && target_pos && target_visible && tick >= bs.duck_until)
+	{
+		bool favourable{false};
+		for (const auto &c : bs.heavy_plan)
+			favourable = favourable || c.best.has_value();
+		const auto away{b::normalized(pos - *target_pos)};
+		const bool duck{b::want_duck({
+			.heavy_ready = true,
+			.favourable = favourable,
+			.distance = m.target_distance,
+			.standoff = bs.standoff,
+			.target_closing = m.target_closing_speed,
+			.back_blocked = wall_distance(obj, away, BOT_BACK_WALL_CLEARANCE) < BOT_BACK_WALL_CLEARANCE,
+		})};
+		bs.duck_point.reset();
+		if (duck)
+		{
+			bs.duck_point = find_duck_point(obj, *target_pos, static_cast<segnum_t>(bs.memory[t].segment));
+			bs.duck_until = tick + (bs.duck_point ? BOT_DUCK_TICKS : b::STRATEGY_DIVISOR * 2);
+			if (bot_log_on())
+			{
+				if (bs.duck_point)
+					con_printf(CON_VERBOSE, "bots: '%s' ducks out of P#%u's sight (%.0f units, needs %.0f): %.0f units away", static_cast<const char *>(bs.cfg.name), t, m.target_distance, bs.standoff, b::distance(pos, *bs.duck_point));
+				else
+					con_printf(CON_VERBOSE, "bots: '%s' finds no cover from P#%u (%.0f units, needs %.0f)", static_cast<const char *>(bs.cfg.name), t, m.target_distance, bs.standoff);
+			}
+		}
+	}
+}
+
 /* Stage B4 (section 9.4): missiles and mines.  At each tick the bot
  * either waits for the release of the missile it chose (the aim within
  * its cone, the blast along the nose far enough away) or chooses one
  * (b::choose_secondary); a mine is dropped at once.  bots_fire fires it
- * through do_missile_firing as the bot, as a human's.
+ * through do_missile_firing as the bot, as a human's.  Section 9.6: a
+ * heavy missile is aimed where its weighing found the best outcome (the
+ * target, a wall near it, the corner it hides behind) and released when
+ * the outcome along the nose is favourable.
  */
 void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept *const p)
 {
+	auto &Objects = LevelUniqueObjectState.Objects;
 	const auto &sk{*bs.skill};
 	auto &pi{obj.ctype.player_info};
 	if (bs.missile_fire)
 		return;
 	if (bs.missile && tick >= bs.missile_until)
+	{
 		bs.missile.reset();
+		bs.heavy_aim.reset();
+	}
 	const auto seconds_since{[tick](const std::optional<uint32_t> &t) {
 		return t ? (tick - *t) / static_cast<double>(b::BOT_TICK_RATE) : 1e9;
 	}};
@@ -2175,6 +2694,8 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 		}
 		/* A doorway: the next path point is the centre of a side. */
 		m.at_doorway = bs.point_index < bs.points.size() && !(bs.point_index & 1) && b::distance(pos, bs.points[bs.point_index]) < 12;
+		/* Section 9.6: the heavy missiles' aims and their outcomes. */
+		plan_heavy(bs, obj, tick, m, target_visible, target_pos, invulnerable_left);
 		/* Section 9.5: the heavy missiles' verdict (the log), and the
 		 * distance to keep for them.
 		 */
@@ -2189,41 +2710,111 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 			if (m.ammo[static_cast<unsigned>(s)])
 			{
 				heavy_md = &m.data[static_cast<unsigned>(s)];
-				bs.heavy_min = b::heavy_min_distance(s, *heavy_md);
+				bs.heavy_min = b::heavy_min_distance(s, *heavy_md) * m.standoff_scale;
 				break;
 			}
 		/* The log: each change of the verdict while the bot has one. */
 		if (heavy_md && verdict != bs.heavy_why && bot_log_on())
-			con_printf(CON_VERBOSE, "bots: '%s' heavy missile: %s (target %.0f units, crossing %.0f, closing %.0f, needs %.0f, blast %.0f%s, keeps %.0f)", static_cast<const char *>(bs.cfg.name), b::name_of(verdict), m.has_target ? m.target_distance : -1.0, m.target_lateral_speed, m.closing_speed, bs.heavy_min, heavy_md->blast_radius, heavy_md->homing ? ", homing" : "", bs.standoff);
+		{
+			const auto &c{bs.heavy_plan[m.ammo[static_cast<unsigned>(b::secondary::earthshaker)] ? 0 : 1]};
+			con_printf(CON_VERBOSE, "bots: '%s' heavy missile: %s (target %.0f units, crossing %.0f, closing %.0f, needs %.0f, blast %.0f%s, keeps %.0f; aims %u, favourable %u, indirect %u%s%s)", static_cast<const char *>(bs.cfg.name), b::name_of(verdict), m.has_target ? m.target_distance : -1.0, m.target_lateral_speed, m.closing_speed, bs.heavy_min, heavy_md->blast_radius, heavy_md->homing ? ", homing" : "", bs.standoff,
+				bs.heavy_planned ? c.candidates : 0u, bs.heavy_planned ? c.favourable : 0u, bs.heavy_planned ? c.indirect_favourable : 0u,
+				bs.heavy_planned && c.best ? ", best " : "", bs.heavy_planned && c.best ? b::name_of(c.best->kind) : "");
+		}
 		bs.heavy_why = verdict;
 		const auto chosen{b::choose_secondary(m)};
 		if (!chosen)
 			return;
 		bs.missile = chosen;
 		bs.missile_until = tick + static_cast<uint32_t>(b::MISSILE_PENDING_SECONDS * b::BOT_TICK_RATE);
+		bs.heavy_aim.reset();
+		if (*chosen == b::secondary::earthshaker || *chosen == b::secondary::mega)
+		{
+			const auto &c{bs.heavy_plan[*chosen == b::secondary::earthshaker ? 0 : 1]};
+			if (bs.heavy_planned && c.best)
+				bs.heavy_aim = c.best;
+		}
 	}
 	const auto s{*bs.missile};
 	const auto w{game_secondary(s)};
 	if (!pi.secondary_ammo[w])
 	{
 		bs.missile.reset();
+		bs.heavy_aim.reset();
 		return;
 	}
 	const auto role{b::role_of(s)};
+	const bool heavy{role == b::missile_role::heavy || role == b::missile_role::shaker};
+	/* Section 9.6: a heavy missile aimed at a wall or a corner. */
+	const bool indirect{heavy && bs.heavy_aim && bs.heavy_aim->kind != b::aim_kind::direct};
 	if (role != b::missile_role::mine)
 	{
 		/* The target: in sight, or a smart missile's seen a moment ago.
 		 * In sight, the line of fire must be clear for every missile,
 		 * the smart one too (no teammate, reactor or robot first).
 		 */
-		if (!target_pos || (!target_visible && role != b::missile_role::smart))
+		if (!target_pos || (!target_visible && role != b::missile_role::smart && !indirect))
 			return;
-		if (target_visible && !bs.shot_clear)
+		if (target_visible && !bs.shot_clear && !indirect)
 			return;
 	}
 	double err{0}, impact{1e9}, target_closing{0};
 	const auto md{missile_data_of(w)};
-	if (role != b::missile_role::mine)
+	const double cone{b::radians(sk.fire_cone_deg)};
+	if (heavy)
+	{
+		/* Section 9.6: the aim, then the outcome along the nose. */
+		const auto wanted{indirect ? bs.heavy_aim->point - pos : (target_visible ? bs.face_dir : *target_pos - pos)};
+		err = b::angle_between(frame.f, wanted);
+		if (err > b::missile_cone(role, cone, md.homing))
+		{
+			bs.heavy_why = b::heavy_verdict::aiming;
+			return;
+		}
+		/* The fvi budget of all bots this tick: spent, it waits. */
+		unsigned &fvi_used{heavy_budget.at(tick)};
+		if (fvi_used >= 2 * BOT_HEAVY_FVI_PER_TICK)
+		{
+			bs.heavy_why = b::heavy_verdict::aiming;
+			return;
+		}
+		const auto t{*bs.target};
+		const auto &mem{bs.memory[t]};
+		const auto scene{heavy_scene(bs, obj, *target_pos, mem.vel, target_visible, target_visible ? 0 : (tick - mem.tick) / static_cast<double>(b::BOT_TICK_RATE), Objects.vcptr(vcplayerptr(t)->objnum)->shields / 65536.0, invulnerable_left)};
+		const fvi_geometry geo{obj, {{pos, obj.segnum}, {mem.pos, static_cast<segnum_t>(mem.segment)}}};
+		/* Aimed at the target: it meets the missile if it is on the
+		 * line (within the cone of the aim).
+		 */
+		const bool direct{!indirect && target_visible};
+		auto o{b::evaluate_burst(geo, scene, role, md, frame.f, direct)};
+		/* Aimed at a wall, the missile may meet the target on the way
+		 * (it homes, or the target is near the line): the direct shot
+		 * weighed now too (the plan is up to a strategy period and the
+		 * pending time old), the worse of both.
+		 */
+		if (!direct && b::may_meet_target(scene, frame.f, md))
+			o = b::merge_meet(o, b::evaluate_burst(geo, scene, role, md, *target_pos - pos, true));
+		/* The objects on the line to the aim point (the direct shot's:
+		 * bs.shot_clear).
+		 */
+		const bool line_ok{!indirect || aim_line_clear(bs, obj, pos + frame.f * b::distance(pos, bs.heavy_aim->point), std::max(md.blast_radius, 0.0) + b::BLAST_MARGIN, geo.calls)};
+		fvi_used += geo.calls;
+		if (!line_ok)
+		{
+			bs.heavy_why = b::heavy_verdict::no_clear_shot;
+			return;
+		}
+		const auto v{b::judge_blast(o, scene, md, bs.risk)};
+		if (v != b::risk_verdict::fire)
+		{
+			bs.heavy_why = b::heavy_verdict::nose_blast;
+			return;
+		}
+		impact = o.impact;
+		if (bot_log_on())
+			con_printf(CON_VERBOSE, "bots: '%s' fires %s at P#%u, %.0f units, aim %s (impact %.0f; expected damage to it %.0f, to itself %.0f, shields %.0f; blast %.0f damage %.0f%s; children %u blast %.0f damage %.0f)", static_cast<const char *>(bs.cfg.name), secondary_names[static_cast<unsigned>(s)], t, b::distance(pos, *target_pos), b::name_of(indirect ? bs.heavy_aim->kind : b::aim_kind::direct), impact, o.target_damage, o.self_damage, obj.shields / 65536.0, md.blast_radius, md.damage, md.homing ? ", homing" : "", md.children, md.child_blast_radius, md.child_damage);
+	}
+	else if (role != b::missile_role::mine)
 	{
 		err = b::angle_between(frame.f, target_visible ? bs.face_dir : *target_pos - pos);
 		/* Where it bursts: the wall along the nose, or the target on
@@ -2241,27 +2832,12 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 				target_closing = b::dot(bs.memory[*bs.target].vel, -b::normalized(*target_pos - pos));
 		}
 	}
-	const bool heavy{role == b::missile_role::heavy || role == b::missile_role::shaker};
 	/* Section 9.5: the bot's own flight toward the burst along the nose. */
 	const double closing{b::dot(vel, frame.f)};
-	if (!b::missile_release(s, err, b::radians(sk.fire_cone_deg), impact, md, invulnerable_left, closing, target_closing))
-	{
-		if (heavy)
-			bs.heavy_why = b::blast_safe(role, impact, md, invulnerable_left, closing, target_closing) ? b::heavy_verdict::aiming : b::heavy_verdict::nose_blast;
+	if (!heavy && !b::missile_release(s, err, cone, impact, md, invulnerable_left, closing, target_closing))
 		return;
-	}
-	/* Section 9.5: the earthshaker's children, back through the bot to
-	 * the wall behind it.
-	 */
-	if (role == b::missile_role::shaker && md.child_blast_radius > 0 &&
-		!b::shaker_behind_safe(role, wall_distance(obj, -frame.f, b::SHAKER_BEHIND_FACTOR * md.child_blast_radius + b::BLAST_MARGIN + 1), impact, md, invulnerable_left))
-	{
-		bs.heavy_why = b::heavy_verdict::wall_behind;
-		return;
-	}
-	if (heavy && bot_log_on())
-		con_printf(CON_VERBOSE, "bots: '%s' fires %s at P#%u, %.0f units (impact %.0f, blast %.0f%s)", static_cast<const char *>(bs.cfg.name), secondary_names[static_cast<unsigned>(s)], bs.target ? *bs.target : 0xffu, target_pos ? b::distance(pos, *target_pos) : -1.0, impact, md.blast_radius, md.homing ? ", homing" : "");
 	bs.missile.reset();
+	bs.heavy_aim.reset();
 	bs.missile_fire = s;
 	bs.missile_volley = std::max<unsigned>(1, Weapon_info[Secondary_weapon_to_weapon_info[w]].fire_count);
 	if (role == b::missile_role::mine)
@@ -2269,14 +2845,16 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 	else
 	{
 		bs.last_missile = tick;
-		if (role == b::missile_role::heavy || role == b::missile_role::shaker)
+		if (heavy)
 		{
 			bs.last_heavy = tick;
 			bs.heavy_target = bs.target ? *bs.target : 0xff;
+			bs.heavy_planned = false;
+			bs.duck_point.reset();
 			/* Section 9.5: clear of its own blast until it is over (the
 			 * cooldown now drops the standoff).
 			 */
-			bs.blast_hold = b::heavy_min_distance(s, md) + 8;
+			bs.blast_hold = b::heavy_min_distance(s, md) * bs.risk.standoff_scale + 8;
 			bs.blast_hold_until = tick + static_cast<uint32_t>(std::ceil(b::blast_danger_seconds(role, impact, md) * b::BOT_TICK_RATE));
 			bs.standoff = std::max(bs.standoff, bs.blast_hold);
 		}
@@ -2388,14 +2966,26 @@ void log_summary(const bot_state &bs, const object &obj, const uint32_t tick)
 		std::snprintf(powerup, sizeof(powerup), "-");
 	char arm[160];
 	describe_armament(pi, arm, sizeof(arm));
-	con_printf(CON_VERBOSE, "bots: '%s' goal=%s %.2f (next %s %.2f, collect %.2f%s) tgt=%s | %s [%s] | sh=%.0f en=%.0f | pu=%s | heavy=%s min=%.0f keep=%.0f",
+	con_printf(CON_VERBOSE, "bots: '%s' goal=%s %.2f (next %s %.2f, collect %.2f%s) tgt=%s | %s [%s] | sh=%.0f en=%.0f | pu=%s | heavy=%s min=%.0f keep=%.0f risk=%.2f/%.1f%s%s",
 		static_cast<const char *>(bs.cfg.name),
 		goal_name(bs.chosen), bs.chosen_u, goal_name(bs.runner_up), bs.runner_up_u, bs.collect_u, bs.grabbing ? " grab" : "",
 		target,
 		primary_name(underlying_value(pi.Primary_weapon.get_active())), arm,
 		obj.shields / 65536.0, pi.energy / 65536.0,
 		powerup,
-		b::name_of(bs.heavy_why), bs.heavy_min, bs.standoff);
+		b::name_of(bs.heavy_why), bs.heavy_min, bs.standoff,
+		bs.risk.self_budget, bs.risk.trade, bs.hugging ? " hug" : "", bs.duck_point && tick < bs.duck_until ? " duck" : "");
+}
+
+/* Section 9.6: toward the duck point, slowing to a hold on it. */
+[[nodiscard]]
+vec3 duck_velocity(const vec3 &pos, const vec3 &point, const double max_speed)
+{
+	const auto to{point - pos};
+	const double d{b::length(to)};
+	if (d < 3)
+		return {};
+	return to * (std::min(max_speed, 3 * d + 8) / d);
 }
 
 /* One tick of the brain (section 4.1). */
@@ -2418,6 +3008,14 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 	{
 		range_lo = bs.standoff;
 		range_hi = std::max(range_hi, range_lo + 25);
+	}
+	/* Section 9.6: hugging an enemy that holds a heavy missile, within
+	 * its own blast.
+	 */
+	if (bs.hugging && !(tick < bs.blast_hold_until))
+	{
+		range_lo = b::HUG_NEAREST;
+		range_hi = bs.hug_keep;
 	}
 	bs.juke.update(bs.rng, b::ticks_from_ms(sk.strafe_min_ms), b::ticks_from_ms(sk.strafe_max_ms), range_lo, range_hi);
 	const auto pos{to_vec(obj.pos)};
@@ -2465,11 +3063,21 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 		}
 		const auto shooter{pos + frame.to_world(gun)};
 		const auto aim{b::aim_point(shooter, est, p->vel, shot_speed, bs.lead.factor())};
-		bs.face_dir = b::apply_aim_offset(aim - shooter, frame.u, bs.aim.yaw(), bs.aim.pitch());
-		/* The steering's feed-forward: how fast the line to the target
-		 * turns, as the bot reckons it.
-		 */
-		bs.face_rate = b::line_of_sight_rate(aim - pos, p->vel - vel);
+		/* Section 9.6: a heavy missile aimed at a wall or corner. */
+		const bool aim_wall{aim_missile && bs.heavy_aim && bs.heavy_aim->kind != b::aim_kind::direct};
+		if (aim_wall)
+		{
+			bs.face_dir = b::apply_aim_offset(bs.heavy_aim->point - shooter, frame.u, bs.aim.yaw(), bs.aim.pitch());
+			bs.face_rate = {};
+		}
+		else
+		{
+			bs.face_dir = b::apply_aim_offset(aim - shooter, frame.u, bs.aim.yaw(), bs.aim.pitch());
+			/* The steering's feed-forward: how fast the line to the
+			 * target turns, as the bot reckons it.
+			 */
+			bs.face_rate = b::line_of_sight_rate(aim - pos, p->vel - vel);
+		}
 		const auto to{est - pos};
 		const double dist{b::length(to)};
 		engaged_dist = dist;
@@ -2478,28 +3086,43 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 		 * retreats facing its pursuer.
 		 */
 		const bool path_goal{bs.goal == bot_goal::collect || bs.goal == bot_goal::retreat || bs.goal == bot_goal::refuel};
-		if (bs.shot_clear && !path_goal)
+		/* One movement per tick (b::engaged_movement): the fight, the
+		 * path, or (section 9.6) out of the target's sight before a
+		 * heavy shot, facing it (it comes round the corner, or the
+		 * corner is hit).
+		 */
+		switch (b::engaged_movement(bs.shot_clear, path_goal, bs.duck_point && tick < bs.duck_until))
 		{
-			/* Section 4.6: close in and back off inside the band, strafe
-			 * across the line of sight in changing directions.
-			 */
-			const double strafe_speed{sk.strafe ? max_speed * 0.7 : 0};
-			/* Combat movement takes over: no recovery manoeuvre. */
-			bs.stuck.cancel_recovery();
-			wanted = b::combat_velocity(to, frame.r, frame.u, bs.juke, sk.strafe_vertical, max_speed * 0.8, strafe_speed);
-			/* Section 9.5: its own heavy missile in flight, the bot does
-			 * not close in on the burst; keeping a standoff, it does not
-			 * back into a wall (the earthshaker's children burst there).
-			 */
-			const auto toward{b::normalized(to)};
-			const double along{b::dot(wanted, toward)};
-			if (along > 0 && tick < bs.blast_hold_until)
-				wanted -= toward * along;
-			else if (along < 0 && bs.standoff > 0 && wall_distance(obj, -toward, BOT_BACK_WALL_CLEARANCE) < BOT_BACK_WALL_CLEARANCE)
-				wanted -= toward * along;
+			case b::engaged_move::combat:
+			{
+				/* Section 4.6: close in and back off inside the band,
+				 * strafe across the line of sight in changing
+				 * directions.
+				 */
+				const double strafe_speed{sk.strafe ? max_speed * 0.7 : 0};
+				/* Combat movement takes over: no recovery manoeuvre. */
+				bs.stuck.cancel_recovery();
+				wanted = b::combat_velocity(to, frame.r, frame.u, bs.juke, sk.strafe_vertical, max_speed * 0.8, strafe_speed);
+				/* Section 9.5: its own heavy missile in flight, the bot
+				 * does not close in on the burst; keeping a standoff, it
+				 * does not back into a wall (the earthshaker's children
+				 * burst there).
+				 */
+				const auto toward{b::normalized(to)};
+				const double along{b::dot(wanted, toward)};
+				if (along > 0 && tick < bs.blast_hold_until)
+					wanted -= toward * along;
+				else if (along < 0 && bs.standoff > 0 && !bs.hugging && wall_distance(obj, -toward, BOT_BACK_WALL_CLEARANCE) < BOT_BACK_WALL_CLEARANCE)
+					wanted -= toward * along;
+				break;
+			}
+			case b::engaged_move::path:
+				wanted = follow_path(bs, obj, true);
+				break;
+			case b::engaged_move::duck:
+				wanted = duck_velocity(pos, *bs.duck_point, max_speed);
+				break;
 		}
-		else
-			wanted = follow_path(bs, obj, true);
 		const double err{b::angle_between(frame.f, bs.face_dir)};
 		/* Section 9.5: turning far round, the bot keeps moving. */
 		wanted = b::keep_moving_in_turn(wanted, err, to, vel, frame.r * static_cast<double>(bs.heading_pref), max_speed);
@@ -2532,6 +3155,23 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 			bs.face_dir = b::normalized(to);
 			bs.face_rate = {};
 			wanted = b::keep_moving_in_turn(wanted, b::angle_between(frame.f, bs.face_dir), to, vel, frame.r * static_cast<double>(bs.heading_pref), max_speed);
+		}
+		/* Section 9.6: a heavy missile for the corner the target hides
+		 * behind: the bot holds (or keeps ducking) and turns to it.
+		 */
+		if (bs.missile && bs.heavy_aim && bs.heavy_aim->kind == b::aim_kind::corner)
+		{
+			const auto shooter{pos + frame.to_world(missile_gun_local(game_secondary(*bs.missile)))};
+			bs.face_dir = b::apply_aim_offset(bs.heavy_aim->point - shooter, frame.u, bs.aim.yaw(), bs.aim.pitch());
+			bs.face_rate = {};
+			wanted = bs.duck_point && tick < bs.duck_until ? duck_velocity(pos, *bs.duck_point, max_speed) : vec3{};
+		}
+		else if (bs.duck_point && tick < bs.duck_until && bs.target && bs.memory[*bs.target].valid)
+		{
+			/* Ducked: facing where the target will come from. */
+			bs.face_dir = b::normalized(bs.memory[*bs.target].pos - pos);
+			bs.face_rate = {};
+			wanted = duck_velocity(pos, *bs.duck_point, max_speed);
 		}
 	}
 	/* Section 9.5: the fusion cannon is charged, then released on the

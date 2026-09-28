@@ -10,7 +10,10 @@
  * B4): which missile or mine a bot fires by skill, target and range, the
  * blast safety of mega and earthshaker (never at point blank, never into
  * a wall next to the bot), the release, the converter, the cloak and
- * invulnerability tactics and the dodge of a homing missile.
+ * invulnerability tactics and the dodge of a homing missile; section
+ * 9.6: the expected outcome of a heavy missile by risk profile, the
+ * indirect aim points on synthetic corridors and corners, hugging and
+ * ducking.
  *
  * Build and run with SCons:
  *
@@ -22,6 +25,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <initializer_list>
+#include <span>
+#include <string_view>
+#include <vector>
 
 #include "bot_weapons.h"
 
@@ -710,10 +716,629 @@ void test_shaker_behind()
 	CHECK(!shaker_behind_safe(missile_role::shaker, 0, 120, shaker, 1));
 }
 
+/* Section 9.6: synthetic levels, a union of axis-aligned boxes (the
+ * free space); casts march in small steps.
+ */
+struct box
+{
+	vec3 lo, hi;
+};
+
+struct box_level
+{
+	std::vector<box> boxes;
+	[[nodiscard]]
+	bool free(const vec3 &p) const
+	{
+		for (const auto &b : boxes)
+			if (p.x >= b.lo.x && p.x <= b.hi.x && p.y >= b.lo.y && p.y <= b.hi.y && p.z >= b.lo.z && p.z <= b.hi.z)
+				return true;
+		return false;
+	}
+	[[nodiscard]]
+	double cast(const vec3 &from, const vec3 &dir, const double limit) const
+	{
+		const auto u{normalized(dir)};
+		constexpr double step{0.25};
+		for (double t = 0; t < limit; t += step)
+			if (!free(from + u * t))
+				return std::max(t - step, 0.0);
+		return limit;
+	}
+	[[nodiscard]]
+	bool sees(const vec3 &a, const vec3 &b) const
+	{
+		const double d{distance(a, b)};
+		return d < 0.01 || cast(a, b - a, d) >= d - 0.3;
+	}
+};
+
+/* A mega and an earthshaker of the order of the game's (the real data
+ * are not here; the log prints them at the first shot).
+ */
+missile_data test_mega()
+{
+	return {.speed = 160, .blast_radius = 50, .thrust = true, .homing = true, .damage = 150};
+}
+
+missile_data test_shaker()
+{
+	return {.speed = 160, .blast_radius = 60, .thrust = true, .homing = true, .child_blast_radius = 48, .damage = 200, .child_damage = 100, .children = SHAKER_CHILDREN};
+}
+
+/* A big room: nothing near anybody. */
+box_level open_room()
+{
+	return {{{{-400, -400, -400}, {400, 400, 400}}}};
+}
+
+blast_scene still_scene(const vec3 &bot, const vec3 &target)
+{
+	blast_scene sc;
+	sc.bot = bot;
+	sc.target = target;
+	sc.aim_sigma = 0.02;
+	return sc;
+}
+
+void test_risk_profiles()
+{
+	const auto cautious{risk_profile_of(bot_skill::hotshot, bot_style::cautious)};
+	const auto balanced{risk_profile_of(bot_skill::hotshot, bot_style::balanced)};
+	const auto aggressive{risk_profile_of(bot_skill::hotshot, bot_style::aggressive)};
+	const auto insane{risk_profile_of(bot_skill::insane, bot_style::aggressive)};
+	const auto rookie{risk_profile_of(bot_skill::rookie, bot_style::balanced)};
+	/* Aggressive and higher skill accept more; cautious stays strict. */
+	CHECK(cautious.self_chance == 0);
+	CHECK(cautious.self_budget < balanced.self_budget && balanced.self_budget < aggressive.self_budget && aggressive.self_budget < insane.self_budget);
+	CHECK(cautious.self_chance < balanced.self_chance && balanced.self_chance < aggressive.self_chance && aggressive.self_chance < insane.self_chance);
+	CHECK(cautious.trade > balanced.trade && balanced.trade > aggressive.trade && aggressive.trade > insane.trade);
+	CHECK(rookie.self_budget < balanced.self_budget);
+	CHECK(aggressive.hug > balanced.hug && balanced.hug > cautious.hug);
+	CHECK(aggressive.standoff_scale < balanced.standoff_scale && balanced.standoff_scale < cautious.standoff_scale);
+	/* Indirect fire from Hotshot (the heavy missiles' skill). */
+	CHECK(balanced.indirect && !rookie.indirect);
+	/* The blast and its expectation. */
+	CHECK(blast_damage(0, 50, 150) == 150);
+	CHECK(blast_damage(25, 50, 150) == 75);
+	CHECK(blast_damage(50, 50, 150) == 0);
+	CHECK(std::fabs(expected_blast_damage(25, 0, 50, 150) - 75) < 1e-9);
+	CHECK(expected_blast_damage(45, 5, 50, 150) > blast_damage(45, 50, 150));
+	CHECK(expected_blast_damage(80, 5, 50, 150) == 0);
+	CHECK(blast_chance(20, 3, 50) == 1 && blast_chance(90, 3, 50) == 0);
+	CHECK(blast_chance(50, 4, 50) > 0 && blast_chance(50, 4, 50) < 1);
+}
+
+/* Point blank never, whatever the style, unless invulnerable; the
+ * expected outcome decides the rest.
+ */
+void test_expected_outcome()
+{
+	const auto level{open_room()};
+	const auto md{test_mega()};
+	for (const auto k : {bot_skill::hotshot, bot_skill::insane})
+		for (const auto st : {bot_style::balanced, bot_style::aggressive, bot_style::cautious, bot_style::collector})
+		{
+			const auto rp{risk_profile_of(k, st)};
+			for (const double d : {5.0, 12.0, 20.0, 29.0})
+			{
+				const auto sc{still_scene({0, 0, 0}, {d, 0, 0})};
+				const auto o{evaluate_burst(level, sc, missile_role::heavy, md, {1, 0, 0}, true)};
+				CHECK(judge_blast(o, sc, md, rp) == risk_verdict::point_blank);
+				CHECK(!choose_heavy_aim(level, sc, missile_role::heavy, md, rp).best);
+			}
+			/* Inside its own blast, the blast would kill it: never. */
+			auto weak{still_scene({0, 0, 0}, {32, 0, 0})};
+			weak.shields = 40;
+			const auto o{evaluate_burst(level, weak, missile_role::heavy, md, {1, 0, 0}, true)};
+			CHECK(o.self_nominal >= weak.shields);
+			CHECK(judge_blast(o, weak, md, rp) == risk_verdict::lethal);
+			/* Far outside it: fire. */
+			const auto far_scene{still_scene({0, 0, 0}, {120, 0, 0})};
+			const auto f{evaluate_burst(level, far_scene, missile_role::heavy, md, {1, 0, 0}, true)};
+			CHECK(f.self_damage == 0 && f.self_chance == 0);
+			CHECK(f.target_damage > 100);
+			CHECK(judge_blast(f, far_scene, md, rp) == risk_verdict::fire);
+		}
+	/* Invulnerable beyond the danger: point blank is still out, just
+	 * beyond it the blast is harmless to the bot.
+	 */
+	{
+		auto sc{still_scene({0, 0, 0}, {32, 0, 0})};
+		sc.invulnerable_left = 20;
+		const auto rp{risk_profile_of(bot_skill::hotshot, bot_style::cautious)};
+		const auto o{evaluate_burst(level, sc, missile_role::heavy, md, {1, 0, 0}, true)};
+		CHECK(o.self_damage == 0);
+		CHECK(judge_blast(o, sc, md, rp) == risk_verdict::fire);
+		sc.target = {20, 0, 0};
+		CHECK(judge_blast(evaluate_burst(level, sc, missile_role::heavy, md, {1, 0, 0}, true), sc, md, rp) == risk_verdict::point_blank);
+		/* Running out before the blast: the full rule. */
+		sc.target = {32, 0, 0};
+		sc.invulnerable_left = 0.1;
+		CHECK(judge_blast(evaluate_burst(level, sc, missile_role::heavy, md, {1, 0, 0}, true), sc, md, rp) != risk_verdict::fire);
+	}
+	/* The edge of the blast: a favourable trade for an aggressive bot
+	 * (a small expected self-damage for a likely kill), not for a
+	 * cautious one (any chance of self-damage).
+	 */
+	{
+		const auto sc{still_scene({0, 0, 0}, {50, 0, 0})};
+		const auto o{evaluate_burst(level, sc, missile_role::heavy, md, {1, 0, 0}, true)};
+		CHECK(o.self_chance > 0 && o.self_damage > 0 && o.self_damage < 5);
+		CHECK(judge_blast(o, sc, md, risk_profile_of(bot_skill::hotshot, bot_style::aggressive)) == risk_verdict::fire);
+		CHECK(judge_blast(o, sc, md, risk_profile_of(bot_skill::hotshot, bot_style::cautious)) == risk_verdict::over_budget);
+		/* Well inside it: too much even for an aggressive bot. */
+		const auto in{still_scene({0, 0, 0}, {38, 0, 0})};
+		const auto i{evaluate_burst(level, in, missile_role::heavy, md, {1, 0, 0}, true)};
+		CHECK(i.self_nominal > 0 && i.self_nominal < in.shields);
+		CHECK(judge_blast(i, in, md, risk_profile_of(bot_skill::hotshot, bot_style::aggressive)) == risk_verdict::over_budget);
+		CHECK(judge_blast(i, in, md, risk_profile_of(bot_skill::insane, bot_style::aggressive)) != risk_verdict::fire);
+	}
+	/* The poor trade: much self-damage for a target hardly hurt. */
+	{
+		blast_outcome o;
+		o.impact = 80;
+		o.burst_distance = 80;
+		o.target_damage = 25;
+		o.self_damage = 25;
+		o.self_chance = 0.3;
+		const auto sc{still_scene({0, 0, 0}, {80, 0, 0})};
+		const auto rp{risk_profile_of(bot_skill::insane, bot_style::aggressive)};
+		CHECK(judge_blast(o, sc, md, rp) == risk_verdict::poor_trade);
+		o.target_damage = 3;
+		CHECK(judge_blast(o, sc, md, rp) == risk_verdict::low_value);
+	}
+	/* A target rushing the bot meets the missile nearer (section 9.5). */
+	{
+		auto sc{still_scene({0, 0, 0}, {70, 0, 0})};
+		const auto calm{evaluate_burst(level, sc, missile_role::heavy, md, {1, 0, 0}, true)};
+		sc.target_vel = {-60, 0, 0};
+		const auto rush{evaluate_burst(level, sc, missile_role::heavy, md, {1, 0, 0}, true)};
+		CHECK(distance(rush.burst, sc.bot) < distance(calm.burst, sc.bot));
+		CHECK(rush.self_damage > calm.self_damage);
+	}
+	/* Behind a wall the blast does not reach (it needs a line of
+	 * sight): two rooms joined by a door.
+	 */
+	{
+		const box_level two{{{{-100, -20, -20}, {0, 20, 20}}, {{0, -5, -5}, {10, 5, 5}}, {{10, -100, -20}, {100, 100, 20}}}};
+		CHECK(!two.sees({-10, 15, 0}, {20, 60, 0}));
+		CHECK(two.sees({-10, 0, 0}, {20, 0, 0}));
+	}
+}
+
+/* The earthshaker's children: they do not hit the bot's ship, but burst
+ * on the wall behind it; and at a target that hugs the bot.
+ */
+void test_shaker_children()
+{
+	const auto md{test_shaker()};
+	const auto rp{risk_profile_of(bot_skill::hotshot, bot_style::cautious)};
+	/* A corridor 20 wide; the bot 90 from the end wall, 6 from the wall
+	 * behind it; nobody for the children to find.
+	 */
+	const box_level corridor{{{{-6, -10, -10}, {300, 10, 10}}}};
+	auto sc{still_scene({0, 0, 0}, {150, 400, 0})};
+	sc.target_visible = false;
+	sc.unseen_for = 2;
+	const auto near_back{evaluate_burst(corridor, sc, missile_role::shaker, md, {1, 0, 0}, false)};
+	CHECK(!near_back.children_find_target);
+	/* With the wall far behind, less of the children's risk. */
+	const box_level long_corridor{{{{-200, -10, -10}, {300, 10, 10}}}};
+	const auto far_back{evaluate_burst(long_corridor, sc, missile_role::shaker, md, {1, 0, 0}, false)};
+	CHECK(far_back.self_damage <= near_back.self_damage);
+	/* A target hugging the bot: the children burst next to it. */
+	const auto room{open_room()};
+	auto hug{still_scene({0, 0, 0}, {14, 0, 0})};
+	const auto h{evaluate_burst(room, hug, missile_role::shaker, md, {1, 0, 0}, true)};
+	CHECK(h.self_nominal >= hug.shields);
+	CHECK(judge_blast(h, hug, md, rp) != risk_verdict::fire);
+	CHECK(!choose_heavy_aim(room, hug, missile_role::shaker, md, risk_profile_of(bot_skill::insane, bot_style::aggressive)).best);
+}
+
+/* Indirect aim points on synthetic geometry. */
+void test_indirect_aims()
+{
+	const auto rp{risk_profile_of(bot_skill::hotshot, bot_style::balanced)};
+	/* A straight corridor: the target 8 units before its end wall.  The
+	 * wall behind it and the corridor's walls round it are candidates;
+	 * the bot fires (at it, or at the wall behind it).
+	 */
+	{
+		const box_level corridor{{{{-20, -12, -12}, {208, 12, 12}}}};
+		const auto sc{still_scene({0, 0, 0}, {200, 0, 0})};
+		unsigned direct{0}, behind{0}, near_wall{0};
+		aim_candidates(corridor, sc, 50, true, [&](const aim_kind k, const vec3 &p) {
+			direct += k == aim_kind::direct;
+			behind += k == aim_kind::wall_behind;
+			near_wall += k == aim_kind::near_wall;
+			CHECK(distance(p, sc.target) <= 50);
+		});
+		CHECK(direct == 1 && behind == 1 && near_wall > 0);
+		const auto c{choose_heavy_aim(corridor, sc, missile_role::heavy, test_mega(), rp)};
+		CHECK(c.best && c.favourable > 1 && c.indirect_favourable > 0);
+		/* Without indirect fire (below Hotshot) only the target. */
+		unsigned n{0};
+		aim_candidates(corridor, sc, 50, false, [&](aim_kind, const vec3 &) { ++n; });
+		CHECK(n == 1);
+	}
+	/* A corner: an L of two corridors.  The target hides round it, 40
+	 * units up the second leg, last seen a second ago.  An earthshaker
+	 * at the end wall of the first leg bursts where its children see the
+	 * target: a corner shot.  A mega's blast does not reach round it.
+	 */
+	{
+		const box_level l_shape{{{{-20, -10, -10}, {200, 10, 10}}, {{180, -10, -10}, {200, 150, 10}}}};
+		auto sc{still_scene({20, 0, 0}, {190, 40, 0})};
+		CHECK(!l_shape.sees(sc.bot, sc.target));
+		sc.target_visible = false;
+		sc.unseen_for = 1;
+		unsigned corner{0};
+		aim_candidates(l_shape, sc, 60, true, [&](const aim_kind k, const vec3 &) {
+			CHECK(k == aim_kind::corner);
+			++corner;
+		});
+		CHECK(corner > 0);
+		const auto shaker{choose_heavy_aim(l_shape, sc, missile_role::shaker, test_shaker(), rp)};
+		CHECK(shaker.best && shaker.best->kind == aim_kind::corner);
+		CHECK(shaker.best->outcome.children_find_target);
+		CHECK(shaker.best->outcome.self_damage < 3);
+		CHECK(!choose_heavy_aim(l_shape, sc, missile_role::heavy, test_mega(), rp).best);
+		/* A child flying back passes through the bot and bursts on the
+		 * wall 40 units behind it: a small chance, too much for a
+		 * cautious bot; with the wall far behind it, none.
+		 */
+		const auto cautious{risk_profile_of(bot_skill::hotshot, bot_style::cautious)};
+		CHECK(shaker.best->outcome.self_chance > 0 && shaker.best->outcome.self_chance < 0.1);
+		CHECK(!choose_heavy_aim(l_shape, sc, missile_role::shaker, test_shaker(), cautious).best);
+		const box_level long_l{{{{-200, -10, -10}, {200, 10, 10}}, {{180, -10, -10}, {200, 150, 10}}}};
+		const auto safe{choose_heavy_aim(long_l, sc, missile_role::shaker, test_shaker(), cautious)};
+		CHECK(safe.best && safe.best->kind == aim_kind::corner && safe.best->outcome.self_chance == 0);
+		/* Hidden too long ago: nowhere to aim (the tactics layer stops
+		 * after CORNER_SEEN_WITHIN; the spread grows meanwhile).
+		 */
+		sc.unseen_for = 10;
+		const auto stale{choose_heavy_aim(l_shape, sc, missile_role::shaker, test_shaker(), rp)};
+		CHECK(!stale.best || stale.best->outcome.target_damage < shaker.best->outcome.target_damage);
+	}
+	/* The target hugs the bot (12 units) in a room with a wall 40 units
+	 * off: never the direct shot; invulnerable, not into the wall next
+	 * to them both either: the missile would meet the target on the way
+	 * (it homes, or passes within reach of it), at point blank.
+	 */
+	{
+		const box_level room{{{{-100, -100, -100}, {45, 100, 100}}}};
+		auto sc{still_scene({0, 0, 0}, {12, 0, 0})};
+		const auto rp_cautious{risk_profile_of(bot_skill::hotshot, bot_style::cautious)};
+		CHECK(!choose_heavy_aim(room, sc, missile_role::heavy, test_mega(), rp_cautious).best);
+		sc.invulnerable_left = 20;
+		const auto c{choose_heavy_aim(room, sc, missile_role::heavy, test_mega(), rp_cautious)};
+		CHECK(!c.best && c.why == risk_verdict::point_blank);
+		auto straight{test_mega()};
+		straight.homing = false;
+		CHECK(!choose_heavy_aim(room, sc, missile_role::heavy, straight, rp_cautious).best);
+	}
+}
+
+/* Section 9.6: the heavy_check with the expected outcome. */
+void test_heavy_check_risk()
+{
+	auto m{armed(2)};
+	const auto e{idx(secondary::earthshaker)};
+	m.heavy_risk[e] = heavy_verdict::fire;
+	m.heavy_aim[e] = aim_kind::direct;
+	/* The distance rules give way to the outcome: 40 units is fine if
+	 * the weighing says so.
+	 */
+	m.target_distance = 40;
+	CHECK(heavy_check(m, secondary::earthshaker) == heavy_verdict::fire);
+	m.heavy_risk[e] = heavy_verdict::risky;
+	CHECK(heavy_check(m, secondary::earthshaker) == heavy_verdict::risky);
+	CHECK(heavy_standoff(m) > 0);
+	/* A corner shot needs no sight of the target, if seen lately. */
+	m.heavy_risk[e] = heavy_verdict::fire;
+	m.heavy_aim[e] = aim_kind::corner;
+	m.target_visible = false;
+	m.shot_clear = false;
+	m.target_seen_ago = 1;
+	CHECK(heavy_check(m, secondary::earthshaker) == heavy_verdict::fire);
+	CHECK(choose_secondary(m) == secondary::earthshaker);
+	m.target_seen_ago = CORNER_SEEN_WITHIN + 1;
+	CHECK(heavy_check(m, secondary::earthshaker) == heavy_verdict::not_visible);
+	/* A direct aim still needs the clear shot. */
+	m.target_seen_ago = 0;
+	m.target_visible = true;
+	m.heavy_aim[e] = aim_kind::direct;
+	CHECK(heavy_check(m, secondary::earthshaker) == heavy_verdict::no_clear_shot);
+	/* Cooldown and cloak still come first. */
+	m.shot_clear = true;
+	m.cloaked = true;
+	CHECK(heavy_check(m, secondary::earthshaker) == heavy_verdict::cloaked);
+	CHECK(std::string_view{name_of(heavy_verdict::poor_trade)} == "poor-trade");
+	CHECK(std::string_view{name_of(aim_kind::corner)} == "corner");
+}
+
+/* Section 9.6: hugging, both ways. */
+void test_hugging()
+{
+	const auto aggressive{risk_profile_of(bot_skill::hotshot, bot_style::aggressive)};
+	const auto cautious{risk_profile_of(bot_skill::hotshot, bot_style::cautious)};
+	hug_view v{.enemy_heavy = true, .enemy_facing = true, .distance = 80, .roll = 0.5};
+	CHECK(want_hug(v, aggressive));
+	CHECK(!want_hug(v, cautious));
+	/* Not without the knowledge, not unless it faces the bot, not out
+	 * of mid range, not with its own heavy shot ready, not weak.
+	 */
+	for (const auto change : {0, 1, 2, 3, 4, 5})
+	{
+		auto w{v};
+		switch (change)
+		{
+			case 0: w.enemy_heavy = false; break;
+			case 1: w.enemy_facing = false; break;
+			case 2: w.distance = 200; break;
+			case 3: w.distance = 15; break;
+			case 4: w.own_heavy_soon = true; break;
+			default: w.weak = true; break;
+		}
+		CHECK(!want_hug(w, aggressive));
+	}
+	/* Hugging, it keeps on (facing or not) while in reach. */
+	v.hugging = true;
+	v.enemy_facing = false;
+	v.distance = 12;
+	CHECK(want_hug(v, aggressive));
+	v.distance = 170;
+	CHECK(!want_hug(v, aggressive));
+	/* The draw: an aggressive bot hugs more often. */
+	unsigned a{0}, c{0};
+	for (unsigned i = 0; i < 100; ++i)
+	{
+		hug_view r{.enemy_heavy = true, .enemy_facing = true, .distance = 80, .roll = (i + 0.5) / 100};
+		a += want_hug(r, aggressive);
+		c += want_hug(r, cautious);
+	}
+	CHECK(a > 70 && c < 20 && c > 0);
+	/* Inside the enemy's own blast, not bumping. */
+	CHECK(hug_distance(50) < 50 * 0.5 && hug_distance(50) > HUG_NEAREST);
+	CHECK(hug_distance(1000) <= 22 && hug_distance(0) >= HUG_NEAREST);
+	/* The other way: the target closes in within the standoff. */
+	duck_view d{.heavy_ready = true, .favourable = false, .distance = 50, .standoff = 80, .target_closing = 20};
+	CHECK(want_duck(d));
+	d.target_closing = 0;
+	CHECK(!want_duck(d));
+	d.back_blocked = true;
+	CHECK(want_duck(d));
+	d.back_blocked = false;
+	d.distance = 30;
+	CHECK(want_duck(d));
+	d.favourable = true;
+	CHECK(!want_duck(d));
+	d.favourable = false;
+	d.distance = 90;
+	CHECK(!want_duck(d));
+	d.heavy_ready = false;
+	d.distance = 30;
+	CHECK(!want_duck(d));
+	/* Where: out of the target's sight, reachable, far from it. */
+	const box_level l_shape{{{{-20, -10, -10}, {200, 10, 10}}, {{180, -10, -10}, {200, 150, 10}}}};
+	const vec3 bot{188, 3, 0}, target{100, 0, 0};
+	const std::array<vec3, 5> places{{{150, 0, 0}, {190, 40, 0}, {190, 80, 0}, {190, 140, 0}, {185, 0, 0}}};
+	const auto p{pick_duck_point(std::span<const vec3>(places), bot, target, 6,
+		[&](const vec3 &q) { return l_shape.sees(bot, q); },
+		[&](const vec3 &q) { return !l_shape.sees(target, q); })};
+	CHECK(p && !l_shape.sees(target, *p) && l_shape.sees(bot, *p));
+	CHECK(distance(*p, bot) >= DUCK_MIN_DISTANCE && distance(*p, bot) <= DUCK_MAX_DISTANCE);
+	/* In the open: nowhere. */
+	const auto room{open_room()};
+	CHECK(!pick_duck_point(std::span<const vec3>(places), bot, target, 6,
+		[&](const vec3 &q) { return room.sees(bot, q); },
+		[&](const vec3 &q) { return !room.sees(target, q); }));
+}
+
+/* Section 9.6, review: one movement per tick; the duck overrides the
+ * fight and the path, the fight needs a clear shot and no path goal.
+ */
+void test_engaged_movement()
+{
+	CHECK(engaged_movement(true, false, false) == engaged_move::combat);
+	CHECK(engaged_movement(false, false, false) == engaged_move::path);
+	CHECK(engaged_movement(true, true, false) == engaged_move::path);
+	CHECK(engaged_movement(false, true, false) == engaged_move::path);
+	for (const bool clear : {false, true})
+		for (const bool goal : {false, true})
+			CHECK(engaged_movement(clear, goal, true) == engaged_move::duck);
+}
+
+/* Section 9.6, review: the point blank rule on the burst distance, the
+ * meeting of the target on the way to a wall aim.
+ */
+void test_burst_distance_and_meeting()
+{
+	const auto level{open_room()};
+	const auto md{test_mega()};
+	const auto rp{risk_profile_of(bot_skill::insane, bot_style::aggressive)};
+	/* 40 units off (beyond point blank), both rushing: the burst comes
+	 * within 30 units of the bot.
+	 */
+	auto sc{still_scene({0, 0, 0}, {40, 0, 0})};
+	sc.invulnerable_left = 20;
+	const auto calm{evaluate_burst(level, sc, missile_role::heavy, md, {1, 0, 0}, true)};
+	CHECK(calm.impact >= MISSILE_MIN_DISTANCE && calm.burst_distance >= MISSILE_MIN_DISTANCE);
+	CHECK(judge_blast(calm, sc, md, rp) == risk_verdict::fire);
+	sc.bot_vel = {40, 0, 0};
+	sc.target_vel = {-50, 0, 0};
+	const auto rush{evaluate_burst(level, sc, missile_role::heavy, md, {1, 0, 0}, true)};
+	CHECK(rush.impact >= MISSILE_MIN_DISTANCE && rush.burst_distance < MISSILE_MIN_DISTANCE);
+	CHECK(judge_blast(rush, sc, md, rp) == risk_verdict::point_blank);
+	/* A homing missile aimed at a wall 20 degrees off a target in sight
+	 * meets it; 70 degrees off, or a target out of sight, not; a
+	 * missile that does not home only near its line.
+	 */
+	const auto t{still_scene({0, 0, 0}, {60, 0, 0})};
+	CHECK(may_meet_target(t, {std::cos(0.35), std::sin(0.35), 0}, md));
+	CHECK(!may_meet_target(t, {std::cos(1.2), std::sin(1.2), 0}, md));
+	auto hidden{t};
+	hidden.target_visible = false;
+	CHECK(!may_meet_target(hidden, {1, 0, 0}, md));
+	auto straight{md};
+	straight.homing = false;
+	CHECK(may_meet_target(t, {1, 0.05, 0}, straight));
+	CHECK(!may_meet_target(t, {std::cos(0.35), std::sin(0.35), 0}, straight));
+	/* The worse of both, the aim's value. */
+	blast_outcome wall, meet;
+	wall.impact = 90;
+	wall.burst_distance = 90;
+	wall.target_damage = 100;
+	meet.impact = 35;
+	meet.burst_distance = 20;
+	meet.self_damage = 30;
+	meet.self_nominal = 40;
+	meet.self_chance = 0.5;
+	const auto w{merge_meet(wall, meet)};
+	CHECK(w.impact == 35 && w.burst_distance == 20 && w.self_damage == 30 && w.self_nominal == 40 && w.self_chance == 0.5 && w.target_damage == 100);
+	CHECK(judge_blast(w, t, md, rp) == risk_verdict::point_blank);
+	/* A target rushing the bot in a corridor: every wall aim ahead meets
+	 * it first, so none is taken at point blank.
+	 */
+	const box_level corridor{{{{-20, -12, -12}, {208, 12, 12}}}};
+	auto rushing{still_scene({0, 0, 0}, {45, 0, 0})};
+	rushing.target_vel = {-60, 0, 0};
+	rushing.bot_vel = {30, 0, 0};
+	const auto c{choose_heavy_aim(corridor, rushing, missile_role::heavy, md, rp)};
+	CHECK(!c.best || c.best->outcome.burst_distance >= MISSILE_MIN_DISTANCE);
+}
+
+/* Section 9.6, review: the bounded search and the objects on the line. */
+void test_aim_search_bounds()
+{
+	const auto rp{risk_profile_of(bot_skill::hotshot, bot_style::balanced)};
+	const box_level corridor{{{{-20, -12, -12}, {208, 12, 12}}}};
+	const auto sc{still_scene({0, 0, 0}, {200, 0, 0})};
+	const auto full{choose_heavy_aim(corridor, sc, missile_role::heavy, test_mega(), rp)};
+	CHECK(full.best && full.candidates > 10);
+	/* Half the fan per plan, at most 4 indirect aims (plus the direct
+	 * shot, the wall behind, the last best).
+	 */
+	aim_search search{.subsets = 2, .phase = 0, .max_indirect = 4, .previous = std::nullopt};
+	const auto first{choose_heavy_aim(corridor, sc, missile_role::heavy, test_mega(), rp, search)};
+	CHECK(first.best && first.candidates <= 6);
+	/* Both phases see different spokes. */
+	unsigned n0{0}, n1{0};
+	aim_candidates(corridor, sc, 45, true, [&](aim_kind, const vec3 &) { ++n0; }, aim_search{.subsets = 2, .phase = 0, .max_indirect = ~0u, .previous = std::nullopt});
+	aim_candidates(corridor, sc, 45, true, [&](aim_kind, const vec3 &) { ++n1; }, aim_search{.subsets = 2, .phase = 1, .max_indirect = ~0u, .previous = std::nullopt});
+	unsigned all{0};
+	aim_candidates(corridor, sc, 45, true, [&](aim_kind, const vec3 &) { ++all; });
+	CHECK(n0 < all && n1 < all && n0 + n1 >= all);
+	/* The last best one is weighed again. */
+	search.phase = 1;
+	search.max_indirect = 0;
+	const vec3 previous{190, 11, 0};
+	search.previous = previous;
+	const auto again{choose_heavy_aim(corridor, sc, missile_role::heavy, test_mega(), rp, search)};
+	/* The direct shot, the wall behind, the last best. */
+	CHECK(again.candidates == 3);
+	/* An object on the line refuses the indirect aims (a teammate): the
+	 * direct shot remains.
+	 */
+	const auto blocked{choose_heavy_aim(corridor, sc, missile_role::heavy, test_mega(), rp, {}, [](const aim_option &) { return false; })};
+	CHECK(!blocked.best || blocked.best->kind == aim_kind::direct);
+	/* A corner shot (no direct one) refused: no aim at all. */
+	const box_level l_shape{{{{-20, -10, -10}, {200, 10, 10}}, {{180, -10, -10}, {200, 150, 10}}}};
+	auto hidden{still_scene({20, 0, 0}, {190, 40, 0})};
+	hidden.target_visible = false;
+	hidden.unseen_for = 1;
+	CHECK(choose_heavy_aim(l_shape, hidden, missile_role::shaker, test_shaker(), rp).best);
+	const auto refused{choose_heavy_aim(l_shape, hidden, missile_role::shaker, test_shaker(), rp, {}, [](const aim_option &) { return false; })};
+	CHECK(!refused.best && refused.blocked > 0);
+}
+
+/* Section 9.6, review: the enemy's heavy missiles counted, the modes
+ * held, the hug dropped out of sight.
+ */
+void test_heavy_knowledge_and_modes()
+{
+	constexpr uint32_t tick{1000};
+	heavy_holding h;
+	CHECK(!h.held(tick));
+	h = heavy_picked_up(h, tick);
+	h = heavy_picked_up(h, tick);
+	CHECK(h.count == 2 && h.held(tick + 60));
+	h = heavy_fired(h, tick + 60);
+	CHECK(h.count == 1 && h.held(tick + 120));
+	/* Its last known one fired: forgotten. */
+	h = heavy_fired(h, tick + 120);
+	CHECK(!h.held(tick + 121));
+	/* A shot not seen picked up: it may hold more, for a short while. */
+	h = heavy_fired(h, tick + 200);
+	CHECK(h.held(tick + 201) && !h.held(tick + 200 + static_cast<uint32_t>(HEAVY_GUESS_SECONDS * BOT_TICK_RATE)));
+	CHECK(HEAVY_GUESS_SECONDS < HEAVY_KNOWN_SECONDS && HEAVY_KNOWN_SECONDS < 45);
+	/* The bot's own heavy missile usable soon: no hug (its standoff). */
+	auto m{armed(2)};
+	m.since_missile = 10;
+	m.since_heavy = 10;
+	CHECK(heavy_usable_soon(m));
+	m.since_heavy = 1;
+	CHECK(!heavy_usable_soon(m));
+	m.since_heavy = HEAVY_INTERVAL - 1;
+	CHECK(heavy_usable_soon(m));
+	m.heavy_used_on_target = true;
+	CHECK(!heavy_usable_soon(m));
+	m.heavy_used_on_target = false;
+	m.ammo[idx(secondary::mega)] = 0;
+	m.ammo[idx(secondary::earthshaker)] = 0;
+	CHECK(!heavy_usable_soon(m));
+	const auto aggressive{risk_profile_of(bot_skill::hotshot, bot_style::aggressive)};
+	hug_view v{.enemy_heavy = true, .enemy_facing = true, .distance = 80, .roll = 0.1};
+	CHECK(want_hug(v, aggressive));
+	v.own_heavy_soon = true;
+	CHECK(!want_hug(v, aggressive));
+	/* Hugging, a moment held even if its own missile comes ready... */
+	v.hugging = true;
+	v.since_change = 0.5;
+	CHECK(want_hug(v, aggressive));
+	/* ...then the standoff. */
+	v.since_change = 3;
+	CHECK(!want_hug(v, aggressive));
+	/* Just stopped: not again at once. */
+	v.hugging = false;
+	v.own_heavy_soon = false;
+	v.since_change = 0.5;
+	CHECK(!want_hug(v, aggressive));
+	/* Out of sight: kept a moment, then dropped; never started. */
+	v.hugging = true;
+	v.since_change = 3;
+	v.unseen_for = 1;
+	CHECK(want_hug(v, aggressive));
+	v.unseen_for = HUG_LOST_SECONDS + 0.5;
+	CHECK(!want_hug(v, aggressive));
+	v.since_change = 0.5;
+	CHECK(!want_hug(v, aggressive));
+	v.hugging = false;
+	v.since_change = 3;
+	v.unseen_for = 0.2;
+	CHECK(!want_hug(v, aggressive));
+	/* The enemy's known missiles gone: no hug. */
+	v.unseen_for = 0;
+	v.hugging = true;
+	v.enemy_heavy = false;
+	CHECK(!want_hug(v, aggressive));
+}
+
 }
 
 int main()
 {
+	test_risk_profiles();
+	test_expected_outcome();
+	test_shaker_children();
+	test_indirect_aims();
+	test_heavy_check_risk();
+	test_hugging();
+	test_engaged_movement();
+	test_burst_distance_and_meeting();
+	test_aim_search_bounds();
+	test_heavy_knowledge_and_modes();
 	test_closing_target();
 	test_shaker_behind();
 	test_roles_and_skills();
