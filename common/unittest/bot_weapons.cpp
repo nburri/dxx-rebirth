@@ -625,10 +625,97 @@ void test_corridor_shaker()
 				}
 }
 
+/* Section 9.5: a target that rushes the bot meets the missile sooner and
+ * nearer, at d s / (s + v) for a bot that holds still: the blast is
+ * judged with both closing in, at human speeds (about 60 units/s, 90 and
+ * more with the afterburner).
+ */
+void test_closing_target()
+{
+	const auto shaker{blast(SHAKER_BLAST)};
+	const auto mega{blast(MEGA_BLAST)};
+	const double cone{radians(6)};
+	const double shaker_need{blast_factor(missile_role::shaker) * SHAKER_BLAST + BLAST_MARGIN};
+	const double mega_need{blast_factor(missile_role::heavy) * MEGA_BLAST + BLAST_MARGIN};
+	/* The formula: 90 units, the missile at 80 units/s, the target at
+	 * 60: they meet at 90 * 80 / 140 from a bot that holds still.
+	 */
+	CHECK(std::fabs(distance_at_burst(90, shaker, 0, 60) - 90.0 * 80 / 140) < 1e-9);
+	CHECK(distance_at_burst(90, shaker, 0, 0) == 90);
+	/* A still bot, the target rushing it at 60: an earthshaker at 90
+	 * units would burst inside its blast.  The bot's own speed alone
+	 * (B4.1) passed it.
+	 */
+	CHECK(missile_release(secondary::earthshaker, 0, cone, 90, shaker, 0, 0));
+	CHECK(!missile_release(secondary::earthshaker, 0, cone, 90, shaker, 0, 0, 60));
+	auto m{only(armed(), {secondary::earthshaker})};
+	m.target_distance = 90;
+	CHECK(heavy_check(m) == heavy_verdict::fire);
+	m.target_closing_speed = 60;
+	CHECK(heavy_check(m) == heavy_verdict::blast);
+	CHECK(!choose_secondary(m) || *choose_secondary(m) != secondary::earthshaker);
+	/* Far enough, it is fired all the same. */
+	m.target_distance = 150;
+	CHECK(distance_at_burst(150, shaker, 0, 60) >= shaker_need);
+	CHECK(heavy_check(m) == heavy_verdict::fire);
+	/* A mega at 70 units with the target on its afterburner (90). */
+	auto g{only(armed(), {secondary::mega})};
+	g.target_distance = 70;
+	CHECK(heavy_check(g) == heavy_verdict::fire);
+	g.target_closing_speed = 90;
+	CHECK(distance_at_burst(70, mega, 0, 90) < mega_need);
+	CHECK(heavy_check(g) == heavy_verdict::blast);
+	/* Both closing in at 50: nearer still. */
+	CHECK(distance_at_burst(120, shaker, 50, 50) < distance_at_burst(120, shaker, 0, 50));
+	/* A fleeing target is credited up to CLOSING_AWAY_CREDIT. */
+	CHECK(distance_at_burst(80, shaker, 0, -60) == distance_at_burst(80, shaker, 0, -CLOSING_AWAY_CREDIT));
+	CHECK(distance_at_burst(80, shaker, 0, -60) > 80);
+	/* No self-kill against a rushing target: whatever the distances and
+	 * speeds of both, a released heavy missile meets the target (flying
+	 * straight at the missile) outside its blast radius of the bot, where
+	 * the bot really is then.
+	 */
+	for (const auto s : {secondary::earthshaker, secondary::mega})
+		for (double r = 20; r <= 90; r += 10)
+			for (double d = 0; d <= 300; d += 5)
+				for (double closing = -60; closing <= 60; closing += 15)
+					for (double target = -60; target <= 120; target += 15)
+					{
+						const auto md{blast(r)};
+						if (!missile_release(s, 0, cone, d, md, 0, closing, target))
+							continue;
+						const double speed{md.speed / 2};
+						const double t{d / (speed + target)};
+						CHECK(t > 0);
+						CHECK(d - (closing + target) * t > r);
+					}
+}
+
+/* Section 9.5: the earthshaker's children pass through the bot and burst
+ * on the wall behind it: a wall close behind holds the release.
+ */
+void test_shaker_behind()
+{
+	auto shaker{blast(SHAKER_BLAST)};
+	shaker.child_blast_radius = 30;
+	const double need{SHAKER_BEHIND_FACTOR * 30 + BLAST_MARGIN};
+	CHECK(!shaker_behind_safe(missile_role::shaker, need - 1, 120, shaker, 0));
+	CHECK(shaker_behind_safe(missile_role::shaker, need, 120, shaker, 0));
+	CHECK(shaker_behind_safe(missile_role::shaker, 400, 120, shaker, 0));
+	/* The mega has no children; a missile without child data passes. */
+	CHECK(shaker_behind_safe(missile_role::heavy, 0, 120, shaker, 0));
+	CHECK(shaker_behind_safe(missile_role::shaker, 0, 120, blast(SHAKER_BLAST), 0));
+	/* Invulnerable beyond the danger: waived. */
+	CHECK(shaker_behind_safe(missile_role::shaker, 0, 120, shaker, 10));
+	CHECK(!shaker_behind_safe(missile_role::shaker, 0, 120, shaker, 1));
+}
+
 }
 
 int main()
 {
+	test_closing_target();
+	test_shaker_behind();
 	test_roles_and_skills();
 	test_missile_choice();
 	test_heavy_safety();

@@ -1492,8 +1492,12 @@ crossing rule, which blocked most of the rest).  The first revision
 (1.5 and 1.2 blast radii) still allowed an earthshaker in 0-43 %.  Now:
 radius 40: earthshaker 60 %, mega 82 %; 50: 43 %, 50 %; 60: 18 %, 43 %;
 80: 0 %, 2 %; with the standoff (35-140 units) 78/90, 69/73, 55/69 and
-35/47 %.  The blast never reaches the bot (the damage is 0 beyond its
-radius; the unit test sweeps radii, distances and the bot's own speed).
+35/47 %.  The missile's own blast never reaches the bot (the damage is 0
+beyond its radius; the unit test sweeps radii, distances and the speeds
+of the bot and of the target).  The earthshaker's children are not
+bounded by this rule: they do not collide with the ship that fired
+them, so one flying back passes through the bot and bursts on the wall
+behind it (see *Review fixes* below).
 
 The blast does no damage beyond its radius (the damage falls linearly to
 0 at `damage_radius`), so the bot stays outside it; the release still
@@ -1504,9 +1508,12 @@ A homing heavy missile is released within 15 degrees.  The blast is
 judged at the impact along the nose (the target when it is nearer than
 the wall behind it: a target 120 units down a corridor is a shot, a wall
 30 units ahead never) and where the bot is when the missile bursts: its
-own flight toward the impact meanwhile is subtracted, flying away is
-credited up to 20 units/s (`distance_at_burst`); no free distance in
-other directions is required.
+own flight toward the impact meanwhile is subtracted, and so is the
+target's toward the bot when the target is the impact (a target rushing
+the bot at v meets the missile at d s / (s + v)); flying away is
+credited up to 20 units/s, for either (`distance_at_burst`).  Only the
+earthshaker needs free distance in another direction: behind the bot
+(below).
 
 **Fusion and omega are fired** (decision; B1-B4 only picked them up).
 Fusion is charged by the bot as `FireLaser` charges the human's (2
@@ -1518,7 +1525,11 @@ s (from 2 s the charge hurts the ship).  The warm-up sound is heard on
 the host only.  Omega recharges from the bot's energy with its own
 `pilot` (`omega_charge_frame`); `do_omega_stuff` now takes the charge
 of a bot's shot on the host as it does the local player's (before, a
-bot's omega would have fired without charge).  Its fire cone is its lock
+bot's omega would have fired without charge).  A bot also does not fire
+or choose omega without the charge for a shot (`omega_can_fire`: an
+eighth of the charge, or some charge and no energy; `omega_factor` is
+0 below it): the host would delete the shot while the clients, told of
+it by `MULTI_FIRE`, drew a full discharge.  Its fire cone is its lock
 cone (18 degrees), its reach 72 units.  Table rows: fusion 3.6/3.5/1.4,
 omega 3.9/1.6/0 (x its charge).
 
@@ -1528,8 +1539,10 @@ omega 3.9/1.6/0 (x its charge).
   reaction time and a turn at the skill's rate; meanwhile it did
   nothing.  Now an unseen attacker makes the bot thrust across the line
   of fire at once (0.6 s), take the attacker as target, and turn to it a
-  reaction time later; weak, it then retreats (the goal choice).  The
-  projectile dodge never had a field-of-view filter.
+  reaction time later; weak, it then retreats (the goal choice).  A
+  teammate's hit (friendly fire on) is no attack: no evasion, turn,
+  target or memory of it.  The projectile dodge never had a
+  field-of-view filter.
 - *Turning round* (`steer_errors_local`, `keep_moving_in_turn`): the
   errors were the shortest rotation, which for a target behind and above
   (or straight behind) turns one axis only; the ship turns each axis at
@@ -1557,8 +1570,12 @@ graph, with the passability of `edge_passable`.  Found:
   human).  A bot never shoots switches: spawned there, every plan
   failed and it stayed for the life.  Now the host judges the sites at
   level start (`spawn_site_open`: a quarter of the level or 150
-  segments reachable) and a bot respawns elsewhere (up to 8 draws of
-  `choose_spawn`); one placed in a cell at level start is moved.
+  segments reachable) and a bot respawns elsewhere: `choose_bot_spawn`
+  leaves the sealed sites out before the ranking and the draw of
+  `choose_spawn` (all of them only if none is open) and draws with the
+  bot's own random numbers, so bot code neither reseeds nor advances
+  the game's `d_rand` (a human's spawn is unchanged); one placed in a
+  cell at level start is moved.
 - *The map knowledge did not reach the ring*: counted in segments
   (Hotshot 8), the bots in the central structure knew 19-22 of the 105
   powerups, 0-3 of the 55 out in the spokes and ring; with the path
@@ -1591,7 +1608,7 @@ why it is not taken (`collecting`, `not-known`, `ignored`,
 heavy missiles' last verdict (`fire`, `none-owned`, `skill`,
 `no-target`, `not-visible`, `no-clear-shot`, `cloaked`, `cooldown`,
 `used-on-target`, `too-fast`, `too-close`, `too-far`, `blast`, and once
-chosen `aiming` or `nose-blast`) with the distance it needs and the
+chosen `aiming`, `nose-blast` or `wall-behind`) with the distance it needs and the
 distance it keeps.  Each change of the heavy verdict while the bot has
 one is logged with the target's distance, crossing and closing speeds,
 the distance needed, the blast radius and whether the missile homes.
@@ -1602,8 +1619,32 @@ per powerup), each weapon switch with the band and scores, each heavy
 missile and fusion shot, each reaction to an unseen attacker, each roam
 goal (explore or random, path, last visit).
 
-**Unchanged:** the human's firing, pickups and omega (the charge rule
-applies to the local player as before), clients, the protocol.
+**Review fixes (PR #34).**
+- *A target rushing the bot*: the blast rule took only the bot's own
+  speed toward the impact; a target flying at the missile meets it
+  sooner and nearer (at 90 units a still bot, the target at 60 units/s:
+  51 units, inside an earthshaker's 66).  Now `distance_at_burst` takes
+  both closing speeds (`missile_situation::target_closing_speed`, and at
+  the release the target's when a ship, not the wall, is the impact);
+  `test_closing_target` sweeps both speeds against the real meeting
+  point.
+- *After the release*: the cooldown dropped the standoff to 0, the band
+  fell back to 35-95 units, the juke rerolled and the fight could fly
+  the bot toward its own burst.  Now the bot keeps the missile's
+  standoff (`blast_hold`) and does not close in on the target until the
+  missile's flight and blast are over (`blast_danger_seconds`).
+- *The earthshaker's children* (not bounded by the rule above): an
+  earthshaker is released only with the wall behind the bot at least
+  half a child's blast radius (the weapon data's `children`) plus 12
+  units away (`shaker_behind_safe`, verdict `wall-behind`; waived while
+  a real invulnerability outlasts the danger); a partial bound, kept
+  small for the tight levels (deliberate risk and indirect fire come
+  later).  A bot backing off to a standoff does not back to within 25
+  units of a wall behind it.
+- Spawn sites, omega without charge and a teammate's hit: above.
+
+**Unchanged:** the human's firing, pickups, spawn and omega (the charge
+rule applies to the local player as before), clients, the protocol.
 
 ---
 

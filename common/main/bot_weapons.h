@@ -138,6 +138,8 @@ struct missile_data
 	 * target, so a crossing target does not dodge it by moving.
 	 */
 	bool homing{};
+	/* The blast radius of its children (the earthshaker's), 0: none. */
+	double child_blast_radius{};
 };
 
 /* Section 9.4: the distances of the rules, in game units. */
@@ -189,8 +191,8 @@ constexpr double MISSILE_PENDING_SECONDS{1.5};
  * away, plus a margin for the ship and the blast's rounding.  The blast
  * does no damage beyond its radius (object_create_explosion_with_damage:
  * the damage falls linearly to 0 at damage_radius).  The earthshaker
- * gets 1.2 (its children spread from the blast and explode too, and do
- * not home on their shooter; B4: 2), the mega 1 (B4: 1.5), the others 1,
+ * gets 1.2 (B4: 2; its children, which pass through the bot, are
+ * bounded only by shaker_behind_safe), the mega 1 (B4: 1.5), the others 1,
  * each plus the margin.  (Measured on the user's tight level "Earth
  * Shaker", section 9.5: with 2 and 1.5 no engagement at the fight's
  * 35-95 units allowed an earthshaker.)  Invulnerable, only point blank is
@@ -233,27 +235,31 @@ constexpr double blast_danger_seconds(const missile_role r, const double impact_
 
 /* Section 9.5: where the bot is when the missile bursts.  The impact is
  * the first thing along the nose (the target if it is nearer than the
- * wall behind it, the wall at the end of the corridor or room if not);
- * the bot flies on meanwhile: toward the impact at `closing_speed`
- * (units/s along the nose; negative: away) for the missile's flight (at
- * half its speed for a thrust missile, as blast_danger_seconds).  Flying
- * away is credited up to CLOSING_AWAY_CREDIT units/s.
+ * wall behind it, the wall at the end of the corridor or room if not).
+ * Both ends close in meanwhile: the bot flies toward the impact at
+ * `closing_speed` (units/s along the nose; negative: away), and a target
+ * that is the impact flies toward the bot at `target_closing` (0 for a
+ * wall), so that the missile meets it sooner and nearer: at d s / (s + v)
+ * for a bot that holds still (s: the missile's speed, at half its speed
+ * for a thrust missile, as blast_danger_seconds).  Flying away is
+ * credited up to CLOSING_AWAY_CREDIT units/s, for either.
  */
 constexpr double CLOSING_AWAY_CREDIT{20};
 
 [[nodiscard]]
-constexpr double distance_at_burst(const double impact_distance, const missile_data &md, const double closing_speed)
+constexpr double distance_at_burst(const double impact_distance, const missile_data &md, const double closing_speed, const double target_closing = 0)
 {
 	const double speed{std::max(md.thrust ? md.speed / 2 : md.speed, 1.0)};
-	const double flight{std::max(impact_distance, 0.0) / speed};
-	return impact_distance - std::max(closing_speed, -CLOSING_AWAY_CREDIT) * flight;
+	const double target{std::max(target_closing, -CLOSING_AWAY_CREDIT)};
+	const double flight{std::max(impact_distance, 0.0) / std::max(speed + target, 1.0)};
+	return impact_distance - (std::max(closing_speed, -CLOSING_AWAY_CREDIT) + target) * flight;
 }
 
 /* `invulnerable_left`: seconds of real invulnerability left (0 when not
  * invulnerable, or only faking it).
  */
 [[nodiscard]]
-constexpr bool blast_safe(const missile_role r, const double impact_distance, const missile_data &md, const double invulnerable_left, const double closing_speed = 0)
+constexpr bool blast_safe(const missile_role r, const double impact_distance, const missile_data &md, const double invulnerable_left, const double closing_speed = 0, const double target_closing = 0)
 {
 	const double f{blast_factor(r)};
 	if (!(f > 0))
@@ -262,7 +268,29 @@ constexpr bool blast_safe(const missile_role r, const double impact_distance, co
 		return impact_distance >= MISSILE_MIN_DISTANCE;
 	/* Both where it is fired and where the bot is at the burst. */
 	const double need{f * std::max(md.blast_radius, 0.0) + BLAST_MARGIN};
-	return impact_distance >= need && distance_at_burst(impact_distance, md, closing_speed) >= need;
+	return impact_distance >= need && distance_at_burst(impact_distance, md, closing_speed, target_closing) >= need;
+}
+
+/* Section 9.5: the earthshaker's children do not collide with the ship
+ * that fired (their parent): one that flies back from the burst passes
+ * through the bot and bursts on the wall behind it, which blast_safe
+ * does not bound.  An earthshaker is released only with the wall behind
+ * the bot (along the nose, backward) at least SHAKER_BEHIND_FACTOR of a
+ * child's blast radius plus the margin away: a child bursting there does
+ * at most half its damage.  (A partial bound, kept small for the tight
+ * levels; invulnerable, as blast_safe, it is waived while the
+ * invulnerability outlasts the danger.)
+ */
+constexpr double SHAKER_BEHIND_FACTOR{0.5};
+
+[[nodiscard]]
+constexpr bool shaker_behind_safe(const missile_role r, const double behind_distance, const double impact_distance, const missile_data &md, const double invulnerable_left)
+{
+	if (r != missile_role::shaker || !(md.child_blast_radius > 0))
+		return true;
+	if (invulnerable_left > blast_danger_seconds(r, impact_distance, md))
+		return true;
+	return behind_distance >= SHAKER_BEHIND_FACTOR * md.child_blast_radius + BLAST_MARGIN;
 }
 
 /* What the missile choice looks at (the tactics layer fills it). */
@@ -302,10 +330,12 @@ struct missile_situation
 	 * enough behind to fly into a mine dropped now.
 	 */
 	bool teammate_behind{};
-	/* The bot's speed toward the target (units/s; negative: away): the
-	 * blast is judged where the bot is when the missile bursts.
+	/* The bot's speed toward the target, and the target's toward the
+	 * bot (units/s; negative: away): the blast is judged where the bot
+	 * is when the missile meets the target.
 	 */
 	double closing_speed{};
+	double target_closing_speed{};
 };
 
 /* Section 9.5: why a heavy missile (mega, earthshaker) is or is not
@@ -329,11 +359,14 @@ enum class heavy_verdict : uint8_t
 	/* Chosen, waiting for the aim or for the blast along the nose. */
 	aiming,
 	nose_blast,
+	/* An earthshaker with a wall close behind (shaker_behind_safe). */
+	wall_behind,
 };
 
-inline constexpr std::array<const char *, 15> heavy_verdict_names{{
+inline constexpr std::array<const char *, 16> heavy_verdict_names{{
 	"fire", "none-owned", "skill", "no-target", "not-visible", "no-clear-shot", "cloaked",
 	"cooldown", "used-on-target", "too-fast", "too-close", "too-far", "blast", "aiming", "nose-blast",
+	"wall-behind",
 }};
 
 [[nodiscard]]
@@ -390,7 +423,7 @@ constexpr heavy_verdict heavy_check(const missile_situation &m, const secondary 
 		return heavy_verdict::too_close;
 	if (d > (r == missile_role::shaker ? SHAKER_MAX_DISTANCE : HEAVY_MAX_DISTANCE))
 		return heavy_verdict::too_far;
-	if (!blast_safe(r, d, md, m.invulnerable_left, m.closing_speed))
+	if (!blast_safe(r, d, md, m.invulnerable_left, m.closing_speed, m.target_closing_speed))
 		return heavy_verdict::blast;
 	return heavy_verdict::fire;
 }
@@ -524,14 +557,14 @@ constexpr double missile_cone(const missile_role r, const double fire_cone, cons
  * neither.
  */
 [[nodiscard]]
-constexpr bool missile_release(const secondary s, const double aim_error, const double fire_cone, const double impact_distance, const missile_data &md, const double invulnerable_left, const double closing_speed = 0)
+constexpr bool missile_release(const secondary s, const double aim_error, const double fire_cone, const double impact_distance, const missile_data &md, const double invulnerable_left, const double closing_speed = 0, const double target_closing = 0)
 {
 	const auto r{role_of(s)};
 	if (r == missile_role::none)
 		return false;
 	if (r == missile_role::mine)
 		return true;
-	return aim_error <= missile_cone(r, fire_cone, md.homing) && blast_safe(r, impact_distance, md, invulnerable_left, closing_speed);
+	return aim_error <= missile_cone(r, fire_cone, md.homing) && blast_safe(r, impact_distance, md, invulnerable_left, closing_speed, target_closing);
 }
 
 /* Section 9.5: the fusion cannon, charged by the bot's own trigger as

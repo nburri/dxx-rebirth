@@ -102,6 +102,8 @@ constexpr unsigned BOT_REVENGE_TICKS{3 * b::BOT_TICK_RATE};
 constexpr double BOT_CLOAK_SEE_DISTANCE{40};
 /* The engagement distance band before the style's range scale. */
 constexpr double BOT_RANGE_LO{35};
+/* Section 9.5: backing off to a standoff, no closer to a wall behind. */
+constexpr double BOT_BACK_WALL_CLEARANCE{25};
 constexpr double BOT_RANGE_HI{95};
 /* A roaming bot flies at least this far (section 4.3). */
 constexpr double BOT_ROAM_MIN_DISTANCE{120};
@@ -356,9 +358,13 @@ struct bot_state
 	b::fusion_action fusion_want{b::fusion_action::idle};
 	fix64 fusion_sound_at{};
 	/* Section 9.5: a fighting bot with a heavy missile ready keeps this
-	 * distance (0: none).
+	 * distance (0: none); after it released one, it keeps blast_hold
+	 * and does not close in until blast_hold_until (the missile's flight
+	 * and blast, b::blast_danger_seconds).
 	 */
 	double standoff{};
+	double blast_hold{};
+	uint32_t blast_hold_until{};
 	/* Section 9.5: after a hit from an unseen attacker, turn to it from
 	 * turn_from until turn_until.
 	 */
@@ -435,6 +441,8 @@ struct bot_state
 		fusion_charging = false;
 		fusion_want = b::fusion_action::idle;
 		standoff = 0;
+		blast_hold = 0;
+		blast_hold_until = 0;
 		turn_to = 0xff;
 		turn_from = turn_until = 0;
 		grabbing = false;
@@ -635,17 +643,15 @@ void judge_spawn_sites()
 	}
 }
 
-/* A spawn for a bot: one it can fly out of, if the random choice gives
- * one within a few draws.
+/* A spawn for a bot: the draw of choose_spawn among the sites it can fly
+ * out of (the sealed ones are left out before the draw), with the bot's
+ * own random numbers: the game's d_rand is not reseeded by bot code.
  */
 [[nodiscard]]
-spawn_choice bot_spawn(const playernum_t pid)
+spawn_choice bot_spawn(bot_state &bs)
 {
 	auto &Objects = LevelUniqueObjectState.Objects;
-	auto spawn{choose_spawn(Objects.vmptr, pid, 1)};
-	for (unsigned k = 0; k < 8 && spawn.what == spawn_choice::kind::site && spawn.site < MAX_PLAYERS && !B.site_open[spawn.site]; ++k)
-		spawn = choose_spawn(Objects.vmptr, pid, 1);
-	return spawn;
+	return choose_bot_spawn(Objects.vmptr, bs.pid, B.site_open, bs.rng.next());
 }
 
 /* A clear line from `from` to `to`: `rad` > 0 for a flight path (the
@@ -851,6 +857,7 @@ b::missile_data missile_data_of(const secondary_weapon_index w)
 		.blast_radius = wi.damage_radius / 65536.0,
 		.thrust = wi.thrust != 0,
 		.homing = wi.homing_flag != 0,
+		.child_blast_radius = wi.children != weapon_id_type::unspecified && wi.children < N_weapon_types ? Weapon_info[wi.children].damage_radius / 65536.0 : 0,
 	};
 }
 
@@ -2140,8 +2147,11 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 				const auto to{*target_pos - pos};
 				m.target_distance = b::length(to);
 				const auto los{b::normalized(to)};
-				/* Section 9.5: the blast where the bot is at the burst. */
+				/* Section 9.5: the blast where the bot is when the
+				 * missile meets the target, both closing in.
+				 */
 				m.closing_speed = b::dot(vel, los);
+				m.target_closing_speed = b::dot(mem.vel, -los);
 				const auto rel_vel{mem.vel - vel};
 				m.target_lateral_speed = b::length(rel_vel - los * b::dot(rel_vel, los));
 				const auto &ship{ship_of(t)};
@@ -2170,6 +2180,9 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 		 */
 		const auto verdict{b::heavy_check(m)};
 		bs.standoff = b::heavy_standoff(m);
+		/* Its own missile in flight: still clear of the blast. */
+		if (tick < bs.blast_hold_until)
+			bs.standoff = std::max(bs.standoff, bs.blast_hold);
 		bs.heavy_min = 0;
 		const b::missile_data *heavy_md{nullptr};
 		for (const auto s : {b::secondary::earthshaker, b::secondary::mega})
@@ -2208,7 +2221,7 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 		if (target_visible && !bs.shot_clear)
 			return;
 	}
-	double err{0}, impact{1e9};
+	double err{0}, impact{1e9}, target_closing{0};
 	const auto md{missile_data_of(w)};
 	if (role != b::missile_role::mine)
 	{
@@ -2216,17 +2229,34 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 		/* Where it bursts: the wall along the nose, or the target on
 		 * the way.
 		 */
-		impact = wall_distance(obj, frame.f, 400);
+		const double wall{wall_distance(obj, frame.f, 400)};
+		impact = wall;
 		if (target_visible)
+		{
 			impact = std::min({impact, b::distance(pos, *target_pos), bs.shot_first_hit});
+			/* Section 9.5: a ship is the impact, not the wall: it flies
+			 * at the missile (the target's closing speed).
+			 */
+			if (impact < wall && bs.target)
+				target_closing = b::dot(bs.memory[*bs.target].vel, -b::normalized(*target_pos - pos));
+		}
 	}
 	const bool heavy{role == b::missile_role::heavy || role == b::missile_role::shaker};
 	/* Section 9.5: the bot's own flight toward the burst along the nose. */
 	const double closing{b::dot(vel, frame.f)};
-	if (!b::missile_release(s, err, b::radians(sk.fire_cone_deg), impact, md, invulnerable_left, closing))
+	if (!b::missile_release(s, err, b::radians(sk.fire_cone_deg), impact, md, invulnerable_left, closing, target_closing))
 	{
 		if (heavy)
-			bs.heavy_why = b::blast_safe(role, impact, md, invulnerable_left, closing) ? b::heavy_verdict::aiming : b::heavy_verdict::nose_blast;
+			bs.heavy_why = b::blast_safe(role, impact, md, invulnerable_left, closing, target_closing) ? b::heavy_verdict::aiming : b::heavy_verdict::nose_blast;
+		return;
+	}
+	/* Section 9.5: the earthshaker's children, back through the bot to
+	 * the wall behind it.
+	 */
+	if (role == b::missile_role::shaker && md.child_blast_radius > 0 &&
+		!b::shaker_behind_safe(role, wall_distance(obj, -frame.f, b::SHAKER_BEHIND_FACTOR * md.child_blast_radius + b::BLAST_MARGIN + 1), impact, md, invulnerable_left))
+	{
+		bs.heavy_why = b::heavy_verdict::wall_behind;
 		return;
 	}
 	if (heavy && bot_log_on())
@@ -2243,6 +2273,12 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 		{
 			bs.last_heavy = tick;
 			bs.heavy_target = bs.target ? *bs.target : 0xff;
+			/* Section 9.5: clear of its own blast until it is over (the
+			 * cooldown now drops the standoff).
+			 */
+			bs.blast_hold = b::heavy_min_distance(s, md) + 8;
+			bs.blast_hold_until = tick + static_cast<uint32_t>(std::ceil(b::blast_danger_seconds(role, impact, md) * b::BOT_TICK_RATE));
+			bs.standoff = std::max(bs.standoff, bs.blast_hold);
 		}
 	}
 }
@@ -2451,6 +2487,16 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 			/* Combat movement takes over: no recovery manoeuvre. */
 			bs.stuck.cancel_recovery();
 			wanted = b::combat_velocity(to, frame.r, frame.u, bs.juke, sk.strafe_vertical, max_speed * 0.8, strafe_speed);
+			/* Section 9.5: its own heavy missile in flight, the bot does
+			 * not close in on the burst; keeping a standoff, it does not
+			 * back into a wall (the earthshaker's children burst there).
+			 */
+			const auto toward{b::normalized(to)};
+			const double along{b::dot(wanted, toward)};
+			if (along > 0 && tick < bs.blast_hold_until)
+				wanted -= toward * along;
+			else if (along < 0 && bs.standoff > 0 && wall_distance(obj, -toward, BOT_BACK_WALL_CLEARANCE) < BOT_BACK_WALL_CLEARANCE)
+				wanted -= toward * along;
 		}
 		else
 			wanted = follow_path(bs, obj, true);
@@ -2647,7 +2693,7 @@ void explode(bot_state &bs, object &obj, const d_robot_info_array &Robot_info)
 void respawn(bot_state &bs, object &obj)
 {
 	auto &Objects = LevelUniqueObjectState.Objects;
-	const auto spawn{bot_spawn(bs.pid)};
+	const auto spawn{bot_spawn(bs)};
 	if (spawn.what == spawn_choice::kind::none)
 	{
 		bs.respawn_at = GameTime64 + F1_0;
@@ -2987,7 +3033,7 @@ void bots_level_start()
 		 */
 		if (const uint32_t seg{obj.segnum}; +(Game_mode & GM_MULTI) && !(Game_mode & GM_MULTI_COOP) && !b::spawn_site_open(reachable_from(seg), B.graph.size()))
 		{
-			const auto spawn{bot_spawn(bs.pid)};
+			const auto spawn{bot_spawn(bs)};
 			if (spawn.what == spawn_choice::kind::site && spawn.site < MAX_PLAYERS && B.site_open[spawn.site])
 			{
 				con_printf(CON_VERBOSE, "bots: '%s' starts in a sealed cell (segment %u): moved to spawn site %u", static_cast<const char *>(bs.cfg.name), seg, spawn.site);
@@ -3161,6 +3207,13 @@ void bots_fire()
 			continue;
 		if (!allowed_to_fire_laser(bs.pl, objp->ctype.player_info))
 			continue;
+#if DXX_BUILD_DESCENT == 2
+		/* Section 9.5: no omega shot without the charge for it (the host
+		 * would delete it, the clients would draw it).
+		 */
+		if (const auto &pi{objp->ctype.player_info}; pi.Primary_weapon == primary_weapon_index::omega && !b::omega_can_fire(pi.Omega_charge / static_cast<double>(MAX_OMEGA_CHARGE), pi.energy / 65536.0))
+			continue;
+#endif
 		do_laser_firing_player(bs.pl, objp);
 	}
 }
@@ -3213,11 +3266,14 @@ bool bot_take_damage(object &ship, const icobjptridx_t killer, const fix damage,
 		return true;
 	if (Endlevel_sequence)
 		return true;
-	/* Section 4.2: a hit tells the bot roughly where the attacker is. */
+	/* Section 4.2: a hit tells the bot roughly where the attacker is.  A
+	 * teammate's hit (friendly fire on) is no attack: no memory of it, no
+	 * evasion, no turn, no target.
+	 */
 	if (killer != object_none && killer->type == object_type::OBJ_PLAYER)
 	{
 		const auto who{get_player_id(*killer)};
-		if (who != pid && who < MAX_PLAYERS)
+		if (who != pid && who < MAX_PLAYERS && !same_team(pid, who))
 		{
 			const auto tick{B.tick.tick()};
 			bs->last_attacker = who;

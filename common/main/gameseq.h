@@ -26,6 +26,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include "fwd-inferno.h"
 #include "fwd-player.h"
 #include "fwd-object.h"
@@ -173,6 +174,12 @@ struct spawn_choice
  */
 [[nodiscard]]
 spawn_choice choose_spawn(fvmobjptr &vmobjptr, playernum_t pnum, int random_flag);
+/* A bot's spawn (deathmatch: as choose_spawn with `random_flag` == 1):
+ * the sealed sites (`site_open` false) are left out unless none is open,
+ * and the draws come from `seed`, not d_rand (which is not reseeded).
+ */
+[[nodiscard]]
+spawn_choice choose_bot_spawn(fvmobjptr &vmobjptr, playernum_t pnum, const per_player_array<bool> &site_open, uint32_t seed);
 /* Put the player ship `plrobj` where `spawn` says and reset it. */
 void place_player(fvmsegptridx &vmsegptridx, vmobjptridx_t plrobj, spawn_choice spawn);
 }

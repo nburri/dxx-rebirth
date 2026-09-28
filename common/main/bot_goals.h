@@ -202,14 +202,25 @@ inline constexpr std::array<std::array<double, BOT_RANGE_BANDS>, 10> primary_tab
 	{{3.9, 1.6, 0.0}},	// omega: reaches 80 units (MAX_OMEGA_DIST)
 }};
 
-/* Omega fires only above an eighth of its charge (do_omega_stuff) and
- * recharges from the energy: full with half its charge and more, a
- * quarter with little, half as good with little energy to recharge.
+/* Omega fires only from an eighth of its charge, or with some charge
+ * and no energy at all (do_omega_stuff); a shot without that is deleted
+ * on the host, while the clients, told of it by MULTI_FIRE, draw a full
+ * discharge: a bot neither chooses nor fires it then (section 9.5).
+ */
+[[nodiscard]]
+constexpr bool omega_can_fire(const double omega_charge, const double energy)
+{
+	return omega_charge >= 0.125 || (omega_charge > 0 && !(energy > 0));
+}
+
+/* Omega recharges from the energy: full with half its charge and more,
+ * a quarter with little, half as good with little energy to recharge,
+ * nothing while it cannot fire (omega_can_fire).
  */
 [[nodiscard]]
 constexpr double omega_factor(const weapon_view &v)
 {
-	if (v.omega_charge < 0.125 && v.energy < 1)
+	if (!omega_can_fire(v.omega_charge, v.energy))
 		return 0;
 	const double f{std::clamp(v.omega_charge / 0.5, 0.25, 1.0)};
 	return v.energy < 10 ? f * 0.5 : f;

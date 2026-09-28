@@ -134,6 +134,25 @@ void test_weapon_table()
 	drained.energy = 0.5;
 	CHECK(omega_factor(drained) == 0);
 	CHECK(omega_factor(all) == 1);
+	/* Section 9.5: below an eighth of its charge omega does not fire
+	 * (do_omega_stuff), unless the energy is gone and some charge is
+	 * left: the bot neither chooses nor fires it then.
+	 */
+	CHECK(omega_can_fire(0.125, 100));
+	CHECK(!omega_can_fire(0.12, 100));
+	CHECK(!omega_can_fire(0.1, 0.5));
+	CHECK(omega_can_fire(0.05, 0));
+	CHECK(!omega_can_fire(0, 0));
+	weapon_view low{all};
+	low.omega_charge = 0.1;
+	CHECK(omega_factor(low) == 0);
+	CHECK(weapon_score(primary::omega, range_band::close, low) == 0);
+	low.energy = 0;
+	low.omega_charge = 0.05;
+	CHECK(omega_factor(low) > 0);
+	low.omega_charge = 0.2;
+	low.energy = 150;
+	CHECK(omega_factor(low) > 0);
 	/* Fusion needs the energy for a charge. */
 	weapon_view fusion_only{};
 	fusion_only.owned = bits({primary::fusion});
