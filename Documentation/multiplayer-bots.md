@@ -397,8 +397,10 @@ gun point, and `w` is the weapon speed from `Weapon_info[...].speed`
 (`ai.cpp` `lead_player` uses the same idea with a linear time estimate).
 Skill enters in three places:
 
-- **Lead accuracy** `ℓ`: the bot uses `ℓ × V`. At `ℓ = 0` it aims at where
-  the target is.
+- **Lead accuracy** `ℓ`: the bot leads with `k × V`, where `k` is 1 on
+  average with an error of `(1 − ℓ) × 0.35`, drawn and held like the aim
+  error (section 9.3; B1 used `ℓ × V`, a systematic under-lead). At
+  `ℓ = 0` it aims at where the target is.
 - **Aim error**: an angular offset drawn from `N(0, σ)` in two axes, held for
   `aim_drift_period` and then eased toward a new sample. Aim therefore
   wanders smoothly instead of jittering, and a steady target is hit more
@@ -1172,7 +1174,9 @@ the energy weapons count half (the laser 0.8), between 20 and 50 they are
 spared a little; vulcan and gauss need rounds. The current weapon counts
 15 % more, so a switch (which costs `REARM_TIME`, as before) happens only
 for a clear gain. Below weapon smarts 2 (Trainee, Rookie) the fixed order
-of B1 stays. Far band trigger discipline: the bot holds fire when the
+of B1 stays. (The energy rule, the laser's close range row, the margin
+and the value of a better weapon were revised after the exp-12
+playtest, section 9.3.) Far band trigger discipline: the bot holds fire when the
 chance of a hit (the target's radius against the spread of the aim error
 and of half the target's lateral motion during the shot's flight) is below
 10 %.
@@ -1197,6 +1201,206 @@ the protocol (no new message; `MULTI_PROTO_VERSION` unchanged).
 
 **Not in B3:** secondary use, the converter, cloak/invulnerability tactics
 (B4); the presets and styles taking effect (B2); CTF/hoard items (B7).
+
+### 9.3 After the v0.61-exp-12 playtest: weapon choice and aim
+
+The playtest (one human against Hotshot bots) found bots that play much
+better but (a) still mostly fire the laser, (b) never fire missiles (B4,
+section 9.4) and (c) hit badly with the slow projectile guns (plasma,
+phoenix, helix, spreadfire) compared with the laser, vulcan and gauss.
+
+**(a) The laser.** Traced end to end: the pickups are right (a granted
+primary sets the ship's `primary_weapon_flags` through
+`host_grant_remote` → `write_inventory`; a cannon comes with its rounds),
+the choice is applied (`choose_weapon` writes the ship's
+`Primary_weapon`, which `do_laser_firing_player` fires; the human's
+autoselect runs only for `Local_pilot`), and nothing else writes a bot's
+`Primary_weapon`. The causes were in the scores:
+
+1. *Every life starts with the laser, and a better weapon was not worth a
+   detour in a fight.* A better primary was worth 5 whatever it replaced,
+   and with an enemy in sight the collection counts 0.35: plasma lying
+   80 units away scored 5 × 60/140 × 0.35 = 0.75 against an engagement's
+   1–2. Bots die often and fight most of the time, so they fought each
+   life with the spawn laser. Now an armament item is worth 3–7 by how
+   much stronger it makes the bot (`upgrade_ratio`, `upgrade_value`:
+   3 + 2 × (ratio − 1), capped at 7; the spawn laser to plasma is 7), and
+   one that makes it at least 1.5 times stronger (`BIG_UPGRADE_RATIO`)
+   counts 0.8 in a fight (`goal_inputs::collect_upgrade`). The bot shoots
+   at what it sees on its way (section 9.2).
+2. *The laser was spared by the energy rule.* Between 20 and 50 energy
+   every energy weapon but the laser lost up to 25 %, below 20 half (the
+   laser 20 %): with a strong laser the bot kept it after 15–20 s of fire.
+   Now each energy weapon is judged by the seconds of continuous fire its
+   own cost leaves (`energy_factor`: the game's `energy_usage /
+   fire_wait`, helix twice in multiplayer, filled per weapon by
+   `energy_rates` in bot.cpp): full for 8 s and more, down to one half
+   with nothing left.
+3. *The hysteresis kept the held laser.* The spawn weapon is always the
+   current one first, and the current one counted 15 % more: the super
+   lasers with quad (3.4 at close range) were within 15 % of spreadfire
+   (3.5) and helix (3.7), so the close range order never took effect. The
+   laser's close range row is now 0.9 and the margin 12 %. The margin was
+   there against flipping at a band border, which the fights (35–95
+   units) straddle at 60: the band itself now has a hysteresis of 8 units
+   (`band_of(distance, previous)`), and the test checks for every pair of
+   weapons that a switch at the border is not undone.
+
+**(c) Aim with slow shots.** Traced per weapon: the speed is the weapon
+data's `speed[Difficulty_level]` of the current primary, which is what
+`Laser_create_new` gives the shot (in multiplayer the netgame's
+difficulty); a shot does not inherit its shooter's velocity (only mines
+do), so the intercept with the target's velocity in the world is right;
+`speedvar` (a random slower shot) is the data's. The causes:
+
+1. *A systematic under-lead.* The lead used the fraction ℓ itself (Hotshot
+   0.7) of the target's velocity: 30 % of the shot's flight short, a miss
+   of 0.3 × the target's speed × the flight time. That grows with the
+   flight time, so it hit the slow shots hardest. Against a ship crossing
+   at 35–58 units/s, 60 units away, B1's Hotshot hit with 20 % of its
+   laser shots (speed 120), 2 % at speed 80 and 79 % at 300; at 90 units,
+   5 %, 0.2 % and 47 %. Now the lead factor is 1 on average with an error
+   drawn from N(0, (1 − ℓ) × 0.35), held for the aim drift period and
+   eased toward (`aim_lead`, like the aim error); Trainee (ℓ = 0) still
+   does not lead. The same ship at 60 units: 82 % at 120, 67 % at 80,
+   91 % at 300 (`test_hit_rates_by_speed`, which requires every speed to
+   hit at least 70 % (below 100 units/s) or 80 % as often as the laser).
+   Against a ship that strafes in new directions every 1.5–3 s the slow
+   shots stay behind (at 60 units: 15 % at 80, 29 % at 120, 54 % at 300),
+   as they do for a human: the ship has more time to turn away.
+2. *The lead was solved from the ship's centre*; the shots leave from
+   their guns and fly parallel to the nose. Now from the average of the
+   weapon's guns (`gun_local`: guns 0 and 1 for laser, plasma, phoenix,
+   fusion, 0–3 with quad, the centre gun for vulcan, spreadfire, gauss,
+   helix).
+3. *The pattern weapons had the single shot's cone.* Spreadfire and helix
+   fire patterns 1/16 and 2/16 off the nose; their fire cone is wider by
+   half the pattern's half angle (`fire_cone_with_spread`).
+4. Weapons with thrust (the missiles) are led with three quarters of
+   their top speed (`effective_shot_speed`; they start at half of it). The
+   reach (speed × lifetime × 0.8) no longer has a floor of 60 units that
+   could exceed it (now 20).
+
+### 9.4 B4 as implemented
+
+**Files.** `common/main/bot_weapons.h` (pure: the role of each
+secondary, the skill that uses it, the missile choice, the blast safety,
+the release, the converter rule, the cloak and invulnerability tactics,
+the homing dodge), `similar/main/bot.cpp` (`missile_tick`, the firing in
+`bots_fire`, `convert_frame`, the tactics in `think`, the dodge),
+`similar/main/laser.cpp` (two small changes, below). Test:
+`test-bot-weapons` (new).
+
+**Firing (sections 4.5, 7.1).** Everything goes through the human's
+path: `bots_fire` calls `do_missile_firing(bot's pilot, weapon, ship)`,
+which creates the missile or mine from the bot's gun, takes the round,
+puts a fired missile back into the level (`maybe_drop_net_powerup`, as
+for a human on the host), applies the mega and earthshaker recoil, and
+sends `MULTI_FIRE` with the bot as originator (bombs with their object
+number, homing missiles with their target), so the clients see exactly a
+human's shot. A weapon whose `fire_count` is above 1 fires its further
+rounds frame by frame, as the human's `Global_missile_firing_count`
+does. In `do_missile_firing` the rapid fire cheat and the secondary
+autoselect now apply to `Local_pilot` only (as `do_laser_firing_player`
+does for the primary): the host's cheat never speeds up a bot, and a bot
+has no autoselect (it chooses its missiles itself).
+
+**A bot's mines are filed under the bot.** `multi_send_fire` maps a bomb
+(or guided missile) it sends with `map_objnum_local_to_local(objnum,
+pnum)`, under the originator: for a human that is `Player_num` as
+before; for a bot flown on the host it is the bot, the owner the clients
+file their copy under (`map_objnum_local_to_remote(..., pnum)`). So a
+homing target, an object removal or the late joiner's snapshot that
+names a bot's mine resolves to the same object on the host and the
+clients (it was filed under the host before).
+
+**Homing for a bot.** `Laser_player_fire` picked a homing missile's
+target (`find_homing_object`) only for `ConsoleObject`; for any other
+shooter it took the target from the `MULTI_FIRE`. A bot's missile on the
+host therefore flew without a target until the missile's own rescan.
+Now the shooter flown on this machine, the local player or a bot on the
+host (`bot_is_local`), picks its target at launch, as a human's missile
+does; the target goes to the clients in the `MULTI_FIRE`.
+`find_homing_object` itself was never tied to the local player.
+
+**Choice and release (`missile_tick`, 60 Hz).** The bot either waits for
+the release of the missile it chose or chooses one
+(`choose_secondary`); a chosen missile that cannot be released within
+1.5 s is dropped. A missile that flies straight (concussion, mercury,
+flash, mega, earthshaker) is aimed with its own speed (three quarters of
+its top speed, it accelerates) from its own guns while it waits. Rules,
+in order:
+
+| Weapon | Rule |
+|---|---|
+| Smart mine, proximity bomb | the bot flies away (retreat, collect, refuel) at more than 15 units/s with its target seen within 1 s behind it (more than 107° off its flight) within 100 units, or 150 at a doorway on its path (the next path point is a side's centre); the smart mine first; one per `mine_interval` (Hotshot 3 s); never with a teammate following (team game, friendly fire on: a teammate in sight behind the bot within 40 units, or within 150 flying towards it) |
+| Earthshaker | a clear shot, 110–260 units, at least 2 blast radii + 12 away |
+| Mega | a clear shot, 70–220 units, at least 1.5 blast radii + 12 away |
+| (both) | not cloaked, at most one per 8 s and one per target per 25 s; below Ace only at a target crossing slower than 30 units/s |
+| Smart | 30–120 units, a clear shot, or the target out of sight but seen within 1 s (its children find it round a corner); a target in sight needs the clear shot, as for the others |
+| Flash | a clear shot within 100 units at a target that faces the bot (within 30°) |
+| Homing | 40–200 units, a clear shot, the target crossing faster than 25 units/s or further than 90 |
+| Mercury, then concussion | 30–200 units, a clear shot |
+| Homing | as the fallback of the straight ones |
+| Guided | never (decision below) |
+
+Missiles go at most one per `missile_interval` (Rookie 4 s, Hotshot 2.5
+s, Ace 1.8 s, Insane 1.2 s). A missile is released when the nose is
+within its cone (the fire cone; homing 20°, smart 30°: they find the
+target themselves) and the first wall along the nose, or the target (or
+another enemy ship first on the line of fire) if nearer, is far enough
+for its blast (`blast_safe`: 2 blast radii for the
+earthshaker, whose children burst around the impact, 1.5 for the mega, 1
+for the others, plus 12 units). The blast radius is the weapon data's
+`damage_radius`. So a bot never fires a mega or an earthshaker at point
+blank, nor into a wall next to it (the user's own death by an earthshaker
+fired near a wall), whatever the target's distance. An invulnerable bot
+only avoids point blank (30 units), and only while the invulnerability
+covers the danger: it must be real (not the spawn's faked one, which
+the first hit ends) and last longer than the missile's flight to the
+impact (at half its speed for a thrust missile), plus 2 s for the
+earthshaker's children and 0.5 s spare (`blast_danger_seconds`);
+otherwise the full rule applies.
+
+**Skill (section 5.1).** Trainee fires no secondary; Rookie concussion,
+homing, flash and mercury; Hotshot and better all but the guided missile.
+Decision: the design gave mega to Ace and the earthshaker to Insane, but
+the presets are not applied before B2 and every bot plays Hotshot, so
+Hotshot uses them too, under the rules above (a slow target, once per
+target, the blast safety); Ace fires them at fast crossers as well.
+
+**The guided missile is never fired** (decision): its steering, its
+camera and its release are the local human's
+(`Guided_missile`, the missile view, `release_local_guided_missile`), and
+a guided missile that nobody steers is a slow concussion. It is still
+picked up, for 0.3 (denied to the others, dropped at death).
+
+**Dodge (section 4.6).** A homing missile whose target is the bot's ship
+turns after it, so its straight flight is only a rough prediction: it is
+judged with 3 times the pass radius and dodged with the skill's
+probability + 0.25 (`dodge_radius`, `dodge_chance`). The Ace
+afterburner rule for dodging already covers the burn.
+
+**Converter (section 4.7).** As the human's key works it
+(`transfer_energy_to_shield`: only the energy above 100, 20 a second, two
+for one), without the HUD text and the local sound: Rookie below 50
+shields, Hotshot below 80, Ace below 100, Insane below 110.
+
+**Cloak and invulnerability (section 4.7).** Invulnerable (not the
+spawn's faked one), the bot engages 1.6 times as readily, collects half as
+readily and fights at 0.6 of its distance band (retreat was already off).
+Cloaked, it engages 1.3 times as readily, fights at 0.7 of its band, and
+holds its primary fire beyond 90 units and every missile beyond 100 (the
+shots show where it is), and fires no heavy missile.
+
+**Unchanged:** the human's firing (the cheat and autoselect are the
+local pilot's as before, the homing target is picked as before for the
+local player), clients (every new branch asks `bot_is_local`, which is
+false there), the protocol.
+
+**Not in B4:** the `-botarena` test mode, the strafe patterns beyond
+B1's jukes, mines at chokepoints the bot is not passing itself, dodging
+mines.
 
 ---
 

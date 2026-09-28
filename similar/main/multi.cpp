@@ -521,14 +521,23 @@ void map_objnum_local_to_remote(const objnum_t local_objnum, const int remote_ob
 
 void map_objnum_local_to_local(objnum_t local_objnum)
 {
-	// Add a mapping for our locally created objects
+	map_objnum_local_to_local(local_objnum, Player_num);
+}
+
+/* An object created here on behalf of `owner`: this player, or a bot
+ * this machine flies.  It is filed under the player the receivers file
+ * their copy under (the originator of the packet), so that an object
+ * number sent back for it (a homing target, the late-join snapshot)
+ * resolves the same on both ends.
+ */
+void map_objnum_local_to_local(objnum_t local_objnum, const playernum_t owner)
+{
 	Assert(local_objnum < MAX_OBJECTS);
+	Assert(owner < MAX_PLAYERS);
 
-	object_owner[local_objnum] = Player_num;
-	remote_to_local[Player_num][local_objnum] = local_objnum;
+	object_owner[local_objnum] = owner;
+	remote_to_local[owner][local_objnum] = local_objnum;
 	local_to_remote[local_objnum] = local_objnum;
-
-	return;
 }
 
 void reset_network_objects()
@@ -2512,7 +2521,7 @@ void multi_send_fire(const vms_matrix &orient, int laser_gun, const laser_level 
 		multibuf.multitrack[19] = remote_owner;
 		if (is_bomb_objnum != object_none)
 		{
-			map_objnum_local_to_local(is_bomb_objnum);
+			map_objnum_local_to_local(is_bomb_objnum, pnum);
 			PUT_INTEL_SHORT(&multibuf.multitrack[20], is_bomb_objnum.operator objnum_t());
 		}
 		else
@@ -2521,7 +2530,8 @@ void multi_send_fire(const vms_matrix &orient, int laser_gun, const laser_level 
 	}
 	else if (is_bomb_objnum != object_none)
 	{
-		map_objnum_local_to_local(is_bomb_objnum);
+		/* pnum is the originator: this player, or a bot flown here. */
+		map_objnum_local_to_local(is_bomb_objnum, pnum);
 		PUT_INTEL_SHORT(&multibuf.multibomb[17], is_bomb_objnum.operator objnum_t());
 		multi_send_data(multibuf.multibomb, multiplayer_data_priority::_1, pnum);
 	}

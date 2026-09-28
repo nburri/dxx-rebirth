@@ -117,6 +117,43 @@ constexpr range_band band_of(const double distance)
 	return distance < 60 ? range_band::close : distance < 150 ? range_band::mid : range_band::distant;
 }
 
+/* The band with hysteresis: a target near a border (60, 150) does not
+ * flip the band, and with it the weapon, at every strategy tick; the
+ * band changes only once the distance is this far past the border.
+ * The fights keep 35-95 units (section 4.6), right across the 60
+ * border.
+ */
+constexpr double BAND_HYSTERESIS{8};
+
+[[nodiscard]]
+constexpr range_band band_of(const double distance, const std::optional<range_band> previous)
+{
+	const auto b{band_of(distance)};
+	if (!previous || *previous == b)
+		return b;
+	const auto p{*previous};
+	/* Keep the previous band while the distance is within the margin
+	 * of the border between the two.
+	 */
+	if (p == range_band::close && b == range_band::mid && distance < 60 + BAND_HYSTERESIS)
+		return p;
+	if (p == range_band::mid && b == range_band::close && distance >= 60 - BAND_HYSTERESIS)
+		return p;
+	if (p == range_band::mid && b == range_band::distant && distance < 150 + BAND_HYSTERESIS)
+		return p;
+	if (p == range_band::distant && b == range_band::mid && distance >= 150 - BAND_HYSTERESIS)
+		return p;
+	return b;
+}
+
+/* Energy per second of continuous fire of each primary, in the game's
+ * order.  The game fills these from its weapon data (Weapon_info:
+ * energy_usage / fire_wait, helix twice in multiplayer); these defaults
+ * only give the tests an order of magnitude.  0: no energy (vulcan,
+ * gauss; omega is charged, not fired from the energy).
+ */
+inline constexpr std::array<double, 10> default_energy_rate{{2, 0, 3, 4, 6, 2.5, 0, 5, 4, 0}};
+
 /* What the weapon choice looks at. */
 struct weapon_view
 {
@@ -128,6 +165,7 @@ struct weapon_view
 	double energy{100};
 	/* Rounds of vulcan (and gauss) ammunition. */
 	unsigned vulcan_ammo{};
+	std::array<double, 10> energy_rate{default_energy_rate};
 };
 
 [[nodiscard]]
@@ -143,7 +181,7 @@ constexpr bool owns(const weapon_view &v, const primary p)
  * The laser's row is its level's (laser_score).
  */
 inline constexpr std::array<std::array<double, BOT_RANGE_BANDS>, 10> primary_table{{
-	{{1.0, 1.0, 0.8}},	// laser (scaled by laser_score)
+	{{0.9, 1.0, 0.8}},	// laser (scaled by laser_score)
 	{{2.4, 2.6, 2.8}},	// vulcan
 	{{3.5, 2.2, 0.6}},	// spreadfire
 	{{3.2, 3.8, 2.0}},	// plasma
@@ -165,26 +203,31 @@ constexpr double laser_score(const unsigned level, const bool quad)
 	return by_level[std::min<std::size_t>(level, by_level.size() - 1)] * (quad ? 1.3 : 1.0);
 }
 
-/* The factor energy puts on a primary: nothing fires without energy
- * but the ammunition weapons; low on energy (below 20, section 4.5) the
- * energy weapons lose against the ammunition ones, the laser (the
- * cheapest shot) less.  Between 20 and 50 the energy-hungry weapons are
- * spared a little (conserve energy).
+/* The factor energy puts on a primary, by the seconds of continuous
+ * fire the bot's energy still buys with it (section 4.5, energy
+ * conservation): full for ENERGY_COMFORT_SECONDS and more, falling to
+ * one half with none left; nothing fires without energy but the
+ * ammunition weapons.  Every energy weapon is judged by its own cost,
+ * the laser too.  (B3 gave the laser alone a bonus below 50 energy, so a
+ * bot with a strong laser kept it against plasma, spreadfire and helix
+ * for most of its life: its energy is below 50 after 15-20 s of fire.)
  */
+constexpr double ENERGY_COMFORT_SECONDS{8};
+
 [[nodiscard]]
-constexpr double energy_factor(const primary p, const double energy)
+constexpr double energy_factor(const primary p, const weapon_view &v)
 {
 	if (is_ammo_primary(p))
 		return 1;
-	if (energy < 1)
+	if (v.energy < 1)
 		return 0;
-	if (p == primary::laser)
-		return energy < 20 ? 0.8 : 1;
-	if (energy < 20)
-		return 0.5;
-	if (energy < 50)
-		return 0.75 + 0.25 * (energy - 20) / 30;
-	return 1;
+	const double rate{v.energy_rate[static_cast<unsigned>(p)]};
+	if (!(rate > 0))
+		return 1;
+	const double seconds{v.energy / rate};
+	if (seconds >= ENERGY_COMFORT_SECONDS)
+		return 1;
+	return 0.5 + 0.5 * seconds / ENERGY_COMFORT_SECONDS;
 }
 
 /* The score of primary `p` at range `band` (0: not usable now). */
@@ -198,11 +241,17 @@ constexpr double weapon_score(const primary p, const range_band band, const weap
 	double s{primary_table[static_cast<unsigned>(p)][static_cast<unsigned>(band)]};
 	if (p == primary::laser)
 		s *= laser_score(v.laser_level, v.quad);
-	return s * energy_factor(p, v.energy);
+	return s * energy_factor(p, v);
 }
 
-/* A switch costs REARM_TIME: the current weapon counts this much more. */
-constexpr double WEAPON_SWITCH_HYSTERESIS{1.15};
+/* A switch costs REARM_TIME: the current weapon counts this much more.
+ * (B3: 15 %.  With the laser's close range row at 1.0 the super lasers
+ * with quad scored within 15 % of spreadfire and helix, and a bot that
+ * held the laser, the spawn weapon, kept it: the table's close range
+ * order never took effect.  The row is now 0.9, the margin 12 %, and
+ * the band itself has a hysteresis, BAND_HYSTERESIS.)
+ */
+constexpr double WEAPON_SWITCH_HYSTERESIS{1.12};
 
 /* Section 4.5: the primary for a target at range `band` (none: no
  * target; the mid band, the all-round choice), from the table, keeping
@@ -307,13 +356,74 @@ constexpr double energy_need(const resource_view &r)
 	return ammo_weapon ? n * 0.5 : n;
 }
 
-/* A weapon that makes the bot stronger than what it has is worth this
- * much (section 4.7), one that does not this much (a spare, and it is
- * dropped when the bot dies).
+/* A weapon that makes the bot stronger than what it has is worth
+ * 3-7 by how much stronger (section 4.7), one that does not this much (a
+ * spare, and it is dropped when the bot dies).
  */
-constexpr double VALUE_BETTER_PRIMARY{5};
 constexpr double VALUE_SPARE_PRIMARY{1};
 constexpr double BETTER_MARGIN{0.2};
+/* An upgrade that makes the armament this much stronger (x 1.5: the
+ * laser to anything but phoenix, the lasers' level 1 to super) is
+ * worth collecting in a fight (goal_inputs::collect_upgrade).
+ */
+constexpr double BIG_UPGRADE_RATIO{1.5};
+
+/* The armament after taking an armament item (a laser level, the super
+ * laser, quad, a primary the bot does not own); none for anything else.
+ */
+[[nodiscard]]
+constexpr std::optional<weapon_view> armament_after(const item_desc &d, const weapon_view &w)
+{
+	auto after{w};
+	switch (d.kind)
+	{
+		case item::laser:
+			after.laser_level = std::min(after.laser_level + 1, 3u);
+			return after;
+		case item::super_laser:
+			after.laser_level = std::min(std::max(after.laser_level + 1, 4u), 5u);
+			return after;
+		case item::quad:
+			after.quad = true;
+			return after;
+		case item::primary:
+			if (owns(w, d.weapon))
+				return std::nullopt;
+			after.owned = static_cast<uint16_t>(after.owned | (1u << static_cast<unsigned>(d.weapon)));
+			/* A new cannon comes with rounds. */
+			if (is_ammo_primary(d.weapon) && !after.vulcan_ammo)
+				after.vulcan_ammo = 1;
+			return after;
+		default:
+			return std::nullopt;
+	}
+}
+
+/* How much stronger the item makes the bot's armament (1: not at all). */
+[[nodiscard]]
+constexpr double upgrade_ratio(const item_desc &d, const weapon_view &w)
+{
+	const auto after{armament_after(d, w)};
+	if (!after)
+		return 1;
+	const double have{armament_score(w)};
+	const double gain{armament_score(*after)};
+	if (!(gain > have + BETTER_MARGIN))
+		return 1;
+	return gain / std::max(have, 0.5);
+}
+
+/* The value of an upgrade by its ratio: 3 for the least, 5 for twice
+ * the armament, 7 for three times and more.  B3 gave every better
+ * primary 5: a bot with the spawn laser valued plasma lying 60 units
+ * away no more than a fight, so after each respawn it fought with the
+ * laser (section 9.3).
+ */
+[[nodiscard]]
+constexpr double upgrade_value(const double ratio)
+{
+	return 3 + 2 * std::clamp(ratio - 1, 0.0, 2.0);
+}
 
 [[nodiscard]]
 constexpr double secondary_value(const uint8_t index)
@@ -328,6 +438,9 @@ constexpr double secondary_value(const uint8_t index)
 		case secondary::proximity:
 		case secondary::smart_mine:
 			return 0.8;
+		case secondary::guided:
+			/* No use to a bot (section 9.4), only denied to the others. */
+			return 0.3;
 		default:
 			return 1;
 	}
@@ -341,10 +454,6 @@ constexpr double secondary_value(const uint8_t index)
 constexpr double item_value(const item_desc &d, const resource_view &r)
 {
 	const auto &w{r.weapons};
-	const double have{armament_score(w)};
-	const auto better{[&](const weapon_view &after) {
-		return armament_score(after) > have + BETTER_MARGIN;
-	}};
 	switch (d.kind)
 	{
 		case item::none:
@@ -357,16 +466,12 @@ constexpr double item_value(const item_desc &d, const resource_view &r)
 			return 0.3 + 3 * energy_need(r);
 		case item::laser:
 		case item::super_laser:
-			{
-				auto after{w};
-				after.laser_level = d.kind == item::laser ? std::min(after.laser_level + 1, 3u) : std::min(std::max(after.laser_level + 1, 4u), 5u);
-				return better(after) ? 3 : VALUE_SPARE_PRIMARY;
-			}
 		case item::quad:
 			{
-				auto after{w};
-				after.quad = true;
-				return better(after) ? 4 : 2;
+				const double ratio{upgrade_ratio(d, w)};
+				if (ratio > 1)
+					return upgrade_value(ratio);
+				return d.kind == item::quad ? 2 : VALUE_SPARE_PRIMARY;
 			}
 		case item::primary:
 			{
@@ -377,12 +482,8 @@ constexpr double item_value(const item_desc &d, const resource_view &r)
 						return 1 + 2 * (1 - std::clamp(r.vulcan_ammo_share, 0.0, 1.0));
 					return 0;
 				}
-				auto after{w};
-				after.owned = static_cast<uint16_t>(after.owned | (1u << static_cast<unsigned>(d.weapon)));
-				/* A new cannon comes with rounds. */
-				if (is_ammo_primary(d.weapon) && !after.vulcan_ammo)
-					after.vulcan_ammo = 1;
-				return better(after) ? VALUE_BETTER_PRIMARY : VALUE_SPARE_PRIMARY;
+				const double ratio{upgrade_ratio(d, w)};
+				return ratio > 1 ? upgrade_value(ratio) : VALUE_SPARE_PRIMARY;
 			}
 		case item::vulcan_ammo:
 			if (owns(w, primary::vulcan) || owns(w, primary::gauss))
@@ -451,6 +552,10 @@ struct goal_inputs
 	/* The best powerup to collect (collect_utility) and its path cost. */
 	double collect{};
 	double collect_path{};
+	/* That powerup makes the armament much stronger
+	 * (BIG_UPGRADE_RATIO): worth taking in a fight.
+	 */
+	bool collect_upgrade{};
 	/* The best fuel or repair centre (collect_utility of the need). */
 	double refuel{};
 	/* The style (section 5.2). */
@@ -481,6 +586,11 @@ constexpr double GOAL_HYSTERESIS{1.2};
  */
 constexpr double COLLECT_UNDER_FIRE{0.35};
 constexpr double GRAB_DISTANCE{40};
+/* A much better weapon is worth a detour in a fight: the bot shoots
+ * at what it sees on its way (section 4.7), and a human would get it
+ * too.
+ */
+constexpr double COLLECT_UPGRADE_UNDER_FIRE{0.8};
 
 [[nodiscard]]
 inline goal_utilities goal_utility(const goal_inputs &in)
@@ -501,7 +611,7 @@ inline goal_utilities goal_utility(const goal_inputs &in)
 	const bool under_fire{in.target_visible && !in.collector};
 	double collect{in.collect * in.collect_weight};
 	if (under_fire && in.collect_path > GRAB_DISTANCE)
-		collect *= COLLECT_UNDER_FIRE;
+		collect *= in.collect_upgrade ? COLLECT_UPGRADE_UNDER_FIRE : COLLECT_UNDER_FIRE;
 	at(goal_kind::collect) = collect;
 	double refuel{in.refuel * in.collect_weight};
 	if (under_fire)

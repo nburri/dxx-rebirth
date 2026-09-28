@@ -490,6 +490,7 @@ objnum_t objnum_remote_to_local(uint16_t remote_obj, int8_t owner);
 owned_remote_objnum objnum_local_to_remote(objnum_t local);
 void map_objnum_local_to_remote(objnum_t local, int remote, int owner);
 void map_objnum_local_to_local(objnum_t objnum);
+void map_objnum_local_to_local(objnum_t objnum, playernum_t owner);
 void reset_network_objects();
 
 void multi_init_objects(void);

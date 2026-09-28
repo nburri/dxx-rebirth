@@ -5041,6 +5041,12 @@ class DXXArchive(DXXCommon):
 		RuntimeTest('test-bot-goals', (
 			'common/unittest/bot_goals.cpp',
 			)),
+		# Test of the bots' missiles, mines and items: the secondary
+		# choice by skill, the blast safety, the release, the converter,
+		# cloak and invulnerability tactics (bot_weapons.h).
+		RuntimeTest('test-bot-weapons', (
+			'common/unittest/bot_weapons.cpp',
+			)),
 		# Test of the score carry-over across a level load
 		# (net_score_carry.h).
 		RuntimeTest('test-net-score-carry', (

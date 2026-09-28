@@ -285,9 +285,14 @@ inline std::optional<double> intercept_time(const vec3 &rel_pos, const vec3 &rel
 }
 
 /* Where to aim a shot of speed `speed` from `shooter` at a target at
- * `pos` moving with `vel`, with lead accuracy `lead` (0: at the target,
- * 1: exact intercept).  Without an intercept, the lead of the time the
- * shot needs to reach the target's current position.
+ * `pos` moving with `vel`, with the lead factor `lead` (0: at the
+ * target, 1: exact intercept; aim_lead).  Without an intercept, the lead
+ * of the time the shot needs to reach the target's current position.
+ *
+ * `vel` is the target's velocity in the world, not relative to the
+ * shooter: a shot does not inherit its shooter's velocity
+ * (Laser_create_new: only the mines do).  `shooter` is the gun the shot
+ * leaves from; it flies parallel to the ship's nose.
  */
 [[nodiscard]]
 inline vec3 aim_point(const vec3 &shooter, const vec3 &pos, const vec3 &vel, const double speed, const double lead)
@@ -347,6 +352,57 @@ public:
 	double target_pitch() const
 	{
 		return m_target_pitch;
+	}
+};
+
+/* Section 4.4, lead accuracy: the factor the bot applies to the
+ * target's velocity when it leads a shot (aim_point), 1 on average: its
+ * error is drawn from N(0, (1 - lead) x LEAD_ERROR_SCALE), held for the
+ * aim drift period and eased toward, as the aim error is.  At lead 0
+ * (Trainee) the bot does not lead at all.
+ *
+ * B1 used the fraction `lead` itself (Hotshot 0.7): a systematic
+ * under-lead of 30 % of the shot's flight, which misses a steady strafer
+ * by 0.3 x its speed x the flight time.  That grows with the flight
+ * time, so the slow shots (the blobs of plasma, phoenix, spreadfire,
+ * helix) missed a strafing human far more often than the fast ones
+ * (Documentation/multiplayer-bots.md, section 9.3).
+ */
+constexpr double LEAD_ERROR_SCALE{0.35};
+
+class aim_lead
+{
+	double m_factor{1}, m_target{1};
+	unsigned m_left{};
+public:
+	void reset()
+	{
+		*this = {};
+	}
+	/* Once per tick. */
+	void update(bot_rng &rng, const double lead, const unsigned drift_ticks)
+	{
+		if (!(lead > 0))
+		{
+			m_factor = m_target = 0;
+			m_left = 0;
+			return;
+		}
+		const unsigned period{std::max(1u, drift_ticks)};
+		if (!m_left)
+		{
+			const double sigma{std::max(0.0, 1 - lead) * LEAD_ERROR_SCALE};
+			m_target = std::max(0.0, 1 + sigma * rng.normal());
+			m_left = period;
+		}
+		--m_left;
+		const double ease{std::min(1.0, 3.0 / period)};
+		m_factor += (m_target - m_factor) * ease;
+	}
+	[[nodiscard]]
+	double factor() const
+	{
+		return m_factor;
 	}
 };
 
@@ -859,6 +915,27 @@ inline bool wall_hit_is_bend(const vec3 &pos, const vec3 &vel, const vec3 &steer
 inline int32_t held_axis_time(const double axis, const int32_t frame_time)
 {
 	return static_cast<int32_t>(std::lround(std::clamp(axis, -1.0, 1.0) * frame_time));
+}
+
+/* Section 4.4: a weapon that fires a pattern (spreadfire, helix) hits
+ * with its outer shots a little beside the aim: its fire cone is wider
+ * by half the pattern's half angle.
+ */
+[[nodiscard]]
+constexpr double fire_cone_with_spread(const double fire_cone, const double spread_half_angle)
+{
+	return fire_cone + 0.5 * std::max(0.0, spread_half_angle);
+}
+
+/* The effective speed of a shot for the lead: a weapon with thrust (the
+ * missiles) starts at half its speed and accelerates to it
+ * (Laser_create_new), about three quarters of it on average over a
+ * fight's distances.
+ */
+[[nodiscard]]
+constexpr double effective_shot_speed(const double speed, const bool thrust)
+{
+	return thrust ? speed * 0.75 : speed;
 }
 
 /* Section 4.4: trigger discipline. */

@@ -83,6 +83,21 @@ void test_bands()
 	CHECK(band_of(149.9) == range_band::mid);
 	CHECK(band_of(150) == range_band::distant);
 	CHECK(band_of(1000) == range_band::distant);
+	/* With hysteresis: the band changes only BAND_HYSTERESIS past a
+	 * border, both ways.
+	 */
+	CHECK(band_of(62, range_band::close) == range_band::close);
+	CHECK(band_of(68.5, range_band::close) == range_band::mid);
+	CHECK(band_of(55, range_band::mid) == range_band::mid);
+	CHECK(band_of(51, range_band::mid) == range_band::close);
+	CHECK(band_of(155, range_band::mid) == range_band::mid);
+	CHECK(band_of(160, range_band::mid) == range_band::distant);
+	CHECK(band_of(145, range_band::distant) == range_band::distant);
+	CHECK(band_of(140, range_band::distant) == range_band::mid);
+	CHECK(band_of(62, std::nullopt) == range_band::mid);
+	/* A jump across two bands is taken at once. */
+	CHECK(band_of(200, range_band::close) == range_band::distant);
+	CHECK(band_of(10, range_band::distant) == range_band::close);
 }
 
 /* Section 4.5: the table's preferences per band. */
@@ -161,12 +176,36 @@ void test_weapon_resources()
 	v.vulcan_ammo = 0;
 	CHECK(weapon_score(primary::gauss, range_band::distant, v) == 0);
 	CHECK(choose_primary_for(v, range_band::distant, primary::gauss) == primary::laser);
-	/* Energy between 20 and 50 spares the hungry weapons, smoothly. */
-	CHECK(energy_factor(primary::plasma, 20) == 0.75);
-	CHECK(energy_factor(primary::plasma, 35) > 0.75 && energy_factor(primary::plasma, 35) < 1);
-	CHECK(energy_factor(primary::plasma, 50) == 1);
-	CHECK(energy_factor(primary::laser, 10) > energy_factor(primary::plasma, 10));
-	CHECK(energy_factor(primary::vulcan, 0) == 1);
+	/* Energy: each weapon by the seconds of fire it still buys, the
+	 * laser too (it has no bonus of its own any more).
+	 */
+	weapon_view e;
+	e.energy_rate = default_energy_rate;
+	e.energy = default_energy_rate[3] * ENERGY_COMFORT_SECONDS;
+	CHECK(energy_factor(primary::plasma, e) == 1);
+	e.energy /= 2;
+	CHECK(energy_factor(primary::plasma, e) == 0.75);
+	e.energy = 0.5;
+	CHECK(energy_factor(primary::plasma, e) == 0);
+	e.energy = 10;
+	/* The cheaper shot lasts longer. */
+	CHECK(energy_factor(primary::laser, e) > energy_factor(primary::plasma, e));
+	e.energy_rate[0] = e.energy_rate[3];
+	CHECK(energy_factor(primary::laser, e) == energy_factor(primary::plasma, e));
+	CHECK(energy_factor(primary::vulcan, e) == 1);
+	e.energy = 0;
+	CHECK(energy_factor(primary::vulcan, e) == 1);
+	/* Section 9.3 (a): with 40 energy a bot with the quad super laser
+	 * still takes plasma and helix where the table says so (B3 kept the
+	 * laser below 50 energy).
+	 */
+	weapon_view w;
+	w.owned = bits({primary::plasma, primary::helix, primary::spreadfire});
+	w.laser_level = 5;
+	w.quad = true;
+	w.energy = 40;
+	CHECK(choose_primary_for(w, range_band::close, primary::laser) == primary::helix);
+	CHECK(choose_primary_for(w, range_band::mid, primary::laser) == primary::plasma);
 	/* Not owned: no score. */
 	CHECK(weapon_score(primary::helix, range_band::close, v) == 0);
 }
@@ -179,12 +218,49 @@ void test_weapon_hysteresis()
 	weapon_view v;
 	v.owned = bits({primary::plasma, primary::helix});
 	v.energy = 100;
-	/* Mid: plasma 3.8 against helix 3.5 (within 15 %): keep either. */
+	/* Mid: plasma 3.8 against helix 3.5 (within 12 %): keep either. */
 	CHECK(choose_primary_for(v, range_band::mid, primary::helix) == primary::helix);
 	CHECK(choose_primary_for(v, range_band::mid, primary::plasma) == primary::plasma);
 	CHECK(choose_primary_for(v, range_band::mid, primary::laser) == primary::plasma);
+	/* Close: helix 3.7 against plasma 3.2: switch to helix, and back in
+	 * the mid band it stays: a fight across the 60 unit border does not
+	 * switch back and forth.
+	 */
+	CHECK(choose_primary_for(v, range_band::close, primary::plasma) == primary::helix);
+	CHECK(choose_primary_for(v, range_band::mid, primary::helix) == primary::helix);
 	/* Far: plasma 2.0 against helix 1.2: switch. */
 	CHECK(choose_primary_for(v, range_band::distant, primary::helix) == primary::plasma);
+	/* Section 9.3 (a): the laser held since the spawn does not keep
+	 * the close range choices away.  The quad super laser against
+	 * spreadfire and helix at close range: they win, whatever is held;
+	 * in the mid band the quad super laser and helix are even, and the
+	 * one held stays.
+	 */
+	weapon_view l;
+	l.owned = bits({primary::spreadfire});
+	l.laser_level = 5;
+	l.quad = true;
+	CHECK(choose_primary_for(l, range_band::close, primary::laser) == primary::spreadfire);
+	l.owned = bits({primary::helix});
+	CHECK(choose_primary_for(l, range_band::close, primary::laser) == primary::helix);
+	CHECK(choose_primary_for(l, range_band::mid, primary::helix) == primary::helix);
+	CHECK(choose_primary_for(l, range_band::mid, primary::laser) == primary::laser);
+	/* Every pair of weapons: a switch in one band is never undone by
+	 * the next band's choice with the same weapons (no flipping at a
+	 * border), for the close-mid border the fights straddle.
+	 */
+	for (unsigned a = 0; a < 10; ++a)
+		for (unsigned c = 0; c < 10; ++c)
+		{
+			weapon_view pv;
+			pv.owned = static_cast<uint16_t>(bit(primary::laser) | (1u << a) | (1u << c));
+			pv.vulcan_ammo = 1000;
+			const auto in_close{choose_primary_for(pv, range_band::close, static_cast<primary>(a))};
+			const auto in_mid{choose_primary_for(pv, range_band::mid, in_close)};
+			CHECK(choose_primary_for(pv, range_band::close, in_mid) == in_mid || choose_primary_for(pv, range_band::close, in_mid) == in_close);
+			const auto back{choose_primary_for(pv, range_band::close, in_mid)};
+			CHECK(choose_primary_for(pv, range_band::mid, back) == in_mid);
+		}
 	/* The current weapon cannot fire: switch whatever the margin. */
 	v.owned = bits({primary::gauss});
 	v.vulcan_ammo = 0;
@@ -243,12 +319,18 @@ void test_values()
 	CHECK(energy_need(r) == 1);
 	r.weapons = {};
 	r.energy = r.weapons.energy = 100;
-	/* A better primary is worth 5, a spare 1, one it has nothing. */
+	/* A better primary is worth 3-7 by how much better, a spare 1,
+	 * one it has nothing.
+	 */
 	const auto plasma{item_desc{item::primary, primary::plasma, 0}};
-	CHECK(item_value(plasma, r) == VALUE_BETTER_PRIMARY);
+	CHECK(upgrade_ratio(plasma, r.weapons) > 3);
+	CHECK(item_value(plasma, r) == 7);
+	CHECK(upgrade_value(1) == 3 && upgrade_value(2) == 5 && upgrade_value(5) == 7);
+	CHECK(item_value({item::primary, primary::phoenix, 0}, r) > 5 && item_value({item::primary, primary::phoenix, 0}, r) < 7);
 	r.weapons.owned = bits({primary::helix, primary::plasma});
 	CHECK(item_value(plasma, r) == 0);
 	CHECK(item_value({item::primary, primary::spreadfire, 0}, r) == VALUE_SPARE_PRIMARY);
+	CHECK(upgrade_ratio({item::primary, primary::spreadfire, 0}, r.weapons) == 1);
 	/* Fusion and omega: taken (denied to others, dropped at death), for
 	 * little.
 	 */
@@ -256,7 +338,7 @@ void test_values()
 	CHECK(item_value({item::primary, primary::fusion, 0}, r) == VALUE_SPARE_PRIMARY);
 	CHECK(item_value({item::primary, primary::omega, 0}, r) == VALUE_SPARE_PRIMARY);
 	/* A new cannon is better than the laser (it comes with rounds). */
-	CHECK(item_value({item::primary, primary::gauss, 0}, r) == VALUE_BETTER_PRIMARY);
+	CHECK(item_value({item::primary, primary::gauss, 0}, r) == 7);
 	/* A cannon it has: its rounds, the more the emptier. */
 	r.weapons.owned = bits({primary::gauss});
 	r.weapons.vulcan_ammo = 100;
@@ -268,9 +350,9 @@ void test_values()
 	r.weapons.owned = bits({});
 	CHECK(item_value({item::vulcan_ammo}, r) < 0.5);
 	/* Laser upgrades matter while the laser is the best weapon. */
-	CHECK(item_value({item::laser}, r) == 3);
-	CHECK(item_value({item::super_laser}, r) == 3);
-	CHECK(item_value({item::quad}, r) == 4);
+	CHECK(item_value({item::laser}, r) == upgrade_value(1.25));
+	CHECK(std::abs(item_value({item::super_laser}, r) - 5.6) < 1e-9);
+	CHECK(item_value({item::quad}, r) > 3 && item_value({item::quad}, r) < 4);
 	r.weapons.owned = bits({primary::plasma, primary::helix});
 	CHECK(item_value({item::laser}, r) == VALUE_SPARE_PRIMARY);
 	CHECK(item_value({item::quad}, r) == 2);
@@ -301,7 +383,7 @@ void test_collect_utility()
 	/* A better weapon far away against a shield orb nearby at full
 	 * shields.
 	 */
-	CHECK(collect_utility(VALUE_BETTER_PRIMARY, 300) > collect_utility(0.5, 20));
+	CHECK(collect_utility(5.0, 300) > collect_utility(0.5, 20));
 }
 
 /* Section 4.1: the goal choice. */
@@ -321,7 +403,7 @@ void test_goal_choice()
 	in.target_score = 0.4;
 	CHECK(choose_goal(in) == goal_kind::hunt);
 	/* A better weapon near, while hunting: collect it first. */
-	in.collect = collect_utility(VALUE_BETTER_PRIMARY, 80);
+	in.collect = collect_utility(5.0, 80);
 	in.collect_path = 80;
 	CHECK(choose_goal(in) == goal_kind::collect);
 	/* ... but not with an enemy in sight (collection stops), unless it is
@@ -330,11 +412,22 @@ void test_goal_choice()
 	in.target_visible = true;
 	in.target_score = 0.8;
 	CHECK(choose_goal(in) == goal_kind::engage);
-	in.collect = collect_utility(VALUE_BETTER_PRIMARY, 30);
+	in.collect = collect_utility(5.0, 30);
 	in.collect_path = 30;
 	CHECK(choose_goal(in) == goal_kind::collect);
-	in.collect = collect_utility(VALUE_BETTER_PRIMARY, 80);
+	in.collect = collect_utility(5.0, 80);
 	in.collect_path = 80;
+	/* Section 9.3 (a): a much better weapon (the spawn laser against
+	 * plasma: value 7) is worth the detour in a fight too; the bot
+	 * shoots on its way.
+	 */
+	CHECK(choose_goal(in) == goal_kind::engage);
+	in.collect = collect_utility(7, 80);
+	in.collect_upgrade = true;
+	CHECK(choose_goal(in) == goal_kind::collect);
+	in.collect_upgrade = false;
+	CHECK(choose_goal(in) == goal_kind::engage);
+	in.collect = collect_utility(5.0, 80);
 	in.collector = true;
 	in.collect_weight = style_of(bot_style::collector).collect_weight;
 	in.engage_weight = style_of(bot_style::collector).engage_weight;

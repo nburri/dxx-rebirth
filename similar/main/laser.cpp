@@ -1510,7 +1510,11 @@ static imobjptridx_t Laser_player_fire_spread_delay(const d_robot_info_array &Ro
 		Player_fired_laser_this_frame = objnum;
 
 	if (Weapon_info[laser_type].homing_flag) {
-		if (obj == ConsoleObject)
+		/* The shooter flown on this machine (the local player, or on the
+		 * host a bot) picks what its missile homes on; for the others
+		 * the target came with their MULTI_FIRE.
+		 */
+		if (obj == ConsoleObject || (obj->type == object_type::OBJ_PLAYER && bot_is_local(get_player_id(obj))))
 		{
 			objnum->ctype.laser_info.track_goal = find_homing_object(LaserPos, objnum);
 		}
@@ -2351,6 +2355,11 @@ void do_missile_firing(pilot &p, const secondary_weapon_index weapon, const vmob
 
 	if (p.dead_state != player_dead_state::no)
 		return;
+	/* The human at this machine: its rapid fire cheat and its secondary
+	 * autoselect.  A bot (bot.cpp) chooses its own missiles and has no
+	 * cheats.
+	 */
+	const bool human{&p == &Local_pilot};
 	if (auto &secondary_weapon_ammo = player_info.secondary_ammo[weapon])
 	{
 		const auto weapon_index{Secondary_weapon_to_weapon_info[weapon]};
@@ -2370,7 +2379,7 @@ void do_missile_firing(pilot &p, const secondary_weapon_index weapon, const vmob
 		 */
 		if (base_weapon_gun == player_gun_number::_4)
 			Missile_gun++;
-		if (!cheats.rapidfire)
+		if (!(human && cheats.rapidfire))
 			Next_missile_fire_time = GameTime64 + Weapon_info[weapon_index].fire_wait - fire_frame_overhead;
 		else
 			Next_missile_fire_time = GameTime64 + (F1_0/25) - fire_frame_overhead;
@@ -2417,7 +2426,7 @@ void do_missile_firing(pilot &p, const secondary_weapon_index weapon, const vmob
 		}
 
 		// don't autoselect if dropping prox and prox not current weapon
-		if (player_info.Secondary_weapon == weapon)
+		if (human && player_info.Secondary_weapon == weapon)
 			auto_select_secondary_weapon(player_info);		//select next missile, if this one out of ammo
 	}
 }
