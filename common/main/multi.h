@@ -1073,6 +1073,17 @@ void net_objects_flush_inventory();
  * now, even if only energy or ammunition changed).
  */
 void net_objects_host_own_ship_inventory(playernum_t pnum, bool force);
+/* The host: whether the bot in slot `pnum` could take a powerup of type
+ * `id` (carrying `count`: a cannon's rounds, the omega charge) now, by
+ * the rules every player's pickups follow (not full, not already had).
+ */
+[[nodiscard]]
+bool net_objects_bot_can_use(playernum_t pnum, powerup_type_t id, uint32_t count);
+/* The host: the ship of the bot in slot `pnum` touched `powerup`.  The
+ * host decides as for any player (host_decide) and grants it at once
+ * (PICKUP_GRANT, then the bot's INVENTORY).  True if granted.
+ */
+bool net_objects_bot_touch(playernum_t pnum, vmobjptridx_t powerup);
 /* The host: send every player's inventory to everyone (the extras of a
  * join in progress).
  */

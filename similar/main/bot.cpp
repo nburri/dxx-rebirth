@@ -5,10 +5,11 @@
  * terms and a link to the Git history.
  */
 /*
- * Multiplayer bots on the host (Documentation/multiplayer-bots.md, stage
- * B1): the slots bots take, their brain on a fixed tick (perception,
- * target choice, navigation, aim), the controls it produces, firing,
- * damage, death and respawn.
+ * Multiplayer bots on the host (Documentation/multiplayer-bots.md, stages
+ * B1 and B3): the slots bots take, their brain on a fixed tick
+ * (perception, target choice, goals, navigation, aim), the controls it
+ * produces, firing and the weapon choice, pickups, fuel centres, the
+ * afterburner, damage, death and respawn.
  *
  * A bot is a player slot the host flies.  Its ship is an ordinary remote
  * ship (control_source remote), moved by do_physics_sim from the bot's
@@ -36,7 +37,9 @@
 #include <vector>
 
 #include "bot.h"
+#include "bot_goals.h"
 #include "bot_nav.h"
+#include "net_v2_objects.h"
 #include "net_interp.h"
 #include "net_v2_game.h"
 #include "pilot.h"
@@ -67,6 +70,10 @@
 #include "bm.h"
 #include "console.h"
 #include "d_levelstate.h"
+#include "powerup.h"
+#include "fuelcen.h"
+#include "digi.h"
+#include "sounds.h"
 
 namespace dsx {
 
@@ -109,6 +116,23 @@ constexpr unsigned BOT_DODGE_TICKS{b::ticks_from_ms(350)};
  * velocity points within this angle of the steer point.
  */
 constexpr double BOT_BEND_MAX_ANGLE{b::radians(40)};
+/* Stage B3 (section 4.7): the path costs a bot computes at each strategy
+ * tick reach this far, over at most this many segments.
+ */
+constexpr double BOT_DISTANCE_MAX_COST{2500};
+constexpr unsigned BOT_DISTANCE_NODE_LIMIT{3000};
+/* Powerups whose line of sight a bot checks per strategy tick. */
+constexpr unsigned BOT_POWERUP_LOS_BUDGET{6};
+/* A powerup the bot came to without taking it, or could not reach, is no
+ * goal for this long.
+ */
+constexpr unsigned BOT_COLLECT_IGNORE_TICKS{5 * b::BOT_TICK_RATE};
+constexpr unsigned BOT_COLLECT_UNREACHABLE_TICKS{10 * b::BOT_TICK_RATE};
+/* Fuel and repair centres give this much per second (Fuelcen_give_amount). */
+constexpr fix BOT_FUELCEN_RATE{i2f(25)};
+constexpr fix BOT_FUELCEN_SOUND_DELAY{F1_0 / 4};
+/* A retreat without a known shield source draws this many places. */
+constexpr unsigned BOT_FLEE_TRIES{10};
 /* Stage B1 plays every bot at the Hotshot preset (section 9). */
 constexpr b::bot_skill BOT_B1_SKILL{b::bot_skill::hotshot};
 
@@ -161,6 +185,12 @@ enum class bot_goal : uint8_t
 	roam,
 	/* A target out of reach of a direct shot: fly to where it was seen. */
 	hunt,
+	/* Stage B3 (section 4.7): fly to a powerup. */
+	collect,
+	/* Weak and threatened: away, to shields if it knows any. */
+	retreat,
+	/* To a fuel or repair centre, and hover there until full. */
+	refuel,
 };
 
 struct bot_controls
@@ -172,6 +202,7 @@ struct bot_state
 {
 	playernum_t pid;
 	bot_config cfg;
+	b::bot_skill skill_level{BOT_B1_SKILL};
 	const b::skill_params *skill{&b::skill_of(BOT_B1_SKILL)};
 	const b::style_params *style{&b::style_of(b::bot_style::balanced)};
 	pilot pl{};
@@ -203,6 +234,16 @@ struct bot_state
 	uint32_t dodge_salt{};
 	vec3 dodge_dir;
 	uint32_t dodge_from{}, dodge_until{};
+	/* Stage B3 (section 4.7): the powerups it knows, the path costs from
+	 * where it is (each strategy tick), the powerup or centre it goes to.
+	 */
+	b::powerup_memory powerups;
+	b::nav_distances dist;
+	uint16_t collect_key{0xffff}, collect_sig{};
+	uint32_t refuel_seg{};
+	/* The afterburner is lit. */
+	bool burning{};
+	fix64 fuel_sound_at{};
 	/* Navigation. */
 	bot_goal goal{bot_goal::none};
 	uint32_t goal_seg{};
@@ -249,6 +290,8 @@ struct bot_state
 		dodge_salt = rng.next();
 		dodge_dir = {};
 		dodge_from = dodge_until = 0;
+		collect_key = 0xffff;
+		burning = false;
 		clear_path();
 		goal = bot_goal::none;
 		stuck.reset();
@@ -285,6 +328,9 @@ struct bots_state
 	b::path_result path;
 	/* Side centres, 6 per segment. */
 	std::vector<vec3> side_centres;
+	/* Stage B3: the fuel centres and repair centres of the level. */
+	std::vector<uint32_t> fuel_centres;
+	std::vector<uint32_t> repair_centres;
 	ship_limits limits;
 	/* The controls passed to apply_pilot_controls. */
 	control_info controls{};
@@ -361,6 +407,19 @@ void build_nav_graph()
 		}
 	}
 	B.graph.finish();
+	B.fuel_centres.clear();
+	B.repair_centres.clear();
+	for (const auto &&segp : vcsegptridx)
+	{
+		const uint32_t n{segp.get_unchecked_index()};
+		if (n >= count)
+			continue;
+		const shared_segment &ss{segp};
+		if (ss.special == segment_special::fuelcen)
+			B.fuel_centres.push_back(n);
+		else if (ss.special == segment_special::repaircen)
+			B.repair_centres.push_back(n);
+	}
 	con_printf(CON_VERBOSE, "bots: navigation graph of %zu segments, %zu edges", B.graph.size(), B.graph.edge_count());
 }
 
@@ -466,22 +525,152 @@ double weapon_range(const player_info &pi)
 	return std::clamp(r * 0.8, 60.0, 400.0);
 }
 
-/* Stage B1: the best primary it can fire (bot_brain.h); a switch costs
- * the rearm time, as select_primary_weapon's does.  No HUD, no sound.
- */
-void choose_weapon(object &obj)
+[[nodiscard]]
+bool has_flag(const player_info &pi, const player_flag f)
 {
-	auto &pi{obj.ctype.player_info};
-	const auto wanted{b::choose_primary({
+	return +(pi.powerup_flags & f) ? true : false;
+}
+
+[[nodiscard]]
+b::weapon_view weapons_of(const player_info &pi)
+{
+	return {
 		.owned = pi.primary_weapon_flags,
+		.laser_level = underlying_value(pi.laser_level),
+		.quad = has_flag(pi, player_flag::quad_lasers),
 		.energy = pi.energy / 65536.0,
 		.vulcan_ammo = pi.vulcan_ammo,
-	})};
+	};
+}
+
+/* Section 4.5: the primary for the range to the target (none: no
+ * target), from the weapon table (bot_goals.h); below weapon smarts 2
+ * the fixed order of stage B1.  A switch costs the rearm time, as
+ * select_primary_weapon's does.  No HUD, no sound.
+ */
+void choose_weapon(const bot_state &bs, object &obj, const std::optional<b::range_band> band)
+{
+	auto &pi{obj.ctype.player_info};
+	const auto active{pi.Primary_weapon.get_active()};
+	const auto current{static_cast<b::primary>(underlying_value(active))};
+	const auto wanted{bs.skill->weapon_smarts < 2
+		? b::choose_primary({
+			.owned = pi.primary_weapon_flags,
+			.energy = pi.energy / 65536.0,
+			.vulcan_ammo = pi.vulcan_ammo,
+		})
+		: b::choose_primary_for(weapons_of(pi), band, current)};
 	const auto w{static_cast<primary_weapon_index>(underlying_value(wanted))};
-	if (pi.Primary_weapon.get_active() == w)
+	if (active == w)
 		return;
 	pi.Primary_weapon = w;
 	pi.Next_laser_fire_time = GameTime64 + REARM_TIME;
+}
+
+/* Section 4.7: what the bot has, for the collection values. */
+[[nodiscard]]
+b::resource_view resources_of(const object &obj)
+{
+	const auto &pi{obj.ctype.player_info};
+	b::resource_view r;
+	r.shields = obj.shields / 65536.0;
+	r.energy = pi.energy / 65536.0;
+	r.weapons = weapons_of(pi);
+	r.ammo_rack = has_flag(pi, player_flag::ammo_rack);
+	const double ammo_max{static_cast<double>(VULCAN_AMMO_MAX) * (r.ammo_rack ? 2 : 1)};
+	r.vulcan_ammo_share = pi.vulcan_ammo / ammo_max;
+	r.afterburner = has_flag(pi, player_flag::afterburner);
+	r.converter = has_flag(pi, player_flag::converter);
+	r.cloaked = has_flag(pi, player_flag::cloaked);
+	r.invulnerable = has_flag(pi, player_flag::invulnerable) && !pi.FakingInvul;
+	return r;
+}
+
+/* Section 4.7: what a powerup is to a bot. */
+[[nodiscard]]
+b::item_desc item_of(const powerup_type_t id)
+{
+	using b::item;
+	const auto primary{[](const b::primary p) {
+		return b::item_desc{item::primary, p, 0};
+	}};
+	const auto missile{[](const secondary_weapon_index w) {
+		return b::item_desc{item::secondary, b::primary::laser, underlying_value(w)};
+	}};
+	switch (id)
+	{
+		case powerup_type_t::POW_ENERGY:
+			return {item::energy};
+		case powerup_type_t::POW_SHIELD_BOOST:
+			return {item::shield};
+		case powerup_type_t::POW_LASER:
+			return {item::laser};
+		case powerup_type_t::POW_QUAD_FIRE:
+			return {item::quad};
+		case powerup_type_t::POW_VULCAN_WEAPON:
+			return primary(b::primary::vulcan);
+		case powerup_type_t::POW_SPREADFIRE_WEAPON:
+			return primary(b::primary::spreadfire);
+		case powerup_type_t::POW_PLASMA_WEAPON:
+			return primary(b::primary::plasma);
+		case powerup_type_t::POW_FUSION_WEAPON:
+			return primary(b::primary::fusion);
+		case powerup_type_t::POW_VULCAN_AMMO:
+			return {item::vulcan_ammo};
+		case powerup_type_t::POW_MISSILE_1:
+		case powerup_type_t::POW_MISSILE_4:
+			return missile(secondary_weapon_index::concussion);
+		case powerup_type_t::POW_HOMING_AMMO_1:
+		case powerup_type_t::POW_HOMING_AMMO_4:
+			return missile(secondary_weapon_index::homing);
+		case powerup_type_t::POW_PROXIMITY_WEAPON:
+			return missile(secondary_weapon_index::proximity);
+		case powerup_type_t::POW_SMARTBOMB_WEAPON:
+			return missile(secondary_weapon_index::smart);
+		case powerup_type_t::POW_MEGA_WEAPON:
+			return missile(secondary_weapon_index::mega);
+		case powerup_type_t::POW_CLOAK:
+			return {item::cloak};
+		case powerup_type_t::POW_INVULNERABILITY:
+			return {item::invulnerability};
+#if DXX_BUILD_DESCENT == 2
+		case powerup_type_t::POW_GAUSS_WEAPON:
+			return primary(b::primary::gauss);
+		case powerup_type_t::POW_HELIX_WEAPON:
+			return primary(b::primary::helix);
+		case powerup_type_t::POW_PHOENIX_WEAPON:
+			return primary(b::primary::phoenix);
+		case powerup_type_t::POW_OMEGA_WEAPON:
+			return primary(b::primary::omega);
+		case powerup_type_t::POW_SUPER_LASER:
+			return {item::super_laser};
+		case powerup_type_t::POW_FULL_MAP:
+			return {item::full_map};
+		case powerup_type_t::POW_CONVERTER:
+			return {item::converter};
+		case powerup_type_t::POW_AMMO_RACK:
+			return {item::ammo_rack};
+		case powerup_type_t::POW_AFTERBURNER:
+			return {item::afterburner};
+		case powerup_type_t::POW_HEADLIGHT:
+			return {item::headlight};
+		case powerup_type_t::POW_SMISSILE1_1:
+		case powerup_type_t::POW_SMISSILE1_4:
+			return missile(secondary_weapon_index::flash);
+		case powerup_type_t::POW_GUIDED_MISSILE_1:
+		case powerup_type_t::POW_GUIDED_MISSILE_4:
+			return missile(secondary_weapon_index::guided);
+		case powerup_type_t::POW_SMART_MINE:
+			return missile(secondary_weapon_index::smart_mine);
+		case powerup_type_t::POW_MERCURY_MISSILE_1:
+		case powerup_type_t::POW_MERCURY_MISSILE_4:
+			return missile(secondary_weapon_index::mercury);
+		case powerup_type_t::POW_EARTHSHAKER_MISSILE:
+			return missile(secondary_weapon_index::earthshaker);
+#endif
+		default:
+			return {};
+	}
 }
 
 /* Plan a path from the ship's segment to `goal_seg` (section 4.3). */
@@ -708,11 +897,261 @@ void perceive(bot_state &bs, const object &obj, const uint32_t tick)
 	net_objects_host_own_ship_inventory(bs.pid, false);
 }
 
-/* Section 4.4: target choice and the goal, at 5 Hz. */
+/* Section 4.7: the path costs from where the bot is to everything within
+ * reach, with the passability and penalties of its paths.
+ */
+void compute_distances(bot_state &bs, const object &obj)
+{
+	const auto flags{obj.ctype.player_info.powerup_flags};
+	bs.dist.compute(B.graph, obj.segnum, [flags](const uint32_t from, const b::nav_edge &e) {
+		return edge_passable(from, e, flags);
+	}, [&bs](const uint32_t from, const b::nav_edge &e) {
+		return bs.penalties.cost(from, e.side);
+	}, BOT_DISTANCE_MAX_COST, BOT_DISTANCE_NODE_LIMIT);
+}
+
+/* The live powerup a memory entry names, if it is still there. */
+[[nodiscard]]
+const object *live_powerup(const b::known_powerup &k)
+{
+	auto &Objects = LevelUniqueObjectState.Objects;
+	if (k.key > Highest_object_index)
+		return nullptr;
+	const auto &o{*Objects.vcptr(objnum_t{k.key})};
+	if (o.type != object_type::OBJ_POWERUP || underlying_value(o.signature) != k.signature || (o.flags & OF_SHOULD_BE_DEAD))
+		return nullptr;
+	return &o;
+}
+
+/* Section 4.7 and decision 4 of section 11: what the bot learns of the
+ * powerups at this strategy tick.  It knows the level's initial layout
+ * within its skill's map knowledge (path segments from where it is),
+ * sees powerups (awareness, field of view, line of sight; a few checks
+ * per tick) and hears a new one appear within its hearing radius (a
+ * respawn, a death's drop).  A remembered powerup whose place it sees
+ * empty, or comes to, is forgotten; so is one remembered too long.
+ */
+void learn_powerups(bot_state &bs, const object &obj, const uint32_t tick)
+{
+	auto &Objects = LevelUniqueObjectState.Objects;
+	const auto &sk{*bs.skill};
+	const auto pos{to_vec(obj.pos)};
+	const auto frame{to_frame(obj.orient)};
+	unsigned budget{BOT_POWERUP_LOS_BUDGET};
+	const auto sees{[&](const vms_vector &where, const vec3 &to) {
+		if (b::length(to) > sk.awareness || !b::in_field_of_view(frame.f, to, sk.fov_half_deg) || !budget)
+			return false;
+		--budget;
+		return line_clear(obj, obj.pos, obj.segnum, where, 0, true);
+	}};
+	/* First the places it remembers: still there? */
+	std::array<uint16_t, 128> gone{};
+	std::size_t n_gone{0};
+	for (const auto &k : bs.powerups.items())
+	{
+		if (const auto o{live_powerup(k)})
+		{
+			/* It rolled (a drop settling): the bot follows it. */
+			if (o->pos != to_fixvec(k.pos))
+			{
+				auto u{k};
+				u.pos = to_vec(o->pos);
+				u.segment = o->segnum;
+				u.count = static_cast<uint32_t>(std::max(o->ctype.powerup_info.count, 0));
+				bs.powerups.learn(u, k.learned_tick);
+			}
+			continue;
+		}
+		const auto to{k.pos - pos};
+		if ((b::length(to) < 15 || sees(to_fixvec(k.pos), to)) && n_gone < gone.size())
+			gone[n_gone++] = k.key;
+	}
+	for (std::size_t i = 0; i < n_gone; ++i)
+		bs.powerups.forget(gone[i]);
+	bs.powerups.expire(tick, b::ticks_from_ms(b::powerup_memory_ms(sk)));
+	/* Then the powerups it does not know yet. */
+	for (const auto &&o : Objects.vcptridx)
+	{
+		if (o->type != object_type::OBJ_POWERUP || (o->flags & OF_SHOULD_BE_DEAD))
+			continue;
+		const uint16_t key = o.get_unchecked_index();
+		const uint16_t sig = underlying_value(o->signature);
+		if (bs.powerups.knows(key, sig))
+			continue;
+		if (item_of(get_powerup_id(o)).kind == b::item::none)
+			continue;
+		const auto netid{net_objects_netid_of(o)};
+		const bool initial{netid != 0xffff && ::dcx::net_v2::is_level_netid(netid)};
+		const auto ppos{to_vec(o->pos)};
+		const auto to{ppos - pos};
+		bool learn{b::knows_from_map(initial, bs.dist.hops(o->segnum), sk.map_knowledge)};
+		if (!learn && !initial)
+		{
+			const double age{(GameTime64 - o->ctype.powerup_info.creation_time) / 65536.0};
+			learn = b::hears_appearance(age, b::length(to), sk.hearing);
+		}
+		if (!learn)
+			learn = sees(o->pos, to);
+		if (!learn)
+			continue;
+		bs.powerups.learn({
+			.key = key,
+			.signature = sig,
+			.type = static_cast<uint8_t>(get_powerup_id(o)),
+			.count = static_cast<uint32_t>(std::max(o->ctype.powerup_info.count, 0)),
+			.initial = initial,
+			.pos = ppos,
+			.segment = o->segnum,
+		}, tick);
+	}
+}
+
+/* A goal place: a powerup or a centre. */
+struct goal_place
+{
+	double utility{};
+	double path{};
+	uint32_t segment{};
+	vec3 pos;
+	uint16_t key{0xffff}, sig{};
+	bool shields{};
+};
+
+/* Section 4.7: the best powerup to collect, by value (its need) over the
+ * path cost.  Only what the rules let the bot take (as a human's "already
+ * have") and what it can reach.
+ */
+[[nodiscard]]
+goal_place best_collect(const bot_state &bs, const b::resource_view &res, const uint32_t tick, const bool shields_only = false)
+{
+	goal_place best;
+	for (const auto &k : bs.powerups.items())
+	{
+		if (tick < k.ignore_until)
+			continue;
+		const auto type{static_cast<powerup_type_t>(k.type)};
+		const auto desc{item_of(type)};
+		if (shields_only && desc.kind != b::item::shield)
+			continue;
+		const auto cost{bs.dist.cost(k.segment)};
+		if (!cost)
+			continue;
+		const double value{b::item_value(desc, res)};
+		if (value <= 0)
+			continue;
+		if (!net_objects_bot_can_use(bs.pid, type, k.count))
+			continue;
+		const double path{*cost + b::distance(B.graph.position(k.segment), k.pos)};
+		const double u{b::collect_utility(value, path)};
+		if (u > best.utility)
+			best = {u, path, k.segment, k.pos, k.key, k.signature, desc.kind == b::item::shield};
+	}
+	return best;
+}
+
+/* Section 4.7: the best fuel centre (energy) or repair centre (shields). */
+[[nodiscard]]
+goal_place best_centre(const bot_state &bs, const b::resource_view &res, const bool repair_only = false)
+{
+	goal_place best;
+	const auto consider{[&](const std::vector<uint32_t> &centres, const bool repair) {
+		const double value{b::fuel_centre_value(repair, res)};
+		if (value <= 0)
+			return;
+		for (const auto seg : centres)
+		{
+			const auto cost{bs.dist.cost(seg)};
+			if (!cost)
+				continue;
+			const double u{b::collect_utility(value, *cost)};
+			if (u > best.utility)
+				best = {u, *cost, seg, B.graph.position(seg), 0xffff, 0, repair};
+		}
+	}};
+	if (!repair_only)
+		consider(B.fuel_centres, false);
+	consider(B.repair_centres, true);
+	return best;
+}
+
+[[nodiscard]]
+bool in_centre(const object &obj, const bool repair)
+{
+	const shared_segment &seg{*vcsegptr(obj.segnum)};
+	return seg.special == (repair ? segment_special::repaircen : segment_special::fuelcen);
+}
+
+/* Section 4.7, retreat: a shield source away from the threat (a shield
+ * powerup it knows, a repair centre), else the place of a few drawn that
+ * is furthest from the threat for the least flying.
+ */
+[[nodiscard]]
+std::optional<goal_place> retreat_place(bot_state &bs, const object &obj, const b::resource_view &res, const vec3 &threat, const uint32_t tick)
+{
+	const auto pos{to_vec(obj.pos)};
+	std::optional<goal_place> best;
+	double best_u{0};
+	for (const auto &p : {best_collect(bs, res, tick, true), best_centre(bs, res, true)})
+	{
+		if (p.utility <= 0)
+			continue;
+		const double u{p.utility * b::retreat_direction_factor(pos, p.pos, threat)};
+		if (u > best_u)
+		{
+			best_u = u;
+			best = p;
+		}
+	}
+	if (best && best_u > 0.3)
+		return best;
+	best.reset();
+	double best_flee{-1e9};
+	const auto n{static_cast<unsigned>(B.graph.size())};
+	for (unsigned i = 0; i < BOT_FLEE_TRIES; ++i)
+	{
+		const uint32_t seg{bs.rng.below(n)};
+		const auto cost{bs.dist.cost(seg)};
+		if (!cost || *cost < 80)
+			continue;
+		const auto &place{B.graph.position(seg)};
+		const double f{b::flee_score(place, threat, *cost)};
+		if (f > best_flee)
+		{
+			best_flee = f;
+			best = goal_place{0, *cost, seg, place, 0xffff, 0, false};
+		}
+	}
+	return best;
+}
+
+/* The goal of the last strategy tick, as the goal choice sees it. */
+[[nodiscard]]
+std::optional<b::goal_kind> current_goal(const bot_state &bs, const bool target_visible)
+{
+	switch (bs.goal)
+	{
+		case bot_goal::none:
+			return std::nullopt;
+		case bot_goal::roam:
+			return b::goal_kind::roam;
+		case bot_goal::hunt:
+			return target_visible ? b::goal_kind::engage : b::goal_kind::hunt;
+		case bot_goal::collect:
+			return b::goal_kind::collect;
+		case bot_goal::retreat:
+			return b::goal_kind::retreat;
+		case bot_goal::refuel:
+			return b::goal_kind::refuel;
+	}
+	return std::nullopt;
+}
+
+/* Section 4.4: target choice; section 4.7: the goal, at 5 Hz. */
 void think(bot_state &bs, object &obj, const uint32_t tick)
 {
 	auto &Objects = LevelUniqueObjectState.Objects;
 	const auto &sk{*bs.skill};
+	const auto &st{*bs.style};
 	const auto pos{to_vec(obj.pos)};
 	std::array<b::target_candidate, MAX_PLAYERS> cand{};
 	unsigned n{0};
@@ -732,25 +1171,132 @@ void think(bot_state &bs, object &obj, const uint32_t tick)
 		c.bounty = +(Game_mode & GM_BOUNTY) && Bounty_target == i;
 	}
 	bs.target = b::choose_target(std::span(cand.data(), n), bs.target, sk.awareness);
-	choose_weapon(obj);
+	double target_score{0};
+	bool target_visible{false};
+	std::optional<double> target_distance;
 	if (bs.target)
 	{
-		/* Hunt: a path to where the target is (or was last seen), also
-		 * while the bot fights it in the open.  B1 dropped the path for a
-		 * direct engagement, so until the bot reacted to the target (a
-		 * reaction time), whenever the line of fire closed and whenever
-		 * the target left the field of view for a moment, the bot had
-		 * nowhere to go and stopped dead: it fought on one spot.  Now it
-		 * chases along the path in those moments.  A target that moves on
-		 * is planned for again at most every half second.
-		 */
-		const auto &m{bs.memory[*bs.target]};
-		const bool moved{bs.goal != bot_goal::hunt || bs.goal_seg != m.segment};
-		if (bs.points.empty() || tick >= bs.next_plan_tick || (moved && tick - bs.last_plan_tick >= BOT_HUNT_REPLAN_TICKS))
-			set_goal(bs, obj, bot_goal::hunt, m.segment, m.pos, tick);
-		return;
+		for (unsigned k = 0; k < n; ++k)
+			if (cand[k].id == *bs.target)
+			{
+				target_score = b::target_score(cand[k], sk.awareness);
+				target_distance = cand[k].distance;
+			}
+		target_visible = bs.visible_now[*bs.target];
 	}
-	if (bs.goal == bot_goal::hunt)
+	/* Section 4.5: the primary for the range to the target. */
+	choose_weapon(bs, obj, target_distance ? std::optional<b::range_band>{b::band_of(*target_distance)} : std::nullopt);
+	/* Section 4.7: what it knows and what it needs. */
+	compute_distances(bs, obj);
+	learn_powerups(bs, obj, tick);
+	const auto res{resources_of(obj)};
+	const auto collect{best_collect(bs, res, tick)};
+	auto centre{best_centre(bs, res)};
+	/* A bot hovering in a centre stays until it is full, unless an enemy
+	 * comes into sight while it has enough to fight.
+	 */
+	const bool refuelling{bs.goal == bot_goal::refuel && bs.points.empty()};
+	if (refuelling && (in_centre(obj, false) || in_centre(obj, true)))
+	{
+		const bool repair{in_centre(obj, true)};
+		const double level{repair ? res.shields : res.energy};
+		if (b::keep_refuelling(level, target_visible))
+			centre = {std::max(centre.utility, 3.0), 0, static_cast<uint32_t>(obj.segnum), pos, 0xffff, 0, repair};
+	}
+	const bool attacked{bs.last_attacker < MAX_PLAYERS && tick - bs.attacked_tick < BOT_REVENGE_TICKS};
+	const auto goal{b::choose_goal({
+		.has_target = bs.target.has_value(),
+		.target_visible = target_visible,
+		.target_score = target_score,
+		.threatened = bs.target.has_value() || attacked,
+		.shields = res.shields,
+		.invulnerable = res.invulnerable,
+		.collect = collect.utility,
+		.collect_path = collect.path,
+		.refuel = centre.utility,
+		.retreat_shields = st.retreat_shields,
+		.engage_weight = st.engage_weight,
+		.collect_weight = st.collect_weight,
+		.collector = bs.cfg.style == b::bot_style::collector,
+		.current = current_goal(bs, target_visible),
+	})};
+	const bool replan_due{bs.points.empty() || tick >= bs.next_plan_tick};
+	switch (goal)
+	{
+		case b::goal_kind::engage:
+		case b::goal_kind::hunt:
+		{
+			/* Hunt: a path to where the target is (or was last seen),
+			 * also while the bot fights it in the open.  B1 dropped the
+			 * path for a direct engagement, so until the bot reacted to
+			 * the target (a reaction time), whenever the line of fire
+			 * closed and whenever the target left the field of view for
+			 * a moment, the bot had nowhere to go and stopped dead: it
+			 * fought on one spot.  Now it chases along the path in those
+			 * moments.  A target that moves on is planned for again at
+			 * most every half second.
+			 */
+			const auto &m{bs.memory[*bs.target]};
+			const bool moved{bs.goal != bot_goal::hunt || bs.goal_seg != m.segment};
+			if (replan_due || (moved && tick - bs.last_plan_tick >= BOT_HUNT_REPLAN_TICKS))
+				set_goal(bs, obj, bot_goal::hunt, m.segment, m.pos, tick);
+			return;
+		}
+		case b::goal_kind::collect:
+		{
+			const bool other{bs.goal != bot_goal::collect || bs.collect_key != collect.key || bs.collect_sig != collect.sig};
+			bs.collect_key = collect.key;
+			bs.collect_sig = collect.sig;
+			if (other || replan_due)
+				set_goal(bs, obj, bot_goal::collect, collect.segment, collect.pos, tick);
+			return;
+		}
+		case b::goal_kind::refuel:
+			if (obj.segnum == centre.segment)
+			{
+				/* In the centre: hover (follow_path holds the place). */
+				if (bs.goal != bot_goal::refuel || !bs.points.empty())
+				{
+					bs.goal = bot_goal::refuel;
+					bs.goal_seg = centre.segment;
+					bs.clear_path();
+				}
+				bs.refuel_seg = centre.segment;
+				return;
+			}
+			if (bs.goal != bot_goal::refuel || bs.refuel_seg != centre.segment || replan_due)
+			{
+				bs.refuel_seg = centre.segment;
+				set_goal(bs, obj, bot_goal::refuel, centre.segment, centre.pos, tick);
+			}
+			return;
+		case b::goal_kind::retreat:
+		{
+			/* On its way: keep the place (planned again every 2 s, as
+			 * doors and penalties change); a new one only on arrival.
+			 */
+			if (bs.goal == bot_goal::retreat && !bs.points.empty())
+			{
+				if (tick >= bs.next_plan_tick)
+					plan_path(bs, obj, bs.goal_seg, std::nullopt, tick);
+				return;
+			}
+			vec3 threat{pos};
+			if (bs.target)
+				threat = bs.memory[*bs.target].pos;
+			else if (attacked && bs.memory[bs.last_attacker].valid)
+				threat = bs.memory[bs.last_attacker].pos;
+			if (const auto place{retreat_place(bs, obj, res, threat, tick)})
+			{
+				set_goal(bs, obj, bot_goal::retreat, place->segment, place->pos, tick);
+				return;
+			}
+			break;
+		}
+		case b::goal_kind::roam:
+			break;
+	}
+	if (bs.goal != bot_goal::roam)
 		bs.goal = bot_goal::none;
 	if (bs.goal == bot_goal::none || bs.points.empty())
 		choose_roam_goal(bs, obj, tick);
@@ -769,9 +1315,21 @@ vec3 follow_path(bot_state &bs, object &obj, const bool engaged)
 			bs.face_dir = frame.f;
 			bs.face_rate = {};
 		}
+		/* Refuelling (section 4.7): hover in the centre. */
+		if (bs.goal == bot_goal::refuel && bs.goal_seg < B.graph.size())
+		{
+			const auto hold{(B.graph.position(bs.goal_seg) - pos) * 0.5};
+			const double l{b::length(hold)};
+			const double cap{max_speed * 0.3};
+			return l > cap ? hold * (cap / l) : hold;
+		}
 		return {};
 	}
 	const double reach{std::max(obj.size / 65536.0 * 1.5, 5.0)};
+	/* A powerup is taken by touching it: the bot flies through its
+	 * centre rather than stopping next to it.
+	 */
+	const bool collecting{bs.goal == bot_goal::collect};
 	bs.point_index = b::advance_along(bs.points, bs.point_index, pos, reach);
 	if (bs.steer_index < bs.point_index)
 		bs.steer_index = bs.point_index;
@@ -781,7 +1339,7 @@ vec3 follow_path(bot_state &bs, object &obj, const bool engaged)
 	const bool last{bs.steer_index + 1 == bs.points.size()};
 	double speed{max_speed};
 	if (last)
-		speed = std::min(speed, dist * 1.5);
+		speed = std::min(speed, collecting ? dist * 3 + 8 : dist * 1.5);
 	else
 	{
 		/* Slow down before a sharp turn. */
@@ -810,22 +1368,100 @@ vec3 follow_path(bot_state &bs, object &obj, const bool engaged)
 			break;
 		}
 		case b::stuck_event::give_up:
+			/* A powerup it cannot reach is no goal for a while. */
+			if (collecting)
+				bs.powerups.ignore_for(bs.collect_key, B.tick.tick() + BOT_COLLECT_UNREACHABLE_TICKS);
 			bs.goal = bot_goal::none;
 			bs.clear_path();
 			return {};
 	}
-	if (last && dist < reach)
+	if (last && dist < (collecting ? 2.0 : reach))
 	{
 		/* Arrived.  A hunt that finds nobody forgets the target's old
 		 * position; a roam picks a new place at the next strategy tick.
+		 * At a powerup that is still there (it could not be taken) the
+		 * bot does not come back for a while; a refuelling bot hovers.
 		 */
 		if (bs.goal == bot_goal::hunt && bs.target)
 			bs.memory[*bs.target] = {};
-		bs.goal = bot_goal::none;
+		if (collecting)
+			bs.powerups.ignore_for(bs.collect_key, B.tick.tick() + BOT_COLLECT_IGNORE_TICKS);
+		if (bs.goal != bot_goal::refuel)
+			bs.goal = bot_goal::none;
 		bs.clear_path();
 		return {};
 	}
 	return b::normalized(to) * speed;
+}
+
+/* Section 4.7: the afterburner, by the skill's rule (bot_goals.h): when
+ * chasing a target far away, retreating, dodging, or on a long straight
+ * flight, with enough charge, and only while the bot wants to go where
+ * its nose points (the afterburner is full forward thrust).  The others
+ * hear it as they hear a human's (MULTI_SOUND_FUNCTION as the bot).
+ */
+void decide_afterburner(bot_state &bs, object &obj, const vec3 &wanted, const uint32_t tick)
+{
+#if DXX_BUILD_DESCENT == 2
+	const auto &pi{obj.ctype.player_info};
+	const auto frame{to_frame(obj.orient)};
+	const auto pos{to_vec(obj.pos)};
+	const double max_speed{B.limits.max_speed};
+	bool chasing_far{false};
+	if (bs.target && (bs.goal == bot_goal::hunt) && bs.memory[*bs.target].valid)
+		chasing_far = b::distance(pos, bs.memory[*bs.target].pos) > b::AFTERBURNER_CHASE_DISTANCE;
+	bool long_straight{false};
+	if ((bs.goal == bot_goal::roam || bs.goal == bot_goal::collect) && bs.steer_index < bs.points.size())
+		long_straight = b::distance(pos, bs.points[bs.steer_index]) > 100;
+	const bool dodging{tick >= bs.dodge_from && tick < bs.dodge_until};
+	const bool aligned{b::length(wanted) > max_speed * 0.5 && b::angle_between(frame.f, wanted) < b::radians(25)};
+	const bool burn{!bs.stuck.recovering() && b::want_afterburner({
+		.have = has_flag(pi, player_flag::afterburner),
+		.charge = bs.pl.afterburner_charge / 65536.0,
+		.use = b::afterburner_of(bs.skill_level),
+		.chasing_far = chasing_far,
+		.retreating = bs.goal == bot_goal::retreat,
+		.dodging = dodging,
+		.long_straight = long_straight,
+		.aligned = aligned,
+		.burning = bs.burning,
+	})};
+	if (burn == bs.burning)
+		return;
+	bs.burning = burn;
+	auto &Objects = LevelUniqueObjectState.Objects;
+	const auto &&objp{Objects.vcptridx(&obj)};
+	if (burn)
+	{
+		digi_link_sound_to_object3(sound_effect::SOUND_AFTERBURNER_IGNITE, objp, 1, F1_0, sound_stack::allow_stacking, vm_distance{i2f(256)}, 20098, 25776);
+		multi_send_sound_function(3, sound_effect::SOUND_AFTERBURNER_IGNITE, bs.pid);
+	}
+	else
+	{
+		digi_kill_sound_linked_to_object(objp);
+		multi_send_sound_function(0, 0, bs.pid);
+	}
+#else
+	(void)bs;
+	(void)obj;
+	(void)wanted;
+	(void)tick;
+#endif
+}
+
+/* The afterburner goes out (death, level end). */
+void stop_afterburner(bot_state &bs, const object &obj)
+{
+	if (!bs.burning)
+		return;
+	bs.burning = false;
+#if DXX_BUILD_DESCENT == 2
+	auto &Objects = LevelUniqueObjectState.Objects;
+	digi_kill_sound_linked_to_object(Objects.vcptridx(&obj));
+	multi_send_sound_function(0, 0, bs.pid);
+#else
+	(void)obj;
+#endif
 }
 
 /* One tick of the brain (section 4.1). */
@@ -872,7 +1508,12 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 		bs.face_rate = b::line_of_sight_rate(aim - pos, p->vel - vel);
 		const auto to{est - pos};
 		const double dist{b::length(to)};
-		if (bs.shot_clear)
+		/* Collecting, retreating or refuelling (section 4.7), the bot
+		 * shoots at what it sees but flies its path: backward when it
+		 * retreats facing its pursuer.
+		 */
+		const bool path_goal{bs.goal == bot_goal::collect || bs.goal == bot_goal::retreat || bs.goal == bot_goal::refuel};
+		if (bs.shot_clear && !path_goal)
 		{
 			/* Section 4.6: close in and back off inside the band, strafe
 			 * across the line of sight in changing directions.
@@ -885,7 +1526,15 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 		else
 			wanted = follow_path(bs, obj, true);
 		const double err{b::angle_between(frame.f, bs.face_dir)};
-		bs.fire = b::should_fire(err, b::radians(sk.fire_cone_deg), bs.shot_clear, dist, weapon_range(pi));
+		/* Section 4.5: beyond the mid band, no shot that hits less than
+		 * one time in ten.
+		 */
+		const auto rel_vel{p->vel - vel};
+		const auto los{b::normalized(to)};
+		const double lateral{b::length(rel_vel - los * b::dot(rel_vel, los))};
+		const auto &target_obj{ship_of(p->target)};
+		bs.fire = b::should_fire(err, b::radians(sk.fire_cone_deg), bs.shot_clear, dist, weapon_range(pi)) &&
+			b::long_shot_worthwhile(dist, weapon_speed(pi), lateral, b::radians(sk.aim_sigma_deg), target_obj.size / 65536.0);
 	}
 	else
 		wanted = follow_path(bs, obj, false);
@@ -896,6 +1545,7 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 	if (tick < bs.avoid_until)
 		wanted += bs.avoid;
 	bs.move_cmd = b::velocity_command(wanted, vel, max_speed);
+	decide_afterburner(bs, obj, wanted, tick);
 }
 
 /* Section 3.4: the controls of this frame, from the direction and
@@ -963,7 +1613,7 @@ void give_spawn_invulnerability(object &obj)
 void new_ship(bot_state &bs, object &obj)
 {
 	give_spawn_invulnerability(obj);
-	choose_weapon(obj);
+	choose_weapon(bs, obj, std::nullopt);
 	bs.reset_for_life(B.tick.tick());
 	create_player_appearance_effect(Vclip, obj);
 	multi_send_reappear(bs.pid);
@@ -976,6 +1626,7 @@ void new_ship(bot_state &bs, object &obj)
 void start_death(bot_state &bs, object &obj)
 {
 	bs.death_pending = false;
+	stop_afterburner(bs, obj);
 	bs.life = bot_life::dying;
 	bs.pl.dead_state = player_dead_state::yes;
 	bs.died_at = GameTime64;
@@ -1025,6 +1676,32 @@ void respawn(bot_state &bs, object &obj)
 	new_ship(bs, obj);
 }
 
+/* Section 4.7: a fuel centre gives energy, a repair centre shields, to
+ * a ship in it, as object_move_one gives the local player's (up to 100,
+ * Fuelcen_give_amount per second); the sound is heard on the host.
+ */
+void refuel_frame(bot_state &bs, object &obj)
+{
+	const shared_segment &seg{*vcsegptr(obj.segnum)};
+	fix *level{nullptr};
+	if (seg.special == segment_special::fuelcen)
+		level = &obj.ctype.player_info.energy;
+	else if (seg.special == segment_special::repaircen)
+		level = &obj.shields;
+	else
+		return;
+	const fix full{seg.special == segment_special::fuelcen ? INITIAL_ENERGY : INITIAL_SHIELDS};
+	if (*level >= full)
+		return;
+	*level += std::min(fixmul(FrameTime, BOT_FUELCEN_RATE), full - *level);
+	if (GameTime64 >= bs.fuel_sound_at || bs.fuel_sound_at > GameTime64 + F1_0)
+	{
+		bs.fuel_sound_at = GameTime64 + BOT_FUELCEN_SOUND_DELAY;
+		auto &Objects = LevelUniqueObjectState.Objects;
+		digi_link_sound_to_object(sound_effect::SOUND_REFUEL_STATION_GIVING_FUEL, Objects.vcptridx(&obj), 0, F1_0 / 2, sound_stack::allow_stacking);
+	}
+}
+
 void life_frame(bot_state &bs, object &obj, const d_robot_info_array &Robot_info)
 {
 	auto &Objects = LevelUniqueObjectState.Objects;
@@ -1037,13 +1714,20 @@ void life_frame(bot_state &bs, object &obj, const d_robot_info_array &Robot_info
 				start_death(bs, obj);
 				break;
 			}
-			/* do_invulnerable_stuff, for the bot. */
+			/* do_invulnerable_stuff, for the bot: an invulnerability
+			 * powerup that runs out is replaced in the level, as the
+			 * human's is.
+			 */
 			auto &pi{obj.ctype.player_info};
 			if (+(pi.powerup_flags & player_flag::invulnerable) && GameTime64 > pi.invulnerable_time + INVULNERABLE_TIME_MAX)
 			{
 				pi.powerup_flags &= ~player_flag::invulnerable;
-				pi.FakingInvul = 0;
+				if (pi.FakingInvul)
+					pi.FakingInvul = 0;
+				else
+					maybe_drop_net_powerup(powerup_type_t::POW_INVULNERABILITY, 1, 0);
 			}
+			refuel_frame(bs, obj);
 			break;
 		}
 		case bot_life::dying:
@@ -1260,6 +1944,7 @@ void bots_level_start()
 		bs.rng.seed(b::bot_seed(Netgame.protocol.udp.session_id, bs.pid, Current_level_num));
 		bs.last_attacker = 0xff;
 		bs.memory = {};
+		bs.powerups.clear();
 		if (vcplayerptr(bs.pid)->connected != player_connection_status::playing)
 			continue;
 		auto &obj{ship_of(bs.pid)};
@@ -1284,6 +1969,8 @@ void bots_level_end()
 		o->death_pending = false;
 		o->ctl = {};
 		o->fire = false;
+		if (plr.objnum != object_none)
+			stop_afterburner(*o, ship_of(o->pid));
 	}
 }
 
@@ -1334,11 +2021,24 @@ void bots_fire()
 	auto &Objects = LevelUniqueObjectState.Objects;
 	for (auto &o : B.bots)
 	{
-		if (!o || !o->fire || o->life != bot_life::alive)
+		if (!o || o->life != bot_life::alive)
 			continue;
 		auto &bs{*o};
 		const auto &&objp{Objects.vmptridx(vcplayerptr(bs.pid)->objnum)};
 		if (objp->type != object_type::OBJ_PLAYER)
+			continue;
+#if DXX_BUILD_DESCENT == 2
+		/* The afterburner's trail, after the move, as the human's
+		 * (object_move_one).
+		 */
+		if (bs.pl.drop_afterburner_blob_flag)
+		{
+			bs.pl.drop_afterburner_blob_flag = 0;
+			drop_afterburner_blobs(*objp, 2, i2f(5) / 2, -1);
+			multi_send_drop_blobs(bs.pid);
+		}
+#endif
+		if (!bs.fire)
 			continue;
 		if (!allowed_to_fire_laser(bs.pl, objp->ctype.player_info))
 			continue;
@@ -1372,7 +2072,7 @@ void bot_apply_controls(object &obj)
 	c.sideways_thrust_time = held(bc.sideways);
 	c.vertical_thrust_time = held(bc.vertical);
 #if DXX_BUILD_DESCENT == 2
-	c.state.afterburner = 0;
+	c.state.afterburner = bc.forward > 0 && bs->burning && !Endlevel_sequence;
 #endif
 	apply_pilot_controls(obj, bs->pl, c);
 }
@@ -1428,6 +2128,79 @@ bool bot_take_damage(object &ship, const icobjptridx_t killer, const fix damage,
 		bs->death_pending = true;
 	}
 	return true;
+}
+
+bool bot_touch_powerup(object &ship, const vmobjptridx_t powerup)
+{
+	if (ship.type != object_type::OBJ_PLAYER)
+		return false;
+	const auto pid{get_player_id(ship)};
+	const auto bs{find_bot(pid)};
+	if (!bs || !bots_running())
+		return false;
+	if (bs->life != bot_life::alive || bs->death_pending || Endlevel_sequence || Network_status != network_state::playing)
+		return true;
+	auto &pi{ship.ctype.player_info};
+	const auto id{get_powerup_id(powerup)};
+	switch (id)
+	{
+		/* Keys stay in a multiplayer level, and every player may take
+		 * one (do_powerup): the bot can then open those doors.
+		 */
+		case powerup_type_t::POW_KEY_BLUE:
+			pi.powerup_flags |= player_flag::blue_key;
+			return true;
+		case powerup_type_t::POW_KEY_RED:
+			pi.powerup_flags |= player_flag::red_key;
+			return true;
+		case powerup_type_t::POW_KEY_GOLD:
+			pi.powerup_flags |= player_flag::gold_key;
+			return true;
+		default:
+			break;
+	}
+	/* Stage B3 (section 4.7): the host's decision, as for every player's
+	 * pickup (net_objects.cpp), granted at once: the host is the
+	 * authority and the bot is its own ship.
+	 */
+	if (!net_objects_bot_touch(pid, powerup))
+		return true;
+	/* What do_powerup does besides the inventory. */
+	switch (id)
+	{
+		case powerup_type_t::POW_CLOAK:
+			pi.cloak_time = GameTime64;
+			multi_send_cloak(pid);
+			break;
+		case powerup_type_t::POW_INVULNERABILITY:
+			pi.FakingInvul = 0;
+			pi.invulnerable_time = GameTime64;
+			break;
+#if DXX_BUILD_DESCENT == 2
+		case powerup_type_t::POW_AFTERBURNER:
+			bs->pl.afterburner_charge = F1_0;
+			break;
+#endif
+		default:
+			break;
+	}
+	/* The powerup is no goal any more; the weapon choice sees what it got
+	 * at the next strategy tick.
+	 */
+	bs->powerups.forget(powerup.get_unchecked_index());
+	con_printf(CON_VERBOSE, "bots: '%s' takes powerup %u", static_cast<const char *>(bs->cfg.name), underlying_value(id));
+	return true;
+}
+
+void bot_cloak_expired(const playernum_t pnum)
+{
+	if (!find_bot(pnum) || !bots_running())
+		return;
+	/* As the human's game does for its own cloak: the others see it, and
+	 * the cloak comes back into the level.
+	 */
+	maybe_drop_net_powerup(powerup_type_t::POW_CLOAK, 1, 0);
+	multi_send_decloak(pnum);
 }
 
 bool bot_hit_wall(const object &ship, const vmsegptridx_t seg, const sidenum_t side)

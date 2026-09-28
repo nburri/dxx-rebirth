@@ -128,6 +128,15 @@ bool bot_take_damage(object &ship, icobjptridx_t killer, fix damage, bool check_
  * True if `ship` is a local bot.
  */
 bool bot_hit_wall(const object &ship, vmsegptridx_t seg, sidenum_t side);
+/* collide_player_and_powerup for a ship that is not the local player's:
+ * a local bot's ship takes the powerup through the host's pickup path
+ * (stage B3).  True if `ship` is a local bot.
+ */
+bool bot_touch_powerup(object &ship, vmobjptridx_t powerup);
+/* do_cloak_stuff: the cloak of bot `pnum` ran out (the flag is already
+ * cleared): tell the others, as the human's own game does.
+ */
+void bot_cloak_expired(playernum_t pnum);
 #else
 [[nodiscard]]
 static inline bool bot_is_local(playernum_t)
@@ -155,6 +164,13 @@ static inline bool bot_take_damage(object &, icobjptridx_t, fix, bool)
 static inline bool bot_hit_wall(const object &, vmsegptridx_t, sidenum_t)
 {
 	return false;
+}
+static inline bool bot_touch_powerup(object &, vmobjptridx_t)
+{
+	return false;
+}
+static inline void bot_cloak_expired(playernum_t)
+{
 }
 static inline void bots_level_start()
 {

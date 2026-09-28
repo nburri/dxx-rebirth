@@ -1,7 +1,8 @@
 # Multiplayer bots (design)
 
-Status: design; stage B0 (the pilot refactor, §3.2.1) and stage B1 (the
-first bot with its setup menus, §9.1) are implemented. Target branch: `experimental-netcode`
+Status: design; stage B0 (the pilot refactor, §3.2.1), stage B1 (the
+first bot with its setup menus, §9.1) and stage B3 (pickups, resources and
+weapon choice, §9.2) are implemented. Target branch: `experimental-netcode`
 (protocol v2, `Documentation/network-protocol-v2.md`, cited as "v2 §n").
 D2X-Rebirth only (v2 decision 6). Line numbers are omitted; function names are
 the anchors.
@@ -1058,6 +1059,138 @@ the full dodge (homing missiles, the nearer wall; B4), wall, force
 field and lava damage to bots, triggers, the presets and styles, the
 `PLAYER_LIST` bot flag, `.ngp` persistence and humans replacing bots
 (B2), adding and removing bots in game (B5).
+
+### 9.2 B3 as implemented
+
+**Files.** `common/main/bot_goals.h` (pure: powerup values by need, the
+goal choice, the map knowledge and the memory of powerups, the weapon
+table, the long range trigger rule, the afterburner rule), `nav_distances`
+in `common/main/bot_nav.h` (bounded Dijkstra: path cost and segment count
+to everything within reach), `similar/main/bot.cpp` (the bots' side),
+`net_objects_bot_touch` / `net_objects_bot_can_use` in
+`similar/main/net_objects.cpp`, one branch each in
+`collide_player_and_powerup` (`collide.cpp`) and `do_cloak_stuff`
+(`game.cpp`). Tests: `test-bot-goals` (new) and `test-bot-nav`
+(`nav_distances` against the reference Dijkstra, the cost bound, the node
+limit, the segment counts).
+
+**Pickups (§4.7, v2 §6.2 and "Stage 3 as implemented").** A bot's ship
+that touches a powerup on the host (`do_physics_sim` finds it, as it does
+for any moving ship) goes through `bot_touch_powerup` →
+`net_objects_bot_touch`: the host's copy of the bot's inventory is set from
+the ship (`inventory_mirror::assign`: the ship is the truth, no grant is in
+flight), then `host_decide` judges it exactly as a client's request (object
+still there and of that type, the bot alive and not dropped, in range, not
+spat by it within 2 s, and `evaluate_pickup`: not full, not "already
+have"), and `host_grant_remote` applies it to the copy and the ship,
+removes the object or leaves a cannon with its remaining rounds, and sends
+`PICKUP_GRANT` with the bot's life counter; then the bot's `INVENTORY` goes
+out at once. The range check takes the bot's ship position, not the
+interpolation ring (a bot has none; the ghost snapshot of its last death
+would have denied every later pickup). Nothing is requested and nothing
+waits, as for the host's own ship. What `do_powerup` does besides the
+inventory is done for the bot: the cloak's time and `MULTI_CLOAK`, a real
+invulnerability's time (`FakingInvul` cleared), a full afterburner charge.
+Keys are taken as a human takes them in a multiplayer game (they stay).
+Death drops need nothing new: `multi_send_player_deres` brings the copy up
+to date and the host drops from it, so what a bot picked up (missiles
+included) is dropped where it dies. When a bot's cloak runs out
+(`do_cloak_stuff`, `bot_cloak_expired`) or its real invulnerability
+(`life_frame`), the host sends `MULTI_DECLOAK` and puts the item back into
+the level (`maybe_drop_net_powerup`), as the human's game does for its own.
+
+**Fusion and omega are picked up** (decision): a bot still cannot fire
+them (B1), but taking them denies them to the others and a death drops
+them, as a human's would. They are worth little (1, a spare), so a bot
+takes one only when nothing better is near. Headlight and full map are
+never sought (value 0) but taken when flown through, as a human takes
+them; a bot never switches the headlight on.
+
+**Knowledge (§4.7, decision 4).** Each strategy tick (5 Hz) the bot
+computes the path cost and segment count from its segment to everything
+within 2500 units (at most 3000 segments), with the passability and
+penalties of its own paths. It then learns: the level's initial powerups
+(level net ids) within `map_knowledge` segments (Trainee none, Rookie 3,
+Hotshot 8, Ace 15, Insane the whole level); powerups it sees (awareness,
+field of view, line of sight through grates; at most 6 line checks per
+tick); and a new powerup appearing (a respawn, a death's drop) within its
+hearing radius during its first second. It remembers what it learned
+(`powerup_memory`: position, type, rounds) and forgets an entry when it
+sees the place empty or comes within 15 units of the empty place, when it
+takes it, and
+after `30 s + 3 × memory` (Hotshot 45 s). So a bot may fly to a powerup
+someone else took, as a human does, but it never knows about a respawn it
+did not see or hear. Fuel and repair centres are known to every bot (they
+are the level's geometry).
+
+**Values and goals (§4.1, §4.7).** Values (`item_value`): shields
+0.5–4 by need (need 0 at 100 shields, 1 at 20), energy 0.3–3.3 by need
+(half the need with a vulcan or gauss that has rounds), a primary that
+raises the bot's armament (its best weapon in the mid band) by more than
+0.2 is worth 5, a spare 1, one it has 0; its own cannon's rounds 1–3 by how
+empty it is; laser, super laser 3 while they make the bot stronger, quad 4
+(else 2); missiles 1 (smart, mega 1.5, earthshaker 2, mines 0.8);
+afterburner 2, cloak 2.5, invulnerability 4, converter 0.8, ammo rack 0.6.
+Only what the rules let the bot take counts (`net_objects_bot_can_use`,
+the same `evaluate_pickup`), so a bot never flies to what it would bounce
+off. Collection utility = value × 60 / (60 + path cost). The goal is the
+highest utility, the current goal counting 20 % more: roam 0.2; engage
+(target in sight) 2 × target score × engage weight; hunt the same for a
+remembered target; collect × collect weight, × 0.35 while an enemy is in
+sight unless the powerup is within 40 units or the style is Collector;
+refuel likewise; retreat 3–5 when threatened (a target known, or hit in
+the last 3 s), not invulnerable, and below the style's retreat shields.
+Retreat goes to the best known shield source (a shield powerup, a repair
+centre) that does not lie toward the threat, else to the place of ten drawn
+that is furthest from the threat for the least flying; the place is kept
+until reached. Collecting, retreating or refuelling, a bot that sees an
+enemy aims and fires at it but flies its path (backward, when it retreats
+facing its pursuer); only engage and hunt use the combat movement of B1.
+A powerup it reached without taking, or could not reach (stuck three
+times), is no goal for 5 s (10 s).
+
+**Fuel and repair centres.** A bot flies to a centre when that is its best
+goal (value of the need over the path), hovers in the segment, and stays
+until full (100), unless an enemy comes into sight while it has 40 or more.
+`refuel_frame` gives it what `object_move_one` gives the local player (25
+per second up to 100; the sound is played on the host only).
+
+**Weapons (§4.5).** `choose_primary_for`, at 5 Hz with the range band of
+the target (close < 60, mid 60–150, far > 150; without a target the mid
+band). Scores per band: helix 3.7/3.5/1.2, spreadfire 3.5/2.2/0.6, plasma
+3.2/3.8/2.0, gauss 3.0/3.3/3.6, vulcan 2.4/2.6/2.8, phoenix 2.0/2.4/0.8,
+the laser 1.0/1.0/0.8 × its level (1, 1.25, 1.5, 1.75, super 2.3, 2.6) ×
+1.3 with quad. So close range prefers helix, spreadfire, super laser with
+quad; mid range plasma, helix, super quad, gauss; far range gauss, vulcan,
+the lasers. Energy: nothing but vulcan and gauss fires below 1; below 20
+the energy weapons count half (the laser 0.8), between 20 and 50 they are
+spared a little; vulcan and gauss need rounds. The current weapon counts
+15 % more, so a switch (which costs `REARM_TIME`, as before) happens only
+for a clear gain. Below weapon smarts 2 (Trainee, Rookie) the fixed order
+of B1 stays. Far band trigger discipline: the bot holds fire when the
+chance of a hit (the target's radius against the spread of the aim error
+and of half the target's lateral motion during the shot's flight) is below
+10 %.
+
+**Afterburner (§4.7).** `want_afterburner`: lit above 30 % charge and kept
+down to 5 %, only while the wanted velocity is at least half the top
+speed and within 25° of the nose (the afterburner is full forward thrust),
+for these reasons by skill: Rookie when hunting a target more than 150
+away, Hotshot also when retreating, Ace also when dodging, Insane also on
+long straight legs (more than 100 units to the steer point) while roaming
+or collecting. The ship's own afterburner code drains and recharges the
+charge from the bot's `pilot`; the host drops the trail's blobs
+(`MULTI_DROP_BLOB` as the bot) and plays and sends the afterburner sound
+(`MULTI_SOUND_FUNCTION` as the bot), and stops it when the bot dies or the
+level ends. All bots still play Hotshot (B2 applies the presets), so in
+this stage they burn when chasing and retreating.
+
+**Unchanged:** the human's pickups on host and clients, non-bot games and
+single player (every new branch asks `find_bot`, which is empty there),
+the protocol (no new message; `MULTI_PROTO_VERSION` unchanged).
+
+**Not in B3:** secondary use, the converter, cloak/invulnerability tactics
+(B4); the presets and styles taking effect (B2); CTF/hoard items (B7).
 
 ---
 
