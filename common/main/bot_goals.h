@@ -438,6 +438,9 @@ constexpr double secondary_value(const uint8_t index)
 		case secondary::proximity:
 		case secondary::smart_mine:
 			return 0.8;
+		case secondary::guided:
+			/* No use to a bot (section 9.4), only denied to the others. */
+			return 0.3;
 		default:
 			return 1;
 	}

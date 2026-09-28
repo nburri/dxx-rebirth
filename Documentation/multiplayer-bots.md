@@ -1281,6 +1281,112 @@ do), so the intercept with the target's velocity in the world is right;
    reach (speed × lifetime × 0.8) no longer has a floor of 60 units that
    could exceed it (now 20).
 
+### 9.4 B4 as implemented
+
+**Files.** `common/main/bot_weapons.h` (pure: the role of each
+secondary, the skill that uses it, the missile choice, the blast safety,
+the release, the converter rule, the cloak and invulnerability tactics,
+the homing dodge), `similar/main/bot.cpp` (`missile_tick`, the firing in
+`bots_fire`, `convert_frame`, the tactics in `think`, the dodge),
+`similar/main/laser.cpp` (two small changes, below). Test:
+`test-bot-weapons` (new).
+
+**Firing (sections 4.5, 7.1).** Everything goes through the human's
+path: `bots_fire` calls `do_missile_firing(bot's pilot, weapon, ship)`,
+which creates the missile or mine from the bot's gun, takes the round,
+puts a fired missile back into the level (`maybe_drop_net_powerup`, as
+for a human on the host), applies the mega and earthshaker recoil, and
+sends `MULTI_FIRE` with the bot as originator (bombs with their object
+number, homing missiles with their target), so the clients see exactly a
+human's shot. A weapon whose `fire_count` is above 1 fires its further
+rounds frame by frame, as the human's `Global_missile_firing_count`
+does. In `do_missile_firing` the rapid fire cheat and the secondary
+autoselect now apply to `Local_pilot` only (as `do_laser_firing_player`
+does for the primary): the host's cheat never speeds up a bot, and a bot
+has no autoselect (it chooses its missiles itself).
+
+**Homing for a bot.** `Laser_player_fire` picked a homing missile's
+target (`find_homing_object`) only for `ConsoleObject`; for any other
+shooter it took the target from the `MULTI_FIRE`. A bot's missile on the
+host therefore flew without a target until the missile's own rescan.
+Now the shooter flown on this machine, the local player or a bot on the
+host (`bot_is_local`), picks its target at launch, as a human's missile
+does; the target goes to the clients in the `MULTI_FIRE`.
+`find_homing_object` itself was never tied to the local player.
+
+**Choice and release (`missile_tick`, 60 Hz).** The bot either waits for
+the release of the missile it chose or chooses one
+(`choose_secondary`); a chosen missile that cannot be released within
+1.5 s is dropped. A missile that flies straight (concussion, mercury,
+flash, mega, earthshaker) is aimed with its own speed (three quarters of
+its top speed, it accelerates) from its own guns while it waits. Rules,
+in order:
+
+| Weapon | Rule |
+|---|---|
+| Smart mine, proximity bomb | the bot flies away (retreat, collect, refuel) at more than 15 units/s with its target seen within 1 s behind it (more than 107° off its flight) within 100 units, or 150 at a doorway on its path (the next path point is a side's centre); the smart mine first; one per `mine_interval` (Hotshot 3 s) |
+| Earthshaker | a clear shot, 110–260 units, at least 2 blast radii + 12 away |
+| Mega | a clear shot, 70–220 units, at least 1.5 blast radii + 12 away |
+| (both) | not cloaked, at most one per 8 s and one per target per 25 s; below Ace only at a target crossing slower than 30 units/s |
+| Smart | 30–120 units, a clear shot, or the target seen within 1 s (its children find it round a corner) |
+| Flash | a clear shot within 100 units at a target that faces the bot (within 30°) |
+| Homing | 40–200 units, a clear shot, the target crossing faster than 25 units/s or further than 90 |
+| Mercury, then concussion | 30–200 units, a clear shot |
+| Homing | as the fallback of the straight ones |
+| Guided | never (decision below) |
+
+Missiles go at most one per `missile_interval` (Rookie 4 s, Hotshot 2.5
+s, Ace 1.8 s, Insane 1.2 s). A missile is released when the nose is
+within its cone (the fire cone; homing 20°, smart 30°: they find the
+target themselves) and the first wall along the nose, or the target if
+nearer, is far enough for its blast (`blast_safe`: 2 blast radii for the
+earthshaker, whose children burst around the impact, 1.5 for the mega, 1
+for the others, plus 12 units). The blast radius is the weapon data's
+`damage_radius`. So a bot never fires a mega or an earthshaker at point
+blank, nor into a wall next to it (the user's own death by an earthshaker
+fired near a wall), whatever the target's distance. An invulnerable bot
+only avoids point blank (30 units).
+
+**Skill (section 5.1).** Trainee fires no secondary; Rookie concussion,
+homing, flash and mercury; Hotshot and better all but the guided missile.
+Decision: the design gave mega to Ace and the earthshaker to Insane, but
+the presets are not applied before B2 and every bot plays Hotshot, so
+Hotshot uses them too, under the rules above (a slow target, once per
+target, the blast safety); Ace fires them at fast crossers as well.
+
+**The guided missile is never fired** (decision): its steering, its
+camera and its release are the local human's
+(`Guided_missile`, the missile view, `release_local_guided_missile`), and
+a guided missile that nobody steers is a slow concussion. It is still
+picked up, for 0.3 (denied to the others, dropped at death).
+
+**Dodge (section 4.6).** A homing missile whose target is the bot's ship
+turns after it, so its straight flight is only a rough prediction: it is
+judged with 3 times the pass radius and dodged with the skill's
+probability + 0.25 (`dodge_radius`, `dodge_chance`). The Ace
+afterburner rule for dodging already covers the burn.
+
+**Converter (section 4.7).** As the human's key works it
+(`transfer_energy_to_shield`: only the energy above 100, 20 a second, two
+for one), without the HUD text and the local sound: Rookie below 50
+shields, Hotshot below 80, Ace below 100, Insane below 110.
+
+**Cloak and invulnerability (section 4.7).** Invulnerable (not the
+spawn's faked one), the bot engages 1.6 times as readily, collects half as
+readily and fights at 0.6 of its distance band (retreat was already off).
+Cloaked, it engages 1.3 times as readily, fights at 0.7 of its band, and
+holds its primary fire beyond 90 units and every missile beyond 100 (the
+shots show where it is), and fires no heavy missile.
+
+**Unchanged:** the human's firing (the cheat and autoselect are the
+local pilot's as before, the homing target is picked as before for the
+local player), clients (every new branch asks `bot_is_local`, which is
+false there), the protocol.
+
+**Not in B4:** the `-botarena` test mode, the strafe patterns beyond
+B1's jukes, mines at chokepoints the bot is not passing itself, dodging
+mines.
+
 ---
 
 ## 10. Risks

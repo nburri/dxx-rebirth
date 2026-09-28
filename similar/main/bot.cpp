@@ -6,10 +6,11 @@
  */
 /*
  * Multiplayer bots on the host (Documentation/multiplayer-bots.md, stages
- * B1 and B3): the slots bots take, their brain on a fixed tick
+ * B1, B3 and B4): the slots bots take, their brain on a fixed tick
  * (perception, target choice, goals, navigation, aim), the controls it
- * produces, firing and the weapon choice, pickups, fuel centres, the
- * afterburner, damage, death and respawn.
+ * produces, firing and the weapon choice, missiles and mines, pickups,
+ * fuel centres, the afterburner, the converter, damage, death and
+ * respawn.
  *
  * A bot is a player slot the host flies.  Its ship is an ordinary remote
  * ship (control_source remote), moved by do_physics_sim from the bot's
@@ -39,6 +40,7 @@
 #include "bot.h"
 #include "bot_goals.h"
 #include "bot_nav.h"
+#include "bot_weapons.h"
 #include "net_v2_objects.h"
 #include "net_interp.h"
 #include "net_v2_game.h"
@@ -247,6 +249,21 @@ struct bot_state
 	uint32_t refuel_seg{};
 	/* The afterburner is lit. */
 	bool burning{};
+	/* Stage B4 (section 9.4): the missile chosen and waiting for its
+	 * release (until missile_until), the one to fire (and the rest of
+	 * its volley), when the last missile, heavy missile and mine went,
+	 * and the target of the last heavy one.
+	 */
+	std::optional<b::secondary> missile;
+	uint32_t missile_until{};
+	std::optional<b::secondary> missile_fire;
+	unsigned missile_volley{};
+	std::optional<uint32_t> last_missile, last_heavy, last_mine;
+	uint8_t heavy_target{0xff};
+	/* Section 4.7: cloak and invulnerability (b::tactics_for), from the
+	 * last strategy tick.
+	 */
+	b::powerup_tactics tactics;
 	fix64 fuel_sound_at{};
 	/* Navigation. */
 	bot_goal goal{bot_goal::none};
@@ -298,6 +315,14 @@ struct bot_state
 		dodge_from = dodge_until = 0;
 		collect_key = 0xffff;
 		burning = false;
+		missile.reset();
+		missile_fire.reset();
+		missile_volley = 0;
+		last_missile.reset();
+		last_heavy.reset();
+		last_mine.reset();
+		heavy_target = 0xff;
+		tactics = {};
 		clear_path();
 		goal = bot_goal::none;
 		stuck.reset();
@@ -624,6 +649,36 @@ std::array<double, 10> energy_rates()
 		r[i] = e / wait;
 	}
 	return r;
+}
+
+/* Stage B4: a secondary's weapon data (b::missile_data). */
+[[nodiscard]]
+b::missile_data missile_data_of(const secondary_weapon_index w)
+{
+	const auto &wi{Weapon_info[Secondary_weapon_to_weapon_info[w]]};
+	return {
+		.speed = wi.speed[GameUniqueState.Difficulty_level] / 65536.0,
+		.blast_radius = wi.damage_radius / 65536.0,
+		.thrust = wi.thrust != 0,
+	};
+}
+
+[[nodiscard]]
+secondary_weapon_index game_secondary(const b::secondary s)
+{
+	return static_cast<secondary_weapon_index>(static_cast<uint8_t>(s));
+}
+
+/* The gun a secondary leaves from (do_missile_firing: guns 4 and 5 in
+ * turn for the missiles), in the ship's frame.
+ */
+[[nodiscard]]
+vec3 missile_gun_local(const secondary_weapon_index w)
+{
+	const auto g{Secondary_weapon_to_gun_num[w]};
+	if (g == player_gun_number::_4)
+		return (to_vec(Player_ship->gun_points[player_gun_number::_4]) + to_vec(Player_ship->gun_points[static_cast<player_gun_number>(5)])) * 0.5;
+	return to_vec(Player_ship->gun_points[g]);
 }
 
 [[nodiscard]]
@@ -982,10 +1037,14 @@ void perceive(bot_state &bs, const object &obj, const uint32_t tick)
 			const auto rel{to_vec(o.pos) - pos};
 			if (b::length(rel) > BOT_DODGE_SCAN)
 				continue;
-			const auto away{b::dodge_direction(rel, to_vec(o.mtype.phys_info.velocity) - vel, BOT_DODGE_HORIZON, radius, frame.r)};
+			/* Stage B4: a homing missile after this bot turns with it;
+			 * it is judged with a wider pass and dodged more often.
+			 */
+			const bool homing_at_me{Weapon_info[get_weapon_id(o)].homing_flag && li.track_goal == own_objnum};
+			const auto away{b::dodge_direction(rel, to_vec(o.mtype.phys_info.velocity) - vel, BOT_DODGE_HORIZON, b::dodge_radius(radius, homing_at_me), frame.r)};
 			if (!away)
 				continue;
-			if (b::dodge_roll(bs.dodge_salt, static_cast<uint16_t>(o.signature)) >= bs.skill->dodge_prob)
+			if (b::dodge_roll(bs.dodge_salt, static_cast<uint16_t>(o.signature)) >= b::dodge_chance(bs.skill->dodge_prob, homing_at_me))
 				continue;
 			bs.dodge_dir = *away;
 			bs.dodge_from = tick + b::ticks_from_ms(bs.skill->reaction_ms) / 2;
@@ -1319,6 +1378,8 @@ void think(bot_state &bs, object &obj, const uint32_t tick)
 			centre = {std::max(centre.utility, 3.0), 0, static_cast<uint32_t>(obj.segnum), pos, 0xffff, 0, repair};
 	}
 	const bool attacked{bs.last_attacker < MAX_PLAYERS && tick - bs.attacked_tick < BOT_REVENGE_TICKS};
+	/* Section 4.7: cloaked it sneaks, invulnerable it attacks. */
+	bs.tactics = b::tactics_for(res.cloaked, res.invulnerable);
 	const auto goal{b::choose_goal({
 		.has_target = bs.target.has_value(),
 		.target_visible = target_visible,
@@ -1331,8 +1392,8 @@ void think(bot_state &bs, object &obj, const uint32_t tick)
 		.collect_upgrade = collect.upgrade,
 		.refuel = centre.utility,
 		.retreat_shields = st.retreat_shields,
-		.engage_weight = st.engage_weight,
-		.collect_weight = st.collect_weight,
+		.engage_weight = st.engage_weight * bs.tactics.engage_weight,
+		.collect_weight = st.collect_weight * bs.tactics.collect_weight,
 		.collector = bs.cfg.style == b::bot_style::collector,
 		.current = current_goal(bs, target_visible),
 	})};
@@ -1580,6 +1641,166 @@ void stop_afterburner(bot_state &bs, const object &obj)
 #endif
 }
 
+/* The distance to the wall a shot fired from the ship along `dir` meets,
+ * up to `limit`: where a missile that misses would burst.  (Objects are
+ * left out: the bot's own shots in flight would stop the line; the
+ * target is taken into account by the caller.)
+ */
+[[nodiscard]]
+double wall_distance(const object &obj, const vec3 &dir, const double limit)
+{
+	auto &Objects = LevelUniqueObjectState.Objects;
+	const auto pos{to_vec(obj.pos)};
+	fvi_info hit;
+	const auto type{find_vector_intersection(fvi_query{
+		obj.pos,
+		to_fixvec(pos + dir * limit),
+		fvi_query::unused_ignore_obj_list,
+		fvi_query::unused_LevelUniqueObjectState,
+		fvi_query::unused_Robot_info,
+		0,
+		Objects.vcptridx(&obj),
+	}, obj.segnum, F1_0, hit)};
+	if (type == fvi_hit_type::None)
+		return limit;
+	return b::distance(pos, to_vec(hit.hit_pnt));
+}
+
+/* Stage B4 (section 9.4): missiles and mines.  At each tick the bot
+ * either waits for the release of the missile it chose (the aim within
+ * its cone, the blast along the nose far enough away) or chooses one
+ * (b::choose_secondary); a mine is dropped at once.  bots_fire fires it
+ * through do_missile_firing as the bot, as a human's.
+ */
+void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept *const p)
+{
+	const auto &sk{*bs.skill};
+	auto &pi{obj.ctype.player_info};
+	if (bs.missile_fire)
+		return;
+	if (bs.missile && tick >= bs.missile_until)
+		bs.missile.reset();
+	const auto seconds_since{[tick](const std::optional<uint32_t> &t) {
+		return t ? (tick - *t) / static_cast<double>(b::BOT_TICK_RATE) : 1e9;
+	}};
+	const auto pos{to_vec(obj.pos)};
+	const auto frame{to_frame(obj.orient)};
+	const auto vel{to_vec(obj.mtype.phys_info.velocity)};
+	const auto res_cloaked{has_flag(pi, player_flag::cloaked)};
+	const bool invulnerable{has_flag(pi, player_flag::invulnerable)};
+	/* The target, as the tactics layer sees it (a reaction time late),
+	 * or as remembered.
+	 */
+	const bool target_visible{p && p->visible && bs.target && *bs.target == p->target && bs.visible_now[p->target]};
+	std::optional<vec3> target_pos;
+	if (target_visible)
+		target_pos = p->pos;
+	else if (bs.target && bs.memory[*bs.target].valid)
+		target_pos = bs.memory[*bs.target].pos;
+	if (!bs.missile)
+	{
+		b::missile_situation m;
+		for (unsigned i = 0; i < b::BOT_SECONDARY_COUNT && i < MAX_SECONDARY_WEAPONS; ++i)
+		{
+			const auto w{static_cast<secondary_weapon_index>(i)};
+			m.ammo[i] = pi.secondary_ammo[w];
+			if (m.ammo[i])
+				m.data[i] = missile_data_of(w);
+		}
+		m.smarts = sk.weapon_smarts;
+		m.has_target = target_pos.has_value();
+		m.target_visible = target_visible;
+		m.shot_clear = target_visible && bs.shot_clear;
+		m.invulnerable = invulnerable;
+		m.cloaked = res_cloaked;
+		m.since_missile = seconds_since(bs.last_missile);
+		m.since_heavy = seconds_since(bs.last_heavy);
+		m.since_mine = seconds_since(bs.last_mine);
+		if (bs.target)
+		{
+			const auto t{*bs.target};
+			const auto &mem{bs.memory[t]};
+			m.target_seen_ago = mem.valid ? (tick - mem.tick) / static_cast<double>(b::BOT_TICK_RATE) : 1e9;
+			m.heavy_used_on_target = bs.heavy_target == t && m.since_heavy < b::HEAVY_PER_TARGET;
+			if (target_pos)
+			{
+				const auto to{*target_pos - pos};
+				m.target_distance = b::length(to);
+				const auto los{b::normalized(to)};
+				const auto rel_vel{mem.vel - vel};
+				m.target_lateral_speed = b::length(rel_vel - los * b::dot(rel_vel, los));
+				const auto &ship{ship_of(t)};
+				m.target_facing = b::dot(to_vec(ship.orient.fvec), -los) > std::cos(b::radians(30));
+			}
+			/* Section 4.7: flying away from it (retreat, collect,
+			 * refuel) with it close behind.
+			 */
+			const bool flying_away{bs.goal == bot_goal::retreat || bs.goal == bot_goal::collect || bs.goal == bot_goal::refuel};
+			if (flying_away && mem.valid && m.target_seen_ago <= 1)
+			{
+				const auto to{mem.pos - pos};
+				const double speed{b::length(vel)};
+				if (speed > 15 && b::dot(b::normalized(vel), b::normalized(to)) < -0.3)
+				{
+					m.chased = true;
+					m.pursuer_distance = b::length(to);
+				}
+			}
+		}
+		/* A doorway: the next path point is the centre of a side. */
+		m.at_doorway = bs.point_index < bs.points.size() && !(bs.point_index & 1) && b::distance(pos, bs.points[bs.point_index]) < 12;
+		const auto chosen{b::choose_secondary(m)};
+		if (!chosen)
+			return;
+		bs.missile = chosen;
+		bs.missile_until = tick + static_cast<uint32_t>(b::MISSILE_PENDING_SECONDS * b::BOT_TICK_RATE);
+	}
+	const auto s{*bs.missile};
+	const auto w{game_secondary(s)};
+	if (!pi.secondary_ammo[w])
+	{
+		bs.missile.reset();
+		return;
+	}
+	const auto role{b::role_of(s)};
+	if (role != b::missile_role::mine)
+	{
+		/* The target: in sight, or a smart missile's seen a moment ago. */
+		if (!target_pos || (!target_visible && role != b::missile_role::smart))
+			return;
+		if (target_visible && !bs.shot_clear && role != b::missile_role::smart)
+			return;
+	}
+	double err{0}, impact{1e9};
+	const auto md{missile_data_of(w)};
+	if (role != b::missile_role::mine)
+	{
+		err = b::angle_between(frame.f, target_visible ? bs.face_dir : *target_pos - pos);
+		/* Where it bursts: the wall along the nose, or the target on
+		 * the way.
+		 */
+		impact = wall_distance(obj, frame.f, 400);
+		if (target_visible)
+			impact = std::min(impact, b::distance(pos, *target_pos));
+	}
+	if (!b::missile_release(s, err, b::radians(sk.fire_cone_deg), impact, md.blast_radius, invulnerable))
+		return;
+	bs.missile.reset();
+	bs.missile_fire = s;
+	bs.missile_volley = std::max<unsigned>(1, Weapon_info[Secondary_weapon_to_weapon_info[w]].fire_count);
+	if (role == b::missile_role::mine)
+		bs.last_mine = tick;
+	else
+	{
+		bs.last_missile = tick;
+		if (role == b::missile_role::heavy || role == b::missile_role::shaker)
+		{
+			bs.last_heavy = tick;
+			bs.heavy_target = bs.target ? *bs.target : 0xff;
+		}
+	}
+}
+
 /* One tick of the brain (section 4.1). */
 void bot_tick(bot_state &bs, const uint32_t tick)
 {
@@ -1593,7 +1814,7 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 		think(bs, obj, tick);
 	bs.aim.update(bs.rng, b::radians(sk.aim_sigma_deg), b::ticks_from_ms(sk.aim_drift_ms));
 	bs.lead.update(bs.rng, sk.lead, b::ticks_from_ms(sk.aim_drift_ms));
-	const double range_scale{bs.style->range_scale};
+	const double range_scale{bs.style->range_scale * bs.tactics.range_scale};
 	bs.juke.update(bs.rng, b::ticks_from_ms(sk.strafe_min_ms), b::ticks_from_ms(sk.strafe_max_ms), BOT_RANGE_LO * range_scale, BOT_RANGE_HI * range_scale);
 	const auto pos{to_vec(obj.pos)};
 	const auto vel{to_vec(obj.mtype.phys_info.velocity)};
@@ -1621,8 +1842,19 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 		 * the current weapon's speed and the bot's lead factor.
 		 */
 		const auto primary_now{pi.Primary_weapon.get_active()};
-		const auto shooter{pos + frame.to_world(gun_local(primary_now, has_flag(pi, player_flag::quad_lasers)))};
-		const auto aim{b::aim_point(shooter, est, p->vel, weapon_speed(pi), bs.lead.factor())};
+		/* Stage B4: a missile that flies straight is aimed with its
+		 * own speed from its own gun while it waits for its release.
+		 */
+		const bool aim_missile{bs.missile && b::missile_aimed(*bs.missile)};
+		const auto gun{aim_missile ? missile_gun_local(game_secondary(*bs.missile)) : gun_local(primary_now, has_flag(pi, player_flag::quad_lasers))};
+		double shot_speed{weapon_speed(pi)};
+		if (aim_missile)
+		{
+			const auto md{missile_data_of(game_secondary(*bs.missile))};
+			shot_speed = b::effective_shot_speed(md.speed, md.thrust);
+		}
+		const auto shooter{pos + frame.to_world(gun)};
+		const auto aim{b::aim_point(shooter, est, p->vel, shot_speed, bs.lead.factor())};
 		bs.face_dir = b::apply_aim_offset(aim - shooter, frame.u, bs.aim.yaw(), bs.aim.pitch());
 		/* The steering's feed-forward: how fast the line to the target
 		 * turns, as the bot reckons it.
@@ -1656,7 +1888,7 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 		const double lateral{b::length(rel_vel - los * b::dot(rel_vel, los))};
 		const auto &target_obj{ship_of(p->target)};
 		const double cone{b::fire_cone_with_spread(b::radians(sk.fire_cone_deg), spread_half_angle(primary_now))};
-		bs.fire = b::should_fire(err, cone, bs.shot_clear, dist, weapon_range(pi)) &&
+		bs.fire = b::should_fire(err, cone, bs.shot_clear, dist, std::min(weapon_range(pi), bs.tactics.max_fire_distance)) &&
 			b::long_shot_worthwhile(dist, weapon_speed(pi), lateral, b::radians(sk.aim_sigma_deg), target_obj.size / 65536.0);
 	}
 	else
@@ -1669,6 +1901,7 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 		wanted += bs.avoid;
 	bs.move_cmd = b::velocity_command(wanted, vel, max_speed);
 	decide_afterburner(bs, obj, wanted, tick);
+	missile_tick(bs, obj, tick, p);
 }
 
 /* Section 3.4: the controls of this frame, from the direction and
@@ -1825,6 +2058,29 @@ void refuel_frame(bot_state &bs, object &obj)
 	}
 }
 
+/* Section 4.7: the energy to shield converter, as the human's key
+ * works it (transfer_energy_to_shield: only the energy above 100, 20 a
+ * second, two for one), without its HUD text and local sound.
+ */
+void convert_frame(const bot_state &bs, object &obj)
+{
+#if DXX_BUILD_DESCENT == 2
+	auto &pi{obj.ctype.player_info};
+	if (!has_flag(pi, player_flag::converter) || !b::want_convert(obj.shields / 65536.0, pi.energy / 65536.0, bs.skill->weapon_smarts))
+		return;
+	constexpr fix converter_rate{i2f(20)};
+	constexpr fix converter_scale{2};
+	const fix e{std::min({fixmul(FrameTime, converter_rate), pi.energy - INITIAL_ENERGY, (MAX_SHIELDS - obj.shields) * converter_scale})};
+	if (e <= 0)
+		return;
+	pi.energy -= e;
+	obj.shields += e / converter_scale;
+#else
+	(void)bs;
+	(void)obj;
+#endif
+}
+
 void life_frame(bot_state &bs, object &obj, const d_robot_info_array &Robot_info)
 {
 	auto &Objects = LevelUniqueObjectState.Objects;
@@ -1851,6 +2107,7 @@ void life_frame(bot_state &bs, object &obj, const d_robot_info_array &Robot_info
 					maybe_drop_net_powerup(powerup_type_t::POW_INVULNERABILITY, 1, 0);
 			}
 			refuel_frame(bs, obj);
+			convert_frame(bs, obj);
 			break;
 		}
 		case bot_life::dying:
@@ -2175,6 +2432,25 @@ void bots_fire()
 			multi_send_drop_blobs(bs.pid);
 		}
 #endif
+		/* Stage B4: the missile or mine the brain released, as the
+		 * human fires one (do_missile_firing: MULTI_FIRE as the bot);
+		 * a volley's further rounds follow frame by frame, as the
+		 * human's Global_missile_firing_count does.
+		 */
+		if (bs.missile_fire)
+		{
+			const auto w{game_secondary(*bs.missile_fire)};
+			auto &pi{objp->ctype.player_info};
+			const bool volley_on{bs.missile_volley < std::max<unsigned>(1, Weapon_info[Secondary_weapon_to_weapon_info[w]].fire_count)};
+			if (!pi.secondary_ammo[w])
+				bs.missile_fire.reset();
+			else if (volley_on || allowed_to_fire_missile(pi))
+			{
+				do_missile_firing(bs.pl, w, objp);
+				if (!bs.missile_volley || !--bs.missile_volley)
+					bs.missile_fire.reset();
+			}
+		}
 		if (!bs.fire)
 			continue;
 		if (!allowed_to_fire_laser(bs.pl, objp->ctype.player_info))
