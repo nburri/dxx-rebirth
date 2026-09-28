@@ -48,6 +48,7 @@
 #include "net_v2_game.h"
 #include "net_v2_state.h"
 #include "net_interp.h"
+#include "net_score_carry.h"
 #include "game.h"
 #include "multi.h"
 #include "bot.h"
@@ -2278,12 +2279,23 @@ void send_endlevel_status()
 	}
 }
 
+/* Whether a level end report belongs to the level being played
+ * (net_score_carry.h, endlevel_report_applies): the score screen, or the
+ * reactor countdown (also started by a kill goal or the time limit).
+ */
+[[nodiscard]]
+bool level_is_ending()
+{
+	return Network_status == network_state::endlevel || (Network_status == network_state::playing && LevelUniqueObjectState.ControlCenterState.Control_center_destroyed);
+}
+
 void receive_endlevel_client(const playernum_t pnum, const std::span<const uint8_t> data)
 {
 	auto &LevelUniqueControlCenterState = LevelUniqueObjectState.ControlCenterState;
-	auto &Objects = LevelUniqueObjectState.Objects;
-	auto &vmobjptr = Objects.vmptr;
-	if (data.size() != LEGACY_ENDLEVEL_CLIENT_SIZE || !(Network_status == network_state::endlevel || Network_status == network_state::playing))
+	if (data.size() != LEGACY_ENDLEVEL_CLIENT_SIZE)
+		return;
+	const auto use{::dcx::net_v2::endlevel_report_applies(true, level_is_ending())};
+	if (!use.status)
 		return;
 	reader r{data};
 	const player_connection_status connected{r.u8()};
@@ -2296,11 +2308,11 @@ void receive_endlevel_client(const playernum_t pnum, const std::span<const uint8
 	const uint8_t countdown{r.u8()};
 	if (Network_status != network_state::playing && vcplayerptr(pnum)->connected == player_connection_status::playing && countdown < LevelUniqueControlCenterState.Countdown_seconds_left)
 		LevelUniqueControlCenterState.Countdown_seconds_left = countdown;
-	auto &player_info = vmobjptr(vcplayerptr(pnum)->objnum)->ctype.player_info;
-	player_info.net_kills_total = r.u16();
-	player_info.net_killed_total = r.u16();
-	range_for (auto &i, kill_matrix[pnum])
-		i = r.u16();
+	/* The client's view of its kills, deaths and kill matrix row: the
+	 * host's own counts are the game's (endlevel_report_applies).
+	 */
+	static_assert(!::dcx::net_v2::endlevel_report_applies(true, true).scores);
+	r.take(2 + 2 + (MAX_PLAYERS * 2));
 	if (vcplayerptr(pnum)->connected != player_connection_status::disconnected)
 		Netgame.players[pnum].LastPacketTime = timer_query();
 }
@@ -2310,7 +2322,10 @@ void receive_endlevel_host(const std::span<const uint8_t> data)
 	auto &LevelUniqueControlCenterState = LevelUniqueObjectState.ControlCenterState;
 	auto &Objects = LevelUniqueObjectState.Objects;
 	auto &vmobjptr = Objects.vmptr;
-	if (data.size() != LEGACY_ENDLEVEL_HOST_SIZE || !(Network_status == network_state::endlevel || Network_status == network_state::playing))
+	if (data.size() != LEGACY_ENDLEVEL_HOST_SIZE)
+		return;
+	const auto use{::dcx::net_v2::endlevel_report_applies(false, level_is_ending())};
+	if (!use.status)
 		return;
 	reader r{data};
 	const uint8_t countdown{r.u8()};
@@ -2328,8 +2343,13 @@ void receive_endlevel_host(const std::span<const uint8_t> data)
 			multi_disconnect_player(i);
 		auto &player_info = vmobjptr(vcplayerptr(i)->objnum)->ctype.player_info;
 		vmplayerptr(i)->connected = connected;
-		player_info.net_kills_total = r.u16();
-		player_info.net_killed_total = r.u16();
+		const int16_t kills{static_cast<int16_t>(r.u16())};
+		const int16_t killed{static_cast<int16_t>(r.u16())};
+		if (use.scores)
+		{
+			player_info.net_kills_total = kills;
+			player_info.net_killed_total = killed;
+		}
 		if (vcplayerptr(i)->connected != player_connection_status::disconnected)
 			Netgame.players[i].LastPacketTime = timer_query();
 	}
@@ -2337,7 +2357,7 @@ void receive_endlevel_host(const std::span<const uint8_t> data)
 		for (playernum_t j = 0; j < MAX_PLAYERS; j++)
 		{
 			const auto v{r.u16()};
-			if (i != Player_num)
+			if (use.scores && i != Player_num)
 				kill_matrix[i][j] = v;
 		}
 }
@@ -2654,8 +2674,16 @@ void apply_level_go_internal()
 		plr.connected = Netgame.players[i].connected;
 		auto &objp = *vmobjptr(plr.objnum);
 		auto &player_info = objp.ctype.player_info;
-		player_info.net_kills_total = Netgame.player_kills[i];
-		player_info.net_killed_total = Netgame.killed[i];
+		const int16_t kills{static_cast<int16_t>(Netgame.player_kills[i])};
+		const int16_t killed{static_cast<int16_t>(Netgame.killed[i])};
+		/* The host's level start copies what it read from the ships, so
+		 * a change there is a bug; a client adopts the host's counts.
+		 * Logged to pin down a count that changes at a level start.
+		 */
+		if (player_info.net_kills_total != kills || player_info.net_killed_total != killed)
+			con_printf(multi_i_am_master() ? CON_URGENT : CON_VERBOSE, "net: level start: P#%u kills %i -> %i, deaths %i -> %i", i, player_info.net_kills_total, kills, player_info.net_killed_total, killed);
+		player_info.net_kills_total = kills;
+		player_info.net_killed_total = killed;
 		if ((Network_rejoined) || (i != Player_num))
 			player_info.mission.score = Netgame.player_score[i];
 	}

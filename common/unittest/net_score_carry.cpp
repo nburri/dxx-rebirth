@@ -163,6 +163,36 @@ void test_repeated_loads()
 	CHECK(w.info(7)->net_kills_total == 21);
 }
 
+/* The level end reports: the host keeps its own counts, a client adopts
+ * the host's, and a report of a level that is over changes nothing.
+ */
+void test_endlevel_reports()
+{
+	static_assert(endlevel_report_applies(true, true) == endlevel_report_use{.status = true, .scores = false});
+	static_assert(endlevel_report_applies(false, true) == endlevel_report_use{.status = true, .scores = true});
+	static_assert(endlevel_report_applies(true, false) == endlevel_report_use{});
+	static_assert(endlevel_report_applies(false, false) == endlevel_report_use{});
+	/* The race the rule removes: the host credits the client a kill made
+	 * in the countdown; the client's report was sent before the relay of
+	 * that kill reached it.
+	 */
+	int16_t host_view_of_client{10};
+	++host_view_of_client;			/* MULTI_KILL_HOST relayed */
+	const int16_t client_report{10};	/* in flight, older */
+	if (endlevel_report_applies(true, true).scores)
+		host_view_of_client = client_report;
+	CHECK(host_view_of_client == 11);
+	/* And the carry to the next level keeps it. */
+	world w;
+	for (std::size_t s = 0; s < players; ++s)
+		w.objnum[s] = static_cast<uint16_t>(s);
+	w.obj[1].net_kills_total = host_view_of_client;
+	const auto before{capture_all_scores<players>([&w](const std::size_t s) -> const fake_player_info * { return w.info(s); })};
+	load_level(w, {{7, 6, 5, 4, 3, 2, 1, 0}});
+	restore_all_scores(before, [&w](const std::size_t s) { return w.info(s); });
+	CHECK(w.info(1)->net_kills_total == 11);
+}
+
 }
 
 int main()
@@ -170,6 +200,7 @@ int main()
 	test_scores_follow_the_slot();
 	test_without_the_carry_scores_are_lost();
 	test_repeated_loads();
+	test_endlevel_reports();
 	std::puts("test-net-score-carry: all checks passed");
 	return 0;
 }

@@ -91,4 +91,41 @@ constexpr void restore_all_scores(const std::array<carried_scores, N> &scores, i
 			restore_scores(*pi, scores[i]);
 }
 
+/* The level end reports (Documentation/network-protocol-v2.md section 4.7,
+ * stage 1: LEGACY_ENDLEVEL_HOST and LEGACY_ENDLEVEL_CLIENT, once per
+ * second while the reactor countdown runs and at the score screen).
+ *
+ * The host computes every kill (a client's own death goes to the host as
+ * MULTI_KILL_CLIENT, the host credits it and relays MULTI_KILL_HOST), so
+ * the host's kills, deaths and kill matrix are the game's.  A client's
+ * report holds the client's view of its own row, which lags the host by
+ * the kills still on their way to it: a report sent before the relay of
+ * a kill arrives after the host credited it.  The host adopted that row,
+ * reverting the kill, and sent the reverted scores to everybody with the
+ * next level start.  So the host takes only the connection state and the
+ * countdown from a client's report, and a client takes the host's scores
+ * for every other slot (its own row arrives with the next level start).
+ *
+ * A report belongs to the end of the level being played: once the next
+ * level has started (playing, countdown not running) a report still in
+ * flight describes the previous level and is dropped.
+ */
+struct endlevel_report_use
+{
+	bool status;	/* connection state and countdown */
+	bool scores;	/* kills, deaths and kill matrix */
+	constexpr bool operator==(const endlevel_report_use &) const = default;
+};
+
+[[nodiscard]]
+constexpr endlevel_report_use endlevel_report_applies(const bool receiver_is_host, const bool level_ending)
+{
+	if (!level_ending)
+		return {};
+	return {
+		.status = true,
+		.scores = !receiver_is_host,
+	};
+}
+
 }
