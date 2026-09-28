@@ -804,7 +804,11 @@ part 60 bytes (D2), then three NUL-terminated strings as in `GAME_INFO_LITE`:
 D1: the four D2-only bytes are sent as 0 so the layout is shared.
 
 `PLAYER_LIST` (0x09): 8 × { callsign 9, `connected` u8, `rank` u8, `team` u8 }
-= 96 bytes. Sent whenever a slot changes. Replaces the per-player part of v1
+= 96 bytes. Sent whenever a slot changes. Bit 7 of `connected` marks a bot
+the host flies (protocol 104, `Documentation/multiplayer-bots.md` §2.2;
+`encode_list_connected` / `decode_list_connected` in `net_v2_session.h`);
+the low bits are the connection status. The flag stays on a bot's slot
+after the bot left, until a human takes the slot (`PLAYER_JOINED`). Replaces the per-player part of v1
 heavy game info and the v1 `addplayer` packet; `PLAYER_JOINED` (0x0A: `pid`,
 callsign 9, rank, team) and `PLAYER_LEFT` (0x0B: `pid`, `reason`) are the
 incremental forms used during play.
@@ -2042,9 +2046,10 @@ wire layouts) is `common/main/net_v2_objects.h`, tested by
 `test-net-v2-authority`; the game side is `similar/main/net_objects.cpp`,
 with the hooks in `multi.cpp`, `collide.cpp`, `powerup.cpp`,
 `weapon.cpp`, `fireball.cpp`, `object.cpp` and `net_v2.cpp`.
-`MULTI_PROTO_VERSION` and `NET_V2_PROTO_VERSION` are 103 (102 was the
+`MULTI_PROTO_VERSION` and `NET_V2_PROTO_VERSION` were 103 (102 was the
 first stage 3 playtest build; the review fixes added the grant's `life`
-and the mine counts of `MULTI_PLAYER_DERES`). Everything is
+and the mine counts of `MULTI_PLAYER_DERES`); bots stage B2 made them 104
+(the `PLAYER_LIST` bot flag, §4.5). Everything is
 active only in a network game (`net_objects_active`: `GM_NETWORK` and not
 playing back a demo); single player and demos run the old code paths.
 Differences from §6.1–§6.4 and decisions:

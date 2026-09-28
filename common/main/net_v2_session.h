@@ -499,6 +499,30 @@ public:
 	}
 };
 
+/* Section 4.5, PLAYER_LIST: bit 7 of a slot's `connected` byte marks a
+ * bot (Documentation/multiplayer-bots.md section 2.2); the low bits are
+ * the connection status.
+ */
+constexpr std::uint8_t PLAYER_LIST_BOT_FLAG{0x80};
+
+[[nodiscard]]
+constexpr std::uint8_t encode_list_connected(const std::uint8_t status, const bool bot)
+{
+	return static_cast<std::uint8_t>((status & ~PLAYER_LIST_BOT_FLAG) | (bot ? PLAYER_LIST_BOT_FLAG : 0));
+}
+
+struct list_connected
+{
+	std::uint8_t status;
+	bool bot;
+};
+
+[[nodiscard]]
+constexpr list_connected decode_list_connected(const std::uint8_t b)
+{
+	return {static_cast<std::uint8_t>(b & ~PLAYER_LIST_BOT_FLAG), (b & PLAYER_LIST_BOT_FLAG) != 0};
+}
+
 /* Section 4.2: the admission table, on a view of the host's player slots.
  * The caller has already handled version mismatch, the endlevel state, the
  * refuse prompt and a retry of a pending accept.
@@ -517,6 +541,12 @@ struct slot_view
 	 * disconnected slot is taken over first.
 	 */
 	net_clock last_packet_time{};
+	/* Documentation/multiplayer-bots.md section 2.3: the slot's player is
+	 * a bot (flown by the host; `connected` while it plays, not after it
+	 * left), added as the `bot_order`th bot of the game.
+	 */
+	bool bot{};
+	unsigned bot_order{};
 };
 
 enum class admission_result : std::uint8_t
@@ -533,7 +563,19 @@ enum class admission_result : std::uint8_t
 	deny_closed,
 	deny_full,
 	deny_duplicate_callsign,
+	/* The bot playing in `slot` leaves and a new player takes the slot
+	 * (humans replace bots: the game is full, or the bot has the
+	 * requester's callsign).
+	 */
+	accept_replace_bot,
 };
+
+/* The results that give the requester `slot`. */
+[[nodiscard]]
+constexpr bool admission_accepts(const admission_result r)
+{
+	return r == admission_result::accept_new || r == admission_result::accept_rejoin || r == admission_result::accept_replace || r == admission_result::accept_replace_bot;
+}
 
 struct admission_decision
 {
@@ -541,8 +583,29 @@ struct admission_decision
 	unsigned slot;
 };
 
+/* The bot a joining human replaces (bots section 2.3): the most recently
+ * added bot still playing below the player limit.
+ */
 [[nodiscard]]
-constexpr admission_decision decide_admission(const std::span<const slot_view> slots, const unsigned max_players, const bool game_closed)
+constexpr std::optional<unsigned> bot_to_replace(const std::span<const slot_view> slots, const unsigned max_players)
+{
+	std::optional<unsigned> r;
+	for (unsigned i = 1; i < slots.size() && i < max_players; ++i)
+	{
+		const auto &s{slots[i]};
+		if (s.bot && s.connected && (!r || s.bot_order > slots[*r].bot_order))
+			r = i;
+	}
+	return r;
+}
+
+/* `bots_replaceable`: the host lets humans replace bots (the Bots
+ * screen's option).  A bot's slot is never rejoined by callsign: a human
+ * with a departed bot's name is a new player; one with a playing bot's
+ * name replaces that bot, or is refused as a duplicate.
+ */
+[[nodiscard]]
+constexpr admission_decision decide_admission(const std::span<const slot_view> slots, const unsigned max_players, const bool game_closed, const bool bots_replaceable = false)
 {
 	/* A returning player first: the callsign names its slot. */
 	for (unsigned i = 0; i < slots.size(); ++i)
@@ -550,6 +613,16 @@ constexpr admission_decision decide_admission(const std::span<const slot_view> s
 		const auto &s{slots[i]};
 		if (!s.occupied || !s.callsign_matches)
 			continue;
+		if (s.bot)
+		{
+			if (!s.connected)
+				continue;
+			if (game_closed)
+				return {admission_result::deny_closed, 0};
+			if (bots_replaceable && i < max_players)
+				return {admission_result::accept_replace_bot, i};
+			return {admission_result::deny_duplicate_callsign, i};
+		}
 		if (!s.connected)
 			return {admission_result::accept_rejoin, i};
 		if (s.address_matches)
@@ -580,6 +653,9 @@ constexpr admission_decision decide_admission(const std::span<const slot_view> s
 	}
 	if (oldest)
 		return {admission_result::accept_new, *oldest};
+	if (bots_replaceable)
+		if (const auto b{bot_to_replace(slots, max_players)})
+			return {admission_result::accept_replace_bot, *b};
 	return {admission_result::deny_full, 0};
 }
 

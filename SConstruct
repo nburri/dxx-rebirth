@@ -5047,6 +5047,12 @@ class DXXArchive(DXXCommon):
 		RuntimeTest('test-bot-weapons', (
 			'common/unittest/bot_weapons.cpp',
 			)),
+		# Test of the bots' skill presets and styles and of the bot
+		# setup in the pilot's netgame profile (bot_brain.h,
+		# bot_profile.h, Documentation/multiplayer-bots.md section 9.7).
+		RuntimeTest('test-bot-presets', (
+			'common/unittest/bot_presets.cpp',
+			)),
 		# Test of the score carry-over across a level load
 		# (net_score_carry.h).
 		RuntimeTest('test-net-score-carry', (

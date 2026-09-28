@@ -30,6 +30,7 @@
 #include "fwd-player.h"
 #include "player-callsign.h"
 #include "bot_brain.h"
+#include "bot_profile.h"
 
 namespace dcx {
 
@@ -52,10 +53,32 @@ struct bot_setup
 	bot::bot_skill default_skill{bot::BOT_DEFAULT_SKILL};
 	bot::bot_style default_style{bot::bot_style::balanced};
 	std::array<bot_config, MAX_BOTS> bots{};
+	/* Section 2.3: a human who finds the game full replaces the most
+	 * recently added bot.
+	 */
+	bool replace{true};
 	bool initialized{};
 };
 
 extern bot_setup Bot_setup;
+
+/* Section 2.2: the slot's player is (or, after it left, was) a bot: on
+ * the host from the setup, on a client from the PLAYER_LIST flag.  For
+ * the kill list, the score screens and the rejoin rule.
+ */
+#if DXX_USE_MULTIPLAYER
+[[nodiscard]]
+bool player_is_bot(unsigned pnum);
+void set_player_is_bot(unsigned pnum, bool bot);
+void clear_player_bot_flags();
+
+#else
+[[nodiscard]]
+static inline bool player_is_bot(unsigned)
+{
+	return false;
+}
+#endif
 
 }
 
@@ -78,6 +101,14 @@ void bots_setup_init();
 void bots_setup_menu(network_game_type mode, unsigned max_players);
 /* The label of the "Bots..." item of the host setup menu. */
 void bots_setup_label(char *buf, std::size_t size, network_game_type mode);
+/* The bot lines of the pilot's netgame profile were read (section 6.5):
+ * they replace the setup; the `-bots N` count applies to the first setup
+ * of the session.
+ */
+void bots_setup_load(const ::dcx::bot::bot_profile &p);
+/* Section 6.5: the setup as the pilot's netgame profile stores it. */
+[[nodiscard]]
+::dcx::bot::bot_profile bots_setup_profile();
 /* Bots play anarchy, team anarchy and bounty until stage B7. */
 [[nodiscard]]
 bool bots_allowed_in_mode(network_game_type mode);
@@ -101,6 +132,18 @@ void bot_slot_released(playernum_t pnum);
  * others see it leave, the host drops what it carried) and return true.
  */
 bool bots_kick(playernum_t pnum);
+/* Section 2.3: a human replaces bot `pnum` (the game was full, or the
+ * bot has the human's name): the bot leaves as a player who quits (its
+ * eggs dropped, PLAYER_LEFT(quit)) and does not come back in this game.
+ * False if `pnum` is not a bot.
+ */
+bool bots_remove_for_human(playernum_t pnum);
+/* The order in which bot `pnum` was added (higher: later). */
+[[nodiscard]]
+unsigned bot_added_order(playernum_t pnum);
+/* The host lets humans replace bots. */
+[[nodiscard]]
+bool bots_replaceable();
 /* The bot's ship is in its death tumble (the bundle's `dying`). */
 [[nodiscard]]
 bool bot_ship_dying(playernum_t pnum);

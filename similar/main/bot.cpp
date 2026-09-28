@@ -140,8 +140,6 @@ constexpr fix BOT_FUELCEN_RATE{i2f(25)};
 constexpr fix BOT_FUELCEN_SOUND_DELAY{F1_0 / 4};
 /* A retreat without a known shield source draws this many places. */
 constexpr unsigned BOT_FLEE_TRIES{10};
-/* Stage B1 plays every bot at the Hotshot preset (section 9). */
-constexpr b::bot_skill BOT_B1_SKILL{b::bot_skill::hotshot};
 /* Section 9.5: the evasion after a hit from an unseen attacker, and how
  * long the bot then turns to where the attacker was.
  */
@@ -282,9 +280,20 @@ struct bot_state
 {
 	playernum_t pid;
 	bot_config cfg;
-	b::bot_skill skill_level{BOT_B1_SKILL};
-	const b::skill_params *skill{&b::skill_of(BOT_B1_SKILL)};
+	/* Section 9.7: the bot's own skill and style (its setup line). */
+	b::bot_skill skill_level{b::BOT_DEFAULT_SKILL};
+	const b::skill_params *skill{&b::skill_of(b::BOT_DEFAULT_SKILL)};
 	const b::style_params *style{&b::style_of(b::bot_style::balanced)};
+	/* The retreat threshold of the last strategy tick: the style's,
+	 * raised when outgunned (b::style_retreat_shields).
+	 */
+	double retreat_shields{35};
+	/* Section 9.7: a beginner's trigger pauses (b::fire_burst). */
+	b::fire_burst burst;
+	/* Section 2.3: the order in which the bots were added; a joining
+	 * human replaces the most recently added one.
+	 */
+	unsigned added{};
 	pilot pl{};
 	b::bot_rng rng;
 	/* The stagger of the slower layers: the slot. */
@@ -440,7 +449,17 @@ struct bot_state
 	explicit bot_state(const playernum_t p, const bot_config &c) :
 		pid{p}, cfg{c}, stagger{p}, risk{b::risk_profile_of(c.skill, c.style)}
 	{
+		apply_config();
 		heavy_near_obj.fill(0xffff);
+	}
+	/* Section 9.7: the presets of the bot's skill and style. */
+	void apply_config()
+	{
+		skill_level = cfg.skill;
+		skill = &b::skill_of(cfg.skill);
+		style = &b::style_of(cfg.style);
+		retreat_shields = style->retreat_shields;
+		risk = b::risk_profile_of(cfg.skill, cfg.style);
 	}
 	void reset_for_life(const uint32_t tick)
 	{
@@ -474,7 +493,8 @@ struct bot_state
 		standoff = 0;
 		blast_hold = 0;
 		blast_hold_until = 0;
-		risk = b::risk_profile_of(cfg.skill, cfg.style);
+		apply_config();
+		burst.reset();
 		heavy_plan = {};
 		heavy_planned = false;
 		heavy_aim.reset();
@@ -1415,7 +1435,8 @@ void perceive(bot_state &bs, const object &obj, const uint32_t tick)
 	 * its flight for a moment, a reaction time later.  The bot's own shots
 	 * and, without friendly fire, its partners' are not dodged.
 	 */
-	if (bs.skill->dodge_prob > 0 && tick >= bs.dodge_until)
+	const double dodge_prob{b::effective_dodge(*bs.skill, *bs.style)};
+	if (dodge_prob > 0 && tick >= bs.dodge_until)
 	{
 		const double radius{obj.size / 65536.0 + 3};
 		const auto frame{to_frame(obj.orient)};
@@ -1450,7 +1471,7 @@ void perceive(bot_state &bs, const object &obj, const uint32_t tick)
 			const auto away{b::dodge_direction(rel, to_vec(o.mtype.phys_info.velocity) - vel, BOT_DODGE_HORIZON, b::dodge_radius(radius, homing_at_me), frame.r)};
 			if (!away)
 				continue;
-			if (b::dodge_roll(bs.dodge_salt, static_cast<uint16_t>(o.signature)) >= b::dodge_chance(bs.skill->dodge_prob, homing_at_me))
+			if (b::dodge_roll(bs.dodge_salt, static_cast<uint16_t>(o.signature)) >= b::dodge_chance(dodge_prob, homing_at_me))
 				continue;
 			bs.dodge_dir = *away;
 			bs.dodge_from = tick + b::ticks_from_ms(bs.skill->reaction_ms) / 2;
@@ -1821,7 +1842,8 @@ void think(bot_state &bs, object &obj, const uint32_t tick)
 	const auto pos{to_vec(obj.pos)};
 	std::array<b::target_candidate, MAX_PLAYERS> cand{};
 	unsigned n{0};
-	const unsigned memory_ticks{b::ticks_from_ms(sk.memory_ms)};
+	/* Section 9.7: an aggressive bot hunts a lost target longer. */
+	const unsigned memory_ticks{b::ticks_from_ms(b::effective_memory_ms(sk, st))};
 	for (playernum_t i = 0; i < N_players && i < MAX_PLAYERS; ++i)
 	{
 		if (i == bs.pid || !bs.memory[i].valid)
@@ -1877,6 +1899,19 @@ void think(bot_state &bs, object &obj, const uint32_t tick)
 	const bool attacked{bs.last_attacker < MAX_PLAYERS && tick - bs.attacked_tick < BOT_REVENGE_TICKS};
 	/* Section 4.7: cloaked it sneaks, invulnerable it attacks. */
 	bs.tactics = b::tactics_for(res.cloaked, res.invulnerable);
+	/* Section 9.7: how the bot stands against its target (shields and
+	 * armament, as a human judges an opponent by its ship and its
+	 * shots): not ahead, a collector avoids the fight; outgunned, a
+	 * cautious bot breaks off.
+	 */
+	double advantage{1};
+	if (bs.target)
+	{
+		const auto &t{*Objects.vcptr(vcplayerptr(*bs.target)->objnum)};
+		if (t.type == object_type::OBJ_PLAYER)
+			advantage = b::fight_advantage(res.shields, b::armament_score(res.weapons), t.shields / 65536.0, b::armament_score(weapons_of(t.ctype.player_info)));
+	}
+	bs.retreat_shields = b::style_retreat_shields(st, advantage);
 	const b::goal_inputs gin{
 		.has_target = bs.target.has_value(),
 		.target_visible = target_visible,
@@ -1890,8 +1925,8 @@ void think(bot_state &bs, object &obj, const uint32_t tick)
 		.grab = grab.key != 0xffff,
 		.grab_shields = grab.shields,
 		.refuel = centre.utility,
-		.retreat_shields = st.retreat_shields,
-		.engage_weight = st.engage_weight * bs.tactics.engage_weight,
+		.retreat_shields = bs.retreat_shields,
+		.engage_weight = st.engage_weight * b::style_engage_factor(st, advantage) * bs.tactics.engage_weight,
 		.collect_weight = st.collect_weight * bs.tactics.collect_weight,
 		.collector = bs.cfg.style == b::bot_style::collector,
 		.current = current_goal(bs, target_visible),
@@ -2107,7 +2142,7 @@ void decide_afterburner(bot_state &bs, object &obj, const vec3 &wanted, const ui
 	const double max_speed{B.limits.max_speed};
 	bool chasing_far{false};
 	if (bs.target && (bs.goal == bot_goal::hunt) && bs.memory[*bs.target].valid)
-		chasing_far = b::distance(pos, bs.memory[*bs.target].pos) > b::AFTERBURNER_CHASE_DISTANCE;
+		chasing_far = b::distance(pos, bs.memory[*bs.target].pos) > bs.style->burn_chase_distance;
 	bool long_straight{false};
 	if ((bs.goal == bot_goal::roam || bs.goal == bot_goal::collect) && bs.steer_index < bs.points.size())
 		long_straight = b::distance(pos, bs.points[bs.steer_index]) > 100;
@@ -2537,7 +2572,7 @@ void plan_heavy(bot_state &bs, const object &obj, const uint32_t tick, b::missil
 				.since_change = (tick - bs.hug_changed) / static_cast<double>(b::BOT_TICK_RATE),
 				.unseen_for = target_visible ? 0 : m.target_seen_ago,
 				.own_heavy_soon = own_soon,
-				.weak = obj.shields / 65536.0 < bs.style->retreat_shields,
+				.weak = obj.shields / 65536.0 < bs.retreat_shields,
 				.roll = bs.hug_roll,
 			}, bs.risk);
 		}
@@ -2575,6 +2610,8 @@ void plan_heavy(bot_state &bs, const object &obj, const uint32_t tick, b::missil
 			.standoff = bs.standoff,
 			.target_closing = m.target_closing_speed,
 			.back_blocked = wall_distance(obj, away, BOT_BACK_WALL_CLEARANCE) < BOT_BACK_WALL_CLEARANCE,
+			.duck_share = bs.risk.duck_share,
+			.duck_closing = bs.risk.duck_closing,
 		})};
 		bs.duck_point.reset();
 		if (duck)
@@ -2647,6 +2684,7 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 				m.data[i] = missile_data_of(w);
 		}
 		m.smarts = sk.weapon_smarts;
+		m.mine_interval_scale = bs.style->mine_interval;
 		m.has_target = target_pos.has_value();
 		m.target_visible = target_visible;
 		m.shot_clear = target_visible && bs.shot_clear;
@@ -3099,10 +3137,11 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 				 * strafe across the line of sight in changing
 				 * directions.
 				 */
-				const double strafe_speed{sk.strafe ? max_speed * 0.7 : 0};
+				/* Section 9.7: the skill's strafe, the style's pace. */
+				const double strafe_speed{max_speed * b::effective_strafe_speed(sk, *bs.style)};
 				/* Combat movement takes over: no recovery manoeuvre. */
 				bs.stuck.cancel_recovery();
-				wanted = b::combat_velocity(to, frame.r, frame.u, bs.juke, sk.strafe_vertical, max_speed * 0.8, strafe_speed);
+				wanted = b::combat_velocity(to, frame.r, frame.u, bs.juke, sk.strafe_vertical, max_speed * b::effective_close_speed(*bs.style), strafe_speed);
 				/* Section 9.5: its own heavy missile in flight, the bot
 				 * does not close in on the burst; keeping a standoff, it
 				 * does not back into a wall (the earthshaker's children
@@ -3141,6 +3180,9 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 #endif
 		bs.fire = b::should_fire(err, cone, bs.shot_clear, dist, std::min(weapon_range(pi), bs.tactics.max_fire_distance)) &&
 			b::long_shot_worthwhile(dist, weapon_speed(pi), lateral, b::radians(sk.aim_sigma_deg), target_obj.size / 65536.0);
+		/* Section 9.7: a beginner pauses between bursts. */
+		bs.burst.update(bs.rng, sk.fire_duty);
+		bs.fire = bs.fire && bs.burst.on();
 	}
 	else
 	{
@@ -3524,7 +3566,14 @@ void bot_slot_released(const playernum_t pnum)
 	}
 }
 
-bool bots_kick(const playernum_t pnum)
+namespace {
+
+/* A bot leaves the game (kicked, or replaced by a human): a bot still
+ * tumbling explodes first, otherwise the host's copy of its inventory is
+ * brought up to date; multi_disconnect_player then drops its eggs, makes
+ * the ship a ghost and tells the others (PLAYER_LEFT with `why`).
+ */
+bool remove_bot(const playernum_t pnum, const kick_player_reason why)
 {
 	const auto bs{find_bot(pnum)};
 	if (!bs || !multi_i_am_master())
@@ -3543,9 +3592,36 @@ bool bots_kick(const playernum_t pnum)
 		else
 			net_objects_host_own_ship_inventory(pnum, true);
 	}
-	net_v2::host_remove_player(pnum, kick_player_reason::kicked);
+	net_v2::host_remove_player(pnum, why);
 	B.bots[pnum].reset();
 	return true;
+}
+
+}
+
+bool bots_kick(const playernum_t pnum)
+{
+	return remove_bot(pnum, kick_player_reason::kicked);
+}
+
+bool bots_remove_for_human(const playernum_t pnum)
+{
+	const auto bs{find_bot(pnum)};
+	if (!bs)
+		return false;
+	con_printf(CON_NORMAL, "bots: '%s' (P#%u) leaves to make room for a human", static_cast<const char *>(bs->cfg.name), pnum);
+	return remove_bot(pnum, kick_player_reason::quit);
+}
+
+unsigned bot_added_order(const playernum_t pnum)
+{
+	const auto bs{find_bot(pnum)};
+	return bs ? bs->added : 0;
+}
+
+bool bots_replaceable()
+{
+	return Bot_setup.replace;
 }
 
 bool bot_ship_dying(const playernum_t pnum)
@@ -3569,6 +3645,7 @@ void bots_session_reset()
 		Netgame.players[pid].callsign = {};
 		o.reset();
 	}
+	clear_player_bot_flags();
 	B.graph.clear();
 	B.side_centres.clear();
 	B.tick_started = false;
@@ -3616,10 +3693,15 @@ unsigned bots_allocate_slots()
 		ship_of(slot).ctype.player_info.KillGoalCount = 0;
 		auto &bs{B.bots[slot].emplace(slot, cfg)};
 		bs.cfg.name = name;
+		/* Section 2.3: the order of addition (a joining human replaces
+		 * the last one); section 2.2: the PLAYER_LIST flag.
+		 */
+		bs.added = k + 1;
+		set_player_is_bot(slot, true);
 		if (slot >= N_players)
 			N_players = slot + 1;
 		++placed;
-		con_printf(CON_NORMAL, "bots: '%s' takes P#%u", static_cast<const char *>(name), slot);
+		con_printf(CON_NORMAL, "bots: '%s' takes P#%u (%s, %s)", static_cast<const char *>(name), slot, b::bot_skill_names[static_cast<unsigned>(bs.skill_level) % b::BOT_SKILL_COUNT], b::bot_style_names[static_cast<unsigned>(bs.cfg.style) % b::BOT_STYLE_COUNT]);
 	}
 	Netgame.numplayers = N_players;
 	if (placed < Bot_setup.count)
@@ -3940,7 +4022,7 @@ bool bot_take_damage(object &ship, const icobjptridx_t killer, const fix damage,
 			const auto reaction{b::react_to_hit({
 				.attacker_seen = seen,
 				.shields = (ship.shields - damage) / 65536.0,
-				.retreat_shields = bs->style->retreat_shields,
+				.retreat_shields = bs->retreat_shields,
 				.invulnerable = false,
 				.evading = tick < bs->dodge_until && bs->turn_to == who,
 			})};

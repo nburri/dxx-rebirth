@@ -60,6 +60,9 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "d_range.h"
 #include "d_zip.h"
 #include "partial_range.h"
+#if DXX_USE_MULTIPLAYER
+#include "bot.h"
+#endif
 
 #define GameNameStr "game_name"
 #define GameModeStr "gamemode"
@@ -1708,8 +1711,10 @@ void read_netgame_profile(netgame_info *ng)
 		return;
 
 	ng->MPGameplayOptions.AutosaveInterval = std::chrono::minutes(10);
+	/* Documentation/multiplayer-bots.md section 6.5: the bot setup. */
+	::dcx::bot::profile_reader bots;
 	// NOTE that we do not set any defaults here or even initialize netgame_info. For flexibility, leave that to the function calling this.
-	for (PHYSFSX_gets_line_t<50> line; const auto rc{PHYSFSX_fgets(line, file)};)
+	for (PHYSFSX_gets_line_t<::dcx::bot::BOT_PROFILE_LINE_SIZE> line; const auto rc{PHYSFSX_fgets(line, file)};)
 	{
 		const auto eol{rc.end()};
 		const auto lb{rc.begin()};
@@ -1717,6 +1722,8 @@ void read_netgame_profile(netgame_info *ng)
 		if (eq == eol)
 			continue;
 		const auto value{std::next(eq)};
+		if (bots.parse(std::string_view{lb, eq}, std::string_view{value, eol}))
+			continue;
 		if (const std::ranges::subrange name{lb, eq}; compare_nonterminated_name(name, GameNameStr))
 			convert_string(ng->game_name, value, eol);
 		else if (compare_nonterminated_name(name, GameModeStr))
@@ -1813,6 +1820,9 @@ void read_netgame_profile(netgame_info *ng)
 		}
 #endif
 	}
+	/* A profile of an older build has no bot lines: the setup stays. */
+	if (bots.seen())
+		bots_setup_load(bots.result());
 }
 
 // write values from netgame_info to ngp file
@@ -1859,6 +1869,13 @@ void write_netgame_profile(const netgame_info *ng)
 #else
 	PHYSFSX_puts_literal(file, TrackerStr "=0\n" TrackerNATHPStr "=0\n");
 #endif
+	{
+		/* Documentation/multiplayer-bots.md section 6.5. */
+		std::array<::dcx::bot::profile_line, 3 + ::dcx::bot::BOT_PROFILE_MAX_BOTS> lines;
+		const auto n{::dcx::bot::format_profile(bots_setup_profile(), lines)};
+		for (std::size_t i = 0; i < n; ++i)
+			PHYSFSX_printf(file, "%s\n", lines[i].data());
+	}
 	PHYSFSX_puts_literal(file, NGPVersionStr "=" DXX_VERSION_STR "\n");
 }
 #endif

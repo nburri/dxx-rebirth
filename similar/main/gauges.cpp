@@ -65,6 +65,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "vclip.h"
 #include "compiler-range_for.h"
 #include "d_levelstate.h"
+#include "bot.h"
 #include <utility>
 
 using std::min;
@@ -3635,7 +3636,10 @@ static void hud_show_kill_list(fvcobjptr &vcobjptr, grs_canvas &canvas, const ga
 			/* The ping comes with the host's state bundle once per second;
 			 * a player whose state reaches the host late is marked.
 			 */
-			if (net_interp_player_lagging(player_num))
+			/* Documentation/multiplayer-bots.md section 2.2. */
+			if (player_is_bot(player_num))
+				gr_string(canvas, game_font, x2, y, "  BOT");
+			else if (net_interp_player_lagging(player_num))
 				gr_string(canvas, game_font, x2, y, " LAG");
 			else
 				gr_printf(canvas, game_font, x2, y, "%4dms", Netgame.players[player_num].ping);
@@ -3733,7 +3737,7 @@ void show_HUD_names(const d_robot_info_array &Robot_info, grs_canvas &canvas, co
 						: (show_name
 							? plr.callsign.operator const char *()
 							: nullptr);
-					const auto trailer = show_typing
+					const auto trailer_state = show_typing
 						? ({
 							const auto m = multi_sending_message[pnum];
 							m == msgsend_state::typing
@@ -3745,6 +3749,10 @@ void show_HUD_names(const d_robot_info_array &Robot_info, grs_canvas &canvas, co
 									: nullptr;
 							})
 						: nullptr;
+					/* Documentation/multiplayer-bots.md section 2.2: a
+					 * bot's name tag says so.
+					 */
+					const auto trailer = trailer_state ? trailer_state : (show_name && !is_bounty_target && player_is_bot(pnum) ? ", Bot" : nullptr);
 					/* If both `name` and `trailer` are present, then
 					 * concatenate them into label_storage.  If successful, set
 					 * `s` to `label_storage`.  Otherwise, set `s` to

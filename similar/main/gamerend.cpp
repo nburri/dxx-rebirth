@@ -61,6 +61,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "d_levelstate.h"
 #include "d_range.h"
 #include "frame_probe.h"
+#include "bot.h"
 
 #if DXX_USE_OGL
 #include "ogl_init.h"
@@ -297,7 +298,11 @@ static void show_netplayerinfo(grs_canvas &canvas)
 			gr_printf(canvas, game_font, x + fspacx8 * 7, y, "%-6d", v);
 		}
 
-		gr_printf(canvas, game_font, x + fspacx8 * 18, y,"%-6d", Netgame.players[i].ping);
+		/* Documentation/multiplayer-bots.md section 2.2. */
+		if (player_is_bot(i))
+			gr_string(canvas, game_font, x + fspacx8 * 18, y, "BOT");
+		else
+			gr_printf(canvas, game_font, x + fspacx8 * 18, y,"%-6d", Netgame.players[i].ping);
 		if (i != Player_num)
 			gr_printf(canvas, game_font, x + fspacx8 * 23, y, "%hu/%hu", kill_matrix[Player_num][i], kill_matrix[i][Player_num]);
 	}

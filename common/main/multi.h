@@ -177,8 +177,10 @@ static inline player_ship_color get_team_color(const team_number tnum)
  * 102: stage 3 (object ids, host-decided pickups and drops, INVENTORY).
  * 103: stage 3 review fixes (PICKUP_GRANT `life`, MULTI_PLAYER_DERES mine
  * counts).
+ * 104: bots B2 (the PLAYER_LIST bot flag, Documentation/multiplayer-bots.md
+ * section 2.2).
  */
-constexpr std::uint16_t MULTI_PROTO_VERSION{103};
+constexpr std::uint16_t MULTI_PROTO_VERSION{104};
 // PROTOCOL VARIABLES AND DEFINES - END
 
 /* The network tick rate (positions per second, and the pacing of every
