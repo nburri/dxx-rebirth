@@ -1300,10 +1300,12 @@ bool net_objects_bot_touch(const playernum_t pnum, const vmobjptridx_t powerup)
 	if (!h.d.grant)
 		return false;
 	host_grant_remote(pnum, id, h);
-	/* The clients see the new inventory now (the grant only names the
-	 * powerup).
+	/* The caller applies what do_powerup does besides the inventory (a
+	 * cloak's time and MULTI_CLOAK, an invulnerability that is no
+	 * longer faked) and then sends the new inventory with
+	 * net_objects_host_own_ship_inventory: the clients must not see the
+	 * cloaked flag before the cloak's start.
 	 */
-	net_objects_host_own_ship_inventory(pnum, true);
 	return true;
 }
 

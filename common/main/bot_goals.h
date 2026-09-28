@@ -674,11 +674,22 @@ public:
 			return k.key == key && k.signature == signature;
 		});
 	}
+	[[nodiscard]]
+	bool full() const
+	{
+		return m_items.size() >= m_capacity;
+	}
 	/* The bot learned of a powerup (saw it, heard it appear, knows the
 	 * map): remember it, or refresh it.  A slot that now holds another
-	 * object replaces the old entry.  Full: the oldest is forgotten.
+	 * object replaces the old entry.  Full: a new powerup the bot only
+	 * knows from the map is not learned (else, on a level with more
+	 * powerups than the memory holds, each strategy tick would push out
+	 * another and the set would churn); one it perceived pushes out the
+	 * oldest entry that is not being ignored (the ignore keeps the bot
+	 * from going back to a powerup it could not reach).  Returns whether
+	 * the powerup is remembered now.
 	 */
-	void learn(const known_powerup &p, const uint32_t tick)
+	bool learn(const known_powerup &p, const uint32_t tick, const bool may_evict = true)
 	{
 		for (auto &k : m_items)
 			if (k.key == p.key)
@@ -687,13 +698,28 @@ public:
 				k = p;
 				k.learned_tick = tick;
 				k.ignore_until = ignore;
-				return;
+				return true;
 			}
-		if (m_items.size() >= m_capacity)
-			m_items.erase(std::ranges::min_element(m_items, {}, &known_powerup::learned_tick));
+		if (full())
+		{
+			if (!may_evict)
+				return false;
+			auto victim{m_items.end()};
+			for (auto i{m_items.begin()}; i != m_items.end(); ++i)
+			{
+				if (tick < i->ignore_until)
+					continue;
+				if (victim == m_items.end() || static_cast<int32_t>(i->learned_tick - victim->learned_tick) < 0)
+					victim = i;
+			}
+			if (victim == m_items.end())
+				return false;
+			m_items.erase(victim);
+		}
 		auto &k{m_items.emplace_back(p)};
 		k.learned_tick = tick;
 		k.ignore_until = 0;
+		return true;
 	}
 	void forget(const uint16_t key)
 	{

@@ -1084,14 +1084,15 @@ still there and of that type, the bot alive and not dropped, in range, not
 spat by it within 2 s, and `evaluate_pickup`: not full, not "already
 have"), and `host_grant_remote` applies it to the copy and the ship,
 removes the object or leaves a cannon with its remaining rounds, and sends
-`PICKUP_GRANT` with the bot's life counter; then the bot's `INVENTORY` goes
-out at once. The range check takes the bot's ship position, not the
+`PICKUP_GRANT` with the bot's life counter. The range check takes the bot's ship position, not the
 interpolation ring (a bot has none; the ghost snapshot of its last death
 would have denied every later pickup). Nothing is requested and nothing
 waits, as for the host's own ship. What `do_powerup` does besides the
 inventory is done for the bot: the cloak's time and `MULTI_CLOAK`, a real
-invulnerability's time (`FakingInvul` cleared), a full afterburner charge.
-Keys are taken as a human takes them in a multiplayer game (they stay).
+invulnerability's time (`FakingInvul` cleared), a full afterburner charge;
+only then does the bot's `INVENTORY` go out (`bot_touch_powerup`), so the
+clients never see the cloaked flag before the cloak's start, nor a faked
+invulnerability for a real one. Keys are taken as a human takes them in a multiplayer game (they stay).
 Death drops need nothing new: `multi_send_player_deres` brings the copy up
 to date and the host drops from it, so what a bot picked up (missiles
 included) is dropped where it dies. When a bot's cloak runs out
@@ -1118,7 +1119,11 @@ hearing radius during its first second. It remembers what it learned
 (`powerup_memory`: position, type, rounds) and forgets an entry when it
 sees the place empty or comes within 15 units of the empty place, when it
 takes it, and
-after `30 s + 3 × memory` (Hotshot 45 s). So a bot may fly to a powerup
+after `30 s + 3 × memory` (Hotshot 45 s). The memory holds 96 powerups;
+when it is full, a powerup known only from the map is not learned (else a
+level with more powerups would churn the set every tick), and one seen or
+heard pushes out the oldest entry that is not being ignored (an unreachable
+powerup's 5 s or 10 s ignore survives). So a bot may fly to a powerup
 someone else took, as a human does, but it never knows about a respawn it
 did not see or hear. Fuel and repair centres are known to every bot (they
 are the level's geometry).
@@ -1181,8 +1186,9 @@ long straight legs (more than 100 units to the steer point) while roaming
 or collecting. The ship's own afterburner code drains and recharges the
 charge from the bot's `pilot`; the host drops the trail's blobs
 (`MULTI_DROP_BLOB` as the bot) and plays and sends the afterburner sound
-(`MULTI_SOUND_FUNCTION` as the bot), and stops it when the bot dies or the
-level ends. All bots still play Hotshot (B2 applies the presets), so in
+(`MULTI_SOUND_FUNCTION` as the bot), and stops it when the bot dies, the
+level ends, or the bot is kicked or its slot released (the loop is linked to
+its ship object, which stays as a ghost). All bots still play Hotshot (B2 applies the presets), so in
 this stage they burn when chasing and retreating.
 
 **Unchanged:** the human's pickups on host and clients, non-bot games and

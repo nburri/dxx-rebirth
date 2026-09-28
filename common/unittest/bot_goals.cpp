@@ -497,6 +497,27 @@ void test_powerup_memory()
 	CHECK(!w.knows(7, 7));
 	m.clear();
 	CHECK(m.size() == 0);
+	/* Full: the map alone does not push anything out (no churn on a
+	 * level with more powerups than the memory holds), and a perceived
+	 * powerup never pushes out one being ignored.
+	 */
+	powerup_memory f{3};
+	CHECK(f.learn(kp(1, 1), 100) && f.learn(kp(2, 1), 110) && f.learn(kp(3, 1), 120));
+	CHECK(f.full());
+	CHECK(!f.learn(kp(4, 1), 130, false));
+	CHECK(f.size() == 3 && !f.knows(4, 1) && f.knows(1, 1));
+	/* Refreshing a known one still works when full. */
+	CHECK(f.learn(kp(2, 1), 135, false) && f.find(2, 1)->learned_tick == 135);
+	f.ignore_for(1, 1000);
+	CHECK(f.learn(kp(5, 1), 140));
+	CHECK(f.knows(1, 1) && f.find(1, 1)->ignore_until == 1000 && !f.knows(3, 1) && f.knows(5, 1));
+	f.ignore_for(2, 1000);
+	f.ignore_for(5, 1000);
+	CHECK(!f.learn(kp(6, 1), 150));
+	CHECK(f.size() == 3 && !f.knows(6, 1));
+	/* The ignores run out: the oldest goes again. */
+	CHECK(f.learn(kp(6, 1), 1000));
+	CHECK(!f.knows(1, 1) && f.knows(2, 1) && f.knows(5, 1) && f.knows(6, 1));
 }
 
 /* Section 4.7 and 5.1: the afterburner. */

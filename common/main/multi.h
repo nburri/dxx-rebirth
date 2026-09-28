@@ -1081,7 +1081,9 @@ void net_objects_host_own_ship_inventory(playernum_t pnum, bool force);
 bool net_objects_bot_can_use(playernum_t pnum, powerup_type_t id, uint32_t count);
 /* The host: the ship of the bot in slot `pnum` touched `powerup`.  The
  * host decides as for any player (host_decide) and grants it at once
- * (PICKUP_GRANT, then the bot's INVENTORY).  True if granted.
+ * (PICKUP_GRANT).  True if granted: the caller then applies the pickup's
+ * other effects (cloak, invulnerability) and sends the bot's INVENTORY
+ * with net_objects_host_own_ship_inventory(pnum, true).
  */
 bool net_objects_bot_touch(playernum_t pnum, vmobjptridx_t powerup);
 /* The host: send every player's inventory to everyone (the extras of a

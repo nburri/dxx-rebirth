@@ -984,15 +984,23 @@ void learn_powerups(bot_state &bs, const object &obj, const uint32_t tick)
 		const bool initial{netid != 0xffff && ::dcx::net_v2::is_level_netid(netid)};
 		const auto ppos{to_vec(o->pos)};
 		const auto to{ppos - pos};
-		bool learn{b::knows_from_map(initial, bs.dist.hops(o->segnum), sk.map_knowledge)};
-		if (!learn && !initial)
+		const bool from_map{b::knows_from_map(initial, bs.dist.hops(o->segnum), sk.map_knowledge)};
+		/* Only a perceived powerup may push another out of a full
+		 * memory (powerup_memory::learn); the map alone need not be
+		 * checked further while there is room.
+		 */
+		bool perceived{false};
+		if (!from_map || bs.powerups.full())
 		{
-			const double age{(GameTime64 - o->ctype.powerup_info.creation_time) / 65536.0};
-			learn = b::hears_appearance(age, b::length(to), sk.hearing);
+			if (!initial)
+			{
+				const double age{(GameTime64 - o->ctype.powerup_info.creation_time) / 65536.0};
+				perceived = b::hears_appearance(age, b::length(to), sk.hearing);
+			}
+			if (!perceived)
+				perceived = sees(o->pos, to);
 		}
-		if (!learn)
-			learn = sees(o->pos, to);
-		if (!learn)
+		if (!from_map && !perceived)
 			continue;
 		bs.powerups.learn({
 			.key = key,
@@ -1002,7 +1010,7 @@ void learn_powerups(bot_state &bs, const object &obj, const uint32_t tick)
 			.initial = initial,
 			.pos = ppos,
 			.segment = o->segnum,
-		}, tick);
+		}, tick, perceived);
 	}
 }
 
@@ -1796,6 +1804,18 @@ callsign_t unique_callsign(const callsign_t &wanted, const playernum_t slot)
 	return wanted;
 }
 
+/* A bot leaving (kicked, or its slot released) puts its afterburner out
+ * first: the loop is linked to its ship object, which stays behind as a
+ * ghost, so on the host and the clients it would otherwise play on
+ * until the level ends, into the tenure of whoever takes the slot next.
+ */
+void put_out_afterburner(bot_state &bs)
+{
+	if (bs.burning && vcplayerptr(bs.pid)->objnum != object_none)
+		stop_afterburner(bs, ship_of(bs.pid));
+	bs.burning = false;
+}
+
 }
 
 bool bot_is_local(const playernum_t pnum)
@@ -1808,6 +1828,7 @@ void bot_slot_released(const playernum_t pnum)
 	if (pnum < MAX_PLAYERS && B.bots[pnum])
 	{
 		con_printf(CON_VERBOSE, "bots: P#%u is no longer a bot", pnum);
+		put_out_afterburner(*B.bots[pnum]);
 		B.bots[pnum].reset();
 	}
 }
@@ -1817,6 +1838,7 @@ bool bots_kick(const playernum_t pnum)
 	const auto bs{find_bot(pnum)};
 	if (!bs || !multi_i_am_master())
 		return false;
+	put_out_afterburner(*bs);
 	auto &obj{ship_of(pnum)};
 	if (obj.type == object_type::OBJ_PLAYER)
 	{
@@ -2184,6 +2206,11 @@ bool bot_touch_powerup(object &ship, const vmobjptridx_t powerup)
 		default:
 			break;
 	}
+	/* Only now do the clients see the new inventory (the grant only
+	 * names the powerup): after MULTI_CLOAK, with the real
+	 * invulnerability, and the host's copy taken from the ship as it is.
+	 */
+	net_objects_host_own_ship_inventory(pid, true);
 	/* The powerup is no goal any more; the weapon choice sees what it got
 	 * at the next strategy tick.
 	 */
