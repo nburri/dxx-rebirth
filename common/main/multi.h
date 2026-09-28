@@ -1084,9 +1084,11 @@ bool net_objects_bot_can_use(playernum_t pnum, powerup_type_t id, uint32_t count
  * host decides as for any player (host_decide) and grants it at once
  * (PICKUP_GRANT).  True if granted: the caller then applies the pickup's
  * other effects (cloak, invulnerability) and sends the bot's INVENTORY
- * with net_objects_host_own_ship_inventory(pnum, true).
+ * with net_objects_host_own_ship_inventory(pnum, true).  Otherwise
+ * `deny` says why (net_v2 deny_reason; 0xff: not the host's to decide,
+ * e.g. a powerup without a net id).
  */
-bool net_objects_bot_touch(playernum_t pnum, vmobjptridx_t powerup);
+bool net_objects_bot_touch(playernum_t pnum, vmobjptridx_t powerup, uint8_t &deny);
 /* The host: send every player's inventory to everyone (the extras of a
  * join in progress).
  */

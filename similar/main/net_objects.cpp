@@ -1272,12 +1272,16 @@ bool net_objects_bot_can_use(const playernum_t pnum, const powerup_type_t id, co
 	return nv::evaluate_pickup(for_rules(inventory_of(ship)), rules_for(pnum), desc, count).usable;
 }
 
-bool net_objects_bot_touch(const playernum_t pnum, const vmobjptridx_t powerup)
+bool net_objects_bot_touch(const playernum_t pnum, const vmobjptridx_t powerup, uint8_t &deny)
 {
+	deny = 0xff;
 	if (!net_objects_active() || !multi_i_am_master() || pnum == Player_num || pnum >= MAX_PLAYERS || pnum >= N_players)
 		return false;
 	if (A.dropped[pnum])
+	{
+		deny = static_cast<uint8_t>(nv::deny_reason::dead);
 		return false;
+	}
 	const auto id{netid_of(*powerup, powerup.get_unchecked_index())};
 	if (id == NETID_NONE)
 		/* No net id (a robot's egg in a robot game): the v1 way is the
@@ -1298,7 +1302,10 @@ bool net_objects_bot_touch(const playernum_t pnum, const vmobjptridx_t powerup)
 	A.mirrors[pnum].assign(inventory_of(ship));
 	const auto h{host_decide(pnum, id, underlying_value(powerup_id))};
 	if (!h.d.grant)
+	{
+		deny = static_cast<uint8_t>(h.d.reason);
 		return false;
+	}
 	host_grant_remote(pnum, id, h);
 	/* The caller applies what do_powerup does besides the inventory (a
 	 * cloak's time and MULTI_CLOAK, an invulnerability that is no

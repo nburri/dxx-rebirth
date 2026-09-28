@@ -2300,7 +2300,10 @@ public:
 	/* The spawn sites for player `player_num`, ranked by their distance
 	 * to the nearest other player ship.
 	 */
-	respawn_locations(fvmobjptr &vmobjptr, fvcsegptridx &vcsegptridx, const playernum_t player_num)
+	/* `site_open` (bots only): the sites a ship can fly out of; the
+	 * others are left out before the ranking, unless none is open.
+	 */
+	respawn_locations(fvmobjptr &vmobjptr, fvcsegptridx &vcsegptridx, const playernum_t player_num, const per_player_array<bool> *const site_open = nullptr)
 	{
 		const auto find_closest_player = [player_num, &vmobjptr, &vcsegptridx](const obj_position &candidate) {
 			fix closest_dist = INT32_MAX;
@@ -2325,7 +2328,16 @@ public:
 			s.first = i;
 			s.second = find_closest_player(Player_init[i]);
 		}
-		max_usable_spawn_sites = rank_secluded_spawn_sites(std::span<site>(sites.data(), max_spawn_sites), Netgame.SecludedSpawns + 1);
+		unsigned candidate_sites{max_spawn_sites};
+		if (site_open)
+		{
+			const auto open_end{std::stable_partition(sites.begin(), std::next(sites.begin(), max_spawn_sites), [site_open](const site &s) {
+				return (*site_open)[static_cast<unsigned>(s.first)];
+			})};
+			if (const auto open{static_cast<unsigned>(std::distance(sites.begin(), open_end))})
+				candidate_sites = open;
+		}
+		max_usable_spawn_sites = rank_secluded_spawn_sites(std::span<site>(sites.data(), candidate_sites), Netgame.SecludedSpawns + 1);
 	}
 	unsigned get_usable_sites() const
 	{
@@ -2355,6 +2367,26 @@ spawn_choice choose_spawn(fvmobjptr &vmobjptr, const playernum_t pnum, const int
 	else
 		// If deathmatch and not random, positions were already determined by sync packet
 		return {spawn_choice::kind::in_place, 0};
+}
+
+spawn_choice choose_bot_spawn(fvmobjptr &vmobjptr, const playernum_t pnum, const per_player_array<bool> &site_open, const uint32_t seed)
+{
+	if (! (+(Game_mode & GM_MULTI) && !(Game_mode & GM_MULTI_COOP))) // If not deathmatch
+		return {spawn_choice::kind::site, pnum};
+	const respawn_locations locations(vmobjptr, vcsegptridx, pnum, &site_open);
+	if (!locations.get_usable_sites())
+		return {spawn_choice::kind::none, 0};
+	/* The bot's own draws (xorshift32 from its seed): the game's d_rand
+	 * is neither reseeded nor advanced.
+	 */
+	uint32_t state{seed ? seed : 0x9e3779b9u};
+	const auto site{pick_spawn_site(locations.get_sites(), locations.get_usable_sites(), i2f(15*20), MAX_PLAYERS * 2, [&state]() {
+		state ^= state << 13;
+		state ^= state >> 17;
+		state ^= state << 5;
+		return state;
+	})};
+	return {spawn_choice::kind::site, static_cast<unsigned>(site)};
 }
 
 void place_player(fvmsegptridx &vmsegptridx, const vmobjptridx_t plrobj, const spawn_choice spawn)

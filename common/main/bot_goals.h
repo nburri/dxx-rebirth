@@ -86,15 +86,22 @@ enum class secondary : uint8_t
 };
 constexpr unsigned BOT_SECONDARY_COUNT{10};
 
-/* The primaries a bot fires (stage B1): fusion needs the human's charge
- * trigger and omega the human's charge model.  A bot still picks them up
- * (it denies them to the others and drops them when it dies), for little.
+/* The primaries a bot fires: all but the super laser, which the game
+ * fires as the laser (by the laser level).  Fusion is charged and
+ * released by the bot's own trigger (bot_weapons.h, fusion_step), omega
+ * fires from the bot's own charge (section 9.5; stages B1-B4 fired
+ * neither, so a bot that took them still fought with the rest).
  */
 [[nodiscard]]
 constexpr bool bot_fires_primary(const primary p)
 {
-	return p != primary::fusion && p != primary::omega && p != primary::super_laser;
+	return p != primary::super_laser;
 }
+
+/* Fusion: a charge costs 2 energy and then 1 per second (FireLaser); a
+ * bot starts one only with this much.
+ */
+constexpr double FUSION_MIN_ENERGY{10};
 
 [[nodiscard]]
 constexpr bool is_ammo_primary(const primary p)
@@ -166,6 +173,8 @@ struct weapon_view
 	/* Rounds of vulcan (and gauss) ammunition. */
 	unsigned vulcan_ammo{};
 	std::array<double, 10> energy_rate{default_energy_rate};
+	/* The omega cannon's charge, 0 to 1 (of MAX_OMEGA_CHARGE). */
+	double omega_charge{1};
 };
 
 [[nodiscard]]
@@ -185,13 +194,37 @@ inline constexpr std::array<std::array<double, BOT_RANGE_BANDS>, 10> primary_tab
 	{{2.4, 2.6, 2.8}},	// vulcan
 	{{3.5, 2.2, 0.6}},	// spreadfire
 	{{3.2, 3.8, 2.0}},	// plasma
-	{{0.0, 0.0, 0.0}},	// fusion: not fired by bots
+	{{3.6, 3.5, 1.4}},	// fusion (charged, section 9.5)
 	{{0.0, 0.0, 0.0}},	// super laser: fired as the laser
 	{{3.0, 3.3, 3.6}},	// gauss
 	{{3.7, 3.5, 1.2}},	// helix
 	{{2.0, 2.4, 0.8}},	// phoenix
-	{{0.0, 0.0, 0.0}},	// omega: not fired by bots
+	{{3.9, 1.6, 0.0}},	// omega: reaches 80 units (MAX_OMEGA_DIST)
 }};
+
+/* Omega fires only from an eighth of its charge, or with some charge
+ * and no energy at all (do_omega_stuff); a shot without that is deleted
+ * on the host, while the clients, told of it by MULTI_FIRE, draw a full
+ * discharge: a bot neither chooses nor fires it then (section 9.5).
+ */
+[[nodiscard]]
+constexpr bool omega_can_fire(const double omega_charge, const double energy)
+{
+	return omega_charge >= 0.125 || (omega_charge > 0 && !(energy > 0));
+}
+
+/* Omega recharges from the energy: full with half its charge and more,
+ * a quarter with little, half as good with little energy to recharge,
+ * nothing while it cannot fire (omega_can_fire).
+ */
+[[nodiscard]]
+constexpr double omega_factor(const weapon_view &v)
+{
+	if (!omega_can_fire(v.omega_charge, v.energy))
+		return 0;
+	const double f{std::clamp(v.omega_charge / 0.5, 0.25, 1.0)};
+	return v.energy < 10 ? f * 0.5 : f;
+}
 
 /* The laser's strength by level (0-based; 4 and 5 are the super lasers),
  * times 1.3 with the quad lasers.
@@ -238,9 +271,13 @@ constexpr double weapon_score(const primary p, const range_band band, const weap
 		return 0;
 	if (is_ammo_primary(p) && !v.vulcan_ammo)
 		return 0;
+	if (p == primary::fusion && v.energy < FUSION_MIN_ENERGY)
+		return 0;
 	double s{primary_table[static_cast<unsigned>(p)][static_cast<unsigned>(band)]};
 	if (p == primary::laser)
 		s *= laser_score(v.laser_level, v.quad);
+	if (p == primary::omega)
+		return s * omega_factor(v);
 	return s * energy_factor(p, v);
 }
 
@@ -425,6 +462,14 @@ constexpr double upgrade_value(const double ratio)
 	return 3 + 2 * std::clamp(ratio - 1, 0.0, 2.0);
 }
 
+/* Section 9.5: a powerup worth a detour in a fight (goal_inputs::
+ * collect_upgrade): a much stronger armament, or shields when the bot
+ * is at 60 or below (B3 counted shields at a third in a fight, so a
+ * damaged bot fought on past a shield powerup 50 units away until it
+ * was weak enough to retreat).
+ */
+constexpr double SHIELD_URGENT_NEED{0.5};
+
 [[nodiscard]]
 constexpr double secondary_value(const uint8_t index)
 {
@@ -505,6 +550,17 @@ constexpr double item_value(const item_desc &d, const resource_view &r)
 	return 0;
 }
 
+/* Section 9.5: whether the item is worth a detour while an enemy is in
+ * sight (goal_inputs::collect_upgrade).
+ */
+[[nodiscard]]
+constexpr bool collect_in_fight(const item_desc &d, const resource_view &r)
+{
+	if (d.kind == item::shield)
+		return shield_need(r.shields) >= SHIELD_URGENT_NEED;
+	return upgrade_ratio(d, r.weapons) >= BIG_UPGRADE_RATIO;
+}
+
 /* Section 4.7: the collection score, value x need / path distance (the
  * need is in the value); 60 units away halves it.
  */
@@ -553,9 +609,15 @@ struct goal_inputs
 	double collect{};
 	double collect_path{};
 	/* That powerup makes the armament much stronger
-	 * (BIG_UPGRADE_RATIO): worth taking in a fight.
+	 * (BIG_UPGRADE_RATIO), or is shields the bot needs
+	 * (collect_in_fight): worth taking in a fight.
 	 */
 	bool collect_upgrade{};
+	/* Section 9.5: a valuable powerup close by (grab_worthwhile), and
+	 * whether it is shields.
+	 */
+	bool grab{};
+	bool grab_shields{};
 	/* The best fuel or repair centre (collect_utility of the need). */
 	double refuel{};
 	/* The style (section 5.2). */
@@ -592,6 +654,40 @@ constexpr double GRAB_DISTANCE{40};
  */
 constexpr double COLLECT_UPGRADE_UNDER_FIRE{0.8};
 
+/* Section 9.5: opportunistic pickups.  B3 chose a collection only by
+ * value over path, and in a fight at a third: a missile, an earthshaker
+ * or energy 20 units away scored below any engagement, so a bot flew
+ * past them.  A human takes what lies on its way.  A powerup worth at
+ * least GRAB_MIN_VALUE within GRAB_RADIUS (and a path of at most
+ * GRAB_PATH) is taken whatever the goal, unless the bot is in danger
+ * (it would retreat: threatened, weak, not invulnerable); shields are
+ * taken in danger too.  It flies there while it shoots at what it sees
+ * (the collect goal's movement).
+ */
+constexpr double GRAB_RADIUS{45};
+constexpr double GRAB_PATH{70};
+constexpr double GRAB_MIN_VALUE{0.75};
+constexpr double GRAB_UTILITY{4};
+
+[[nodiscard]]
+constexpr bool grab_worthwhile(const double value, const double straight_distance, const double path_cost)
+{
+	return value >= GRAB_MIN_VALUE && straight_distance <= GRAB_RADIUS && path_cost <= GRAB_PATH;
+}
+
+/* Threatened, weak and not invulnerable: the bot would retreat. */
+[[nodiscard]]
+constexpr bool in_danger(const goal_inputs &in)
+{
+	return in.threatened && !in.invulnerable && in.retreat_shields > 0 && in.shields < in.retreat_shields;
+}
+
+[[nodiscard]]
+constexpr bool grab_applies(const goal_inputs &in)
+{
+	return in.grab && (!in_danger(in) || in.grab_shields);
+}
+
 [[nodiscard]]
 inline goal_utilities goal_utility(const goal_inputs &in)
 {
@@ -612,6 +708,8 @@ inline goal_utilities goal_utility(const goal_inputs &in)
 	double collect{in.collect * in.collect_weight};
 	if (under_fire && in.collect_path > GRAB_DISTANCE)
 		collect *= in.collect_upgrade ? COLLECT_UPGRADE_UNDER_FIRE : COLLECT_UNDER_FIRE;
+	if (grab_applies(in))
+		collect = std::max(collect, GRAB_UTILITY);
 	at(goal_kind::collect) = collect;
 	double refuel{in.refuel * in.collect_weight};
 	if (under_fire)
@@ -620,7 +718,7 @@ inline goal_utilities goal_utility(const goal_inputs &in)
 	/* Section 4.7: below the style's threshold, a threatened bot strongly
 	 * prefers to retreat, the more the weaker; invulnerable, never.
 	 */
-	if (in.threatened && !in.invulnerable && in.shields < in.retreat_shields && in.retreat_shields > 0)
+	if (in_danger(in))
 		at(goal_kind::retreat) = 3 + 2 * (in.retreat_shields - in.shields) / in.retreat_shields;
 	return r;
 }
@@ -700,15 +798,38 @@ inline double retreat_direction_factor(const vec3 &from, const vec3 &place, cons
  * have seen or heard.
  */
 constexpr unsigned MAP_KNOWLEDGE_WHOLE_LEVEL{0xffff};
+/* Section 9.5: the knowledge also reaches this many units of path per
+ * segment of it (Hotshot: 8 segments or 320 units).  Counted in segments
+ * alone, it did not leave a spawn area of many small segments: a bot
+ * there never learnt of the powerups in the large rooms round it.
+ */
+constexpr double MAP_KNOWLEDGE_UNITS_PER_SEGMENT{40};
 
 [[nodiscard]]
-constexpr bool knows_from_map(const bool initial_layout, const std::optional<unsigned> hops, const unsigned map_knowledge)
+constexpr bool knows_from_map(const bool initial_layout, const std::optional<unsigned> hops, const unsigned map_knowledge, const std::optional<double> path_cost = std::nullopt)
 {
 	if (!initial_layout || !map_knowledge)
 		return false;
 	if (map_knowledge >= MAP_KNOWLEDGE_WHOLE_LEVEL)
 		return true;
-	return hops && *hops <= map_knowledge;
+	return (hops && *hops <= map_knowledge) || (path_cost && *path_cost <= map_knowledge * MAP_KNOWLEDGE_UNITS_PER_SEGMENT);
+}
+
+/* Section 9.5: a powerup this close is noticed outside the field of view
+ * (a human sees it at the edge of the screen, and flies round to it).
+ * B3 required the field of view for every powerup, and checked at most
+ * six lines of sight per strategy tick in the order of the object
+ * slots: the level's powerups behind walls (low slots, never seen, so
+ * checked again at every tick) used the checks up, and a powerup that
+ * appeared later (a death's drop, a respawn: high slots) was never
+ * checked at all.  The candidates are now checked nearest first.
+ */
+constexpr double POWERUP_NOTICE_DISTANCE{60};
+
+[[nodiscard]]
+constexpr bool notices_powerup(const double distance_to, const bool in_fov, const double awareness)
+{
+	return distance_to <= awareness && (in_fov || distance_to <= POWERUP_NOTICE_DISTANCE);
 }
 
 /* A powerup that just appeared (a respawn, with its effect and sound) is

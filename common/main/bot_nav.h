@@ -426,6 +426,70 @@ uint32_t pick_roam_goal(const nav_graph &graph, const uint32_t from, const vec3 
 	return best;
 }
 
+/* Section 9.5, exploring.  pick_roam_goal draws segments uniformly and
+ * takes the first one 120 units away in a straight line: on a level whose
+ * spawn area is a dense core of many small segments inside a few large
+ * rings, nearly every draw fell in the core (the rings have few
+ * segments), and a place across the core was 120 units away, so the
+ * bots roamed the core for ever.  Now `tries` segments are drawn and the
+ * best is taken by the flight to it (the path cost, `path_cost(seg)`,
+ * none: out of reach; capped at EXPLORE_COST_CAP) and by how long ago
+ * the bot was there (`seconds_since(seg)`, full weight after
+ * EXPLORE_STALE_SECONDS): one far ring segment among the draws wins.
+ * None if no drawn segment is within reach.
+ */
+constexpr double EXPLORE_COST_CAP{900};
+constexpr double EXPLORE_STALE_SECONDS{90};
+constexpr unsigned EXPLORE_TRIES{24};
+
+[[nodiscard]]
+constexpr double explore_score(const double path_cost, const double seconds_since_visit)
+{
+	const double stale{std::clamp(seconds_since_visit / EXPLORE_STALE_SECONDS, 0.0, 1.0)};
+	return std::min(std::max(path_cost, 0.0), EXPLORE_COST_CAP) * (0.25 + 0.75 * stale);
+}
+
+template <typename Below, typename PathCost, typename SecondsSince>
+[[nodiscard]]
+std::optional<uint32_t> pick_explore_goal(const nav_graph &graph, const uint32_t from, Below &&below, PathCost &&path_cost, SecondsSince &&seconds_since, const unsigned tries = EXPLORE_TRIES)
+{
+	const auto n{static_cast<uint32_t>(graph.size())};
+	if (n < 2)
+		return std::nullopt;
+	std::optional<uint32_t> best;
+	double best_score{-1};
+	for (unsigned i = 0; i < tries; ++i)
+	{
+		const uint32_t seg{below(n)};
+		if (seg >= n || seg == from || graph.neighbours(seg).empty())
+			continue;
+		const std::optional<double> c{path_cost(seg)};
+		if (!c)
+			continue;
+		const double s{explore_score(*c, seconds_since(seg))};
+		if (s > best_score)
+		{
+			best = seg;
+			best_score = s;
+		}
+	}
+	return best;
+}
+
+/* Section 9.5: a spawn site a bot can fly out of.  A level may start
+ * players in a sealed cell whose walls open when a human shoots a
+ * switch (Schwarzbrenner Outpost: two of eight sites, nine segments each,
+ * closed walls opened by a one-shot "open wall" trigger on a wall
+ * switch); a bot never shoots switches, and was trapped there for the
+ * life.  A site is open if a ship flies from it to at least a quarter of
+ * the level, or to 150 segments.
+ */
+[[nodiscard]]
+constexpr bool spawn_site_open(const std::size_t reached, const std::size_t total)
+{
+	return reached * 4 >= total || reached >= 150;
+}
+
 /* The furthest of the path points `from` .. `from + lookahead - 1` (not
  * beyond `count - 1`) that `reachable(i)` accepts, tried from the
  * furthest down; `from` if none is (the next point is steered at

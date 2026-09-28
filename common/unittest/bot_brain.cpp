@@ -489,13 +489,20 @@ void test_steering()
 	CHECK(near(e.pitch, -std::numbers::pi / 4, 1e-12));
 	e = steer_errors_local({0, 1, 0});
 	CHECK(near(e.pitch, -std::numbers::pi / 2, 1e-12));
-	/* Straight behind: keeps the preferred side. */
-	e = steer_errors_local({0.01, 0, -1}, -1);
+	/* Straight behind: keeps the preferred side (B1's shortest rotation). */
+	e = steer_errors_shortest({0.01, 0, -1}, -1);
 	CHECK(e.heading < -3);
-	e = steer_errors_local({-0.01, 0, -1}, 1);
+	e = steer_errors_shortest({-0.01, 0, -1}, 1);
 	CHECK(e.heading > 3);
-	e = steer_errors_local({-0.01, 0, -1}, 0);
+	e = steer_errors_shortest({-0.01, 0, -1}, 0);
 	CHECK(e.heading < -3);
+	/* Section 9.5: combined, the same side, on both axes at once. */
+	e = steer_errors_local({0.01, 0, -1}, -1);
+	CHECK(e.heading < -2 && std::abs(e.pitch) > 2);
+	e = steer_errors_local({-0.01, 0, -1}, 1);
+	CHECK(e.heading > 2 && std::abs(e.pitch) > 2);
+	e = steer_errors_local({-0.01, 0, -1}, 0);
+	CHECK(e.heading < -2);
 
 	/* The controller settles a 90 degree turn without overshoot beyond a
 	 * few degrees, in about the same time at any frame length.
@@ -919,6 +926,59 @@ void test_dodge_and_bend_rules()
 	CHECK(!wall_hit_is_bend(pos, {0, 0, 0}, {0, 0, 20}, 30, max_angle));
 }
 
+
+/* Section 9.5: a hit from an attacker the bot does not see. */
+void test_unseen_hit()
+{
+	/* Seen: nothing new (it fights it). */
+	CHECK(react_to_hit({.attacker_seen = true}) == hit_reaction::none);
+	/* Unseen: evade and turn to fight; weak: evade and flee. */
+	CHECK(react_to_hit({.attacker_seen = false, .shields = 80}) == hit_reaction::evade_turn);
+	CHECK(react_to_hit({.attacker_seen = false, .shields = 20, .retreat_shields = 35}) == hit_reaction::evade_flee);
+	CHECK(react_to_hit({.attacker_seen = false, .shields = 20, .retreat_shields = 35, .invulnerable = true}) == hit_reaction::evade_turn);
+	/* Already evading that attacker: no new evasion at every hit. */
+	CHECK(react_to_hit({.attacker_seen = false, .shields = 80, .evading = true}) == hit_reaction::none);
+	/* The evasion goes across the line of fire (a little away), the way
+	 * the ship already moves, else the side given.
+	 */
+	const vec3 from_attacker{0, 0, 1};	// the attacker is behind (-z)
+	const auto still{evade_direction(from_attacker, {}, {1, 0, 0})};
+	CHECK(std::abs(length(still) - 1) < 1e-9);
+	CHECK(still.x > 0.9 && still.z > 0.1 && still.z < 0.5);
+	const auto moving{evade_direction(from_attacker, {0, -30, 10}, {1, 0, 0})};
+	CHECK(moving.y < -0.9);
+	/* Degenerate inputs still give a direction. */
+	CHECK(length(evade_direction({}, {}, {0, 1, 0})) > 0.99);
+	CHECK(length(evade_direction({0, 1, 0}, {}, {0, 1, 0})) > 0.99);
+}
+
+/* Section 9.5: turning far round, the bot keeps moving. */
+void test_keep_moving_in_turn()
+{
+	const double top{58};
+	const vec3 behind{0, 0, -60};
+	/* Facing the target or wanting speed already: unchanged. */
+	const vec3 fast{0, 40, 0};
+	CHECK(keep_moving_in_turn(fast, radians(30), behind, {}, {1, 0, 0}, top) == fast);
+	CHECK(keep_moving_in_turn({}, radians(30), behind, {}, {1, 0, 0}, top) == vec3{});
+	const vec3 quick{top * 0.7, 0, 0};
+	CHECK(keep_moving_in_turn(quick, radians(170), behind, {}, {1, 0, 0}, top) == quick);
+	/* Turning round, standing still: slides across the line of sight at
+	 * TURN_MOVE_SPEED, the way the hint says...
+	 */
+	const auto slide{keep_moving_in_turn({}, radians(170), behind, {}, {1, 0, 0}, top)};
+	CHECK(std::abs(length(slide) - TURN_MOVE_SPEED * top) < 1e-6);
+	CHECK(std::abs(slide.z) < 1e-9 && slide.x > 0);
+	/* ... or the way it already slides (momentum). */
+	const auto keep{keep_moving_in_turn({}, radians(170), behind, {0, -20, 5}, {1, 0, 0}, top)};
+	CHECK(keep.y < -0.99 * TURN_MOVE_SPEED * top);
+	/* A small wish (backing off) is kept, topped up across. */
+	const vec3 back{0, 0, 10};
+	const auto both{keep_moving_in_turn(back, radians(120), behind, {}, {1, 0, 0}, top)};
+	CHECK(std::abs(length(both) - TURN_MOVE_SPEED * top) < 1e-6);
+	CHECK(std::abs(both.z - 10) < 1e-9);
+}
+
 }
 
 int main()
@@ -936,6 +996,8 @@ int main()
 	test_primary_choice();
 	test_slot_allocation();
 	test_dodge_and_bend_rules();
+	test_unseen_hit();
+	test_keep_moving_in_turn();
 	std::puts("test-bot-brain: all checks passed");
 	return 0;
 }

@@ -76,6 +76,7 @@
 #include "fuelcen.h"
 #include "digi.h"
 #include "sounds.h"
+#include "args.h"
 
 namespace dsx {
 
@@ -101,6 +102,8 @@ constexpr unsigned BOT_REVENGE_TICKS{3 * b::BOT_TICK_RATE};
 constexpr double BOT_CLOAK_SEE_DISTANCE{40};
 /* The engagement distance band before the style's range scale. */
 constexpr double BOT_RANGE_LO{35};
+/* Section 9.5: backing off to a standoff, no closer to a wall behind. */
+constexpr double BOT_BACK_WALL_CLEARANCE{25};
 constexpr double BOT_RANGE_HI{95};
 /* A roaming bot flies at least this far (section 4.3). */
 constexpr double BOT_ROAM_MIN_DISTANCE{120};
@@ -123,8 +126,10 @@ constexpr double BOT_BEND_MAX_ANGLE{b::radians(40)};
  */
 constexpr double BOT_DISTANCE_MAX_COST{2500};
 constexpr unsigned BOT_DISTANCE_NODE_LIMIT{3000};
-/* Powerups whose line of sight a bot checks per strategy tick. */
-constexpr unsigned BOT_POWERUP_LOS_BUDGET{6};
+/* Powerups whose line of sight a bot checks per strategy tick (nearest
+ * first, section 9.5).
+ */
+constexpr unsigned BOT_POWERUP_LOS_BUDGET{8};
 /* A powerup the bot came to without taking it, or could not reach, is no
  * goal for this long.
  */
@@ -137,6 +142,79 @@ constexpr fix BOT_FUELCEN_SOUND_DELAY{F1_0 / 4};
 constexpr unsigned BOT_FLEE_TRIES{10};
 /* Stage B1 plays every bot at the Hotshot preset (section 9). */
 constexpr b::bot_skill BOT_B1_SKILL{b::bot_skill::hotshot};
+/* Section 9.5: the evasion after a hit from an unseen attacker, and how
+ * long the bot then turns to where the attacker was.
+ */
+constexpr unsigned BOT_EVADE_TICKS{b::ticks_from_ms(600)};
+constexpr unsigned BOT_TURN_TO_ATTACKER_TICKS{b::ticks_from_ms(1500)};
+/* Section 9.5, the log (-verbose): one summary line per bot this often;
+ * a denied touch of the same powerup is logged again after this long.
+ */
+constexpr unsigned BOT_LOG_TICKS{b::BOT_TICK_RATE};
+constexpr unsigned BOT_DENY_LOG_TICKS{b::BOT_TICK_RATE};
+/* Powerups the summary line looks at (the nearest valuable one). */
+constexpr double BOT_LOG_POWERUP_RADIUS{120};
+
+/* The log is written only with -verbose (CON_VERBOSE): its lines are
+ * not even formatted otherwise.
+ */
+[[nodiscard]]
+bool bot_log_on()
+{
+	return CGameArg.DbgVerbose >= CON_VERBOSE;
+}
+
+inline constexpr std::array<const char *, 10> primary_names{{"laser", "vulcan", "spread", "plasma", "fusion", "super", "gauss", "helix", "phoenix", "omega"}};
+inline constexpr std::array<const char *, 10> secondary_names{{"conc", "homing", "prox", "smart", "mega", "flash", "guided", "smine", "merc", "shaker"}};
+inline constexpr std::array<const char *, b::BOT_GOAL_COUNT> goal_names{{"roam", "hunt", "engage", "collect", "retreat", "refuel"}};
+
+[[nodiscard]]
+const char *primary_name(const unsigned i)
+{
+	return i < primary_names.size() ? primary_names[i] : "?";
+}
+
+[[nodiscard]]
+const char *goal_name(const b::goal_kind g)
+{
+	const auto i{static_cast<unsigned>(g)};
+	return i < goal_names.size() ? goal_names[i] : "?";
+}
+
+/* Section 9.5, the log: why the nearest valuable powerup is not being
+ * taken.
+ */
+enum class collect_why : uint8_t
+{
+	none,
+	/* It is the bot's goal now. */
+	collecting,
+	/* The bot does not know it (not seen, heard, or on its map). */
+	not_known,
+	/* Not a goal for a while (reached without taking it, or stuck). */
+	ignored,
+	/* No path within reach. */
+	unreachable,
+	/* The rules would not let the bot take it (full, already has). */
+	cannot_use,
+	/* Worth little to the bot now. */
+	no_value,
+	/* Another goal scored higher. */
+	goal_lower,
+	/* Touched, and the host denied it. */
+	denied,
+};
+
+inline constexpr std::array<const char *, 9> collect_why_names{{"-", "collecting", "not-known", "ignored", "unreachable", "cannot-use", "no-value", "goal-lower", "denied"}};
+
+/* The names of the host's pickup denials (net_v2_objects.h deny_reason). */
+inline constexpr std::array<const char *, 6> deny_names{{"gone", "dead", "range", "spat", "cannot-use", "not-arbitrated"}};
+
+[[nodiscard]]
+const char *deny_name(const uint8_t r)
+{
+	return r < deny_names.size() ? deny_names[r] : "no-netid";
+}
 
 [[nodiscard]]
 vec3 to_vec(const vms_vector &v)
@@ -249,6 +327,10 @@ struct bot_state
 	 */
 	b::powerup_memory powerups;
 	b::nav_distances dist;
+	/* Section 9.5: the tick + 1 of the bot's last visit to each segment
+	 * (0: never), for exploring.
+	 */
+	std::vector<uint32_t> visited;
 	uint16_t collect_key{0xffff}, collect_sig{};
 	uint32_t refuel_seg{};
 	/* The afterburner is lit. */
@@ -269,6 +351,42 @@ struct bot_state
 	 */
 	b::powerup_tactics tactics;
 	fix64 fuel_sound_at{};
+	/* Section 9.5: the fusion cannon's charge (the ship's Fusion_charge
+	 * holds it), what the last tick decided, the warm-up sound.
+	 */
+	bool fusion_charging{};
+	b::fusion_action fusion_want{b::fusion_action::idle};
+	fix64 fusion_sound_at{};
+	/* Section 9.5: a fighting bot with a heavy missile ready keeps this
+	 * distance (0: none); after it released one, it keeps blast_hold
+	 * and does not close in until blast_hold_until (the missile's flight
+	 * and blast, b::blast_danger_seconds).
+	 */
+	double standoff{};
+	double blast_hold{};
+	uint32_t blast_hold_until{};
+	/* Section 9.5: after a hit from an unseen attacker, turn to it from
+	 * turn_from until turn_until.
+	 */
+	uint8_t turn_to{0xff};
+	uint32_t turn_from{}, turn_until{};
+	/* Section 9.5: a valuable powerup close by is the collect goal. */
+	bool grabbing{};
+	/* Section 9.5, the log: the goal's choice at the last strategy
+	 * tick (the chosen one and the best other), the heavy missiles'
+	 * verdict, the last denied touch, the next summary line.
+	 */
+	b::goal_kind chosen{b::goal_kind::roam};
+	double chosen_u{};
+	b::goal_kind runner_up{b::goal_kind::roam};
+	double runner_up_u{};
+	double collect_u{};
+	b::heavy_verdict heavy_why{b::heavy_verdict::none_owned};
+	double heavy_min{};
+	uint16_t deny_key{0xffff};
+	uint8_t deny_reason{};
+	uint32_t deny_tick{};
+	uint32_t next_log_tick{};
 	/* Navigation. */
 	bot_goal goal{bot_goal::none};
 	uint32_t goal_seg{};
@@ -320,6 +438,15 @@ struct bot_state
 		dodge_from = dodge_until = 0;
 		collect_key = 0xffff;
 		burning = false;
+		fusion_charging = false;
+		fusion_want = b::fusion_action::idle;
+		standoff = 0;
+		blast_hold = 0;
+		blast_hold_until = 0;
+		turn_to = 0xff;
+		turn_from = turn_until = 0;
+		grabbing = false;
+		heavy_why = b::heavy_verdict::none_owned;
 		missile.reset();
 		missile_fire.reset();
 		missile_volley = 0;
@@ -367,6 +494,8 @@ struct bots_state
 	/* Stage B3: the fuel centres and repair centres of the level. */
 	std::vector<uint32_t> fuel_centres;
 	std::vector<uint32_t> repair_centres;
+	/* Section 9.5: the spawn sites a ship can fly out of (b::spawn_site_open). */
+	per_player_array<bool> site_open{};
 	ship_limits limits;
 	/* The controls passed to apply_pilot_controls. */
 	control_info controls{};
@@ -480,6 +609,51 @@ bool edge_passable(const uint32_t from, const b::nav_edge &e, const player_flags
 	return w.keys == wall_key::none || +(powerup_flags & static_cast<player_flag>(w.keys));
 }
 
+/* The segments a ship without keys flies to from `seg`, by the doors and
+ * walls as they are now.
+ */
+[[nodiscard]]
+std::size_t reachable_from(const uint32_t seg)
+{
+	if (seg >= B.graph.size())
+		return 0;
+	b::nav_distances d;
+	d.compute(B.graph, seg, [](const uint32_t from, const b::nav_edge &e) {
+		return edge_passable(from, e, player_flags{});
+	}, [](uint32_t, const b::nav_edge &) {
+		return 0.0;
+	}, 1e12, static_cast<unsigned>(B.graph.size()));
+	std::size_t n{0};
+	for (uint32_t i = 0; i < B.graph.size(); ++i)
+		n += d.reached(i);
+	return n;
+}
+
+/* Section 9.5: which spawn sites a bot can fly out of, at level start. */
+void judge_spawn_sites()
+{
+	B.site_open.fill(true);
+	for (unsigned i = 0; i < NumNetPlayerPositions && i < MAX_PLAYERS; ++i)
+	{
+		const uint32_t seg{Player_init[i].segnum};
+		const auto n{reachable_from(seg)};
+		B.site_open[i] = b::spawn_site_open(n, B.graph.size());
+		if (!B.site_open[i])
+			con_printf(CON_VERBOSE, "bots: spawn site %u (segment %u) is sealed: %zu of %zu segments reachable; bots avoid it", i, seg, n, B.graph.size());
+	}
+}
+
+/* A spawn for a bot: the draw of choose_spawn among the sites it can fly
+ * out of (the sealed ones are left out before the draw), with the bot's
+ * own random numbers: the game's d_rand is not reseeded by bot code.
+ */
+[[nodiscard]]
+spawn_choice bot_spawn(bot_state &bs)
+{
+	auto &Objects = LevelUniqueObjectState.Objects;
+	return choose_bot_spawn(Objects.vmptr, bs.pid, B.site_open, bs.rng.next());
+}
+
 /* A clear line from `from` to `to`: `rad` > 0 for a flight path (the
  * ship's body), 0 for sight through grates (FQ_TRANSWALL).
  */
@@ -558,9 +732,17 @@ bool shot_line_clear(const bot_state &bs, const object &obj, const object &targe
 [[nodiscard]]
 double weapon_speed(const player_info &pi)
 {
+#if DXX_BUILD_DESCENT == 2
+	/* Omega's lightning is there at once (do_omega_stuff): no lead. */
+	if (pi.Primary_weapon == primary_weapon_index::omega)
+		return 1e5;
+#endif
 	const auto &wi{Weapon_info[Primary_weapon_to_weapon_info[pi.Primary_weapon]]};
 	return b::effective_shot_speed(wi.speed[GameUniqueState.Difficulty_level] / 65536.0, wi.thrust != 0);
 }
+
+/* Omega's reach (laser.cpp MAX_OMEGA_DIST: 16 blobs 5 units apart). */
+constexpr double BOT_OMEGA_RANGE{16 * 5};
 
 /* How far its shots fly before they expire: the bot does not fire
  * beyond that (four fifths of it, with a floor for the data's odd
@@ -569,6 +751,10 @@ double weapon_speed(const player_info &pi)
 [[nodiscard]]
 double weapon_range(const player_info &pi)
 {
+#if DXX_BUILD_DESCENT == 2
+	if (pi.Primary_weapon == primary_weapon_index::omega)
+		return BOT_OMEGA_RANGE * 0.9;
+#endif
 	const auto &wi{Weapon_info[Primary_weapon_to_weapon_info[pi.Primary_weapon]]};
 	const double r{weapon_speed(pi) * (wi.lifetime / 65536.0)};
 	return std::clamp(r * 0.8, 20.0, 400.0);
@@ -670,6 +856,8 @@ b::missile_data missile_data_of(const secondary_weapon_index w)
 		.speed = wi.speed[GameUniqueState.Difficulty_level] / 65536.0,
 		.blast_radius = wi.damage_radius / 65536.0,
 		.thrust = wi.thrust != 0,
+		.homing = wi.homing_flag != 0,
+		.child_blast_radius = wi.children != weapon_id_type::unspecified && wi.children < N_weapon_types ? Weapon_info[wi.children].damage_radius / 65536.0 : 0,
 	};
 }
 
@@ -707,7 +895,48 @@ b::weapon_view weapons_of(const player_info &pi)
 		.energy = pi.energy / 65536.0,
 		.vulcan_ammo = pi.vulcan_ammo,
 		.energy_rate = energy_rates(),
+#if DXX_BUILD_DESCENT == 2
+		.omega_charge = pi.Omega_charge / static_cast<double>(MAX_OMEGA_CHARGE),
+#else
+		.omega_charge = 0,
+#endif
 	};
+}
+
+/* The log: what the bot has, compactly ("laser2q,plasma,vulcan(1200)
+ * sec=conc4,shaker1").
+ */
+void describe_armament(const player_info &pi, char *const buf, const std::size_t size)
+{
+	if (!size)
+		return;
+	buf[0] = 0;
+	std::size_t n{0};
+	/* snprintf's result, the text kept within the buffer. */
+	const auto adv{[&](const int w) {
+		if (w > 0)
+			n = std::min(size - 1, n + static_cast<std::size_t>(w));
+	}};
+	adv(std::snprintf(buf + n, size - n, "laser%u%s", underlying_value(pi.laser_level) + 1u, has_flag(pi, player_flag::quad_lasers) ? "q" : ""));
+	for (unsigned i = 1; i < MAX_PRIMARY_WEAPONS && i < primary_names.size(); ++i)
+	{
+		if (i == 5 || !(pi.primary_weapon_flags & (1u << i)))
+			continue;
+		if (weapon_index_uses_vulcan_ammo(static_cast<primary_weapon_index>(i)))
+			adv(std::snprintf(buf + n, size - n, ",%s(%u)", primary_names[i], static_cast<unsigned>(pi.vulcan_ammo)));
+		else
+			adv(std::snprintf(buf + n, size - n, ",%s", primary_names[i]));
+	}
+	adv(std::snprintf(buf + n, size - n, " sec="));
+	bool any{false};
+	for (unsigned i = 0; i < MAX_SECONDARY_WEAPONS && i < secondary_names.size(); ++i)
+		if (const unsigned a{pi.secondary_ammo[static_cast<secondary_weapon_index>(i)]})
+		{
+			adv(std::snprintf(buf + n, size - n, "%s%s%u", any ? "," : "", secondary_names[i], a));
+			any = true;
+		}
+	if (!any)
+		adv(std::snprintf(buf + n, size - n, "-"));
 }
 
 /* Section 4.5: the primary for the range to the target (none: no
@@ -718,6 +947,9 @@ b::weapon_view weapons_of(const player_info &pi)
 void choose_weapon(const bot_state &bs, object &obj, const std::optional<b::range_band> band)
 {
 	auto &pi{obj.ctype.player_info};
+	/* Section 9.5: a charging fusion cannon is fired first. */
+	if (bs.fusion_charging)
+		return;
 	const auto active{pi.Primary_weapon.get_active()};
 	const auto current{static_cast<b::primary>(underlying_value(active))};
 	const auto wanted{bs.skill->weapon_smarts < 2
@@ -730,6 +962,12 @@ void choose_weapon(const bot_state &bs, object &obj, const std::optional<b::rang
 	const auto w{static_cast<primary_weapon_index>(underlying_value(wanted))};
 	if (active == w)
 		return;
+	if (bot_log_on())
+	{
+		const auto v{weapons_of(pi)};
+		const auto rb{band.value_or(b::range_band::mid)};
+		con_printf(CON_VERBOSE, "bots: '%s' switches %s -> %s (band %u, scores %.2f -> %.2f, energy %.0f)", static_cast<const char *>(bs.cfg.name), primary_name(underlying_value(active)), primary_name(underlying_value(w)), static_cast<unsigned>(rb), b::weapon_score(current, rb, v), b::weapon_score(wanted, rb, v), pi.energy / 65536.0);
+	}
 	pi.Primary_weapon = w;
 	pi.Next_laser_fire_time = GameTime64 + REARM_TIME;
 }
@@ -900,10 +1138,26 @@ void choose_roam_goal(bot_state &bs, const object &obj, const uint32_t tick)
 {
 	if (B.graph.size() < 2)
 		return;
-	/* Somewhere else, not next door (bot_nav.h). */
-	const uint32_t seg{b::pick_roam_goal(B.graph, obj.segnum, to_vec(obj.pos), BOT_ROAM_MIN_DISTANCE, [&bs](const uint32_t n) {
+	const auto below{[&bs](const uint32_t n) {
 		return bs.rng.below(n);
-	})};
+	}};
+	/* Section 9.5: far and long unvisited places (bot_nav.h), within
+	 * reach of the path costs of this strategy tick.
+	 */
+	const auto seconds_since{[&bs, tick](const uint32_t seg) {
+		return seg < bs.visited.size() && bs.visited[seg] ? (tick - (bs.visited[seg] - 1)) / static_cast<double>(b::BOT_TICK_RATE) : 1e9;
+	}};
+	const auto explore{b::pick_explore_goal(B.graph, obj.segnum, below, [&bs](const uint32_t seg) {
+		return bs.dist.cost(seg);
+	}, seconds_since)};
+	/* Else somewhere else, not next door (B1). */
+	const uint32_t seg{explore ? *explore : b::pick_roam_goal(B.graph, obj.segnum, to_vec(obj.pos), BOT_ROAM_MIN_DISTANCE, below)};
+	if (bot_log_on())
+	{
+		const auto cost{bs.dist.cost(seg)};
+		const double since{seconds_since(seg)};
+		con_printf(CON_VERBOSE, "bots: '%s' roams from segment %u to %u (%s, path %.0f, last there %s%.0f s ago)", static_cast<const char *>(bs.cfg.name), static_cast<unsigned>(obj.segnum), seg, explore ? "explore" : "random", cost ? *cost : -1.0, since > 1e8 ? "never, " : "", since > 1e8 ? 0.0 : since);
+	}
 	set_goal(bs, obj, bot_goal::roam, seg, std::nullopt, tick);
 }
 
@@ -914,6 +1168,9 @@ void perceive(bot_state &bs, const object &obj, const uint32_t tick)
 	const auto &sk{*bs.skill};
 	const auto pos{to_vec(obj.pos)};
 	const auto frame{to_frame(obj.orient)};
+	/* Section 9.5: where the bot has been (exploring). */
+	if (const uint32_t seg{obj.segnum}; seg < bs.visited.size())
+		bs.visited[seg] = tick + 1;
 	for (playernum_t i = 0; i < N_players && i < MAX_PLAYERS; ++i)
 	{
 		bs.visible_now[i] = false;
@@ -1110,8 +1367,9 @@ void learn_powerups(bot_state &bs, const object &obj, const uint32_t tick)
 	const auto pos{to_vec(obj.pos)};
 	const auto frame{to_frame(obj.orient)};
 	unsigned budget{BOT_POWERUP_LOS_BUDGET};
+	/* Section 9.5: close by, also outside the field of view. */
 	const auto sees{[&](const vms_vector &where, const vec3 &to) {
-		if (b::length(to) > sk.awareness || !b::in_field_of_view(frame.f, to, sk.fov_half_deg) || !budget)
+		if (!budget || !b::notices_powerup(b::length(to), b::in_field_of_view(frame.f, to, sk.fov_half_deg), sk.awareness))
 			return false;
 		--budget;
 		return line_clear(obj, obj.pos, obj.segnum, where, 0, true);
@@ -1141,7 +1399,31 @@ void learn_powerups(bot_state &bs, const object &obj, const uint32_t tick)
 	for (std::size_t i = 0; i < n_gone; ++i)
 		bs.powerups.forget(gone[i]);
 	bs.powerups.expire(tick, b::ticks_from_ms(b::powerup_memory_ms(sk)));
-	/* Then the powerups it does not know yet. */
+	/* Then the powerups it does not know yet.  Those it must see are
+	 * checked nearest first (section 9.5): B3 checked them in the order
+	 * of the object slots, and the level's powerups behind walls used
+	 * up the checks at every tick.
+	 */
+	struct unseen
+	{
+		double dist;
+		objnum_t objnum;
+	};
+	std::array<unseen, 64> to_see;
+	std::size_t n_to_see{0};
+	const auto learn_one{[&](const vcobjptridx_t o, const bool initial, const bool perceived) {
+		const uint16_t key = o.get_unchecked_index();
+		const uint16_t sig = underlying_value(o->signature);
+		bs.powerups.learn({
+			.key = key,
+			.signature = sig,
+			.type = static_cast<uint8_t>(get_powerup_id(o)),
+			.count = static_cast<uint32_t>(std::max(o->ctype.powerup_info.count, 0)),
+			.initial = initial,
+			.pos = to_vec(o->pos),
+			.segment = o->segnum,
+		}, tick, perceived);
+	}};
 	for (const auto &&o : Objects.vcptridx)
 	{
 		if (o->type != object_type::OBJ_POWERUP || (o->flags & OF_SHOULD_BE_DEAD))
@@ -1156,33 +1438,54 @@ void learn_powerups(bot_state &bs, const object &obj, const uint32_t tick)
 		const bool initial{netid != 0xffff && ::dcx::net_v2::is_level_netid(netid)};
 		const auto ppos{to_vec(o->pos)};
 		const auto to{ppos - pos};
-		const bool from_map{b::knows_from_map(initial, bs.dist.hops(o->segnum), sk.map_knowledge)};
+		const double dist{b::length(to)};
+		const bool from_map{b::knows_from_map(initial, bs.dist.hops(o->segnum), sk.map_knowledge, bs.dist.cost(o->segnum))};
 		/* Only a perceived powerup may push another out of a full
 		 * memory (powerup_memory::learn); the map alone need not be
 		 * checked further while there is room.
 		 */
-		bool perceived{false};
-		if (!from_map || bs.powerups.full())
+		if (from_map && !bs.powerups.full())
 		{
-			if (!initial)
-			{
-				const double age{(GameTime64 - o->ctype.powerup_info.creation_time) / 65536.0};
-				perceived = b::hears_appearance(age, b::length(to), sk.hearing);
-			}
-			if (!perceived)
-				perceived = sees(o->pos, to);
-		}
-		if (!from_map && !perceived)
+			learn_one(o, initial, false);
 			continue;
-		bs.powerups.learn({
-			.key = key,
-			.signature = sig,
-			.type = static_cast<uint8_t>(get_powerup_id(o)),
-			.count = static_cast<uint32_t>(std::max(o->ctype.powerup_info.count, 0)),
-			.initial = initial,
-			.pos = ppos,
-			.segment = o->segnum,
-		}, tick, perceived);
+		}
+		if (!initial)
+		{
+			const double age{(GameTime64 - o->ctype.powerup_info.creation_time) / 65536.0};
+			if (b::hears_appearance(age, dist, sk.hearing))
+			{
+				learn_one(o, initial, true);
+				continue;
+			}
+		}
+		if (!b::notices_powerup(dist, b::in_field_of_view(frame.f, to, sk.fov_half_deg), sk.awareness))
+		{
+			if (from_map)
+				learn_one(o, initial, false);
+			continue;
+		}
+		const objnum_t objnum{o.get_unchecked_index()};
+		if (n_to_see < to_see.size())
+			to_see[n_to_see++] = {dist, objnum};
+		else
+		{
+			/* Keep the nearest. */
+			auto furthest{std::ranges::max_element(to_see, {}, &unseen::dist)};
+			if (furthest->dist > dist)
+				*furthest = {dist, objnum};
+		}
+	}
+	std::sort(to_see.begin(), to_see.begin() + n_to_see, [](const unseen &a, const unseen &c) {
+		return a.dist < c.dist;
+	});
+	for (std::size_t i = 0; i < n_to_see; ++i)
+	{
+		const auto &&o{Objects.vcptridx(to_see[i].objnum)};
+		const auto netid{net_objects_netid_of(o)};
+		const bool initial{netid != 0xffff && ::dcx::net_v2::is_level_netid(netid)};
+		const bool seen{sees(o->pos, to_vec(o->pos) - pos)};
+		if (seen || b::knows_from_map(initial, bs.dist.hops(o->segnum), sk.map_knowledge, bs.dist.cost(o->segnum)))
+			learn_one(o, initial, seen);
 	}
 }
 
@@ -1226,7 +1529,48 @@ goal_place best_collect(const bot_state &bs, const b::resource_view &res, const 
 		const double path{*cost + b::distance(B.graph.position(k.segment), k.pos)};
 		const double u{b::collect_utility(value, path)};
 		if (u > best.utility)
-			best = {u, path, k.segment, k.pos, k.key, k.signature, desc.kind == b::item::shield, b::upgrade_ratio(desc, res.weapons) >= b::BIG_UPGRADE_RATIO};
+			best = {u, path, k.segment, k.pos, k.key, k.signature, desc.kind == b::item::shield, b::collect_in_fight(desc, res)};
+	}
+	return best;
+}
+
+/* Section 9.5: the valuable powerup close by that the bot takes whatever
+ * its goal (b::grab_worthwhile): the most valuable for the distance.
+ */
+[[nodiscard]]
+goal_place best_grab(const bot_state &bs, const object &obj, const b::resource_view &res, const uint32_t tick)
+{
+	goal_place best;
+	double best_score{0};
+	const auto pos{to_vec(obj.pos)};
+	const uint32_t own_seg{obj.segnum};
+	for (const auto &k : bs.powerups.items())
+	{
+		if (tick < k.ignore_until)
+			continue;
+		const double straight{b::distance(pos, k.pos)};
+		if (straight > b::GRAB_RADIUS)
+			continue;
+		const auto cost{bs.dist.cost(k.segment)};
+		if (!cost)
+			continue;
+		/* The path cost runs between segment centres: in the bot's own
+		 * segment, the straight line.
+		 */
+		const double path{k.segment == own_seg ? straight : std::min(*cost + b::distance(B.graph.position(k.segment), k.pos), *cost + straight)};
+		const auto type{static_cast<powerup_type_t>(k.type)};
+		const auto desc{item_of(type)};
+		const double value{b::item_value(desc, res)};
+		if (!b::grab_worthwhile(value, straight, path))
+			continue;
+		if (!net_objects_bot_can_use(bs.pid, type, k.count))
+			continue;
+		const double score{value / (straight + 20)};
+		if (score > best_score)
+		{
+			best_score = score;
+			best = {b::collect_utility(value, path), path, k.segment, k.pos, k.key, k.signature, desc.kind == b::item::shield, true};
+		}
 	}
 	return best;
 }
@@ -1375,7 +1719,9 @@ void think(bot_state &bs, object &obj, const uint32_t tick)
 	compute_distances(bs, obj);
 	learn_powerups(bs, obj, tick);
 	const auto res{resources_of(obj)};
-	const auto collect{best_collect(bs, res, tick)};
+	auto collect{best_collect(bs, res, tick)};
+	/* Section 9.5: a valuable powerup close by. */
+	const auto grab{best_grab(bs, obj, res, tick)};
 	auto centre{best_centre(bs, res)};
 	/* A bot hovering in a centre stays until it is full, unless an enemy
 	 * comes into sight while it has enough to fight.
@@ -1391,7 +1737,7 @@ void think(bot_state &bs, object &obj, const uint32_t tick)
 	const bool attacked{bs.last_attacker < MAX_PLAYERS && tick - bs.attacked_tick < BOT_REVENGE_TICKS};
 	/* Section 4.7: cloaked it sneaks, invulnerable it attacks. */
 	bs.tactics = b::tactics_for(res.cloaked, res.invulnerable);
-	const auto goal{b::choose_goal({
+	const b::goal_inputs gin{
 		.has_target = bs.target.has_value(),
 		.target_visible = target_visible,
 		.target_score = target_score,
@@ -1401,13 +1747,37 @@ void think(bot_state &bs, object &obj, const uint32_t tick)
 		.collect = collect.utility,
 		.collect_path = collect.path,
 		.collect_upgrade = collect.upgrade,
+		.grab = grab.key != 0xffff,
+		.grab_shields = grab.shields,
 		.refuel = centre.utility,
 		.retreat_shields = st.retreat_shields,
 		.engage_weight = st.engage_weight * bs.tactics.engage_weight,
 		.collect_weight = st.collect_weight * bs.tactics.collect_weight,
 		.collector = bs.cfg.style == b::bot_style::collector,
 		.current = current_goal(bs, target_visible),
-	})};
+	};
+	const auto goal{b::choose_goal(gin)};
+	/* The grab is the collect goal while it applies. */
+	bs.grabbing = goal == b::goal_kind::collect && b::grab_applies(gin);
+	if (bs.grabbing)
+		collect = grab;
+	/* The log: the goal's utility against the best other. */
+	{
+		const auto u{b::goal_utility(gin)};
+		bs.chosen = goal;
+		bs.chosen_u = u[goal];
+		bs.collect_u = u[b::goal_kind::collect];
+		bs.runner_up_u = -1;
+		for (unsigned i = 0; i < b::BOT_GOAL_COUNT; ++i)
+		{
+			const auto g{static_cast<b::goal_kind>(i)};
+			if (g != goal && u[g] > bs.runner_up_u)
+			{
+				bs.runner_up = g;
+				bs.runner_up_u = u[g];
+			}
+		}
+	}
 	const bool replan_due{bs.points.empty() || tick >= bs.next_plan_tick};
 	switch (goal)
 	{
@@ -1777,6 +2147,11 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 				const auto to{*target_pos - pos};
 				m.target_distance = b::length(to);
 				const auto los{b::normalized(to)};
+				/* Section 9.5: the blast where the bot is when the
+				 * missile meets the target, both closing in.
+				 */
+				m.closing_speed = b::dot(vel, los);
+				m.target_closing_speed = b::dot(mem.vel, -los);
 				const auto rel_vel{mem.vel - vel};
 				m.target_lateral_speed = b::length(rel_vel - los * b::dot(rel_vel, los));
 				const auto &ship{ship_of(t)};
@@ -1800,6 +2175,27 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 		}
 		/* A doorway: the next path point is the centre of a side. */
 		m.at_doorway = bs.point_index < bs.points.size() && !(bs.point_index & 1) && b::distance(pos, bs.points[bs.point_index]) < 12;
+		/* Section 9.5: the heavy missiles' verdict (the log), and the
+		 * distance to keep for them.
+		 */
+		const auto verdict{b::heavy_check(m)};
+		bs.standoff = b::heavy_standoff(m);
+		/* Its own missile in flight: still clear of the blast. */
+		if (tick < bs.blast_hold_until)
+			bs.standoff = std::max(bs.standoff, bs.blast_hold);
+		bs.heavy_min = 0;
+		const b::missile_data *heavy_md{nullptr};
+		for (const auto s : {b::secondary::earthshaker, b::secondary::mega})
+			if (m.ammo[static_cast<unsigned>(s)])
+			{
+				heavy_md = &m.data[static_cast<unsigned>(s)];
+				bs.heavy_min = b::heavy_min_distance(s, *heavy_md);
+				break;
+			}
+		/* The log: each change of the verdict while the bot has one. */
+		if (heavy_md && verdict != bs.heavy_why && bot_log_on())
+			con_printf(CON_VERBOSE, "bots: '%s' heavy missile: %s (target %.0f units, crossing %.0f, closing %.0f, needs %.0f, blast %.0f%s, keeps %.0f)", static_cast<const char *>(bs.cfg.name), b::name_of(verdict), m.has_target ? m.target_distance : -1.0, m.target_lateral_speed, m.closing_speed, bs.heavy_min, heavy_md->blast_radius, heavy_md->homing ? ", homing" : "", bs.standoff);
+		bs.heavy_why = verdict;
 		const auto chosen{b::choose_secondary(m)};
 		if (!chosen)
 			return;
@@ -1825,7 +2221,7 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 		if (target_visible && !bs.shot_clear)
 			return;
 	}
-	double err{0}, impact{1e9};
+	double err{0}, impact{1e9}, target_closing{0};
 	const auto md{missile_data_of(w)};
 	if (role != b::missile_role::mine)
 	{
@@ -1833,12 +2229,38 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 		/* Where it bursts: the wall along the nose, or the target on
 		 * the way.
 		 */
-		impact = wall_distance(obj, frame.f, 400);
+		const double wall{wall_distance(obj, frame.f, 400)};
+		impact = wall;
 		if (target_visible)
+		{
 			impact = std::min({impact, b::distance(pos, *target_pos), bs.shot_first_hit});
+			/* Section 9.5: a ship is the impact, not the wall: it flies
+			 * at the missile (the target's closing speed).
+			 */
+			if (impact < wall && bs.target)
+				target_closing = b::dot(bs.memory[*bs.target].vel, -b::normalized(*target_pos - pos));
+		}
 	}
-	if (!b::missile_release(s, err, b::radians(sk.fire_cone_deg), impact, md, invulnerable_left))
+	const bool heavy{role == b::missile_role::heavy || role == b::missile_role::shaker};
+	/* Section 9.5: the bot's own flight toward the burst along the nose. */
+	const double closing{b::dot(vel, frame.f)};
+	if (!b::missile_release(s, err, b::radians(sk.fire_cone_deg), impact, md, invulnerable_left, closing, target_closing))
+	{
+		if (heavy)
+			bs.heavy_why = b::blast_safe(role, impact, md, invulnerable_left, closing, target_closing) ? b::heavy_verdict::aiming : b::heavy_verdict::nose_blast;
 		return;
+	}
+	/* Section 9.5: the earthshaker's children, back through the bot to
+	 * the wall behind it.
+	 */
+	if (role == b::missile_role::shaker && md.child_blast_radius > 0 &&
+		!b::shaker_behind_safe(role, wall_distance(obj, -frame.f, b::SHAKER_BEHIND_FACTOR * md.child_blast_radius + b::BLAST_MARGIN + 1), impact, md, invulnerable_left))
+	{
+		bs.heavy_why = b::heavy_verdict::wall_behind;
+		return;
+	}
+	if (heavy && bot_log_on())
+		con_printf(CON_VERBOSE, "bots: '%s' fires %s at P#%u, %.0f units (impact %.0f, blast %.0f%s)", static_cast<const char *>(bs.cfg.name), secondary_names[static_cast<unsigned>(s)], bs.target ? *bs.target : 0xffu, target_pos ? b::distance(pos, *target_pos) : -1.0, impact, md.blast_radius, md.homing ? ", homing" : "");
 	bs.missile.reset();
 	bs.missile_fire = s;
 	bs.missile_volley = std::max<unsigned>(1, Weapon_info[Secondary_weapon_to_weapon_info[w]].fire_count);
@@ -1851,8 +2273,129 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 		{
 			bs.last_heavy = tick;
 			bs.heavy_target = bs.target ? *bs.target : 0xff;
+			/* Section 9.5: clear of its own blast until it is over (the
+			 * cooldown now drops the standoff).
+			 */
+			bs.blast_hold = b::heavy_min_distance(s, md) + 8;
+			bs.blast_hold_until = tick + static_cast<uint32_t>(std::ceil(b::blast_danger_seconds(role, impact, md) * b::BOT_TICK_RATE));
+			bs.standoff = std::max(bs.standoff, bs.blast_hold);
 		}
 	}
+}
+
+/* The log: a powerup's short name. */
+[[nodiscard]]
+const char *powerup_label(const powerup_type_t id)
+{
+	const auto d{item_of(id)};
+	switch (d.kind)
+	{
+		case b::item::primary:
+			return primary_name(static_cast<unsigned>(d.weapon));
+		case b::item::secondary:
+			return d.secondary < secondary_names.size() ? secondary_names[d.secondary] : "missile";
+		case b::item::energy:
+			return "energy";
+		case b::item::shield:
+			return "shield";
+		case b::item::laser:
+			return "laser";
+		case b::item::super_laser:
+			return "superlaser";
+		case b::item::quad:
+			return "quad";
+		case b::item::vulcan_ammo:
+			return "vulcanammo";
+		case b::item::afterburner:
+			return "afterburner";
+		case b::item::converter:
+			return "converter";
+		case b::item::ammo_rack:
+			return "ammorack";
+		case b::item::cloak:
+			return "cloak";
+		case b::item::invulnerability:
+			return "invuln";
+		case b::item::headlight:
+			return "headlight";
+		case b::item::full_map:
+			return "fullmap";
+		case b::item::none:
+			break;
+	}
+	return "other";
+}
+
+/* Section 9.5, the log (-verbose), once a second per bot: the goal and
+ * its utility against the best other, the target, the weapons, shields
+ * and energy, the nearest valuable powerup and why it is not being
+ * taken, the heavy missiles' last verdict.
+ */
+void log_summary(const bot_state &bs, const object &obj, const uint32_t tick)
+{
+	auto &Objects = LevelUniqueObjectState.Objects;
+	const auto &pi{obj.ctype.player_info};
+	const auto pos{to_vec(obj.pos)};
+	const auto res{resources_of(obj)};
+	/* The target. */
+	char target[64];
+	if (bs.target && bs.memory[*bs.target].valid)
+		std::snprintf(target, sizeof(target), "P#%u %.0fu%s%s", *bs.target, b::distance(pos, bs.memory[*bs.target].pos), bs.visible_now[*bs.target] ? " vis" : "", bs.visible_now[*bs.target] && bs.shot_clear ? " clr" : "");
+	else
+		std::snprintf(target, sizeof(target), "-");
+	/* The nearest valuable powerup. */
+	const object *near_pu{nullptr};
+	double near_d{BOT_LOG_POWERUP_RADIUS};
+	for (const object &o : Objects.vcptr)
+	{
+		if (o.type != object_type::OBJ_POWERUP || (o.flags & OF_SHOULD_BE_DEAD))
+			continue;
+		const double d{b::distance(pos, to_vec(o.pos))};
+		if (d >= near_d || b::item_value(item_of(get_powerup_id(o)), res) < b::GRAB_MIN_VALUE)
+			continue;
+		near_pu = &o;
+		near_d = d;
+	}
+	char powerup[96];
+	if (near_pu)
+	{
+		const auto &&o{Objects.vcptridx(near_pu)};
+		const uint16_t key = o.get_unchecked_index();
+		const uint16_t sig = underlying_value(o->signature);
+		const auto id{get_powerup_id(o)};
+		auto why{collect_why::goal_lower};
+		const auto *const k{[&]() -> const b::known_powerup * {
+			for (const auto &e : bs.powerups.items())
+				if (e.key == key && e.signature == sig)
+					return &e;
+			return nullptr;
+		}()};
+		if (bs.goal == bot_goal::collect && bs.collect_key == key && bs.collect_sig == sig)
+			why = collect_why::collecting;
+		else if (bs.deny_key == key && tick - bs.deny_tick < 2 * b::BOT_TICK_RATE)
+			why = collect_why::denied;
+		else if (!k)
+			why = collect_why::not_known;
+		else if (tick < k->ignore_until)
+			why = collect_why::ignored;
+		else if (!bs.dist.cost(k->segment))
+			why = collect_why::unreachable;
+		else if (!net_objects_bot_can_use(bs.pid, id, static_cast<uint32_t>(std::max(o->ctype.powerup_info.count, 0))))
+			why = collect_why::cannot_use;
+		std::snprintf(powerup, sizeof(powerup), "%s %.0fu v%.1f %s%s%s", powerup_label(id), near_d, b::item_value(item_of(id), res), collect_why_names[static_cast<unsigned>(why)], why == collect_why::denied ? ":" : "", why == collect_why::denied ? deny_name(bs.deny_reason) : "");
+	}
+	else
+		std::snprintf(powerup, sizeof(powerup), "-");
+	char arm[160];
+	describe_armament(pi, arm, sizeof(arm));
+	con_printf(CON_VERBOSE, "bots: '%s' goal=%s %.2f (next %s %.2f, collect %.2f%s) tgt=%s | %s [%s] | sh=%.0f en=%.0f | pu=%s | heavy=%s min=%.0f keep=%.0f",
+		static_cast<const char *>(bs.cfg.name),
+		goal_name(bs.chosen), bs.chosen_u, goal_name(bs.runner_up), bs.runner_up_u, bs.collect_u, bs.grabbing ? " grab" : "",
+		target,
+		primary_name(underlying_value(pi.Primary_weapon.get_active())), arm,
+		obj.shields / 65536.0, pi.energy / 65536.0,
+		powerup,
+		b::name_of(bs.heavy_why), bs.heavy_min, bs.standoff);
 }
 
 /* One tick of the brain (section 4.1). */
@@ -1869,7 +2412,14 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 	bs.aim.update(bs.rng, b::radians(sk.aim_sigma_deg), b::ticks_from_ms(sk.aim_drift_ms));
 	bs.lead.update(bs.rng, sk.lead, b::ticks_from_ms(sk.aim_drift_ms));
 	const double range_scale{bs.style->range_scale * bs.tactics.range_scale};
-	bs.juke.update(bs.rng, b::ticks_from_ms(sk.strafe_min_ms), b::ticks_from_ms(sk.strafe_max_ms), BOT_RANGE_LO * range_scale, BOT_RANGE_HI * range_scale);
+	double range_lo{BOT_RANGE_LO * range_scale}, range_hi{BOT_RANGE_HI * range_scale};
+	/* Section 9.5: with a heavy missile ready, far enough for its blast. */
+	if (bs.standoff > range_lo)
+	{
+		range_lo = bs.standoff;
+		range_hi = std::max(range_hi, range_lo + 25);
+	}
+	bs.juke.update(bs.rng, b::ticks_from_ms(sk.strafe_min_ms), b::ticks_from_ms(sk.strafe_max_ms), range_lo, range_hi);
 	const auto pos{to_vec(obj.pos)};
 	const auto vel{to_vec(obj.mtype.phys_info.velocity)};
 	const auto frame{to_frame(obj.orient)};
@@ -1883,9 +2433,16 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 	if (bs.stuck.tick_recovery() && bs.goal != bot_goal::none)
 		plan_path(bs, obj, bs.goal_seg, std::nullopt, tick);
 	vec3 wanted;
+	auto &pi{obj.ctype.player_info};
+	const auto primary_now{pi.Primary_weapon.get_active()};
+	/* The target in sight, as the tactics layer sees it: its distance,
+	 * for the fusion cannon's charge.
+	 */
+	bool engaged{false};
+	double engaged_dist{1e9};
 	if (p && p->visible && bs.target && *bs.target == p->target && bs.visible_now[p->target])
 	{
-		auto &pi{obj.ctype.player_info};
+		engaged = true;
 		/* Where the target is now, reckoned from what the bot saw a
 		 * reaction time ago: a straight flight is followed, a turn is
 		 * noticed late (section 4.2).
@@ -1895,7 +2452,6 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 		/* Section 4.4: the lead from the gun the shots leave from, with
 		 * the current weapon's speed and the bot's lead factor.
 		 */
-		const auto primary_now{pi.Primary_weapon.get_active()};
 		/* Stage B4: a missile that flies straight is aimed with its
 		 * own speed from its own gun while it waits for its release.
 		 */
@@ -1916,6 +2472,7 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 		bs.face_rate = b::line_of_sight_rate(aim - pos, p->vel - vel);
 		const auto to{est - pos};
 		const double dist{b::length(to)};
+		engaged_dist = dist;
 		/* Collecting, retreating or refuelling (section 4.7), the bot
 		 * shoots at what it sees but flies its path: backward when it
 		 * retreats facing its pursuer.
@@ -1930,10 +2487,22 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 			/* Combat movement takes over: no recovery manoeuvre. */
 			bs.stuck.cancel_recovery();
 			wanted = b::combat_velocity(to, frame.r, frame.u, bs.juke, sk.strafe_vertical, max_speed * 0.8, strafe_speed);
+			/* Section 9.5: its own heavy missile in flight, the bot does
+			 * not close in on the burst; keeping a standoff, it does not
+			 * back into a wall (the earthshaker's children burst there).
+			 */
+			const auto toward{b::normalized(to)};
+			const double along{b::dot(wanted, toward)};
+			if (along > 0 && tick < bs.blast_hold_until)
+				wanted -= toward * along;
+			else if (along < 0 && bs.standoff > 0 && wall_distance(obj, -toward, BOT_BACK_WALL_CLEARANCE) < BOT_BACK_WALL_CLEARANCE)
+				wanted -= toward * along;
 		}
 		else
 			wanted = follow_path(bs, obj, true);
 		const double err{b::angle_between(frame.f, bs.face_dir)};
+		/* Section 9.5: turning far round, the bot keeps moving. */
+		wanted = b::keep_moving_in_turn(wanted, err, to, vel, frame.r * static_cast<double>(bs.heading_pref), max_speed);
 		/* Section 4.5: beyond the mid band, no shot that hits less than
 		 * one time in ten.
 		 */
@@ -1941,12 +2510,54 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 		const auto los{b::normalized(to)};
 		const double lateral{b::length(rel_vel - los * b::dot(rel_vel, los))};
 		const auto &target_obj{ship_of(p->target)};
-		const double cone{b::fire_cone_with_spread(b::radians(sk.fire_cone_deg), spread_half_angle(primary_now))};
+		double cone{b::fire_cone_with_spread(b::radians(sk.fire_cone_deg), spread_half_angle(primary_now))};
+#if DXX_BUILD_DESCENT == 2
+		/* Section 9.5: omega locks on what is near the nose. */
+		if (primary_now == primary_weapon_index::omega)
+			cone = b::omega_fire_cone(cone);
+#endif
 		bs.fire = b::should_fire(err, cone, bs.shot_clear, dist, std::min(weapon_range(pi), bs.tactics.max_fire_distance)) &&
 			b::long_shot_worthwhile(dist, weapon_speed(pi), lateral, b::radians(sk.aim_sigma_deg), target_obj.size / 65536.0);
 	}
 	else
+	{
 		wanted = follow_path(bs, obj, false);
+		/* Section 9.5: hit by an attacker it did not see, the bot turns
+		 * to where it was, a reaction time after the hit, and keeps
+		 * moving while it turns.
+		 */
+		if (bs.turn_to < MAX_PLAYERS && tick >= bs.turn_from && tick < bs.turn_until && bs.memory[bs.turn_to].valid)
+		{
+			const auto to{bs.memory[bs.turn_to].pos - pos};
+			bs.face_dir = b::normalized(to);
+			bs.face_rate = {};
+			wanted = b::keep_moving_in_turn(wanted, b::angle_between(frame.f, bs.face_dir), to, vel, frame.r * static_cast<double>(bs.heading_pref), max_speed);
+		}
+	}
+	/* Section 9.5: the fusion cannon is charged, then released on the
+	 * target (bots_fire does it frame by frame).
+	 */
+#if DXX_BUILD_DESCENT == 2
+	{
+		const bool fusion{primary_now == primary_weapon_index::fusion};
+		bs.fusion_want = b::fusion_step({
+			.selected = fusion,
+			.charging = bs.fusion_charging,
+			.charge = pi.Fusion_charge / 65536.0,
+			.energy = pi.energy / 65536.0,
+			.target_visible = engaged,
+			.shot_clear = bs.shot_clear,
+			.aimed = bs.fire,
+			.distance = engaged_dist,
+			.range = weapon_range(pi),
+		}, b::fusion_release_charge(sk.weapon_smarts));
+		if (fusion)
+			bs.fire = false;
+	}
+#else
+	(void)engaged;
+	(void)engaged_dist;
+#endif
 	if (bs.stuck.recovering())
 		wanted = bs.recover_dir * max_speed;
 	else if (tick >= bs.dodge_from && tick < bs.dodge_until)
@@ -1956,6 +2567,11 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 	bs.move_cmd = b::velocity_command(wanted, vel, max_speed);
 	decide_afterburner(bs, obj, wanted, tick);
 	missile_tick(bs, obj, tick, p);
+	if (bot_log_on() && tick >= bs.next_log_tick)
+	{
+		bs.next_log_tick = tick + BOT_LOG_TICKS;
+		log_summary(bs, obj, tick);
+	}
 }
 
 /* Section 3.4: the controls of this frame, from the direction and
@@ -2023,6 +2639,8 @@ void give_spawn_invulnerability(object &obj)
 void new_ship(bot_state &bs, object &obj)
 {
 	give_spawn_invulnerability(obj);
+	obj.ctype.player_info.Fusion_charge = 0;
+	bs.fusion_charging = false;
 	choose_weapon(bs, obj, std::nullopt);
 	bs.reset_for_life(B.tick.tick());
 	create_player_appearance_effect(Vclip, obj);
@@ -2075,7 +2693,7 @@ void explode(bot_state &bs, object &obj, const d_robot_info_array &Robot_info)
 void respawn(bot_state &bs, object &obj)
 {
 	auto &Objects = LevelUniqueObjectState.Objects;
-	const auto spawn{choose_spawn(Objects.vmptr, bs.pid, 1)};
+	const auto spawn{bot_spawn(bs)};
 	if (spawn.what == spawn_choice::kind::none)
 	{
 		bs.respawn_at = GameTime64 + F1_0;
@@ -2162,6 +2780,13 @@ void life_frame(bot_state &bs, object &obj, const d_robot_info_array &Robot_info
 			}
 			refuel_frame(bs, obj);
 			convert_frame(bs, obj);
+#if DXX_BUILD_DESCENT == 2
+			/* Section 9.5: the omega cannon recharges from the bot's
+			 * energy, as the human's does (game.cpp), with the bot's
+			 * pilot; do_omega_stuff takes the shots' charge.
+			 */
+			omega_charge_frame(bs.pl, pi);
+#endif
 			break;
 		}
 		case bot_life::dying:
@@ -2380,6 +3005,7 @@ void bots_level_start()
 		return;
 	build_nav_graph();
 	compute_limits();
+	judge_spawn_sites();
 	B.tick = ::dcx::net_interp::tick_accumulator{b::BOT_TICK_RATE};
 	B.tick.reset(GameTime64);
 	B.last_time = GameTime64;
@@ -2393,6 +3019,7 @@ void bots_level_start()
 		bs.last_attacker = 0xff;
 		bs.memory = {};
 		bs.powerups.clear();
+		bs.visited.assign(B.graph.size(), 0);
 		if (vcplayerptr(bs.pid)->connected != player_connection_status::playing)
 			continue;
 		auto &obj{ship_of(bs.pid)};
@@ -2400,6 +3027,19 @@ void bots_level_start()
 		obj.control_source = object::control_type::remote;
 		obj.movement_source = object::movement_type::physics;
 		init_player_stats_new_ship(bs.pid);
+		auto &Objects = LevelUniqueObjectState.Objects;
+		/* Section 9.5: a bot placed in a sealed cell moves to a site it
+		 * can fly out of (a human shoots the switch; a bot does not).
+		 */
+		if (const uint32_t seg{obj.segnum}; +(Game_mode & GM_MULTI) && !(Game_mode & GM_MULTI_COOP) && !b::spawn_site_open(reachable_from(seg), B.graph.size()))
+		{
+			const auto spawn{bot_spawn(bs)};
+			if (spawn.what == spawn_choice::kind::site && spawn.site < MAX_PLAYERS && B.site_open[spawn.site])
+			{
+				con_printf(CON_VERBOSE, "bots: '%s' starts in a sealed cell (segment %u): moved to spawn site %u", static_cast<const char *>(bs.cfg.name), seg, spawn.site);
+				place_player(vmsegptridx, Objects.vmptridx(&obj), spawn);
+			}
+		}
 		new_ship(bs, obj);
 	}
 }
@@ -2505,10 +3145,75 @@ void bots_fire()
 					bs.missile_fire.reset();
 			}
 		}
+#if DXX_BUILD_DESCENT == 2
+		/* Section 9.5: the fusion cannon, as FireLaser charges the
+		 * human's: 2 energy to start, then 1 a second, the charge in the
+		 * ship's Fusion_charge (the shot's damage grows with it); the
+		 * shot goes through do_laser_firing_player (MULTI_FIRE with the
+		 * charge, as the human's).  The warm-up is heard on the host.
+		 */
+		{
+			auto &pi{objp->ctype.player_info};
+			const bool fusion{pi.Primary_weapon == primary_weapon_index::fusion};
+			if (bs.fusion_charging && !fusion)
+			{
+				/* Switched away (the rearm): what was charged is lost,
+				 * as it is not the weapon that would fire.
+				 */
+				bs.fusion_charging = false;
+				pi.Fusion_charge = 0;
+			}
+			if (fusion && (bs.fusion_want == b::fusion_action::charge || (bs.fusion_charging && bs.fusion_want != b::fusion_action::release)))
+			{
+				if (!bs.fusion_charging)
+				{
+					if (!allowed_to_fire_laser(bs.pl, pi) || pi.energy < F1_0 * 2)
+						continue;
+					bs.fusion_charging = true;
+					pi.Fusion_charge = 0;
+					pi.energy -= F1_0 * 2;
+				}
+				pi.Fusion_charge += FrameTime;
+				pi.energy -= FrameTime;
+				if (pi.energy <= 0)
+				{
+					pi.energy = 0;
+					bs.fusion_want = b::fusion_action::release;
+				}
+				if (GameTime64 >= bs.fusion_sound_at || bs.fusion_sound_at > GameTime64 + F1_0)
+				{
+					bs.fusion_sound_at = GameTime64 + F1_0 / 4;
+					digi_link_sound_to_object(sound_effect::SOUND_FUSION_WARMUP, objp, 0, F1_0, sound_stack::allow_stacking);
+				}
+			}
+			if (fusion && bs.fusion_charging && bs.fusion_want == b::fusion_action::release)
+			{
+				if (!allowed_to_fire_laser(bs.pl, pi))
+					continue;
+				const double charged{pi.Fusion_charge / 65536.0};
+				do_laser_firing_player(bs.pl, objp);
+				bs.fusion_charging = false;
+				pi.Fusion_charge = 0;
+				bs.fusion_want = b::fusion_action::idle;
+				if (bot_log_on())
+					con_printf(CON_VERBOSE, "bots: '%s' fires fusion, charge %.2f s", static_cast<const char *>(bs.cfg.name), charged);
+				continue;
+			}
+			if (fusion)
+				continue;
+		}
+#endif
 		if (!bs.fire)
 			continue;
 		if (!allowed_to_fire_laser(bs.pl, objp->ctype.player_info))
 			continue;
+#if DXX_BUILD_DESCENT == 2
+		/* Section 9.5: no omega shot without the charge for it (the host
+		 * would delete it, the clients would draw it).
+		 */
+		if (const auto &pi{objp->ctype.player_info}; pi.Primary_weapon == primary_weapon_index::omega && !b::omega_can_fire(pi.Omega_charge / static_cast<double>(MAX_OMEGA_CHARGE), pi.energy / 65536.0))
+			continue;
+#endif
 		do_laser_firing_player(bs.pl, objp);
 	}
 }
@@ -2561,11 +3266,14 @@ bool bot_take_damage(object &ship, const icobjptridx_t killer, const fix damage,
 		return true;
 	if (Endlevel_sequence)
 		return true;
-	/* Section 4.2: a hit tells the bot roughly where the attacker is. */
+	/* Section 4.2: a hit tells the bot roughly where the attacker is.  A
+	 * teammate's hit (friendly fire on) is no attack: no memory of it, no
+	 * evasion, no turn, no target.
+	 */
 	if (killer != object_none && killer->type == object_type::OBJ_PLAYER)
 	{
 		const auto who{get_player_id(*killer)};
-		if (who != pid && who < MAX_PLAYERS)
+		if (who != pid && who < MAX_PLAYERS && !same_team(pid, who))
 		{
 			const auto tick{B.tick.tick()};
 			bs->last_attacker = who;
@@ -2581,6 +3289,34 @@ bool bot_take_damage(object &ship, const icobjptridx_t killer, const fix damage,
 					.segment = static_cast<uint16_t>(killer->segnum),
 					.tick = tick,
 				};
+			}
+			/* Section 9.5: an attacker it does not see (behind it): evade
+			 * at once, turn to it a reaction time later.
+			 */
+			const auto pos{to_vec(ship.pos)};
+			const auto frame{to_frame(ship.orient)};
+			const auto to_attacker{m.pos - pos};
+			const bool seen{bs->visible_now[who] && b::in_field_of_view(frame.f, to_attacker, bs->skill->fov_half_deg)};
+			const auto reaction{b::react_to_hit({
+				.attacker_seen = seen,
+				.shields = (ship.shields - damage) / 65536.0,
+				.retreat_shields = bs->style->retreat_shields,
+				.invulnerable = false,
+				.evading = tick < bs->dodge_until && bs->turn_to == who,
+			})};
+			if (reaction != b::hit_reaction::none)
+			{
+				const auto side{frame.r * (bs->rng.uniform() < 0.5 ? -1.0 : 1.0)};
+				bs->dodge_dir = b::evade_direction(-to_attacker, to_vec(ship.mtype.phys_info.velocity), side);
+				bs->dodge_from = tick;
+				bs->dodge_until = tick + BOT_EVADE_TICKS;
+				bs->turn_to = who;
+				bs->turn_from = tick + b::ticks_from_ms(bs->skill->reaction_ms);
+				bs->turn_until = bs->turn_from + BOT_TURN_TO_ATTACKER_TICKS;
+				if (!bs->target || !bs->visible_now[*bs->target])
+					bs->target = who;
+				if (bot_log_on())
+					con_printf(CON_VERBOSE, "bots: '%s' hit by unseen P#%u (%.0f units, %s): evades, turns in %u ms", static_cast<const char *>(bs->cfg.name), who, b::length(to_attacker), reaction == b::hit_reaction::evade_flee ? "weak, flees" : "fights", bs->skill->reaction_ms);
 			}
 		}
 	}
@@ -2630,8 +3366,25 @@ bool bot_touch_powerup(object &ship, const vmobjptridx_t powerup)
 	 * pickup (net_objects.cpp), granted at once: the host is the
 	 * authority and the bot is its own ship.
 	 */
-	if (!net_objects_bot_touch(pid, powerup))
+	uint8_t deny{};
+	if (!net_objects_bot_touch(pid, powerup, deny))
+	{
+		/* Section 9.5, the log: a denied touch (once per powerup and
+		 * reason, again after a second: the touch repeats every frame
+		 * while the ship overlaps it).
+		 */
+		const uint16_t key = powerup.get_unchecked_index();
+		const auto tick{B.tick.tick()};
+		if (bs->deny_key != key || bs->deny_reason != deny || tick - bs->deny_tick >= BOT_DENY_LOG_TICKS)
+		{
+			bs->deny_key = key;
+			bs->deny_reason = deny;
+			bs->deny_tick = tick;
+			if (bot_log_on())
+				con_printf(CON_VERBOSE, "bots: '%s' touches powerup %u: denied (%s)", static_cast<const char *>(bs->cfg.name), underlying_value(id), deny_name(deny));
+		}
 		return true;
+	}
 	/* What do_powerup does besides the inventory. */
 	switch (id)
 	{
@@ -2660,7 +3413,12 @@ bool bot_touch_powerup(object &ship, const vmobjptridx_t powerup)
 	 * at the next strategy tick.
 	 */
 	bs->powerups.forget(powerup.get_unchecked_index());
-	con_printf(CON_VERBOSE, "bots: '%s' takes powerup %u", static_cast<const char *>(bs->cfg.name), underlying_value(id));
+	if (bot_log_on())
+	{
+		char arm[160];
+		describe_armament(pi, arm, sizeof(arm));
+		con_printf(CON_VERBOSE, "bots: '%s' takes powerup %u (granted%s): %s", static_cast<const char *>(bs->cfg.name), underlying_value(id), bs->grabbing ? ", grab" : "", arm);
+	}
 	return true;
 }
 
