@@ -107,14 +107,14 @@ enum class range_band : uint8_t
 {
 	close,	// < 60
 	mid,	// 60 - 150
-	far,	// > 150
+	distant,	// > 150; not "far", which windef.h defines as a macro
 };
 constexpr unsigned BOT_RANGE_BANDS{3};
 
 [[nodiscard]]
 constexpr range_band band_of(const double distance)
 {
-	return distance < 60 ? range_band::close : distance < 150 ? range_band::mid : range_band::far;
+	return distance < 60 ? range_band::close : distance < 150 ? range_band::mid : range_band::distant;
 }
 
 /* What the weapon choice looks at. */
@@ -270,7 +270,7 @@ constexpr double LONG_SHOT_MIN_CHANCE{0.1};
 [[nodiscard]]
 inline bool long_shot_worthwhile(const double distance, const double shot_speed, const double lateral_speed, const double sigma, const double target_radius)
 {
-	return band_of(distance) != range_band::far || long_shot_hit_chance(distance, shot_speed, lateral_speed, sigma, target_radius) >= LONG_SHOT_MIN_CHANCE;
+	return band_of(distance) != range_band::distant || long_shot_hit_chance(distance, shot_speed, lateral_speed, sigma, target_radius) >= LONG_SHOT_MIN_CHANCE;
 }
 
 /* Section 4.7: what the bot has, as the collection values see it. */

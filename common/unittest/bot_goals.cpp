@@ -81,8 +81,8 @@ void test_bands()
 	CHECK(band_of(59.9) == range_band::close);
 	CHECK(band_of(60) == range_band::mid);
 	CHECK(band_of(149.9) == range_band::mid);
-	CHECK(band_of(150) == range_band::far);
-	CHECK(band_of(1000) == range_band::far);
+	CHECK(band_of(150) == range_band::distant);
+	CHECK(band_of(1000) == range_band::distant);
 }
 
 /* Section 4.5: the table's preferences per band. */
@@ -95,11 +95,11 @@ void test_weapon_table()
 	/* Close: helix first; mid: plasma; far: gauss. */
 	CHECK(choose_primary_for(all, range_band::close, primary::laser) == primary::helix);
 	CHECK(choose_primary_for(all, range_band::mid, primary::laser) == primary::plasma);
-	CHECK(choose_primary_for(all, range_band::far, primary::laser) == primary::gauss);
+	CHECK(choose_primary_for(all, range_band::distant, primary::laser) == primary::gauss);
 	/* Without a target: the mid band's choice. */
 	CHECK(choose_primary_for(all, std::nullopt, primary::laser) == primary::plasma);
 	/* Never fusion or omega (stage B1: the human's charge). */
-	for (const auto b : {range_band::close, range_band::mid, range_band::far})
+	for (const auto b : {range_band::close, range_band::mid, range_band::distant})
 	{
 		const auto p{choose_primary_for(all, b, primary::fusion)};
 		CHECK(p != primary::fusion && p != primary::omega);
@@ -112,12 +112,12 @@ void test_weapon_table()
 	close.owned = bits({primary::spreadfire, primary::plasma, primary::gauss, primary::vulcan});
 	CHECK(choose_primary_for(close, range_band::close, primary::laser) == primary::spreadfire);
 	/* Far: the fast shots (gauss, vulcan, the lasers), not the blobs. */
-	weapon_view far{all};
-	far.owned = bits({primary::vulcan, primary::spreadfire, primary::helix, primary::phoenix});
-	CHECK(choose_primary_for(far, range_band::far, primary::laser) == primary::vulcan);
-	far.owned = bits({primary::spreadfire, primary::helix, primary::phoenix});
-	far.laser_level = 3;
-	CHECK(choose_primary_for(far, range_band::far, primary::spreadfire) == primary::laser);
+	weapon_view far_view{all};
+	far_view.owned = bits({primary::vulcan, primary::spreadfire, primary::helix, primary::phoenix});
+	CHECK(choose_primary_for(far_view, range_band::distant, primary::laser) == primary::vulcan);
+	far_view.owned = bits({primary::spreadfire, primary::helix, primary::phoenix});
+	far_view.laser_level = 3;
+	CHECK(choose_primary_for(far_view, range_band::distant, primary::spreadfire) == primary::laser);
 	/* Mid order: plasma, helix, super laser with quad, gauss, vulcan,
 	 * phoenix.
 	 */
@@ -159,8 +159,8 @@ void test_weapon_resources()
 	CHECK(choose_primary_for(v, range_band::close, primary::laser) == primary::gauss);
 	/* No rounds: no gauss; nothing fires: the laser. */
 	v.vulcan_ammo = 0;
-	CHECK(weapon_score(primary::gauss, range_band::far, v) == 0);
-	CHECK(choose_primary_for(v, range_band::far, primary::gauss) == primary::laser);
+	CHECK(weapon_score(primary::gauss, range_band::distant, v) == 0);
+	CHECK(choose_primary_for(v, range_band::distant, primary::gauss) == primary::laser);
 	/* Energy between 20 and 50 spares the hungry weapons, smoothly. */
 	CHECK(energy_factor(primary::plasma, 20) == 0.75);
 	CHECK(energy_factor(primary::plasma, 35) > 0.75 && energy_factor(primary::plasma, 35) < 1);
@@ -184,7 +184,7 @@ void test_weapon_hysteresis()
 	CHECK(choose_primary_for(v, range_band::mid, primary::plasma) == primary::plasma);
 	CHECK(choose_primary_for(v, range_band::mid, primary::laser) == primary::plasma);
 	/* Far: plasma 2.0 against helix 1.2: switch. */
-	CHECK(choose_primary_for(v, range_band::far, primary::helix) == primary::plasma);
+	CHECK(choose_primary_for(v, range_band::distant, primary::helix) == primary::plasma);
 	/* The current weapon cannot fire: switch whatever the margin. */
 	v.owned = bits({primary::gauss});
 	v.vulcan_ammo = 0;
