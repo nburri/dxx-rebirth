@@ -17,6 +17,8 @@
  *   partial path to the explored node nearest the goal;
  * - `pull_string` and `advance_along`: which path point the bot steers
  *   at, and when it has reached one;
+ * - `nav_distances`: the path cost and segment count to every node
+ *   within reach (stage B3: collection, map knowledge);
  * - `stuck_detector` and `edge_penalties`: stuck recovery.
  *
  * Standard library only (common/unittest/bot_nav.cpp).
@@ -29,6 +31,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -268,6 +271,126 @@ public:
 		std::ranges::reverse(out.steps);
 		out.steps.front().side = NAV_NO_SIDE;
 		return true;
+	}
+};
+
+/* Section 4.7 (stage B3): the path cost and the number of segments from
+ * one node to every node within reach, for the collection scores and the
+ * bot's map knowledge.  Dijkstra with the same passability and extra cost
+ * as the A*, stopped at `max_cost` or after `node_limit` expansions (the
+ * nodes left out count as unreachable).
+ */
+class nav_distances
+{
+	struct open_entry
+	{
+		double g;
+		uint32_t node;
+	};
+	static bool worse(const open_entry &a, const open_entry &b)
+	{
+		if (a.g != b.g)
+			return a.g > b.g;
+		return a.node > b.node;
+	}
+	std::vector<double> m_cost;
+	std::vector<uint16_t> m_hops;
+	std::vector<uint32_t> m_done;
+	std::vector<uint32_t> m_seen;
+	std::vector<open_entry> m_open;
+	uint32_t m_generation{};
+	uint32_t m_start{};
+	unsigned m_expanded{};
+public:
+	template <typename Passable, typename ExtraCost>
+	void compute(const nav_graph &graph, const uint32_t start, Passable &&passable, ExtraCost &&extra_cost, const double max_cost, const unsigned node_limit)
+	{
+		const auto n{graph.size()};
+		if (m_cost.size() != n)
+		{
+			m_cost.assign(n, 0);
+			m_hops.assign(n, 0);
+			m_done.assign(n, 0);
+			m_seen.assign(n, 0);
+			m_generation = 0;
+		}
+		if (++m_generation == 0)
+		{
+			std::ranges::fill(m_done, 0);
+			std::ranges::fill(m_seen, 0);
+			m_generation = 1;
+		}
+		m_open.clear();
+		m_expanded = 0;
+		m_start = start;
+		if (start >= n)
+			return;
+		const auto gen{m_generation};
+		m_cost[start] = 0;
+		m_hops[start] = 0;
+		m_seen[start] = gen;
+		m_open.push_back({0, start});
+		while (!m_open.empty())
+		{
+			std::ranges::pop_heap(m_open, worse);
+			const auto e{m_open.back()};
+			m_open.pop_back();
+			if (m_done[e.node] == gen || e.g != m_cost[e.node])
+				continue;
+			if (m_expanded >= node_limit)
+				break;
+			m_done[e.node] = gen;
+			++m_expanded;
+			for (const auto &edge : graph.neighbours(e.node))
+			{
+				if (edge.to >= n || m_done[edge.to] == gen)
+					continue;
+				if (!passable(e.node, edge))
+					continue;
+				const double g{e.g + static_cast<double>(edge.cost) + extra_cost(e.node, edge)};
+				if (g > max_cost)
+					continue;
+				if (m_seen[edge.to] == gen && g >= m_cost[edge.to])
+					continue;
+				m_seen[edge.to] = gen;
+				m_cost[edge.to] = g;
+				m_hops[edge.to] = static_cast<uint16_t>(std::min<unsigned>(m_hops[e.node] + 1u, 0xffffu));
+				m_open.push_back({g, edge.to});
+				std::ranges::push_heap(m_open, worse);
+			}
+		}
+	}
+	/* Whether node `n` was reached (its cost is final). */
+	[[nodiscard]]
+	bool reached(const uint32_t n) const
+	{
+		return n < m_done.size() && m_generation && m_done[n] == m_generation;
+	}
+	/* The path cost to `n`, if reached. */
+	[[nodiscard]]
+	std::optional<double> cost(const uint32_t n) const
+	{
+		if (!reached(n))
+			return std::nullopt;
+		return m_cost[n];
+	}
+	/* The segments on that path, if reached. */
+	[[nodiscard]]
+	std::optional<unsigned> hops(const uint32_t n) const
+	{
+		if (!reached(n))
+			return std::nullopt;
+		return m_hops[n];
+	}
+	[[nodiscard]]
+	uint32_t start() const
+	{
+		return m_start;
+	}
+	[[nodiscard]]
+	unsigned expanded() const
+	{
+		return m_expanded;
 	}
 };
 

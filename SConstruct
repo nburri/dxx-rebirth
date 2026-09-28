@@ -5035,6 +5035,12 @@ class DXXArchive(DXXCommon):
 		RuntimeTest('test-bot-flight', (
 			'common/unittest/bot_flight.cpp',
 			)),
+		# Test of the bots' resources and goals: the weapon table, the
+		# powerup values, the goal choice, the map knowledge, the memory
+		# of powerups and the afterburner (bot_goals.h).
+		RuntimeTest('test-bot-goals', (
+			'common/unittest/bot_goals.cpp',
+			)),
 		# Test of the score carry-over across a level load
 		# (net_score_carry.h).
 		RuntimeTest('test-net-score-carry', (
