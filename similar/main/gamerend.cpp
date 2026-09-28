@@ -185,16 +185,19 @@ static void show_framerate(grs_canvas &canvas)
 	const auto &game_font = *GAME_FONT;
 	gr_set_fontcolor(canvas, BM_XRGB(0, 31, 0),-1);
 	char buf[16];
-	if (CGameArg.DbgVerbose)
+	if (CGameArg.DbgFrameTimeHud)
 		snprintf(buf, sizeof(buf), "%iFPS (%.2fms)", fps_rate, fps_frame_ms);
 	else
 		snprintf(buf, sizeof(buf), "%iFPS", fps_rate);
 	const auto &&[w, h] = gr_get_string_size(game_font, buf);
 	const auto bm_h = canvas.cv_bitmap.bm_h;
 	gr_string(canvas, game_font, FSPACX(318) - w, bm_h - line_displacement, buf, w, h);
-	/* With -verbose, show where the frame time went (averages over the
-	 * last second, in ms) above the frame rate.
+	/* With -frametimes, show where the frame time went (averages over
+	 * the last second, in ms) above the frame rate.  -verbose only logs
+	 * it to gamelog.txt.
 	 */
+	if (!CGameArg.DbgFrameTimeHud)
+		return;
 	std::array<std::array<char, 64>, 3> probe_lines;
 	if (const auto n = frame_probe::hud_lines(probe_lines[0], probe_lines[1], probe_lines[2]))
 	{
