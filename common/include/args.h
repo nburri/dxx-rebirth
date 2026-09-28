@@ -74,6 +74,7 @@ struct CArg : prohibit_void_ptr<>
 	bool DbgForbidConsoleGrab;
 	bool DbgShowMemInfo;
 	bool DbgSafelog;
+	bool DbgFrameTimeHud;
 	bool SysShowCmdHelp;
 	bool SysLowMem;
 	int8_t SysUsePlayersDir;

@@ -402,6 +402,8 @@ static void ReadCmdArgs(Inilist &ini, Arglist &&Args)
 			CGameArg.DbgForbidConsoleGrab = true;
 		else if (!d_stricmp(p, "-safelog"))
 			CGameArg.DbgSafelog = true;
+		else if (!d_stricmp(p, "-frametimes"))
+			CGameArg.DbgFrameTimeHud = true;
 		else if (!d_stricmp(p, "-norun"))
 			CGameArg.DbgNoRun = true;
 		else if (!d_stricmp(p, "-renderstats"))

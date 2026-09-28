@@ -288,7 +288,7 @@ void scope::charge(const phase p, const uint64_t elapsed, const uint64_t childre
 
 void frame_mark()
 {
-	const bool want{CGameArg.DbgVerbose >= CON_VERBOSE};
+	const bool want{CGameArg.DbgVerbose >= CON_VERBOSE || CGameArg.DbgFrameTimeHud};
 	if (!want)
 	{
 		if (enabled)
