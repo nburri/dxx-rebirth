@@ -878,6 +878,7 @@ void test_expected_outcome()
 	{
 		blast_outcome o;
 		o.impact = 80;
+		o.burst_distance = 80;
 		o.target_damage = 25;
 		o.self_damage = 25;
 		o.self_chance = 0.3;
@@ -1001,8 +1002,9 @@ void test_indirect_aims()
 		CHECK(!stale.best || stale.best->outcome.target_damage < shaker.best->outcome.target_damage);
 	}
 	/* The target hugs the bot (12 units) in a room with a wall 40 units
-	 * off: never the direct shot; invulnerable, the bot fires into the
-	 * wall next to them both, and not at point blank.
+	 * off: never the direct shot; invulnerable, not into the wall next
+	 * to them both either: the missile would meet the target on the way
+	 * (it homes, or passes within reach of it), at point blank.
 	 */
 	{
 		const box_level room{{{{-100, -100, -100}, {45, 100, 100}}}};
@@ -1011,8 +1013,10 @@ void test_indirect_aims()
 		CHECK(!choose_heavy_aim(room, sc, missile_role::heavy, test_mega(), rp_cautious).best);
 		sc.invulnerable_left = 20;
 		const auto c{choose_heavy_aim(room, sc, missile_role::heavy, test_mega(), rp_cautious)};
-		CHECK(c.best && c.best->kind != aim_kind::direct);
-		CHECK(c.best->outcome.impact >= MISSILE_MIN_DISTANCE);
+		CHECK(!c.best && c.why == risk_verdict::point_blank);
+		auto straight{test_mega()};
+		straight.homing = false;
+		CHECK(!choose_heavy_aim(room, sc, missile_role::heavy, straight, rp_cautious).best);
 	}
 }
 
@@ -1074,7 +1078,7 @@ void test_hugging()
 			case 1: w.enemy_facing = false; break;
 			case 2: w.distance = 200; break;
 			case 3: w.distance = 15; break;
-			case 4: w.own_heavy_ready = true; break;
+			case 4: w.own_heavy_soon = true; break;
 			default: w.weak = true; break;
 		}
 		CHECK(!want_hug(w, aggressive));
@@ -1132,6 +1136,195 @@ void test_hugging()
 		[&](const vec3 &q) { return !room.sees(target, q); }));
 }
 
+/* Section 9.6, review: one movement per tick; the duck overrides the
+ * fight and the path, the fight needs a clear shot and no path goal.
+ */
+void test_engaged_movement()
+{
+	CHECK(engaged_movement(true, false, false) == engaged_move::combat);
+	CHECK(engaged_movement(false, false, false) == engaged_move::path);
+	CHECK(engaged_movement(true, true, false) == engaged_move::path);
+	CHECK(engaged_movement(false, true, false) == engaged_move::path);
+	for (const bool clear : {false, true})
+		for (const bool goal : {false, true})
+			CHECK(engaged_movement(clear, goal, true) == engaged_move::duck);
+}
+
+/* Section 9.6, review: the point blank rule on the burst distance, the
+ * meeting of the target on the way to a wall aim.
+ */
+void test_burst_distance_and_meeting()
+{
+	const auto level{open_room()};
+	const auto md{test_mega()};
+	const auto rp{risk_profile_of(bot_skill::insane, bot_style::aggressive)};
+	/* 40 units off (beyond point blank), both rushing: the burst comes
+	 * within 30 units of the bot.
+	 */
+	auto sc{still_scene({0, 0, 0}, {40, 0, 0})};
+	sc.invulnerable_left = 20;
+	const auto calm{evaluate_burst(level, sc, missile_role::heavy, md, {1, 0, 0}, true)};
+	CHECK(calm.impact >= MISSILE_MIN_DISTANCE && calm.burst_distance >= MISSILE_MIN_DISTANCE);
+	CHECK(judge_blast(calm, sc, md, rp) == risk_verdict::fire);
+	sc.bot_vel = {40, 0, 0};
+	sc.target_vel = {-50, 0, 0};
+	const auto rush{evaluate_burst(level, sc, missile_role::heavy, md, {1, 0, 0}, true)};
+	CHECK(rush.impact >= MISSILE_MIN_DISTANCE && rush.burst_distance < MISSILE_MIN_DISTANCE);
+	CHECK(judge_blast(rush, sc, md, rp) == risk_verdict::point_blank);
+	/* A homing missile aimed at a wall 20 degrees off a target in sight
+	 * meets it; 70 degrees off, or a target out of sight, not; a
+	 * missile that does not home only near its line.
+	 */
+	const auto t{still_scene({0, 0, 0}, {60, 0, 0})};
+	CHECK(may_meet_target(t, {std::cos(0.35), std::sin(0.35), 0}, md));
+	CHECK(!may_meet_target(t, {std::cos(1.2), std::sin(1.2), 0}, md));
+	auto hidden{t};
+	hidden.target_visible = false;
+	CHECK(!may_meet_target(hidden, {1, 0, 0}, md));
+	auto straight{md};
+	straight.homing = false;
+	CHECK(may_meet_target(t, {1, 0.05, 0}, straight));
+	CHECK(!may_meet_target(t, {std::cos(0.35), std::sin(0.35), 0}, straight));
+	/* The worse of both, the aim's value. */
+	blast_outcome wall, meet;
+	wall.impact = 90;
+	wall.burst_distance = 90;
+	wall.target_damage = 100;
+	meet.impact = 35;
+	meet.burst_distance = 20;
+	meet.self_damage = 30;
+	meet.self_nominal = 40;
+	meet.self_chance = 0.5;
+	const auto w{merge_meet(wall, meet)};
+	CHECK(w.impact == 35 && w.burst_distance == 20 && w.self_damage == 30 && w.self_nominal == 40 && w.self_chance == 0.5 && w.target_damage == 100);
+	CHECK(judge_blast(w, t, md, rp) == risk_verdict::point_blank);
+	/* A target rushing the bot in a corridor: every wall aim ahead meets
+	 * it first, so none is taken at point blank.
+	 */
+	const box_level corridor{{{{-20, -12, -12}, {208, 12, 12}}}};
+	auto rushing{still_scene({0, 0, 0}, {45, 0, 0})};
+	rushing.target_vel = {-60, 0, 0};
+	rushing.bot_vel = {30, 0, 0};
+	const auto c{choose_heavy_aim(corridor, rushing, missile_role::heavy, md, rp)};
+	CHECK(!c.best || c.best->outcome.burst_distance >= MISSILE_MIN_DISTANCE);
+}
+
+/* Section 9.6, review: the bounded search and the objects on the line. */
+void test_aim_search_bounds()
+{
+	const auto rp{risk_profile_of(bot_skill::hotshot, bot_style::balanced)};
+	const box_level corridor{{{{-20, -12, -12}, {208, 12, 12}}}};
+	const auto sc{still_scene({0, 0, 0}, {200, 0, 0})};
+	const auto full{choose_heavy_aim(corridor, sc, missile_role::heavy, test_mega(), rp)};
+	CHECK(full.best && full.candidates > 10);
+	/* Half the fan per plan, at most 4 indirect aims (plus the direct
+	 * shot, the wall behind, the last best).
+	 */
+	aim_search search{.subsets = 2, .phase = 0, .max_indirect = 4, .previous = std::nullopt};
+	const auto first{choose_heavy_aim(corridor, sc, missile_role::heavy, test_mega(), rp, search)};
+	CHECK(first.best && first.candidates <= 6);
+	/* Both phases see different spokes. */
+	unsigned n0{0}, n1{0};
+	aim_candidates(corridor, sc, 45, true, [&](aim_kind, const vec3 &) { ++n0; }, aim_search{.subsets = 2, .phase = 0, .max_indirect = ~0u, .previous = std::nullopt});
+	aim_candidates(corridor, sc, 45, true, [&](aim_kind, const vec3 &) { ++n1; }, aim_search{.subsets = 2, .phase = 1, .max_indirect = ~0u, .previous = std::nullopt});
+	unsigned all{0};
+	aim_candidates(corridor, sc, 45, true, [&](aim_kind, const vec3 &) { ++all; });
+	CHECK(n0 < all && n1 < all && n0 + n1 >= all);
+	/* The last best one is weighed again. */
+	search.phase = 1;
+	search.max_indirect = 0;
+	const vec3 previous{190, 11, 0};
+	search.previous = previous;
+	const auto again{choose_heavy_aim(corridor, sc, missile_role::heavy, test_mega(), rp, search)};
+	/* The direct shot, the wall behind, the last best. */
+	CHECK(again.candidates == 3);
+	/* An object on the line refuses the indirect aims (a teammate): the
+	 * direct shot remains.
+	 */
+	const auto blocked{choose_heavy_aim(corridor, sc, missile_role::heavy, test_mega(), rp, {}, [](const aim_option &) { return false; })};
+	CHECK(!blocked.best || blocked.best->kind == aim_kind::direct);
+	/* A corner shot (no direct one) refused: no aim at all. */
+	const box_level l_shape{{{{-20, -10, -10}, {200, 10, 10}}, {{180, -10, -10}, {200, 150, 10}}}};
+	auto hidden{still_scene({20, 0, 0}, {190, 40, 0})};
+	hidden.target_visible = false;
+	hidden.unseen_for = 1;
+	CHECK(choose_heavy_aim(l_shape, hidden, missile_role::shaker, test_shaker(), rp).best);
+	const auto refused{choose_heavy_aim(l_shape, hidden, missile_role::shaker, test_shaker(), rp, {}, [](const aim_option &) { return false; })};
+	CHECK(!refused.best && refused.blocked > 0);
+}
+
+/* Section 9.6, review: the enemy's heavy missiles counted, the modes
+ * held, the hug dropped out of sight.
+ */
+void test_heavy_knowledge_and_modes()
+{
+	constexpr uint32_t tick{1000};
+	heavy_holding h;
+	CHECK(!h.held(tick));
+	h = heavy_picked_up(h, tick);
+	h = heavy_picked_up(h, tick);
+	CHECK(h.count == 2 && h.held(tick + 60));
+	h = heavy_fired(h, tick + 60);
+	CHECK(h.count == 1 && h.held(tick + 120));
+	/* Its last known one fired: forgotten. */
+	h = heavy_fired(h, tick + 120);
+	CHECK(!h.held(tick + 121));
+	/* A shot not seen picked up: it may hold more, for a short while. */
+	h = heavy_fired(h, tick + 200);
+	CHECK(h.held(tick + 201) && !h.held(tick + 200 + static_cast<uint32_t>(HEAVY_GUESS_SECONDS * BOT_TICK_RATE)));
+	CHECK(HEAVY_GUESS_SECONDS < HEAVY_KNOWN_SECONDS && HEAVY_KNOWN_SECONDS < 45);
+	/* The bot's own heavy missile usable soon: no hug (its standoff). */
+	auto m{armed(2)};
+	m.since_missile = 10;
+	m.since_heavy = 10;
+	CHECK(heavy_usable_soon(m));
+	m.since_heavy = 1;
+	CHECK(!heavy_usable_soon(m));
+	m.since_heavy = HEAVY_INTERVAL - 1;
+	CHECK(heavy_usable_soon(m));
+	m.heavy_used_on_target = true;
+	CHECK(!heavy_usable_soon(m));
+	m.heavy_used_on_target = false;
+	m.ammo[idx(secondary::mega)] = 0;
+	m.ammo[idx(secondary::earthshaker)] = 0;
+	CHECK(!heavy_usable_soon(m));
+	const auto aggressive{risk_profile_of(bot_skill::hotshot, bot_style::aggressive)};
+	hug_view v{.enemy_heavy = true, .enemy_facing = true, .distance = 80, .roll = 0.1};
+	CHECK(want_hug(v, aggressive));
+	v.own_heavy_soon = true;
+	CHECK(!want_hug(v, aggressive));
+	/* Hugging, a moment held even if its own missile comes ready... */
+	v.hugging = true;
+	v.since_change = 0.5;
+	CHECK(want_hug(v, aggressive));
+	/* ...then the standoff. */
+	v.since_change = 3;
+	CHECK(!want_hug(v, aggressive));
+	/* Just stopped: not again at once. */
+	v.hugging = false;
+	v.own_heavy_soon = false;
+	v.since_change = 0.5;
+	CHECK(!want_hug(v, aggressive));
+	/* Out of sight: kept a moment, then dropped; never started. */
+	v.hugging = true;
+	v.since_change = 3;
+	v.unseen_for = 1;
+	CHECK(want_hug(v, aggressive));
+	v.unseen_for = HUG_LOST_SECONDS + 0.5;
+	CHECK(!want_hug(v, aggressive));
+	v.since_change = 0.5;
+	CHECK(!want_hug(v, aggressive));
+	v.hugging = false;
+	v.since_change = 3;
+	v.unseen_for = 0.2;
+	CHECK(!want_hug(v, aggressive));
+	/* The enemy's known missiles gone: no hug. */
+	v.unseen_for = 0;
+	v.hugging = true;
+	v.enemy_heavy = false;
+	CHECK(!want_hug(v, aggressive));
+}
+
 }
 
 int main()
@@ -1142,6 +1335,10 @@ int main()
 	test_indirect_aims();
 	test_heavy_check_risk();
 	test_hugging();
+	test_engaged_movement();
+	test_burst_distance_and_meeting();
+	test_aim_search_bounds();
+	test_heavy_knowledge_and_modes();
 	test_closing_target();
 	test_shaker_behind();
 	test_roles_and_skills();

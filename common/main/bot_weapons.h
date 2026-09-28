@@ -535,6 +535,11 @@ struct blast_outcome
 	/* Where it bursts, and how far along the aim from the bot. */
 	vec3 burst;
 	double impact{};
+	/* How far the burst is from the bot when it bursts: the impact less
+	 * the closing of both meanwhile (as distance_at_burst; the point
+	 * blank rule applies to it and to the impact).
+	 */
+	double burst_distance{};
 	/* Expected damage to the target and to the bot (blast and
 	 * children), and the bot's damage without the uncertainties.
 	 */
@@ -614,6 +619,7 @@ blast_outcome evaluate_burst(const Geometry &geo, const blast_scene &sc, const m
 	const double closing{dot(sc.bot_vel, u)};
 	const auto bot_at{sc.bot + (sc.bot_vel - u * closing) * flight + u * (std::max(closing, -CLOSING_AWAY_CREDIT) * flight)};
 	const double bot_d{distance(bot_at, o.burst)};
+	o.burst_distance = bot_d;
 	const double bot_spread{BOT_SPREAD_BASE + 0.2 * length(sc.bot_vel) * flight};
 	/* The target at the burst. */
 	double target_d, target_spread;
@@ -736,7 +742,7 @@ constexpr double blast_value(const blast_outcome &o, const blast_scene &sc)
 [[nodiscard]]
 constexpr risk_verdict judge_blast(const blast_outcome &o, const blast_scene &sc, const missile_data &md, const risk_profile &rp)
 {
-	if (o.impact < MISSILE_MIN_DISTANCE)
+	if (std::min(o.impact, o.burst_distance) < MISSILE_MIN_DISTANCE)
 		return risk_verdict::point_blank;
 	if (o.self_nominal >= sc.shields)
 		return risk_verdict::lethal;
@@ -791,6 +797,65 @@ constexpr double INDIRECT_MAX_ANGLE{50 * 3.14159265358979323846 / 180};
 /* The target counts as hiding for this long after it was last seen. */
 constexpr double CORNER_SEEN_WITHIN{3};
 
+/* Section 9.6: a missile aimed at a wall near a target in sight may meet
+ * the target on the way: a homing one turns to a target within its
+ * homing cone (laser.h HOMING_MIN_TRACKABLE_DOT), any one meets a target
+ * near its line (MEET_LATERAL units plus the target's crossing during
+ * the flight).  Such an aim bears the risk of the direct shot too: the
+ * worse of both (merge_meet), with the direct shot's point blank.
+ */
+constexpr double HOMING_CONE_COS{0.75};
+constexpr double MEET_LATERAL{10};
+
+[[nodiscard]]
+inline bool may_meet_target(const blast_scene &sc, const vec3 &dir, const missile_data &md)
+{
+	if (!sc.target_visible)
+		return false;
+	const auto u{normalized(dir)};
+	const auto to{sc.target - sc.bot};
+	const double along{dot(to, u)};
+	if (!(along > 0))
+		return false;
+	if (md.homing && along >= HOMING_CONE_COS * length(to))
+		return true;
+	const double speed{std::max(md.thrust ? md.speed / 2 : md.speed, 1.0)};
+	const auto rel{sc.target_vel - sc.bot_vel};
+	const double crossing{length(rel - u * dot(rel, u))};
+	return length(to - u * along) < MEET_LATERAL + crossing * (along / speed);
+}
+
+/* The worse of an aim's outcome and of the missile meeting the target
+ * (the value stays the aim's).
+ */
+[[nodiscard]]
+constexpr blast_outcome merge_meet(blast_outcome o, const blast_outcome &meet)
+{
+	o.self_damage = std::max(o.self_damage, meet.self_damage);
+	o.self_nominal = std::max(o.self_nominal, meet.self_nominal);
+	o.self_chance = std::max(o.self_chance, meet.self_chance);
+	o.impact = std::min(o.impact, meet.impact);
+	o.burst_distance = std::min(o.burst_distance, meet.burst_distance);
+	return o;
+}
+
+/* Section 9.6: the bounds of one weighing (the game's; the default:
+ * everything, as the tests and the evaluation take it).  The fan's
+ * spokes and the probes from the target are split into `subsets`
+ * interleaved parts, one weighed per plan (`phase` rotates through
+ * them); of the indirect candidates, the `max_indirect` most promising
+ * by a cheap estimate (the burst near the target, away from the bot)
+ * are weighed; `previous`, the last plan's best indirect aim, is weighed
+ * again (the rotation does not lose it).
+ */
+struct aim_search
+{
+	unsigned subsets{1};
+	unsigned phase{};
+	unsigned max_indirect{~0u};
+	std::optional<vec3> previous;
+};
+
 /* The candidates (section 9.6): the target itself; the wall right
  * behind it; walls near it that the bot's missile reaches, within
  * `reach` of it (the blast radius; for an earthshaker at a hidden
@@ -803,8 +868,21 @@ constexpr double CORNER_SEEN_WITHIN{3};
 inline constexpr std::array<double, 3> AIM_FAN_ANGLES{{8 * 3.14159265358979323846 / 180, 16 * 3.14159265358979323846 / 180, 28 * 3.14159265358979323846 / 180}};
 constexpr unsigned AIM_FAN_SPOKES{8};
 
+/* The indirect aim point `point` qualifies: not at point blank, within
+ * `reach` of the target, not too far off the line to it.
+ */
+[[nodiscard]]
+inline bool indirect_aim_ok(const blast_scene &sc, const vec3 &point, const double reach)
+{
+	const auto to_target{sc.target - sc.bot};
+	const double dist{length(to_target)};
+	const auto aim{point - sc.bot};
+	const double len{length(aim)};
+	return dist > 1 && len >= MISSILE_MIN_DISTANCE && distance(point, sc.target) <= reach && dot(aim, to_target) >= len * dist * std::cos(INDIRECT_MAX_ANGLE);
+}
+
 template <typename Geometry, typename Visit>
-void aim_candidates(const Geometry &geo, const blast_scene &sc, const double reach, const bool indirect, Visit &&visit)
+void aim_candidates(const Geometry &geo, const blast_scene &sc, const double reach, const bool indirect, Visit &&visit, const aim_search &search = {})
 {
 	const auto to_target{sc.target - sc.bot};
 	const double dist{length(to_target)};
@@ -823,11 +901,12 @@ void aim_candidates(const Geometry &geo, const blast_scene &sc, const double rea
 	}
 	const auto kind{sc.target_visible ? aim_kind::near_wall : aim_kind::corner};
 	const auto consider{[&](const vec3 &point) {
-		const auto aim{point - sc.bot};
-		const double len{length(aim)};
-		if (len < MISSILE_MIN_DISTANCE || distance(point, sc.target) > reach || dot(aim, u) < len * std::cos(INDIRECT_MAX_ANGLE))
-			return;
-		visit(kind, point);
+		if (indirect_aim_ok(sc, point, reach))
+			visit(kind, point);
+	}};
+	const unsigned subsets{std::max(search.subsets, 1u)};
+	const auto in_subset{[&](const unsigned j) {
+		return j % subsets == search.phase % subsets;
 	}};
 	/* The fan from the bot (the line itself too, for a hidden target:
 	 * where its line of sight breaks).
@@ -839,9 +918,12 @@ void aim_candidates(const Geometry &geo, const blast_scene &sc, const double rea
 		const double h{geo.cast(sc.bot, u, dist + reach)};
 		consider(sc.bot + u * std::max(h - 1, 0.0));
 	}
-	for (const double angle : AIM_FAN_ANGLES)
+	for (unsigned a = 0; a < AIM_FAN_ANGLES.size(); ++a)
 		for (unsigned k = 0; k < AIM_FAN_SPOKES; ++k)
 		{
+			if (!in_subset(k + a))
+				continue;
+			const double angle{AIM_FAN_ANGLES[a]};
 			const double phi{2 * 3.14159265358979323846 * k / AIM_FAN_SPOKES};
 			const auto dir{u * std::cos(angle) + (side * std::cos(phi) + up * std::sin(phi)) * std::sin(angle)};
 			const double h{geo.cast(sc.bot, dir, dist + reach)};
@@ -849,17 +931,22 @@ void aim_candidates(const Geometry &geo, const blast_scene &sc, const double rea
 				consider(sc.bot + dir * std::max(h - 1, 0.0));
 		}
 	/* The probes from the target, where the missile reaches. */
-	for (const auto &d : icosahedron_directions)
+	for (unsigned i = 0; i < icosahedron_directions.size(); ++i)
 	{
+		if (!in_subset(i))
+			continue;
+		const auto &d{icosahedron_directions[i]};
 		const double h{geo.cast(sc.target, d, reach)};
 		if (!(h < reach))
 			continue;
 		const auto point{sc.target + d * std::max(h - 1, 0.0)};
+		if (!indirect_aim_ok(sc, point, reach))
+			continue;
 		const auto aim{point - sc.bot};
 		const double len{length(aim)};
-		if (len < MISSILE_MIN_DISTANCE || geo.cast(sc.bot, aim, len + 1) < len - 2)
+		if (geo.cast(sc.bot, aim, len + 1) < len - 2)
 			continue;
-		consider(point);
+		visit(kind, point);
 	}
 }
 
@@ -873,24 +960,80 @@ struct aim_choice
 	 * best candidate's).
 	 */
 	risk_verdict why{risk_verdict::low_value};
+	/* How many aims were weighed, how many of them were favourable, the
+	 * indirect ones; favourable indirect ones refused for an object on
+	 * the line (`clear`).
+	 */
 	unsigned candidates{};
-	/* How many of them were favourable, the indirect ones. */
 	unsigned favourable{};
 	unsigned indirect_favourable{};
+	unsigned blocked{};
 };
 
-template <typename Geometry>
+/* Every line clear (the tests): the game checks the objects on the line
+ * to an indirect aim point (a teammate, the reactor, a robot, a ship
+ * whose burst would be near the bot).
+ */
+struct any_line_clear
+{
+	constexpr bool operator()(const aim_option &) const
+	{
+		return true;
+	}
+};
+
+template <typename Geometry, typename Clear = any_line_clear>
 [[nodiscard]]
-aim_choice choose_heavy_aim(const Geometry &geo, const blast_scene &sc, const missile_role r, const missile_data &md, const risk_profile &rp)
+aim_choice choose_heavy_aim(const Geometry &geo, const blast_scene &sc, const missile_role r, const missile_data &md, const risk_profile &rp, const aim_search &search = {}, Clear &&clear = {})
 {
 	aim_choice c;
+	const bool children{r == missile_role::shaker && md.children > 0 && md.child_blast_radius > 0};
+	const double reach_visible{std::max(md.blast_radius, 0.0) * 0.9};
+	const double reach{sc.target_visible ? reach_visible : (children ? std::max(reach_visible, 60.0) : reach_visible)};
+	/* The candidates: the direct shot and the wall behind always, the
+	 * others the most promising first, near duplicates once.
+	 */
+	std::vector<std::pair<aim_kind, vec3>> fixed, others;
+	const auto near_known{[&](const vec3 &p) {
+		for (const auto &f : fixed)
+			if (distance(f.second, p) < 3)
+				return true;
+		for (const auto &f : others)
+			if (distance(f.second, p) < 3)
+				return true;
+		return false;
+	}};
+	aim_candidates(geo, sc, reach, rp.indirect, [&](const aim_kind kind, const vec3 &point) {
+		if (kind == aim_kind::direct || kind == aim_kind::wall_behind)
+			fixed.emplace_back(kind, point);
+		else if (!near_known(point))
+			others.emplace_back(kind, point);
+	}, search);
+	const auto indirect_kind{sc.target_visible ? aim_kind::near_wall : aim_kind::corner};
+	if (rp.indirect && search.previous && indirect_aim_ok(sc, *search.previous, reach) && !near_known(*search.previous))
+		fixed.emplace_back(indirect_kind, *search.previous);
+	if (others.size() > search.max_indirect)
+	{
+		const double radius{std::max(md.blast_radius, 1.0)};
+		std::vector<std::pair<double, std::size_t>> ranked;
+		ranked.reserve(others.size());
+		for (std::size_t j = 0; j < others.size(); ++j)
+		{
+			const auto &p{others[j].second};
+			const double e{blast_damage(distance(p, sc.target), std::max(reach, 1.0), 1) - 1.5 * blast_damage(distance(p, sc.bot), radius, 1)};
+			ranked.emplace_back(std::isfinite(e) ? e : -1e9, j);
+		}
+		std::ranges::stable_sort(ranked, [](const auto &a, const auto &b) { return a.first > b.first; });
+		std::vector<std::pair<aim_kind, vec3>> kept;
+		kept.reserve(search.max_indirect);
+		for (std::size_t j = 0; j < search.max_indirect; ++j)
+			kept.push_back(others[ranked[j].second]);
+		others = std::move(kept);
+	}
 	std::optional<blast_outcome> direct_outcome;
 	std::optional<risk_verdict> direct_verdict;
 	double least_bad{-1e18};
-	const bool children{r == missile_role::shaker && md.children > 0 && md.child_blast_radius > 0};
-	const double reach{std::max(md.blast_radius, 0.0) * 0.9};
-	const double hidden_reach{children ? std::max(reach, 60.0) : reach};
-	aim_candidates(geo, sc, sc.target_visible ? reach : hidden_reach, rp.indirect, [&](const aim_kind kind, const vec3 &point) {
+	const auto weigh{[&](const aim_kind kind, const vec3 &point) {
 		aim_option a;
 		a.kind = kind;
 		a.point = point;
@@ -898,16 +1041,14 @@ aim_choice choose_heavy_aim(const Geometry &geo, const blast_scene &sc, const mi
 		a.outcome = evaluate_burst(geo, sc, r, md, a.dir, kind == aim_kind::direct);
 		if (kind == aim_kind::direct)
 			direct_outcome = a.outcome;
-		else if (kind == aim_kind::wall_behind)
+		else if (kind == aim_kind::wall_behind || may_meet_target(sc, a.dir, md))
 		{
 			/* It may meet the target on the way: the nearer burst's
-			 * risk.
+			 * risk too.
 			 */
-			const auto meet{direct_outcome ? *direct_outcome : evaluate_burst(geo, sc, r, md, a.dir, true)};
-			a.outcome.self_damage = std::max(a.outcome.self_damage, meet.self_damage);
-			a.outcome.self_nominal = std::max(a.outcome.self_nominal, meet.self_nominal);
-			a.outcome.self_chance = std::max(a.outcome.self_chance, meet.self_chance);
-			a.outcome.impact = std::min(a.outcome.impact, meet.impact);
+			if (!direct_outcome)
+				direct_outcome = evaluate_burst(geo, sc, r, md, sc.target - sc.bot, true);
+			a.outcome = merge_meet(a.outcome, *direct_outcome);
 		}
 		a.verdict = judge_blast(a.outcome, sc, md, rp);
 		a.score = blast_value(a.outcome, sc) - rp.trade * a.outcome.self_damage;
@@ -916,14 +1057,21 @@ aim_choice choose_heavy_aim(const Geometry &geo, const blast_scene &sc, const mi
 			direct_verdict = a.verdict;
 		if (a.verdict == risk_verdict::fire)
 		{
-			++c.favourable;
-			if (kind != aim_kind::direct)
-				++c.indirect_favourable;
 			/* The direct shot is preferred when about as good: the aim
 			 * is the target's, the easiest.
 			 */
 			const double score{a.score * (kind == aim_kind::direct ? 1.15 : 1)};
-			if (!c.best || score > c.best->score * (c.best->kind == aim_kind::direct ? 1.15 : 1))
+			const bool better{!c.best || score > c.best->score * (c.best->kind == aim_kind::direct ? 1.15 : 1)};
+			/* An indirect aim that would win: the objects on its line. */
+			if (kind != aim_kind::direct && better && !clear(a))
+			{
+				++c.blocked;
+				return;
+			}
+			++c.favourable;
+			if (kind != aim_kind::direct)
+				++c.indirect_favourable;
+			if (better)
 				c.best = a;
 		}
 		else if (!direct_verdict && a.score > least_bad)
@@ -931,7 +1079,11 @@ aim_choice choose_heavy_aim(const Geometry &geo, const blast_scene &sc, const mi
 			least_bad = a.score;
 			c.why = a.verdict;
 		}
-	});
+	}};
+	for (const auto &[kind, point] : fixed)
+		weigh(kind, point);
+	for (const auto &[kind, point] : others)
+		weigh(kind, point);
 	if (direct_verdict)
 		c.why = *direct_verdict;
 	return c;
@@ -941,10 +1093,15 @@ aim_choice choose_heavy_aim(const Geometry &geo, const blast_scene &sc, const mi
  * it pick one up or fire one) and faces the bot at mid range will not
  * fire it at a bot that hugs its ship, or kills itself too.  The bot
  * closes in with its profile's chance (drawn once per engagement), when
- * it has no heavy shot of its own ready and is not about to retreat.
+ * it has no heavy shot of its own usable soon (then it keeps its
+ * standoff instead: one mode at a time) and is not about to retreat.
+ * A mode holds for HUG_HOLD_SECONDS (no flapping); a hug ends when the
+ * enemy is out of sight for HUG_LOST_SECONDS.
  */
 constexpr double HUG_START_MIN{25};
 constexpr double HUG_START_MAX{160};
+constexpr double HUG_HOLD_SECONDS{1.5};
+constexpr double HUG_LOST_SECONDS{1.5};
 /* Hugging, it keeps within this distance (and not nearer than
  * HUG_NEAREST, the ships bump).
  */
@@ -955,9 +1112,15 @@ struct hug_view
 	bool enemy_heavy{};
 	bool enemy_facing{};
 	double distance{};
-	/* Already hugging (it keeps on while the enemy is in reach). */
+	/* Already hugging (it keeps on while the enemy is in reach), and
+	 * the seconds since the hug started or ended.
+	 */
 	bool hugging{};
-	bool own_heavy_ready{};
+	double since_change{1e9};
+	/* Seconds the enemy is out of sight (0: in sight). */
+	double unseen_for{};
+	/* The bot's own heavy missile usable soon (heavy_usable_soon). */
+	bool own_heavy_soon{};
 	bool weak{};
 	/* The draw of this engagement, uniform in [0, 1). */
 	double roll{1};
@@ -966,13 +1129,57 @@ struct hug_view
 [[nodiscard]]
 constexpr bool want_hug(const hug_view &v, const risk_profile &rp)
 {
-	if (!v.enemy_heavy || v.own_heavy_ready || v.weak)
+	if (!v.enemy_heavy || v.weak)
 		return false;
 	if (v.hugging)
-		return v.distance <= HUG_START_MAX;
+	{
+		if (v.unseen_for > HUG_LOST_SECONDS)
+			return false;
+		if (v.since_change < HUG_HOLD_SECONDS)
+			return true;
+		return !v.own_heavy_soon && v.distance <= HUG_START_MAX;
+	}
+	if (v.own_heavy_soon || v.unseen_for > 0 || v.since_change < HUG_HOLD_SECONDS)
+		return false;
 	if (!v.enemy_facing || v.distance < HUG_START_MIN || v.distance > HUG_START_MAX)
 		return false;
 	return v.roll < rp.hug;
+}
+
+/* What a bot knows of an enemy's heavy missiles (section 9.6): how many
+ * it saw it pick up and not fire yet, and until when (in ticks) it
+ * counts as holding one.  A pickup: one more, HEAVY_KNOWN_SECONDS.  A
+ * shot: one less; the last known one fired, it is forgotten; a shot not
+ * seen picked up, it may hold more, for HEAVY_GUESS_SECONDS.
+ */
+constexpr double HEAVY_KNOWN_SECONDS{25};
+constexpr double HEAVY_GUESS_SECONDS{10};
+
+struct heavy_holding
+{
+	unsigned count{};
+	uint32_t until{};
+	[[nodiscard]]
+	constexpr bool held(const uint32_t tick) const
+	{
+		return tick < until;
+	}
+};
+
+[[nodiscard]]
+constexpr heavy_holding heavy_picked_up(const heavy_holding h, const uint32_t tick)
+{
+	return {std::min(h.count + 1, 9u), tick + static_cast<uint32_t>(HEAVY_KNOWN_SECONDS * BOT_TICK_RATE)};
+}
+
+[[nodiscard]]
+constexpr heavy_holding heavy_fired(const heavy_holding h, const uint32_t tick)
+{
+	if (h.count > 1)
+		return {h.count - 1, tick + static_cast<uint32_t>(HEAVY_KNOWN_SECONDS * BOT_TICK_RATE)};
+	if (h.count == 1)
+		return {};
+	return {0, tick + static_cast<uint32_t>(HEAVY_GUESS_SECONDS * BOT_TICK_RATE)};
 }
 
 /* The distance to keep while hugging: well inside the enemy's own blast
@@ -1008,6 +1215,32 @@ constexpr bool want_duck(const duck_view &v)
 	if (!v.heavy_ready || v.favourable || !(v.standoff > 0) || v.distance >= v.standoff)
 		return false;
 	return v.target_closing > 5 || v.back_blocked || v.distance < 0.6 * v.standoff;
+}
+
+/* How a bot that sees its target moves (sections 4.6, 4.7 and 9.6):
+ * - `combat`: the fight band, strafing, the standoff and the blast hold
+ *   (combat_velocity), with a clear shot and no path goal;
+ * - `path`: its path (collecting, retreating, refuelling, or without a
+ *   clear shot);
+ * - `duck`: to its duck point, which overrides both while it lasts.
+ * One choice per tick, so no mode's velocity is overwritten by
+ * another's.
+ */
+enum class engaged_move : uint8_t
+{
+	combat,
+	path,
+	duck,
+};
+
+[[nodiscard]]
+constexpr engaged_move engaged_movement(const bool shot_clear, const bool path_goal, const bool ducking)
+{
+	if (ducking)
+		return engaged_move::duck;
+	if (shot_clear && !path_goal)
+		return engaged_move::combat;
+	return engaged_move::path;
 }
 
 /* Where it ducks: a place 15-90 units away, preferably far from the
@@ -1213,6 +1446,29 @@ constexpr double heavy_standoff(const missile_situation &m)
 		}
 	}
 	return best;
+}
+
+/* Section 9.6: the bot's own heavy missile is usable within
+ * HEAVY_SOON_SECONDS (held, its skill uses it, the cooldowns end by
+ * then, not cloaked, not used on this target yet): it keeps its standoff
+ * rather than hug.
+ */
+constexpr double HEAVY_SOON_SECONDS{2};
+
+[[nodiscard]]
+constexpr bool heavy_usable_soon(const missile_situation &m)
+{
+	if (m.cloaked || m.heavy_used_on_target)
+		return false;
+	for (const auto s : {secondary::earthshaker, secondary::mega})
+	{
+		if (!m.ammo[static_cast<unsigned>(s)] || m.smarts < min_smarts(s))
+			continue;
+		const double wait{std::max(missile_interval(m.smarts) - m.since_missile, HEAVY_INTERVAL - m.since_heavy)};
+		if (wait <= HEAVY_SOON_SECONDS)
+			return true;
+	}
+	return false;
 }
 
 /* Section 4.5 and 9.4: the secondary the bot wants to fire now, if any.

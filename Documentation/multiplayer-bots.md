@@ -1699,8 +1699,10 @@ bot works out where it bursts and what that does (`evaluate_burst`):
 - Real invulnerability that outlasts the danger (`blast_danger_seconds`)
   makes the bot's damage 0.
 
-The rule (`judge_blast`), in order: never at point blank (the burst
-nearer than 30 units, invulnerable or not); never when the blast
+The rule (`judge_blast`), in order: never at point blank (the impact
+or the burst distance nearer than 30 units, invulnerable or not; the
+burst distance is where the bot is when the missile bursts, the impact
+less the closing of both during the flight, as `distance_at_burst`); never when the blast
 without the uncertainties would kill the bot (`lethal`: an almost
 certain suicide); at least a fifth of the blast's damage (up to the
 target's shields) to the target (`low-value`); the expected
@@ -1742,7 +1744,17 @@ the target from a burst that sees it).  Candidates more than 50 degrees
 off the line to the target, or nearer than 30 units, are left out.
 Each is weighed as above; the best favourable one by its value less
 `trade` times its self-damage wins (the direct shot gets 15 % extra:
-the easiest aim).  The weighing runs at the strategy rate (5 Hz) while
+the easiest aim).  An aim at a wall while the target is in sight may
+meet the target on the way (`may_meet_target`): a homing missile turns
+to a target within its homing cone (`HOMING_MIN_TRACKABLE_DOT`, 0.75),
+any missile meets a target within 10 units of its line plus the
+target's crossing during the flight.  Such an aim bears the direct
+shot's outcome too, the worse of both (`merge_meet`: the self-damage,
+its chance, the impact and the burst distance; the value stays the
+aim's).  As mega and earthshaker home, a wall aim next to a target in
+sight is then rarely better than the direct shot: indirect fire is
+mostly the corner shot at a hidden target, and the wall behind a
+target out of the cone.  The weighing runs at the strategy rate (5 Hz) while
 the bot may fire (a target, no cooldown, not cloaked, not yet hit on
 this target); `heavy_check` takes its verdict (`m.heavy_risk`) instead
 of the distance rules (`too-fast`, `too-close`, `blast`), and an aim at a
@@ -1750,7 +1762,38 @@ wall or a corner needs no clear line to the target.  The bot then turns
 to the aim point (the steering aims at a point; with the aim error of
 its skill), holds its place for a corner shot, and releases when the
 nose is within the missile's cone and the outcome *along the nose* is
-favourable (verdict `nose-blast` otherwise).  The shot goes through the
+favourable (verdict `nose-blast` otherwise).  At the release the scene
+is the current one (the plan may be a strategy period and the pending
+time old): along the nose, and for a wall aim that may meet the target,
+also the direct shot with the current distance and closing speeds, the
+worse of both.
+
+*Objects on the line.*  An indirect aim needs no clear line to the
+target, so the line to the aim point is checked with the objects
+(`aim_line_clear`, fvi as `shot_line_clear`): a teammate, the reactor,
+a robot or clutter first on it refuses the aim (`no-clear-shot` at the
+release); so does another enemy ship nearer than the blast radius plus
+the margin (the burst would be near the bot); the target on it is the
+meeting above.  In the weighing only an indirect aim that would become
+the best is checked (one fvi call, usually); refused, the next best
+wins (the log counts them).
+
+*Cost.*  The weighing is bounded (`aim_search`): per plan half the fan's
+spokes and half the probes from the target, alternating between plans;
+the last best indirect aim weighed again; of the other indirect
+candidates (near duplicates within 3 units merged) the 8 most promising
+by a cheap estimate (the burst near the target, away from the bot).
+The level's segments are looked up once per weighing (`fvi_geometry`'s
+cache), `find_point_seg` starting from the nearest point already known
+(the bot's, the target's, where casts ended) instead of scanning the
+level.  All bots share an fvi budget of 300 calls per brain tick (60
+Hz): a due weighing waits for the next tick when it is spent (an
+overdue one may use up to twice it), a release check likewise.  On
+the Earth Shaker level (below) a weighing costs 205 fvi calls for the
+earthshaker and 49 for the mega on average (the unbounded search: 519
+and 107; before this review: 524 and 108), so seven bots holding both
+weigh about 9000 calls per second (before: 22000), under the budget's
+18000.  The shot goes through the
 normal firing path as the bot (section 9.4); `laser.cpp` is unchanged.
 
 **3. Hugging, both ways.**
@@ -1758,14 +1801,23 @@ normal firing path as the bot (section 9.4); `laser.cpp` is unchanged.
   enemy holds one only as a human does: it saw it fire one (a mega or
   earthshaker in flight from that enemy, within the awareness and in
   sight) or pick one up (a heavy powerup next to the enemy in sight, 14
-  units, is gone at the next look), for 45 s or until the enemy dies.
+  units, is gone at the next look), until the enemy dies or as counted below.
+  The bot counts them (`heavy_holding`): a pickup one more, a shot one
+  less (each missile once, by its signature); its last known one fired,
+  the enemy is forgotten; a shot not seen picked up means it may hold
+  more, for 10 s; a pickup is remembered 25 s.
   An enemy so known that faces the bot (30 degrees) at 25-160 units is
   hugged with the profile's chance, drawn once per target (`want_hug`),
-  unless the bot has its own heavy shot ready or is weak (below its
+  unless the bot's own heavy missile is usable within 2 s
+  (`heavy_usable_soon`: held, cooldowns ending, not cloaked, not used
+  on this target; it keeps its standoff then) or it is weak (below its
   style's retreat shields): the fight band becomes 8 units to
   `hug_distance` (a third of the blast radius, 14-22 units), inside the
   enemy's own blast.  It keeps hugging while the enemy is within 160
-  units.
+  units and its own missile is not usable soon.  One mode at a time: a
+  hugging bot does not duck, a hug or its end holds 1.5 s (no
+  flapping), and a hug ends when the enemy is out of sight for 1.5 s
+  (it is re-weighed while the enemy is hidden).
 - *(b) The bot with the heavy missile*: its standoff makes it back off
   (as before).  A target that closes in within the standoff (flying at
   the bot, or within 0.6 of it, or with a wall close behind the bot)
@@ -1791,6 +1843,11 @@ The log prints them at every heavy shot:
 
 The evaluation below sweeps the radii instead.
 
+**Movement while engaged** (`engaged_movement`): one mode per tick, the
+fight (`combat_velocity`: the band, strafing, standoff, blast hold, the
+wall behind) with a clear shot and no path goal, else the path, and the
+duck overriding both while it lasts.
+
 **Measured on "Earth Shaker"** (`eshaker.rl2`, 250 segments, parsed
 outside the repository; the side planes and walls of each segment, a
 ray walker like fvi's, and the pure functions of `bot_weapons.h`
@@ -1806,30 +1863,37 @@ earthshaker 60:
 
 | Profile | Earthshaker allowed (9.5 rule) | of which indirect | Corner shot at a hidden target | Shots with self-damage (9.5 rule's shots) | Suicides per shot |
 |---|---|---|---|---|---|
-| Cautious Hotshot | 42 % (40 %) | 23 % | 5 % | 3.6 % (3.1 %) | 0.01 % |
-| Balanced Hotshot | 60 % | 21 % | 7 % | 4.5 % | 0.03 % |
-| Aggressive Hotshot | 72 % | 20 % | 9 % | 6.0 % | 0.12 % |
-| Aggressive Insane | 83 % | 27 % | 10 % | 8.1 % | 0.29 % |
+| Cautious Hotshot | 19 % (40 %) | 0 % | 5 % | 3.9 % (3.0 %) | 0.00 % |
+| Balanced Hotshot | 43 % | 0 % | 7 % | 4.7 % | 0.01 % |
+| Aggressive Hotshot | 59 % | 0 % | 9 % | 5.6 % | 0.07 % |
+| Aggressive Insane | 65 % | 0 % | 10 % | 7.3 % | 0.05 % |
 
 | Profile | Mega allowed (9.5 rule) | of which indirect | Shots with self-damage |
 |---|---|---|---|
-| Cautious Hotshot | 94 % (60 %) | 23 % | 0.5 % |
-| Balanced / Aggressive Hotshot | 98 % | 20 % | 5.8-6.3 % |
-| Aggressive Insane | 99 % | 20 % | 6.7 % |
+| Cautious Hotshot | 71 % (60 %) | 0.2 % | 0.1 % |
+| Balanced / Aggressive Hotshot | 78 % | 0.3 % | 1.4-1.5 % |
+| Aggressive Insane | 79 % | 0.3 % | 1.7 % |
 
-An indirect aim is favourable in 40-83 % of the fights for the
-earthshaker, 86-91 % for the mega.  The self-damage of a cautious bot
-comes from the earthshaker's scattered children (the main blast: 0.0 %),
-as much as with the 9.5 rule; a shot that would put its own blast on
-the bot is never taken.  Other radii (earthshaker allowed for cautious /
+The bounded search of the game gives the same shares as the unbounded
+one within half a point.  After the review the model counts the
+homing missile meeting a target in sight on the way to a wall aim
+(before: 42/60/72/83 % earthshaker, 94-99 % mega, about a fifth of it
+indirect, with up to 8.1 % of the shots hurting the bot; those
+indirect shots were really direct ones and are no longer taken), and
+the point blank rule applies to the burst distance too (198 rejections
+instead of 153 of 2000).  The self-damage of a cautious bot comes from
+the earthshaker's scattered children (the main blast: 0.0 %), as much
+as with the 9.5 rule; a shot that would put its own blast on the bot
+is never taken.  Other radii (earthshaker allowed for cautious /
 balanced / aggressive Hotshot / aggressive Insane, self-damage of the
-aggressive Insane shots): mega 40, earthshaker 50: 52/70/80/89 % (9.5
-rule 53 %), 7.8 %; mega 60, earthshaker 80: 27/42/54/70 % (9.5 rule
-22 %), 8.2 %.  Missiles that do not home: within a point of these.
-Suicides stay below 0.4 % of the shots for every profile and radius.
+aggressive Insane shots): mega 40, earthshaker 50: 26/55/70/75 % (9.5
+rule 53 %), 6.5 %; mega 60, earthshaker 80: 11/22/39/47 % (9.5 rule
+22 %), 8.0 %.  Missiles that do not home: 20/44/59/66 % earthshaker
+(4-7 % of it indirect), 74-82 % mega (27-30 % indirect), 8.3 %.
+Suicides stay below 0.2 % of the shots for every profile and radius.
 In play the cooldowns (5 s between heavy missiles, 10 s per target)
 bound the rate.  Ducking: within the standoff without a favourable aim
-in 17-48 % of the earthshaker fights (the more the more cautious); a
+in 30-61 % of the earthshaker fights (the more the more cautious); a
 place to duck to (three segments) in about 20 % of those; otherwise the
 bot backs off as before.
 
@@ -1838,7 +1902,8 @@ many aims were weighed, favourable, indirect favourable, and the best
 one's kind (`direct`, `behind`, `wall`, `corner`); new verdicts
 `lethal`, `risky`, `poor-trade`, `low-value`.  The summary line gains
 `risk=<budget>/<trade>` and ` hug`, ` duck`.  Events: `saw P#n fire a
-heavy missile`, `saw P#n pick up a heavy missile`, `hugs P#n` / `stops
+heavy missile (k more known[, forgotten])`, `saw P#n pick up a heavy
+missile (k known)`, `hugs P#n` / `stops
 hugging`, `ducks out of P#n's sight` / `finds no cover`, and the shot
 line above.
 
@@ -1853,8 +1918,17 @@ are candidates; indirect ones favourable), an L-shaped corner (the
 earthshaker's corner shot finds the hidden target, the mega's does not
 reach; a child flying back makes it too risky for a cautious bot unless
 the wall behind is far), a hugging target (only an invulnerable bot
-fires, into the wall, not at point blank); `heavy_check` with the
-weighing; hugging and ducking decisions and the duck point.
+fires, into the wall, not at point blank; after the review: not at
+all, the missile would meet the target on the way); `heavy_check` with
+the weighing; hugging and ducking decisions and the duck point.  After
+the review: the movement mode per tick (`engaged_movement`: the duck
+overrides, the fight needs a clear shot and no path goal); the point
+blank rule on the burst distance of a rushing target; the meeting of
+the target by a homing and a straight missile, `merge_meet`; the
+bounded search (subsets, the cap, the last best aim) and a refused
+line (a corner shot refused leaves no aim); the enemy's missiles
+counted and forgotten; `heavy_usable_soon`; the hug held, then left for
+the standoff, dropped out of sight.
 
 **Unchanged:** the human's firing and every human path (all changes are
 in the bots' code; `laser.cpp` untouched), non-bot games, clients, the
