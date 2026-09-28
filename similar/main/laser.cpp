@@ -637,7 +637,11 @@ static void do_omega_stuff(fvmsegptridx &vmsegptridx, const vmobjptridx_t parent
 {
 	vms_vector	goal_pos;
 	player_info *pl_info{};
-	if (parent_objp->type == object_type::OBJ_PLAYER && get_player_id(parent_objp) == Player_num)
+	/* The charge is the shooter's own where it is flown: the local
+	 * player, or on the host a bot (bot.cpp recharges it with
+	 * omega_charge_frame).  Elsewhere the shot arrived by MULTI_FIRE.
+	 */
+	if (parent_objp->type == object_type::OBJ_PLAYER && (get_player_id(parent_objp) == Player_num || bot_is_local(get_player_id(parent_objp))))
 	{
 		//	If charge >= min, or (some charge and zero energy), allow to fire.
 		auto &player_info = parent_objp->ctype.player_info;

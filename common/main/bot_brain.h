@@ -574,8 +574,28 @@ struct steer_errors
 	double heading{};
 };
 
+/* Section 9.5, turning round: the ship turns about its pitch and heading
+ * axes each at up to its own top rate (physics.cpp applies rotthrust per
+ * axis), so a turn about both at once is up to 1.41 times as fast as a
+ * turn about one.  For a direction far behind the nose the shortest
+ * rotation is ill-defined anyway (a small change of the direction swings
+ * its axis round), and B1-B4 often took it about the pitch axis alone:
+ * a slow loop in place.  Beyond LARGE_TURN_START the errors blend toward
+ * both axes at once (full beyond LARGE_TURN_FULL), in the direction the
+ * target lies (or the preferred one, straight behind); as the nose comes
+ * round, the shortest rotation takes over again.
+ */
+constexpr double LARGE_TURN_START{2.0};	// radians, about 115 degrees
+constexpr double LARGE_TURN_FULL{2.5};	// about 143 degrees
+
 [[nodiscard]]
-inline steer_errors steer_errors_local(const vec3 &local_dir, const int prefer_heading_sign = 0)
+inline steer_errors steer_errors_local(const vec3 &local_dir, const int prefer_heading_sign = 0, const int prefer_pitch_sign = 0, const bool combined_large_turns = true);
+
+/* B1's errors: the shortest rotation only (kept for the flight test's
+ * comparison).
+ */
+[[nodiscard]]
+inline steer_errors steer_errors_shortest(const vec3 &local_dir, const int prefer_heading_sign = 0)
 {
 	const auto d{normalized(local_dir)};
 	if (d == vec3{})
@@ -601,6 +621,28 @@ inline steer_errors steer_errors_local(const vec3 &local_dir, const int prefer_h
 		e.heading = prefer_heading_sign * angle;
 		e.pitch = 0;
 	}
+	return e;
+}
+
+/* Section 9.5: the errors of a turn, combined on both axes beyond
+ * LARGE_TURN_START (see above).
+ */
+inline steer_errors steer_errors_local(const vec3 &local_dir, const int prefer_heading_sign, const int prefer_pitch_sign, const bool combined_large_turns)
+{
+	auto e{steer_errors_shortest(local_dir, prefer_heading_sign)};
+	const auto d{normalized(local_dir)};
+	const double angle{std::acos(std::clamp(d.z, -1.0, 1.0))};
+	if (!combined_large_turns || d == vec3{} || angle <= LARGE_TURN_START)
+		return e;
+	/* Both axes at once, each by the angle to go over the square root
+	 * of two, in the direction the target lies.
+	 */
+	const double w{std::clamp((angle - LARGE_TURN_START) / (LARGE_TURN_FULL - LARGE_TURN_START), 0.0, 1.0)};
+	const int hs{std::abs(d.x) > 0.05 || !prefer_heading_sign ? (d.x < 0 ? -1 : 1) : prefer_heading_sign};
+	const int ps{std::abs(d.y) > 0.05 ? (d.y > 0 ? -1 : 1) : (prefer_pitch_sign > 0 ? 1 : -1)};
+	const double k{angle / std::numbers::sqrt2};
+	e.heading = (1 - w) * e.heading + w * hs * k;
+	e.pitch = (1 - w) * e.pitch + w * ps * k;
 	return e;
 }
 
@@ -690,6 +732,8 @@ struct steer_input
 	vec3 move_cmd;
 	/* The current pitch and heading rates, radians per second. */
 	double pitch_rate{}, heading_rate{};
+	/* B1's turn (the flight test's comparison). */
+	bool shortest_only{};
 };
 
 struct steer_output
@@ -701,7 +745,11 @@ struct steer_output
 inline steer_output steer_controls(const steer_input &in, const turn_response &ship, const double cap, int &heading_pref)
 {
 	steer_output c;
-	const auto e{steer_errors_local(in.unrolled.to_local(in.face_dir), heading_pref)};
+	/* Straight behind, the pitch goes the way it already turns, else
+	 * the nose goes up.
+	 */
+	const int pitch_pref{in.pitch_rate > 0.2 ? 1 : -1};
+	const auto e{in.shortest_only ? steer_errors_shortest(in.unrolled.to_local(in.face_dir), heading_pref) : steer_errors_local(in.unrolled.to_local(in.face_dir), heading_pref, pitch_pref)};
 	if (std::abs(e.heading) > 0.2)
 		heading_pref = e.heading > 0 ? 1 : -1;
 	c.pitch = rotation_axis(e.pitch, in.pitch_rate, ship, cap, dot(in.face_rate, in.unrolled.r));
@@ -831,6 +879,100 @@ inline vec3 combat_velocity(const vec3 &to_target, const vec3 &right, const vec3
 	const auto u{cross(d, r)};
 	const auto lateral{normalized(r * std::cos(juke.angle()) + u * (std::sin(juke.angle()) * vertical))};
 	return d * approach + lateral * strafe_speed;
+}
+
+/* Section 9.5: a bot that turns far round (to face a target behind it)
+ * keeps moving, as a human does: a ship that stops to turn is the
+ * easiest target there is.  When the nose is more than
+ * TURN_MOVE_ANGLE off the wanted direction and the bot wants less than
+ * TURN_MOVE_SPEED of the top speed, it slides across the line to the
+ * target (`lateral`: the way it already slides, or its own choice) at
+ * that speed, keeping what it wanted besides.
+ */
+constexpr double TURN_MOVE_ANGLE{1.05};	// 60 degrees
+constexpr double TURN_MOVE_SPEED{0.6};
+
+[[nodiscard]]
+inline vec3 keep_moving_in_turn(const vec3 &wanted, const double face_error, const vec3 &to_target, const vec3 &vel, const vec3 &lateral_hint, const double max_speed)
+{
+	if (face_error <= TURN_MOVE_ANGLE || max_speed <= 0)
+		return wanted;
+	const double min_speed{TURN_MOVE_SPEED * max_speed};
+	const double have{length(wanted)};
+	if (have >= min_speed)
+		return wanted;
+	const auto los{normalized(to_target)};
+	/* Across the line of sight: the way the ship already slides, if it
+	 * does, else the hint.
+	 */
+	auto across{vel - los * dot(vel, los)};
+	if (length(across) < 5)
+		across = lateral_hint - los * dot(lateral_hint, los);
+	across = normalized(across);
+	if (across == vec3{})
+		return wanted;
+	const double need{std::sqrt(std::max(min_speed * min_speed - have * have, 0.0))};
+	return wanted + across * need;
+}
+
+/* Section 9.5: a hit from an attacker the bot does not see (behind it,
+ * outside its field of view).  B1-B4 learnt the attacker's place from the
+ * hit and turned to it after the reaction time, the target choice (5 Hz)
+ * and a turn at the skill's rate: standing still meanwhile, the bot died
+ * before it faced its attacker.  Now it thrusts away across the line of
+ * fire at once (a reflex), turns to the attacker a reaction time later,
+ * then fights (the target choice) or, weak, retreats (the goal choice).
+ */
+enum class hit_reaction : uint8_t
+{
+	/* It sees the attacker: nothing new, it is fighting it. */
+	none,
+	/* Evade, then turn to fight. */
+	evade_turn,
+	/* Evade, then turn only while it flees (weak). */
+	evade_flee,
+};
+
+struct hit_view
+{
+	/* The attacker is in sight now and within the field of view. */
+	bool attacker_seen{};
+	double shields{100};
+	double retreat_shields{35};
+	bool invulnerable{};
+	/* Already evading an earlier hit. */
+	bool evading{};
+};
+
+[[nodiscard]]
+constexpr hit_reaction react_to_hit(const hit_view &v)
+{
+	if (v.attacker_seen || v.evading)
+		return hit_reaction::none;
+	if (!v.invulnerable && v.shields < v.retreat_shields)
+		return hit_reaction::evade_flee;
+	return hit_reaction::evade_turn;
+}
+
+/* The evasion: across the line from the attacker, the side the ship
+ * already moves to (momentum), else `side` (the bot's roll), with a
+ * little away from the attacker.
+ */
+[[nodiscard]]
+inline vec3 evade_direction(const vec3 &from_attacker, const vec3 &vel, const vec3 &side)
+{
+	const auto away{normalized(from_attacker)};
+	if (away == vec3{})
+		return normalized(side);
+	auto across{vel - away * dot(vel, away)};
+	if (length(across) < 5)
+		across = side - away * dot(side, away);
+	across = normalized(across);
+	if (across == vec3{})
+		across = normalized(cross(away, vec3{0, 1, 0}));
+	if (across == vec3{})
+		across = vec3{1, 0, 0};
+	return normalized(across + away * 0.3);
 }
 
 /* Section 4.6, dodge: a projectile at `rel_pos` from the ship moving at

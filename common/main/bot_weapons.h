@@ -134,6 +134,10 @@ struct missile_data
 	double blast_radius{};
 	/* It accelerates (thrust): it starts at half its speed. */
 	bool thrust{true};
+	/* It homes (the weapon data's homing_flag): it turns after its
+	 * target, so a crossing target does not dodge it by moving.
+	 */
+	bool homing{};
 };
 
 /* Section 9.4: the distances of the rules, in game units. */
@@ -141,9 +145,15 @@ constexpr double MISSILE_MIN_DISTANCE{30};
 constexpr double MISSILE_MAX_DISTANCE{200};
 constexpr double HOMING_MIN_DISTANCE{40};
 constexpr double SMART_MAX_DISTANCE{120};
-constexpr double HEAVY_MIN_DISTANCE{70};
+/* Section 9.5: B4 fired the earthshaker only from 110 units and the mega
+ * from 70, at a target crossing slower than 30 units/s: a fight keeps
+ * 35-95 units (bot.cpp) and a human strafes faster, so the heavy missiles
+ * were practically never fired.  The distances are now those of the
+ * blast (blast_safe), and the bot backs off to them (heavy_standoff).
+ */
+constexpr double HEAVY_MIN_DISTANCE{45};
 constexpr double HEAVY_MAX_DISTANCE{220};
-constexpr double SHAKER_MIN_DISTANCE{110};
+constexpr double SHAKER_MIN_DISTANCE{55};
 constexpr double SHAKER_MAX_DISTANCE{260};
 constexpr double FLASH_MAX_DISTANCE{100};
 /* A mine is dropped for a pursuer this close behind. */
@@ -160,12 +170,13 @@ constexpr double CLOAKED_MISSILE_DISTANCE{100};
 /* A heavy missile (mega, earthshaker) at most once per this many
  * seconds; and once per target until it changes or this passes.
  */
-constexpr double HEAVY_INTERVAL{8};
-constexpr double HEAVY_PER_TARGET{25};
-/* A target crossing faster than this dodges a slow heavy missile; below
- * Ace (weapon smarts 3) the bot waits for a slower moment.
+constexpr double HEAVY_INTERVAL{5};
+constexpr double HEAVY_PER_TARGET{10};
+/* A target crossing faster than this dodges a slow heavy missile that
+ * does not home; below Ace (weapon smarts 3) the bot waits for a slower
+ * moment.  A homing one (the data's homing_flag) turns after it.
  */
-constexpr double HEAVY_MAX_LATERAL{30};
+constexpr double HEAVY_MAX_LATERAL{45};
 /* A smart missile fired at a target that was seen this recently (its
  * children find it round a corner).
  */
@@ -175,9 +186,11 @@ constexpr double MISSILE_PENDING_SECONDS{1.5};
 
 /* Blast safety: the first thing a missile fired along the nose meets
  * (a wall, the target, anything) must be at least `factor` blast radii
- * away, plus a margin for the ship and the blast's rounding.  The
- * earthshaker gets 2 (its children spread from the blast and explode
- * too), the mega 1.5, the others 1.  Invulnerable, only point blank is
+ * away, plus a margin for the ship and the blast's rounding.  The blast
+ * does no damage beyond its radius (object_create_explosion_with_damage:
+ * the damage falls linearly to 0 at damage_radius).  The earthshaker
+ * gets 1.5 (its children spread from the blast and explode too; B4: 2),
+ * the mega 1.2 (B4: 1.5), the others 1.  Invulnerable, only point blank is
  * avoided, but only if the invulnerability outlasts the danger: it must
  * be real (not the faked respawn one, which a hit ends) and last beyond
  * the missile's flight, plus the earthshaker's children
@@ -193,9 +206,9 @@ constexpr double blast_factor(const missile_role r)
 	switch (r)
 	{
 		case missile_role::shaker:
-			return 2;
-		case missile_role::heavy:
 			return 1.5;
+		case missile_role::heavy:
+			return 1.2;
 		case missile_role::mine:
 		case missile_role::none:
 			return 0;
@@ -215,18 +228,38 @@ constexpr double blast_danger_seconds(const missile_role r, const double impact_
 	return std::max(impact_distance, 0.0) / speed + (r == missile_role::shaker ? SHAKER_CHILDREN_SECONDS : 0) + INVULNERABLE_SPARE;
 }
 
+/* Section 9.5: where the bot is when the missile bursts.  The impact is
+ * the first thing along the nose (the target if it is nearer than the
+ * wall behind it, the wall at the end of the corridor or room if not);
+ * the bot flies on meanwhile: toward the impact at `closing_speed`
+ * (units/s along the nose; negative: away) for the missile's flight (at
+ * half its speed for a thrust missile, as blast_danger_seconds).  Flying
+ * away is credited up to CLOSING_AWAY_CREDIT units/s.
+ */
+constexpr double CLOSING_AWAY_CREDIT{20};
+
+[[nodiscard]]
+constexpr double distance_at_burst(const double impact_distance, const missile_data &md, const double closing_speed)
+{
+	const double speed{std::max(md.thrust ? md.speed / 2 : md.speed, 1.0)};
+	const double flight{std::max(impact_distance, 0.0) / speed};
+	return impact_distance - std::max(closing_speed, -CLOSING_AWAY_CREDIT) * flight;
+}
+
 /* `invulnerable_left`: seconds of real invulnerability left (0 when not
  * invulnerable, or only faking it).
  */
 [[nodiscard]]
-constexpr bool blast_safe(const missile_role r, const double impact_distance, const missile_data &md, const double invulnerable_left)
+constexpr bool blast_safe(const missile_role r, const double impact_distance, const missile_data &md, const double invulnerable_left, const double closing_speed = 0)
 {
 	const double f{blast_factor(r)};
 	if (!(f > 0))
 		return true;
 	if (invulnerable_left > blast_danger_seconds(r, impact_distance, md))
 		return impact_distance >= MISSILE_MIN_DISTANCE;
-	return impact_distance >= f * std::max(md.blast_radius, 0.0) + BLAST_MARGIN;
+	/* Both where it is fired and where the bot is at the burst. */
+	const double need{f * std::max(md.blast_radius, 0.0) + BLAST_MARGIN};
+	return impact_distance >= need && distance_at_burst(impact_distance, md, closing_speed) >= need;
 }
 
 /* What the missile choice looks at (the tactics layer fills it). */
@@ -266,7 +299,128 @@ struct missile_situation
 	 * enough behind to fly into a mine dropped now.
 	 */
 	bool teammate_behind{};
+	/* The bot's speed toward the target (units/s; negative: away): the
+	 * blast is judged where the bot is when the missile bursts.
+	 */
+	double closing_speed{};
 };
+
+/* Section 9.5: why a heavy missile (mega, earthshaker) is or is not
+ * fired now, for the log (-verbose): the first rule that fails.
+ */
+enum class heavy_verdict : uint8_t
+{
+	fire,
+	none_owned,
+	skill,
+	no_target,
+	not_visible,
+	no_clear_shot,
+	cloaked,
+	cooldown,
+	used_on_target,
+	too_fast,
+	too_close,
+	too_far,
+	blast,
+	/* Chosen, waiting for the aim or for the blast along the nose. */
+	aiming,
+	nose_blast,
+};
+
+inline constexpr std::array<const char *, 15> heavy_verdict_names{{
+	"fire", "none-owned", "skill", "no-target", "not-visible", "no-clear-shot", "cloaked",
+	"cooldown", "used-on-target", "too-fast", "too-close", "too-far", "blast", "aiming", "nose-blast",
+}};
+
+[[nodiscard]]
+constexpr const char *name_of(const heavy_verdict v)
+{
+	const auto i{static_cast<unsigned>(v)};
+	return i < heavy_verdict_names.size() ? heavy_verdict_names[i] : "?";
+}
+
+/* The least distance at which heavy missile `s` may be fired, by its
+ * range and its blast (without invulnerability).
+ */
+[[nodiscard]]
+constexpr double heavy_min_distance(const secondary s, const missile_data &md)
+{
+	const auto r{role_of(s)};
+	const double range_min{r == missile_role::shaker ? SHAKER_MIN_DISTANCE : HEAVY_MIN_DISTANCE};
+	return std::max(range_min, blast_factor(r) * std::max(md.blast_radius, 0.0) + BLAST_MARGIN);
+}
+
+/* The rules of one heavy missile (mega or earthshaker) now. */
+[[nodiscard]]
+constexpr heavy_verdict heavy_check(const missile_situation &m, const secondary s)
+{
+	const auto i{static_cast<unsigned>(s)};
+	if (!m.ammo[i])
+		return heavy_verdict::none_owned;
+	if (m.smarts < min_smarts(s))
+		return heavy_verdict::skill;
+	if (!m.has_target)
+		return heavy_verdict::no_target;
+	if (m.since_missile < missile_interval(m.smarts) || m.since_heavy < HEAVY_INTERVAL)
+		return heavy_verdict::cooldown;
+	if (!m.target_visible)
+		return heavy_verdict::not_visible;
+	if (!m.shot_clear)
+		return heavy_verdict::no_clear_shot;
+	if (m.cloaked)
+		return heavy_verdict::cloaked;
+	if (m.heavy_used_on_target)
+		return heavy_verdict::used_on_target;
+	const auto &md{m.data[i]};
+	if (!md.homing && m.smarts < 3 && m.target_lateral_speed >= HEAVY_MAX_LATERAL)
+		return heavy_verdict::too_fast;
+	const double d{m.target_distance};
+	const auto r{role_of(s)};
+	if (d < (r == missile_role::shaker ? SHAKER_MIN_DISTANCE : HEAVY_MIN_DISTANCE))
+		return heavy_verdict::too_close;
+	if (d > (r == missile_role::shaker ? SHAKER_MAX_DISTANCE : HEAVY_MAX_DISTANCE))
+		return heavy_verdict::too_far;
+	if (!blast_safe(r, d, md, m.invulnerable_left, m.closing_speed))
+		return heavy_verdict::blast;
+	return heavy_verdict::fire;
+}
+
+/* The verdict on the heavy missiles together: the earthshaker's if the
+ * bot has one, else the mega's.
+ */
+[[nodiscard]]
+constexpr heavy_verdict heavy_check(const missile_situation &m)
+{
+	const auto e{heavy_check(m, secondary::earthshaker)};
+	if (e == heavy_verdict::fire)
+		return e;
+	const auto g{heavy_check(m, secondary::mega)};
+	if (g == heavy_verdict::fire || e == heavy_verdict::none_owned)
+		return g;
+	return e;
+}
+
+/* Section 9.5: the distance a fighting bot keeps while it has a heavy
+ * missile ready to fire (the rules but the distance hold): far enough
+ * for the blast, so that it gets its shot.  0: none.
+ */
+[[nodiscard]]
+constexpr double heavy_standoff(const missile_situation &m)
+{
+	double best{0};
+	for (const auto s : {secondary::earthshaker, secondary::mega})
+	{
+		const auto v{heavy_check(m, s)};
+		if (v == heavy_verdict::too_close || v == heavy_verdict::blast || v == heavy_verdict::fire)
+		{
+			const double d{heavy_min_distance(s, m.data[static_cast<unsigned>(s)]) + 8};
+			if (!best || d < best)
+				best = d;
+		}
+	}
+	return best;
+}
 
 /* Section 4.5 and 9.4: the secondary the bot wants to fire now, if any.
  * Whether it is released (the aim, the blast along the nose) is
@@ -295,20 +449,15 @@ constexpr std::optional<secondary> choose_secondary(const missile_situation &m)
 	if (m.cloaked && d > CLOAKED_MISSILE_DISTANCE)
 		return std::nullopt;
 	const bool open_shot{m.target_visible && m.shot_clear};
-	/* The heavy ones: a clear shot, far enough (the release checks the
-	 * blast along the nose again), not too often, once per target, and
-	 * below Ace only at a target that does not cross fast.
+	/* The heavy ones (heavy_check): a clear shot, far enough for the
+	 * blast (the release checks the blast along the nose again), not
+	 * too often, once per target, and below Ace only at a target that
+	 * does not cross fast, unless the missile homes.
 	 */
-	const bool heavy_ok{open_shot && !m.cloaked && !m.heavy_used_on_target && m.since_heavy >= HEAVY_INTERVAL && (m.smarts >= 3 || m.target_lateral_speed < HEAVY_MAX_LATERAL)};
-	if (heavy_ok)
-	{
-		if (usable(secondary::earthshaker) && d >= SHAKER_MIN_DISTANCE && d <= SHAKER_MAX_DISTANCE &&
-			blast_safe(missile_role::shaker, d, m.data[static_cast<unsigned>(secondary::earthshaker)], m.invulnerable_left))
-			return secondary::earthshaker;
-		if (usable(secondary::mega) && d >= HEAVY_MIN_DISTANCE && d <= HEAVY_MAX_DISTANCE &&
-			blast_safe(missile_role::heavy, d, m.data[static_cast<unsigned>(secondary::mega)], m.invulnerable_left))
-			return secondary::mega;
-	}
+	if (heavy_check(m, secondary::earthshaker) == heavy_verdict::fire)
+		return secondary::earthshaker;
+	if (heavy_check(m, secondary::mega) == heavy_verdict::fire)
+		return secondary::mega;
 	/* Smart: its children find the target, even round a corner seen a
 	 * moment ago.
 	 */
@@ -340,11 +489,15 @@ constexpr std::optional<secondary> choose_secondary(const missile_situation &m)
  * in front), the straight ones need the primary's.
  */
 [[nodiscard]]
-constexpr double missile_cone(const missile_role r, const double fire_cone)
+constexpr double missile_cone(const missile_role r, const double fire_cone, const bool homing = false)
 {
 	constexpr double pi{3.14159265358979323846};
 	switch (r)
 	{
+		case missile_role::heavy:
+		case missile_role::shaker:
+			/* A homing mega or earthshaker finds its target itself. */
+			return homing ? std::max(fire_cone, 15 * pi / 180) : fire_cone;
 		case missile_role::homing:
 			return std::max(fire_cone, 20 * pi / 180);
 		case missile_role::smart:
@@ -362,14 +515,85 @@ constexpr double missile_cone(const missile_role r, const double fire_cone)
  * neither.
  */
 [[nodiscard]]
-constexpr bool missile_release(const secondary s, const double aim_error, const double fire_cone, const double impact_distance, const missile_data &md, const double invulnerable_left)
+constexpr bool missile_release(const secondary s, const double aim_error, const double fire_cone, const double impact_distance, const missile_data &md, const double invulnerable_left, const double closing_speed = 0)
 {
 	const auto r{role_of(s)};
 	if (r == missile_role::none)
 		return false;
 	if (r == missile_role::mine)
 		return true;
-	return aim_error <= missile_cone(r, fire_cone) && blast_safe(r, impact_distance, md, invulnerable_left);
+	return aim_error <= missile_cone(r, fire_cone, md.homing) && blast_safe(r, impact_distance, md, invulnerable_left, closing_speed);
+}
+
+/* Section 9.5: the fusion cannon, charged by the bot's own trigger as
+ * FireLaser charges the human's (2 energy to start, then 1 a second,
+ * the shot's damage growing with the charge), released when the aim is
+ * on the target and the charge is the skill's, at the latest at
+ * FUSION_MAX_CHARGE: from 2 s on the charge hurts the ship itself.
+ */
+constexpr double FUSION_MAX_CHARGE{1.8};
+
+[[nodiscard]]
+constexpr double fusion_release_charge(const unsigned smarts)
+{
+	constexpr std::array<double, 5> by_smarts{{0.5, 0.6, 1.0, 1.3, 1.5}};
+	return by_smarts[std::min<std::size_t>(smarts, by_smarts.size() - 1)];
+}
+
+enum class fusion_action : uint8_t
+{
+	idle,
+	charge,
+	release,
+};
+
+struct fusion_view
+{
+	/* Fusion is the bot's primary. */
+	bool selected{};
+	bool charging{};
+	/* Seconds of charge. */
+	double charge{};
+	double energy{};
+	bool target_visible{};
+	bool shot_clear{};
+	/* The aim is within the fire cone (should_fire). */
+	bool aimed{};
+	double distance{};
+	double range{};
+};
+
+[[nodiscard]]
+constexpr fusion_action fusion_step(const fusion_view &v, const double release_charge)
+{
+	if (v.charging)
+	{
+		/* Switched away, full, out of energy: what is charged goes (the
+		 * human's cannon fires by itself too).
+		 */
+		if (!v.selected || v.charge >= FUSION_MAX_CHARGE || v.energy <= 0)
+			return fusion_action::release;
+		if (v.aimed && v.charge >= release_charge)
+			return fusion_action::release;
+		return fusion_action::charge;
+	}
+	if (!v.selected || v.energy < FUSION_MIN_ENERGY)
+		return fusion_action::idle;
+	/* Charge while the shot comes: in sight, a clear line, in range. */
+	if (v.target_visible && v.shot_clear && v.distance <= v.range)
+		return fusion_action::charge;
+	return fusion_action::idle;
+}
+
+/* Section 9.5: the omega cannon locks on what lies within about 20
+ * degrees of the nose (OMEGA_MIN_TRACKABLE_DOT, 15/16) within
+ * MAX_OMEGA_DIST: its fire cone is that wide.
+ */
+[[nodiscard]]
+constexpr double omega_fire_cone(const double fire_cone)
+{
+	constexpr double pi{3.14159265358979323846};
+	return std::max(fire_cone, 18 * pi / 180);
 }
 
 /* Whether the aim uses the missile's speed while it waits for the

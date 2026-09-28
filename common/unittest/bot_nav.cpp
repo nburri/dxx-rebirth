@@ -22,8 +22,11 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <algorithm>
 #include <functional>
 #include <limits>
+#include <numbers>
+#include <optional>
 #include <queue>
 #include <random>
 #include <vector>
@@ -615,6 +618,178 @@ void test_nav_distances()
 	CHECK(!nd.reached(0));
 }
 
+
+/* Section 9.5: a level like the playtest's, a dense core of small
+ * segments (the spawn area) inside a large ring reached by two
+ * corridors.  B1's roam (the first of up to 12 uniform draws 120 units
+ * away) almost never left the core; exploring (far and unvisited places)
+ * goes round the ring.
+ */
+struct core_and_ring
+{
+	nav_graph g;
+	uint32_t core_nodes{};
+	uint32_t ring_first{}, ring_nodes{32};
+	core_and_ring()
+	{
+		constexpr unsigned cw{12}, ch{4};
+		constexpr double step{20};
+		core_nodes = cw * cw * ch;
+		constexpr unsigned corridor{4};
+		ring_first = core_nodes + 2 * corridor;
+		const uint32_t n{ring_first + ring_nodes};
+		std::vector<vec3> pos(n);
+		std::vector<std::vector<uint32_t>> adj(n);
+		const auto link{[&](const uint32_t a, const uint32_t b) {
+			adj[a].push_back(b);
+			adj[b].push_back(a);
+		}};
+		const auto core_id{[&](const unsigned x, const unsigned y, const unsigned z) {
+			return (y * cw + z) * cw + x;
+		}};
+		const double half{(cw - 1) * step / 2};
+		for (unsigned y = 0; y < ch; ++y)
+			for (unsigned z = 0; z < cw; ++z)
+				for (unsigned x = 0; x < cw; ++x)
+				{
+					const auto id{core_id(x, y, z)};
+					pos[id] = {x * step - half, y * step, z * step - half};
+					if (x + 1 < cw)
+						link(id, core_id(x + 1, y, z));
+					if (z + 1 < cw)
+						link(id, core_id(x, y, z + 1));
+					if (y + 1 < ch)
+						link(id, core_id(x, y + 1, z));
+				}
+		constexpr double radius{400};
+		for (uint32_t i = 0; i < ring_nodes; ++i)
+		{
+			const double a{2 * std::numbers::pi * i / ring_nodes};
+			pos[ring_first + i] = {radius * std::cos(a), 0, radius * std::sin(a)};
+			link(ring_first + i, ring_first + (i + 1) % ring_nodes);
+		}
+		/* Two corridors: +x and -x, from the core's edge to the ring. */
+		for (unsigned c = 0; c < 2; ++c)
+		{
+			const double sign{c ? -1.0 : 1.0};
+			uint32_t prev{core_id(c ? 0 : cw - 1, 0, cw / 2)};
+			for (unsigned k = 0; k < corridor; ++k)
+			{
+				const uint32_t id{core_nodes + c * corridor + k};
+				pos[id] = {sign * (half + (radius - half) * (k + 1) / (corridor + 1)), 0, 0};
+				link(prev, id);
+				prev = id;
+			}
+			link(prev, ring_first + (c ? ring_nodes / 2 : 0));
+		}
+		g.begin(n);
+		for (uint32_t i = 0; i < n; ++i)
+			g.set_position(i, pos[i]);
+		for (uint32_t i = 0; i < n; ++i)
+		{
+			std::sort(adj[i].begin(), adj[i].end());
+			uint8_t side{0};
+			for (const auto j : adj[i])
+				g.add_edge(i, {j, side++, static_cast<float>(distance(pos[i], pos[j]))});
+		}
+		g.finish();
+	}
+	[[nodiscard]]
+	bool in_core(const uint32_t n) const
+	{
+		return n < core_nodes;
+	}
+};
+
+void test_explore_core_and_ring()
+{
+	const core_and_ring level;
+	const auto open{[](uint32_t, const nav_edge &) { return true; }};
+	const auto none{[](uint32_t, const nav_edge &) { return 0.0; }};
+	std::minstd_rand rng{11};
+	const auto below{[&rng](const uint32_t n) -> uint32_t {
+		const uint32_t r = rng() % n;
+		return r;
+	}};
+	/* The path costs of a strategy tick (2500 units, 3000 nodes) reach
+	 * the whole ring from the core's centre.
+	 */
+	nav_distances nd;
+	const uint32_t centre{(2 * 12 + 6) * 12 + 6};
+	nd.compute(level.g, centre, open, none, 2500, 3000);
+	for (uint32_t i = 0; i < level.ring_nodes; ++i)
+		CHECK(nd.reached(level.ring_first + i));
+	/* B1's roam: mostly the core. */
+	unsigned b1_out{0};
+	for (unsigned i = 0; i < 400; ++i)
+		b1_out += !level.in_core(pick_roam_goal(level.g, centre, level.g.position(centre), 120, below));
+	CHECK(b1_out < 400 * 3 / 10);
+	/* Exploring: a bot flies 40 roams, from goal to goal, marking what
+	 * it passes; time goes by the flight (50 units/s).
+	 */
+	astar_search search;
+	path_result path;
+	std::vector<double> visited(level.g.size(), -1);
+	double now{0};
+	uint32_t at{centre};
+	unsigned out{0};
+	for (unsigned i = 0; i < 40; ++i)
+	{
+		nd.compute(level.g, at, open, none, 2500, 3000);
+		const auto goal{pick_explore_goal(level.g, at, below, [&nd](const uint32_t n) -> std::optional<double> {
+			return nd.cost(n);
+		}, [&](const uint32_t n) {
+			return visited[n] < 0 ? 1e9 : now - visited[n];
+		})};
+		CHECK(goal.has_value());
+		CHECK(*goal != at);
+		CHECK(search.find(level.g, at, *goal, open, none, 4000, path));
+		CHECK(path.complete);
+		for (const auto &st : path.steps)
+		{
+			visited[st.node] = now;
+			if (&st != &path.steps.front())
+				now += 0.5;
+		}
+		now += *nd.cost(*goal) / 50;
+		out += !level.in_core(*goal);
+		at = *goal;
+	}
+	unsigned ring_seen{0};
+	for (uint32_t i = 0; i < level.ring_nodes; ++i)
+		ring_seen += visited[level.ring_first + i] >= 0;
+	std::printf("test-bot-nav: core and ring: B1 roams left the core %u of 400 times; exploring %u of 40, %u of %u ring segments visited\n", b1_out, out, ring_seen, level.ring_nodes);
+	CHECK(out >= 40 / 3 && out > b1_out * 40 / 400);
+	CHECK(ring_seen >= level.ring_nodes * 3 / 4);
+	/* The score: far and long unvisited first; capped. */
+	CHECK(explore_score(600, 1e9) > explore_score(300, 1e9));
+	CHECK(explore_score(600, 1e9) > explore_score(600, 10));
+	CHECK(explore_score(5000, 1e9) == explore_score(EXPLORE_COST_CAP, 1e9));
+	CHECK(explore_score(600, 0) > 0);
+	/* Section 9.5: a spawn site sealed off (here the ring, its corridors
+	 * closed: 32 of 616 segments) is not open; the core is.  The real
+	 * case: Schwarzbrenner Outpost's two cells of 9 of 272 segments,
+	 * against 243 for the other sites.
+	 */
+	const auto sealed{[&](const uint32_t from, const nav_edge &e) {
+		return level.in_core(from) == level.in_core(e.to) && (from < level.ring_first) == (e.to < level.ring_first);
+	}};
+	const auto count_from{[&](const uint32_t start) {
+		nd.compute(level.g, start, sealed, none, 1e12, static_cast<unsigned>(level.g.size()));
+		std::size_t k{0};
+		for (uint32_t i = 0; i < level.g.size(); ++i)
+			k += nd.reached(i);
+		return k;
+	}};
+	CHECK(count_from(level.ring_first) == level.ring_nodes);
+	CHECK(!spawn_site_open(count_from(level.ring_first), level.g.size()));
+	CHECK(spawn_site_open(count_from(centre), level.g.size()));
+	CHECK(!spawn_site_open(9, 272) && spawn_site_open(243, 272));
+	CHECK(spawn_site_open(150, 9000) && !spawn_site_open(149, 9000));
+	/* Nothing within reach: none (the caller falls back to B1's roam). */
+	CHECK(!pick_explore_goal(level.g, centre, below, [](uint32_t) -> std::optional<double> { return std::nullopt; }, [](uint32_t) { return 0.0; }));
+}
+
 }
 
 int main()
@@ -628,6 +803,7 @@ int main()
 	test_stuck_detector();
 	test_roam_goals();
 	test_nav_distances();
+	test_explore_core_and_ring();
 	std::puts("test-bot-nav: all checks passed");
 	return 0;
 }

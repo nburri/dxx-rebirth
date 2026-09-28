@@ -521,6 +521,126 @@ void test_combat_movement()
 	}
 }
 
+
+/* Section 9.5: turning round to a target behind, under fire.  B1-B4
+ * took the shortest rotation: for a target behind and above (or straight
+ * behind) a turn about one axis, a slow loop in place, and a bot that
+ * wanted to hold its place braked to a stop meanwhile.  Now both axes
+ * turn at once beyond LARGE_TURN_START (faster), and the ship slides on
+ * while it turns (keep_moving_in_turn).
+ */
+struct turn_result
+{
+	double time{-1};
+	double min_speed{1e9};
+};
+
+turn_result turn_round(const vec3 &target_local, const bool combined, const bool slide, const double fps)
+{
+	const auto lim{ship_limits()};
+	const double cap{skill_of(bot_skill::hotshot).turn_cap};
+	const fix ft{to_fix(1 / fps)};
+	ship s;
+	/* Flying on at 40 units/s when the shots come from behind. */
+	s.vel = {0, 0, 40};
+	const auto target_pos{normalized(target_local) * 80};
+	int pref{1};
+	ticker tk;
+	vec3 face{0, 0, 1}, move;
+	double t{0};
+	turn_result r;
+	while (t < 4 && r.time < 0)
+	{
+		for (unsigned n{tk.advance(ft)}; n; --n)
+		{
+			const auto to{target_pos - s.pos};
+			face = normalized(to);
+			/* The bot wants to hold its distance: no wish of its own;
+			 * the new rule adds the slide.
+			 */
+			vec3 wanted{};
+			if (slide)
+				wanted = keep_moving_in_turn(wanted, angle_between(s.orient.f, face), to, s.vel, s.orient.r * static_cast<double>(pref), lim.max_speed);
+			move = velocity_command(wanted, s.vel, lim.max_speed);
+		}
+		const auto c{steer_controls({
+			.unrolled = s.unrolled(),
+			.thrust_frame = s.orient,
+			.face_dir = face,
+			.face_rate = {},
+			.move_cmd = move,
+			.pitch_rate = s.pitch_rate * rev_to_rad,
+			.heading_rate = s.heading_rate * rev_to_rad,
+			.shortest_only = !combined,
+		}, lim.turn, cap, pref)};
+		s.step(c, ft);
+		t += ft / 65536.0;
+		const double err{angle_between(s.orient.f, normalized(target_pos - s.pos))};
+		/* While the nose is far off (the rule's domain; nearer, the
+		 * fight's own movement takes over).
+		 */
+		if (t > 0.3 && err > TURN_MOVE_ANGLE)
+			r.min_speed = std::min(r.min_speed, length(s.vel));
+		if (err < radians(5))
+			r.time = t;
+	}
+	return r;
+}
+
+void test_turn_round()
+{
+	const auto lim{ship_limits()};
+	/* Behind and above: B1 looped on the pitch axis; straight behind: on
+	 * the heading axis.  Elsewhere B1 already turned both axes (no gain,
+	 * no loss).
+	 */
+	for (const vec3 target_local : {vec3{0, 0.45, -1}, vec3{0.05, -0.2, -1}, vec3{0.001, 0, -1}, vec3{0.03, -0.6, -1}})
+	{
+		/* B1 turned about one axis only when the target lay (almost) in
+		 * a plane of the ship: the pitch loop.
+		 */
+		const bool one_axis{std::abs(target_local.x) <= 0.01 || std::abs(target_local.y) <= 0.01};
+		for (const double fps : frame_rates)
+		{
+			const auto b1{turn_round(target_local, false, false, fps)};
+			const auto both{turn_round(target_local, true, false, fps)};
+			const auto moving{turn_round(target_local, true, true, fps)};
+			std::printf("test-bot-flight: turn round (%.2f %.2f %.2f) at %.0f fps: B1 %.2f s (least speed %.1f), both axes %.2f s, sliding %.2f s (least speed %.1f)\n", target_local.x, target_local.y, target_local.z, fps, b1.time, b1.min_speed, both.time, moving.time, moving.min_speed);
+			CHECK(b1.time > 0 && both.time > 0 && moving.time > 0);
+			/* Both axes at once: faster than B1's single axis. */
+			if (one_axis)
+				CHECK(both.time < b1.time * 0.9);
+			else
+				CHECK(both.time < b1.time * 1.03);
+			/* B1-B4 braked to a stop; now it never stands still while it
+			 * turns, and turns about as fast.
+			 */
+			CHECK(b1.min_speed < lim.max_speed * 0.15);
+			CHECK(moving.min_speed > lim.max_speed * 0.4);
+			CHECK(moving.time < b1.time * (one_axis ? 1 : 1.1));
+			/* The same at any frame rate. */
+			const auto ref{turn_round(target_local, true, true, 60)};
+			CHECK(std::abs(moving.time - ref.time) < 0.12);
+		}
+	}
+	/* The combined errors: a target straight behind and a little above
+	 * turns both axes, by the same amount, the nose up.
+	 */
+	const auto e{steer_errors_local({0, 0.01, -1}, 1, 0)};
+	CHECK(std::abs(std::abs(e.pitch) - std::abs(e.heading)) < 1e-9);
+	CHECK(e.pitch < 0 && e.heading > 0);
+	/* B1: one axis only. */
+	for (const vec3 d : {vec3{0, 0.05, -1}, vec3{0, 0.45, -1}})
+	{
+		const auto b1{steer_errors_shortest(d, 1)};
+		CHECK((std::abs(b1.heading) < 0.01) != (std::abs(b1.pitch) < 0.01));
+	}
+	/* Below LARGE_TURN_START: the shortest rotation, unchanged. */
+	const auto small{steer_errors_local({1, 0.2, 0.3}, 1, 0)};
+	const auto small_b1{steer_errors_shortest({1, 0.2, 0.3}, 1)};
+	CHECK(small.pitch == small_b1.pitch && small.heading == small_b1.heading);
+}
+
 }
 
 int main()
@@ -531,6 +651,7 @@ int main()
 	test_tracking();
 	test_waypoints();
 	test_combat_movement();
+	test_turn_round();
 	std::puts("test-bot-flight: all checks passed");
 	return 0;
 }

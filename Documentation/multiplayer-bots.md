@@ -1102,8 +1102,8 @@ included) is dropped where it dies. When a bot's cloak runs out
 (`life_frame`), the host sends `MULTI_DECLOAK` and puts the item back into
 the level (`maybe_drop_net_powerup`), as the human's game does for its own.
 
-**Fusion and omega are picked up** (decision): a bot still cannot fire
-them (B1), but taking them denies them to the others and a death drops
+**Fusion and omega are picked up** (decision; since section 9.5 they
+are also fired): a bot still cannot fire them (B1), but taking them denies them to the others and a death drops
 them, as a human's would. They are worth little (1, a spare), so a bot
 takes one only when nothing better is near. Headlight and full map are
 never sought (value 0) but taken when flown through, as a human takes
@@ -1401,6 +1401,192 @@ false there), the protocol.
 **Not in B4:** the `-botarena` test mode, the strafe patterns beyond
 B1's jukes, mines at chokepoints the bot is not passing itself, dodging
 mines.
+
+
+### 9.5 After the v0.61-exp-13 playtest: pickups, guns, big missiles, turning
+
+The playtest (one human against Hotshot bots) found: (1) no bot ever
+fired an earthshaker or a mega (nor fusion or omega), even one that had
+just picked an earthshaker up; (2) bots switch weapons but still mostly
+fire the laser; (3) bots fly past powerups, even close ones; later also
+(4) bots are easy to kill: they do not react to shots from behind and
+turn round slowly, standing still; (5) on a level whose spawn area is a
+dense core inside large rings, bots never leave the core.  Nothing here
+could be run with game data, so each cause was traced in the code, and
+the bots now write what they decide to the log (below).
+
+**Pickups: the path from "a powerup near the bot" to "granted".**
+
+- *The touch and the grant are right* (confirmed by reading):
+  a bot's ship moves by `do_physics_sim` (bots are not interpolation
+  driven), whose object sweep finds powerups for any player
+  (`check_vector_to_object`: ship radius + powerup radius);
+  `collide_player_and_powerup` hands a ship that is not the local
+  player's to `bot_touch_powerup`; `net_objects_bot_touch` judges it as a
+  client's request and `host_grant_remote` writes the grant into the
+  bot's own ship (`write_inventory`, the object `missile_tick` and
+  `bots_fire` read).  So the earthshaker the user dropped did reach the
+  bot's `secondary_ammo`.  No `Player_num` guard skips a bot's touch.
+  `A.dropped` (set at death) is cleared by `multi_send_reappear` for bots
+  too.
+- *Knowledge starved* (confirmed, `learn_powerups`): a powerup had to be
+  within the field of view to be seen, and at most six lines of sight
+  were checked per strategy tick, in the order of the object slots.  The
+  level's powerups behind walls (low slots, within the awareness and the
+  field of view, never seen, so checked again at every tick) used the
+  checks up; a death's drop or a respawn (high slots) was never checked.
+  Now the candidates are checked nearest first (eight per tick), and a
+  powerup within `POWERUP_NOTICE_DISTANCE` (60) is noticed outside the
+  field of view.  The map knowledge (Hotshot: 8 segments) was counted in
+  segments only: in a spawn area of many small segments it did not reach
+  the rooms round it; it now also reaches 40 units of path per segment
+  (`MAP_KNOWLEDGE_UNITS_PER_SEGMENT`, Hotshot 320 units).
+- *Goal lower* (confirmed, the utilities with real numbers,
+  `test_pickup_scenarios`): a Hotshot bot with the spawn laser fighting
+  an enemy 100 units away engages at 1.85 (x 1.2 for the current goal).
+  Plasma 20 or 80 units away wins (5.25, 3.0 with the upgrade rule of
+  section 9.3), if known.  But an earthshaker 20 units away scored 1.5,
+  a concussion pack or energy the bot needs less, and a powerup beyond
+  40 units counted a third in a fight: the bot flew past them.
+  *Opportunistic pickup* (`grab_worthwhile`, `grab_applies`): a powerup
+  worth at least 0.75 within 45 units (path 70) is taken whatever the goal
+  (utility `GRAB_UTILITY` 4), unless the bot is in danger (it would
+  retreat); shields are grabbed in danger too.  It flies there as a
+  collecting bot does, shooting at what it sees.  Shields at 60 and below
+  now count as much in a fight as a big upgrade (`collect_in_fight`).
+- *Steering to it*: the path's last point is the powerup's centre, the
+  approach speed `3 d + 8`, arrival at 2 units, far inside the touch
+  radius (ship + powerup, about 7 units): not a cause.
+
+**(2) The laser.**  The choice and the firing are right (section 9.3;
+`choose_weapon` writes the ship's `Primary_weapon`, which
+`do_laser_firing_player` fires for the bot's ship; no code resets it but
+the spawn, after which the choice runs at once).
+`test_owned_weapon_selection` checks that a bot holding the laser that
+owns any one other gun takes it in every band where the table ranks it
+higher, at 100, 60 and 15 energy.  The laser preference was the pickups
+(a bot that dies often fights each life with the spawn laser) and fusion
+and omega, which bots did not fire at all.
+
+**(1) Heavy missiles** (confirmed, `choose_secondary`): the earthshaker
+needed 110 units and the mega 70, both at a target crossing slower than
+30 units/s, while a fight keeps 35-95 units and a human strafes faster:
+the rules practically never held.  Now (`heavy_check`, which also names
+the failing rule for the log):
+
+| | B4 | Now |
+|---|---|---|
+| Earthshaker | 110-260 units, 2 blast radii + 12 | 55-260 units, 1.5 blast radii + 12 |
+| Mega | 70-220 units, 1.5 blast radii + 12 | 45-220 units, 1.2 blast radii + 12 |
+| Crossing target (below Ace) | < 30 units/s | < 45 units/s, any speed if the missile homes (the data's `homing_flag`) |
+| Interval, per target | 8 s, 25 s | 5 s, 10 s |
+
+The blast does no damage beyond its radius (the damage falls linearly to
+0 at `damage_radius`), so the bot stays outside it; the release still
+checks the wall along the nose (the user's earthshaker death).  A bot
+with a heavy missile ready keeps the distance it needs
+(`heavy_standoff`: the combat band starts there), so it gets its shot.
+A homing heavy missile is released within 15 degrees.  The blast is
+judged at the impact along the nose (the target when it is nearer than
+the wall behind it: a target 120 units down a corridor is a shot, a wall
+30 units ahead never) and where the bot is when the missile bursts: its
+own flight toward the impact meanwhile is subtracted, flying away is
+credited up to 20 units/s (`distance_at_burst`); no free distance in
+other directions is required.
+
+**Fusion and omega are fired** (decision; B1-B4 only picked them up).
+Fusion is charged by the bot as `FireLaser` charges the human's (2
+energy, then 1 a second, `Fusion_charge` on the bot's ship), from when
+the target is in sight and in range, and released through
+`do_laser_firing_player` when the aim is on the target and the charge is
+the skill's (`fusion_release_charge`: Hotshot 1 s), at the latest at 1.8
+s (from 2 s the charge hurts the ship).  The warm-up sound is heard on
+the host only.  Omega recharges from the bot's energy with its own
+`pilot` (`omega_charge_frame`); `do_omega_stuff` now takes the charge
+of a bot's shot on the host as it does the local player's (before, a
+bot's omega would have fired without charge).  Its fire cone is its lock
+cone (18 degrees), its reach 72 units.  Table rows: fusion 3.6/3.5/1.4,
+omega 3.9/1.6/0 (x its charge).
+
+**(4) Survival.**
+- *Hit from behind* (`react_to_hit`): the attacker's place was learnt
+  and the bot turned after the target choice (up to 200 ms), the
+  reaction time and a turn at the skill's rate; meanwhile it did
+  nothing.  Now an unseen attacker makes the bot thrust across the line
+  of fire at once (0.6 s), take the attacker as target, and turn to it a
+  reaction time later; weak, it then retreats (the goal choice).  The
+  projectile dodge never had a field-of-view filter.
+- *Turning round* (`steer_errors_local`, `keep_moving_in_turn`): the
+  errors were the shortest rotation, which for a target behind and above
+  (or straight behind) turns one axis only; the ship turns each axis at
+  its own top rate, so both at once are up to 1.41 times as fast.
+  Beyond 115 degrees the errors blend to both axes at full.  And a bot
+  that wanted to hold its place (no path, the fight's band) braked to a
+  stop while it turned (`velocity_command` of nothing is full reverse
+  thrust): now, more than 60 degrees off, it slides across the line of
+  sight at 0.6 of its top speed, the way it already moves.  In the flight
+  model a 180 degree turn at Hotshot takes 1.4 s instead of 1.6-1.8 s
+  and the ship keeps above 25 units/s (`test_turn_round`).
+- The aim (error, reaction, lead) is unchanged: Hotshot matches
+  section 5.1; the harder presets come with B2.
+
+**(5) Leaving the spawn area.**  The user's level (Schwarzbrenner
+Outpost, `VLR08-03.RL2`: 272 segments, 8 spawn sites, 105 powerups, a
+central structure with spokes to a ring of 124 segments at 200-250
+units) was parsed outside the repository and the bots' own navigation
+code (`nav_distances`, `astar_search`, `pick_roam_goal`) run on its
+graph, with the passability of `edge_passable`.  Found:
+
+- *Two of the eight spawn sites are sealed cells* (segments 79 and 119:
+  9 segments each; their exits are closed walls that a one-shot "open
+  wall" trigger on a wall switch opens, the switch being shot by a
+  human).  A bot never shoots switches: spawned there, every plan
+  failed and it stayed for the life.  Now the host judges the sites at
+  level start (`spawn_site_open`: a quarter of the level or 150
+  segments reachable) and a bot respawns elsewhere (up to 8 draws of
+  `choose_spawn`); one placed in a cell at level start is moved.
+- *The map knowledge did not reach the ring*: counted in segments
+  (Hotshot 8), the bots in the central structure knew 19-22 of the 105
+  powerups, 0-3 of the 55 out in the spokes and ring; with the path
+  distance (`MAP_KNOWLEDGE_UNITS_PER_SEGMENT`) 23-41, up to 10 of them.
+  The central structure holds 44 powerups, the nearer and known ones: a
+  bot collected there and fought there.
+- The roam itself was not the cause here (B1's draws went to the ring
+  60-76 % of the time from the open sites), but 10-13 % of them were
+  out of reach (the cells, a locked door), a strategy tick lost each.
+  Exploring (`pick_explore_goal`): 24 draws within reach of the path
+  costs, the best by the path cost (capped at 900) and the time since
+  the bot was there (full after 90 s; each bot marks the segments it
+  passes).  On this level the farthest places by path are the top of
+  the central structure, reached only round through the ring; on a
+  synthetic dense core inside a ring (`test_explore_core_and_ring`) the
+  bot visits most of the ring, while B1's roam left the core in a
+  fifth of the draws, mostly into the corridors.
+
+**The log (-verbose, in gamelog.txt).**  Nothing is formatted without
+`-verbose`.  Once a second per bot:
+
+    bots: 'havoc' goal=engage 1.85 (next collect 1.50, collect 1.50) tgt=P#0 84u vis clr | plasma [laser1,plasma sec=conc2,shaker1] | sh=87 en=64 | pu=shaker 24u v2.0 goal-lower | heavy=blast min=80 keep=88
+
+the goal and its utility, the best other goal and the collection's
+(`grab` when the grab rule holds), the target (distance, in sight,
+clear shot), the primary and what the bot has, shields and energy, the
+nearest powerup worth at least 0.75 within 120 units with its value and
+why it is not taken (`collecting`, `not-known`, `ignored`,
+`unreachable`, `cannot-use`, `goal-lower`, `denied:<reason>`), and the
+heavy missiles' last verdict (`fire`, `none-owned`, `skill`,
+`no-target`, `not-visible`, `no-clear-shot`, `cloaked`, `cooldown`,
+`used-on-target`, `too-fast`, `too-close`, `too-far`, `blast`, and once
+chosen `aiming` or `nose-blast`) with the distance it needs and the
+distance it keeps.  Events: each pickup (`takes powerup N (granted)`
+with the inventory after it) or denied touch (`denied (gone | dead |
+range | spat | cannot-use | not-arbitrated | no-netid)`, once a second
+per powerup), each weapon switch with the band and scores, each heavy
+missile and fusion shot, each reaction to an unseen attacker, each roam
+goal (explore or random, path, last visit).
+
+**Unchanged:** the human's firing, pickups and omega (the charge rule
+applies to the local player as before), clients, the protocol.
 
 ---
 

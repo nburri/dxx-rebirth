@@ -107,21 +107,46 @@ void test_weapon_table()
 	all.owned = bits({primary::vulcan, primary::spreadfire, primary::plasma, primary::fusion, primary::gauss, primary::helix, primary::phoenix, primary::omega});
 	all.vulcan_ammo = 1000;
 	all.energy = 150;
-	/* Close: helix first; mid: plasma; far: gauss. */
-	CHECK(choose_primary_for(all, range_band::close, primary::laser) == primary::helix);
+	/* Close: omega (charged) first, then helix; mid: plasma; far: gauss. */
+	CHECK(choose_primary_for(all, range_band::close, primary::laser) == primary::omega);
 	CHECK(choose_primary_for(all, range_band::mid, primary::laser) == primary::plasma);
 	CHECK(choose_primary_for(all, range_band::distant, primary::laser) == primary::gauss);
 	/* Without a target: the mid band's choice. */
 	CHECK(choose_primary_for(all, std::nullopt, primary::laser) == primary::plasma);
-	/* Never fusion or omega (stage B1: the human's charge). */
+	/* Section 9.5: fusion and omega are fired (the bot's own charge);
+	 * the super laser is the laser.  Omega does not reach the far band.
+	 */
 	for (const auto b : {range_band::close, range_band::mid, range_band::distant})
 	{
-		const auto p{choose_primary_for(all, b, primary::fusion)};
-		CHECK(p != primary::fusion && p != primary::omega);
-		CHECK(weapon_score(primary::fusion, b, all) == 0);
-		CHECK(weapon_score(primary::omega, b, all) == 0);
+		CHECK(weapon_score(primary::fusion, b, all) > 0);
 		CHECK(weapon_score(primary::super_laser, b, all) == 0);
 	}
+	CHECK(weapon_score(primary::omega, range_band::close, all) > weapon_score(primary::helix, range_band::close, all));
+	CHECK(weapon_score(primary::omega, range_band::mid, all) < weapon_score(primary::plasma, range_band::mid, all));
+	CHECK(weapon_score(primary::omega, range_band::distant, all) == 0);
+	/* An empty omega: helix at close range; an omega recharging from
+	 * little energy counts less.
+	 */
+	weapon_view drained{all};
+	drained.omega_charge = 0.1;
+	CHECK(choose_primary_for(drained, range_band::close, primary::laser) == primary::helix);
+	drained.omega_charge = 0.05;
+	drained.energy = 0.5;
+	CHECK(omega_factor(drained) == 0);
+	CHECK(omega_factor(all) == 1);
+	/* Fusion needs the energy for a charge. */
+	weapon_view fusion_only{};
+	fusion_only.owned = bits({primary::fusion});
+	fusion_only.energy = 100;
+	CHECK(choose_primary_for(fusion_only, range_band::close, primary::laser) == primary::fusion);
+	CHECK(choose_primary_for(fusion_only, range_band::mid, primary::laser) == primary::fusion);
+	fusion_only.energy = FUSION_MIN_ENERGY - 1;
+	CHECK(weapon_score(primary::fusion, range_band::close, fusion_only) == 0);
+	CHECK(choose_primary_for(fusion_only, range_band::close, primary::fusion) == primary::laser);
+	/* Without omega and fusion, the order of B3: helix at close range. */
+	weapon_view no_charge{all};
+	no_charge.owned = bits({primary::vulcan, primary::spreadfire, primary::plasma, primary::gauss, primary::helix, primary::phoenix});
+	CHECK(choose_primary_for(no_charge, range_band::close, primary::laser) == primary::helix);
 	/* Close range without helix: spreadfire. */
 	weapon_view close{all};
 	close.owned = bits({primary::spreadfire, primary::plasma, primary::gauss, primary::vulcan});
@@ -331,12 +356,12 @@ void test_values()
 	CHECK(item_value(plasma, r) == 0);
 	CHECK(item_value({item::primary, primary::spreadfire, 0}, r) == VALUE_SPARE_PRIMARY);
 	CHECK(upgrade_ratio({item::primary, primary::spreadfire, 0}, r.weapons) == 1);
-	/* Fusion and omega: taken (denied to others, dropped at death), for
-	 * little.
+	/* Section 9.5: fusion and omega are fired now: an upgrade like the
+	 * others (B3: a spare, 1).
 	 */
 	r.weapons.owned = bits({});
-	CHECK(item_value({item::primary, primary::fusion, 0}, r) == VALUE_SPARE_PRIMARY);
-	CHECK(item_value({item::primary, primary::omega, 0}, r) == VALUE_SPARE_PRIMARY);
+	CHECK(item_value({item::primary, primary::fusion, 0}, r) == 7);
+	CHECK(item_value({item::primary, primary::omega, 0}, r) > 3);
 	/* A new cannon is better than the laser (it comes with rounds). */
 	CHECK(item_value({item::primary, primary::gauss, 0}, r) == 7);
 	/* A cannon it has: its rounds, the more the emptier. */
@@ -479,6 +504,173 @@ void test_goal_choice()
 	CHECK(choose_goal(close) == goal_kind::collect);
 	close.refuel = 1.3;
 	CHECK(choose_goal(close) == goal_kind::refuel);
+}
+
+/* Section 9.5: the playtest's situations with the real numbers, and the
+ * opportunistic pickup.  A Hotshot bot (awareness 350) with the spawn
+ * laser and full shields fights a visible enemy 100 units away.
+ */
+void test_pickup_scenarios()
+{
+	const double awareness{skill_of(bot_skill::hotshot).awareness};
+	const double enemy_score{target_score(target_candidate{.id = 0, .visible = true, .distance = 100}, awareness)};
+	CHECK(enemy_score > 0.9 && enemy_score < 0.95);
+	resource_view spawn;
+	spawn.weapons.energy = spawn.energy;
+	const auto fight_with{[&](const item_desc &d, const resource_view &r, const double distance_to) {
+		goal_inputs in;
+		in.has_target = in.target_visible = in.threatened = true;
+		in.target_score = enemy_score;
+		in.shields = r.shields;
+		in.collect = collect_utility(item_value(d, r), distance_to);
+		in.collect_path = distance_to;
+		in.collect_upgrade = collect_in_fight(d, r);
+		in.grab = grab_worthwhile(item_value(d, r), distance_to, distance_to);
+		in.grab_shields = d.kind == item::shield;
+		in.current = goal_kind::engage;
+		return in;
+	}};
+	/* Plasma 20 units away: worth 7, taken (it was, if known). */
+	const item_desc plasma{item::primary, primary::plasma, 0};
+	CHECK(item_value(plasma, spawn) == 7);
+	CHECK(choose_goal(fight_with(plasma, spawn, 20)) == goal_kind::collect);
+	/* ... and 80 units away (a much better weapon, section 9.3). */
+	CHECK(choose_goal(fight_with(plasma, spawn, 80)) == goal_kind::collect);
+	/* An earthshaker 20 units away: B3 fought on past it (worth 2: 1.5
+	 * against the fight's 1.85, times 1.2 for the current goal).  The
+	 * grab takes it.
+	 */
+	const item_desc shaker{item::secondary, primary::laser, static_cast<uint8_t>(secondary::earthshaker)};
+	auto in{fight_with(shaker, spawn, 20)};
+	CHECK(goal_utility(in)[goal_kind::engage] > collect_utility(2, 20));
+	in.grab = false;
+	CHECK(choose_goal(in) == goal_kind::engage);
+	in.grab = true;
+	CHECK(choose_goal(in) == goal_kind::collect);
+	/* Beyond the grab radius the fight goes on. */
+	CHECK(choose_goal(fight_with(shaker, spawn, 60)) == goal_kind::engage);
+	/* A concussion pack 30 units away: grabbed; energy at full energy:
+	 * not worth it.
+	 */
+	const item_desc concussion{item::secondary, primary::laser, static_cast<uint8_t>(secondary::concussion)};
+	CHECK(choose_goal(fight_with(concussion, spawn, 30)) == goal_kind::collect);
+	CHECK(choose_goal(fight_with({item::energy}, spawn, 10)) == goal_kind::engage);
+	CHECK(choose_goal(fight_with({item::shield}, spawn, 10)) == goal_kind::engage);
+	/* Energy it needs is grabbed. */
+	resource_view drained{spawn};
+	drained.energy = drained.weapons.energy = 30;
+	CHECK(choose_goal(fight_with({item::energy}, drained, 25)) == goal_kind::collect);
+	/* A vulcan owner and plasma 80 units away: not a big upgrade (x1.46),
+	 * so not in a fight; 30 units away: grabbed.
+	 */
+	resource_view vulcan{spawn};
+	vulcan.weapons.owned = bits({primary::vulcan});
+	vulcan.weapons.vulcan_ammo = 1000;
+	CHECK(upgrade_ratio(plasma, vulcan.weapons) < BIG_UPGRADE_RATIO);
+	CHECK(choose_goal(fight_with(plasma, vulcan, 80)) == goal_kind::engage);
+	CHECK(choose_goal(fight_with(plasma, vulcan, 30)) == goal_kind::collect);
+	/* Shields: at 50 a shield powerup is worth a detour in a fight (0.8,
+	 * not 0.35); close by it is grabbed.
+	 */
+	resource_view hurt{spawn};
+	hurt.shields = 50;
+	CHECK(collect_in_fight({item::shield}, hurt));
+	CHECK(!collect_in_fight({item::shield}, spawn));
+	CHECK(!collect_in_fight(concussion, hurt));
+	CHECK(collect_in_fight(plasma, spawn));
+	CHECK(choose_goal(fight_with({item::shield}, hurt, 40)) == goal_kind::collect);
+	/* In danger (weak and threatened) no grab, retreat; but shields are
+	 * grabbed.
+	 */
+	resource_view weak{spawn};
+	weak.shields = 20;
+	auto d{fight_with(shaker, weak, 20)};
+	d.retreat_shields = 35;
+	CHECK(in_danger(d));
+	CHECK(!grab_applies(d));
+	CHECK(choose_goal(d) == goal_kind::retreat);
+	auto s{fight_with({item::shield}, weak, 20)};
+	s.retreat_shields = 35;
+	CHECK(grab_applies(s));
+	CHECK(choose_goal(s) == goal_kind::collect);
+	/* Invulnerable: no danger. */
+	d.invulnerable = true;
+	CHECK(!in_danger(d) && grab_applies(d));
+	/* The grab's limits. */
+	CHECK(grab_worthwhile(GRAB_MIN_VALUE, GRAB_RADIUS, GRAB_PATH));
+	CHECK(!grab_worthwhile(GRAB_MIN_VALUE - 0.01, 10, 10));
+	CHECK(!grab_worthwhile(2, GRAB_RADIUS + 1, 50));
+	CHECK(!grab_worthwhile(2, 30, GRAB_PATH + 1));
+	/* Without an enemy the grab wins over a far collection and roaming. */
+	goal_inputs calm;
+	calm.collect = collect_utility(7, 300);
+	calm.grab = true;
+	CHECK(choose_goal(calm) == goal_kind::collect);
+	CHECK(goal_utility(calm)[goal_kind::collect] == GRAB_UTILITY);
+}
+
+/* Section 9.5, the laser preference: a bot holding the spawn laser that
+ * owns one other gun takes it in every band where the table ranks it
+ * above the laser, at full energy and at little, from the laser as the
+ * current weapon (its hysteresis).
+ */
+void test_owned_weapon_selection()
+{
+	for (const double energy : {100.0, 60.0, 15.0})
+		for (const auto w : {primary::vulcan, primary::spreadfire, primary::plasma, primary::helix, primary::gauss, primary::phoenix, primary::fusion, primary::omega})
+		{
+			weapon_view v;
+			v.owned = bits({w});
+			v.energy = energy;
+			v.vulcan_ammo = 1000;
+			for (const auto band : {range_band::close, range_band::mid, range_band::distant})
+			{
+				/* Far: the slow blobs and the short omega are worse
+				 * than the laser; so is helix, low on energy.
+				 */
+				const bool laser_better{
+					band == range_band::distant && (w == primary::spreadfire || w == primary::phoenix || w == primary::omega || (w == primary::helix && energy < 20))
+				};
+				const auto chosen{choose_primary_for(v, band, primary::laser)};
+				CHECK(chosen == (laser_better ? primary::laser : w));
+			}
+		}
+	/* With a laser of level 4 and quad (3.4 at close range), the close
+	 * range guns still win over it.
+	 */
+	weapon_view strong;
+	strong.laser_level = 3;
+	strong.quad = true;
+	for (const auto w : {primary::spreadfire, primary::helix, primary::omega, primary::fusion})
+	{
+		strong.owned = bits({w});
+		CHECK(choose_primary_for(strong, range_band::close, primary::laser) == w);
+	}
+}
+
+/* Section 9.5: a powerup close by is noticed outside the field of view,
+ * any within the awareness inside it.
+ */
+void test_noticing()
+{
+	CHECK(notices_powerup(30, false, 350));
+	CHECK(notices_powerup(POWERUP_NOTICE_DISTANCE, false, 350));
+	CHECK(!notices_powerup(POWERUP_NOTICE_DISTANCE + 1, false, 350));
+	CHECK(notices_powerup(300, true, 350));
+	CHECK(!notices_powerup(400, true, 350));
+	/* A Trainee's small awareness still limits. */
+	CHECK(!notices_powerup(50, false, 40));
+	/* Section 9.5: the map knowledge also reaches its segments' worth of
+	 * path: a Hotshot (8 segments) in a spawn area of small segments
+	 * knows the powerups 300 units away through 20 of them.
+	 */
+	const unsigned hotshot{skill_of(bot_skill::hotshot).map_knowledge};
+	CHECK(!knows_from_map(true, 20u, hotshot));
+	CHECK(knows_from_map(true, 20u, hotshot, 300.0));
+	CHECK(!knows_from_map(true, 20u, hotshot, hotshot * MAP_KNOWLEDGE_UNITS_PER_SEGMENT + 1));
+	CHECK(knows_from_map(true, 5u, hotshot, 1000.0));
+	CHECK(!knows_from_map(false, 1u, hotshot, 10.0));
+	CHECK(!knows_from_map(true, 1u, 0, 10.0));
 }
 
 void test_fuel_centres()
@@ -681,6 +873,9 @@ int main()
 	test_values();
 	test_collect_utility();
 	test_goal_choice();
+	test_pickup_scenarios();
+	test_owned_weapon_selection();
+	test_noticing();
 	test_fuel_centres();
 	test_retreat();
 	test_map_knowledge();
