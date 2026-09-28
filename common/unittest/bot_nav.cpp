@@ -536,6 +536,85 @@ void test_roam_goals()
 	}
 }
 
+/* Stage B3: the path costs to every node within reach equal the
+ * reference Dijkstra's, with passability and extra costs; the segment
+ * counts are those of a shortest path; the cost bound and the node limit
+ * leave nodes out, never a wrong cost in.
+ */
+void test_nav_distances()
+{
+	nav_distances nd;
+	/* Not computed yet: nothing reached. */
+	CHECK(!nd.reached(0));
+	for (uint32_t seed = 1; seed <= 20; ++seed)
+	{
+		grid gr{12, 9, 3, 0.2, seed};
+		std::minstd_rand rng{seed};
+		const auto extra{[seed](const uint32_t from, const nav_edge &e) {
+			return ((from * 7 + e.side + seed) % 5 == 0) ? 15.0 : 0.0;
+		}};
+		const auto passable{[seed](const uint32_t from, const nav_edge &e) {
+			return (from + e.to + seed) % 11 != 0;
+		}};
+		for (unsigned q = 0; q < 5; ++q)
+		{
+			uint32_t s{static_cast<uint32_t>(rng() % gr.g.size())};
+			if (gr.blocked[s])
+				s = 0;
+			const auto ref{dijkstra(gr.g, s, passable, extra)};
+			nd.compute(gr.g, s, passable, extra, 1e9, 100000);
+			CHECK(nd.start() == s);
+			for (uint32_t n = 0; n < gr.g.size(); ++n)
+			{
+				CHECK(nd.reached(n) == !std::isinf(ref[n]));
+				if (!nd.reached(n))
+				{
+					CHECK(!nd.cost(n) && !nd.hops(n));
+					continue;
+				}
+				CHECK(near(*nd.cost(n), ref[n], 1e-5));
+				/* Every edge costs at least 20: a path of k segments costs
+				 * at least 20 k, and no more than cost / 20 segments.
+				 */
+				CHECK(*nd.hops(n) * 20.0 <= *nd.cost(n) + 1e-6);
+			}
+			CHECK(*nd.hops(s) == 0 && *nd.cost(s) == 0);
+			/* The bound: exactly the nodes within it (their cost final). */
+			nd.compute(gr.g, s, passable, extra, 100, 100000);
+			for (uint32_t n = 0; n < gr.g.size(); ++n)
+			{
+				CHECK(nd.reached(n) == (ref[n] <= 100));
+				if (nd.reached(n))
+					CHECK(near(*nd.cost(n), ref[n], 1e-5));
+			}
+			/* The node limit: at most that many, the nearest, exact. */
+			nd.compute(gr.g, s, passable, extra, 1e9, 10);
+			unsigned reached{0};
+			double worst{0};
+			for (uint32_t n = 0; n < gr.g.size(); ++n)
+				if (nd.reached(n))
+				{
+					++reached;
+					CHECK(near(*nd.cost(n), ref[n], 1e-5));
+					worst = std::max(worst, ref[n]);
+				}
+			CHECK(reached <= 10 && nd.expanded() == reached);
+			for (uint32_t n = 0; n < gr.g.size(); ++n)
+				if (!nd.reached(n))
+					CHECK(ref[n] >= worst);
+		}
+	}
+	/* Hops on a plain grid: the Manhattan distance. */
+	grid open{6, 6, 1, 0, 1};
+	nd.compute(open.g, open.id(0, 0, 0), all_passable, no_extra, 1e9, 100000);
+	for (unsigned y = 0; y < 6; ++y)
+		for (unsigned x = 0; x < 6; ++x)
+			CHECK(*nd.hops(open.id(x, y, 0)) == x + y);
+	/* An invalid start: nothing. */
+	nd.compute(open.g, 1000, all_passable, no_extra, 1e9, 100000);
+	CHECK(!nd.reached(0));
+}
+
 }
 
 int main()
@@ -548,6 +627,7 @@ int main()
 	test_string_pulling_and_following();
 	test_stuck_detector();
 	test_roam_goals();
+	test_nav_distances();
 	std::puts("test-bot-nav: all checks passed");
 	return 0;
 }

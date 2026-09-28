@@ -39,6 +39,7 @@
 #include "net_v2_session.h"
 #include "net_v2_game.h"
 #include "multi.h"
+#include "bot.h"
 #include "object.h"
 #include "player.h"
 #include "powerup.h"
@@ -596,7 +597,10 @@ host_decision host_decide(const playernum_t pnum, const netid_t id, const uint8_
 			auto &ship{*Objects.vcptr(vcplayerptr(pnum)->objnum)};
 			vms_vector pos{ship.pos};
 			fix speed{};
-			if (!net_interp_newest_position(pnum, pos, speed))
+			/* A bot's ship is flown here: it is where it is (its
+			 * interpolation ring, if any, is stale).
+			 */
+			if (bot_is_local(pnum) || !net_interp_newest_position(pnum, pos, speed))
 				speed = vm_vec_mag_quick(ship.mtype.phys_info.velocity).d;
 			q.in_range = nv::pickup_in_range(vm_vec_dist_quick(pos, r.obj->pos).d, r.obj->size, ship.size, speed);
 		}
@@ -1252,6 +1256,57 @@ void net_objects_host_own_ship_inventory(const playernum_t pnum, const bool forc
 	m.write(buf);
 	send(session_msg::inventory, buf);
 	last = {inv, true, now};
+}
+
+bool net_objects_bot_can_use(const playernum_t pnum, const powerup_type_t id, const uint32_t count)
+{
+	if (!net_objects_active() || !multi_i_am_master() || pnum >= MAX_PLAYERS || pnum >= N_players)
+		return false;
+	const auto desc{desc_of(id)};
+	if (desc.kind == nv::pickup_kind::none)
+		return false;
+	auto &Objects{LevelUniqueObjectState.Objects};
+	const auto &ship{*Objects.vcptr(vcplayerptr(pnum)->objnum)};
+	if (ship.type != object_type::OBJ_PLAYER)
+		return false;
+	return nv::evaluate_pickup(for_rules(inventory_of(ship)), rules_for(pnum), desc, count).usable;
+}
+
+bool net_objects_bot_touch(const playernum_t pnum, const vmobjptridx_t powerup)
+{
+	if (!net_objects_active() || !multi_i_am_master() || pnum == Player_num || pnum >= MAX_PLAYERS || pnum >= N_players)
+		return false;
+	if (A.dropped[pnum])
+		return false;
+	const auto id{netid_of(*powerup, powerup.get_unchecked_index())};
+	if (id == NETID_NONE)
+		/* No net id (a robot's egg in a robot game): the v1 way is the
+		 * local player's only.
+		 */
+		return false;
+	const auto powerup_id{get_powerup_id(powerup)};
+	if (desc_of(powerup_id).kind == nv::pickup_kind::none)
+		return false;
+	auto &Objects{LevelUniqueObjectState.Objects};
+	auto &ship{*Objects.vmptr(vcplayerptr(pnum)->objnum)};
+	if (ship.type != object_type::OBJ_PLAYER)
+		return false;
+	/* The ship is the truth for a player the host flies: the copy is
+	 * brought up to date without a report, then the decision is the one
+	 * for every player, and the grant goes into the copy and the ship.
+	 */
+	A.mirrors[pnum].assign(inventory_of(ship));
+	const auto h{host_decide(pnum, id, underlying_value(powerup_id))};
+	if (!h.d.grant)
+		return false;
+	host_grant_remote(pnum, id, h);
+	/* The caller applies what do_powerup does besides the inventory (a
+	 * cloak's time and MULTI_CLOAK, an invulnerability that is no
+	 * longer faked) and then sends the new inventory with
+	 * net_objects_host_own_ship_inventory: the clients must not see the
+	 * cloaked flag before the cloak's start.
+	 */
+	return true;
 }
 
 void net_objects_send_all_inventories()

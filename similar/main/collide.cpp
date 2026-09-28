@@ -2520,6 +2520,10 @@ static void collide_player_and_powerup(const d_robot_info_array &, object &playe
 	{
 		collide_live_local_player_and_powerup(powerup);
 	}
+	else if (bot_touch_powerup(playerobj, powerup))
+	{
+		/* A bot the host flies: the host's pickup path (stage B3). */
+	}
 	else if (+(Game_mode & GM_MULTI_COOP) && (get_player_id(playerobj) != Player_num))
 	{
 		switch (get_powerup_id(powerup)) {

@@ -1116,6 +1116,8 @@ static void do_cloak_stuff()
 						multi_send_decloak(Player_num); // For demo recording
 #endif
 				}
+				else
+					bot_cloak_expired(i);
 			}
 		}
 	}
