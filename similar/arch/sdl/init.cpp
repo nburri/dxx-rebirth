@@ -17,6 +17,7 @@
 #include "text.h"
 #include "args.h"
 #include "window.h"
+#include "console.h"
 #include "dxxsconf.h"
 
 #if DXX_USE_SDLIMAGE
@@ -24,6 +25,104 @@
 #endif
 
 namespace dsx {
+
+#if DXX_MAX_JOYSTICKS && SDL_MAJOR_VERSION == 2
+namespace {
+
+/* Set a hint unless the player set the environment variable of the
+ * same name: SDL ignores hints below SDL_HINT_OVERRIDE priority when
+ * that variable exists, so every choice below can be undone from the
+ * environment (e.g. SDL_JOYSTICK_HIDAPI=1).
+ */
+static void set_default_hint(const char *const name, const char *const value)
+{
+	SDL_SetHintWithPriority(name, value, SDL_HINT_DEFAULT);
+}
+
+static void log_hint(const char *const name)
+{
+	const auto v{SDL_GetHint(name)};
+	con_printf(CON_NORMAL, "sdl-joystick: hint %s=%s%s", name, v ? v : "(SDL default)", SDL_getenv(name) ? " (from environment)" : "");
+}
+
+/* Must run before the joystick and gamecontroller subsystems start:
+ * SDL reads most of these hints only in SDL_Init.
+ */
+static void set_joystick_hints()
+{
+	/* event_pump (event.cpp) calls SDL_JoystickUpdate right after
+	 * SDL_PumpEvents, so that the frame probe can measure it on its
+	 * own.  Without this hint, SDL_PumpEvents would also call it.
+	 */
+#ifdef SDL_HINT_AUTO_UPDATE_JOYSTICKS
+	set_default_hint(SDL_HINT_AUTO_UPDATE_JOYSTICKS, "0");
+#endif
+#ifdef _WIN32
+	/* Input stalls on Windows (v0.61-exp-19 gamelog: clusters of 50 to
+	 * 180 ms frames, all spent in SDL_PumpEvents).  SDL 2.32 polls and
+	 * detects joysticks inside SDL_PumpEvents, on the game thread, and
+	 * several of its Windows backends do slow work there whenever
+	 * Windows reports a device change, even for devices that are not
+	 * game controllers:
+	 *
+	 * - HIDAPI registers for WM_DEVICECHANGE with
+	 *   DEVICE_NOTIFY_ALL_INTERFACE_CLASSES, so an arrival or removal of
+	 *   any device interface (USB, audio endpoints, Bluetooth, virtual
+	 *   devices of vendor tools) makes the next SDL_JoystickUpdate call
+	 *   SDL_hid_enumerate, which opens every HID device on the system
+	 *   to read its attributes and strings.  HIDAPI only adds extended
+	 *   support for some gamepads (PlayStation, Switch, Stadia, Steam:
+	 *   gyro, LEDs, rumble) which Descent does not use; without it,
+	 *   those pads still work through DirectInput and the
+	 *   gamecontrollerdb.txt mappings, and Xbox pads through XInput.
+	 *
+	 * - RawInput handles Xbox-compatible pads: it opens each HID
+	 *   device again on arrival, and while such a pad is connected, it
+	 *   correlates its reports with XInput and Windows.Gaming.Input
+	 *   readings every frame.  XInput covers these pads.
+	 *
+	 * - Windows.Gaming.Input delivers device arrivals and removals on
+	 *   its own thread, which holds SDL's joystick lock while it looks
+	 *   the device up; SDL_JoystickUpdate on the game thread waits for
+	 *   that lock.  Its startup is also slow.  XInput covers the same
+	 *   pads.
+	 *
+	 * - SDL_JOYSTICK_THREAD moves the joystick device notification
+	 *   window (WM_DEVICECHANGE, raw input device messages) to a
+	 *   helper thread, so that the game thread's message pump does not
+	 *   process them.
+	 *
+	 * DirectInput (flight sticks such as the Thrustmaster T.16000M,
+	 * which have no HIDAPI driver) and XInput (Xbox pads) stay enabled.
+	 * DirectInput still enumerates game controllers again on the game
+	 * thread after a HID device change (CM_Register_Notification and
+	 * WM_DEVICECHANGE, with follow-ups 300 ms and 2 s later); the frame
+	 * probe shows that as "joystick-update" time with "hid-changes".
+	 */
+	set_default_hint(SDL_HINT_JOYSTICK_HIDAPI, "0");
+	set_default_hint(SDL_HINT_JOYSTICK_RAWINPUT, "0");
+#ifdef SDL_HINT_JOYSTICK_WGI
+	set_default_hint(SDL_HINT_JOYSTICK_WGI, "0");
+#endif
+#ifdef SDL_HINT_JOYSTICK_THREAD
+	set_default_hint(SDL_HINT_JOYSTICK_THREAD, "1");
+#endif
+	log_hint(SDL_HINT_JOYSTICK_HIDAPI);
+	log_hint(SDL_HINT_JOYSTICK_RAWINPUT);
+#ifdef SDL_HINT_JOYSTICK_WGI
+	log_hint(SDL_HINT_JOYSTICK_WGI);
+#endif
+#ifdef SDL_HINT_JOYSTICK_THREAD
+	log_hint(SDL_HINT_JOYSTICK_THREAD);
+#endif
+#endif
+#ifdef SDL_HINT_AUTO_UPDATE_JOYSTICKS
+	log_hint(SDL_HINT_AUTO_UPDATE_JOYSTICKS);
+#endif
+}
+
+}
+#endif
 
 static void arch_close(void)
 {
@@ -103,6 +202,7 @@ arch_atexit arch_init()
 	if (!CGameArg.CtlNoJoystick)
 	{
 #if SDL_MAJOR_VERSION == 2
+		set_joystick_hints();
 		/* Initialize the gamecontroller layer first, so that the mappings
 		 * from gamecontrollerdb.txt are loaded before joy_init() asks
 		 * SDL_IsGameController().  Otherwise, a device that is only
