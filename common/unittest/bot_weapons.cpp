@@ -1354,12 +1354,32 @@ void test_volleys()
 	/* Never more than it holds. */
 	CHECK(volley_size(view(secondary::homing, 4, bot_style::aggressive, 2, 80)) == 2);
 	CHECK(volley_size(view(secondary::homing, 4, bot_style::aggressive, 0, 80)) == 0);
-	/* Not a good target: one. */
-	CHECK(volley_size(view(secondary::concussion, 4, bot_style::balanced, 10, 170)) == 1);
+	/* Not a good target: one (section 9.9: Insane a pair). */
+	CHECK(volley_size(view(secondary::concussion, 3, bot_style::balanced, 10, 170)) == 1);
+	CHECK(volley_size(view(secondary::concussion, 4, bot_style::balanced, 10, 170)) == 2);
+	CHECK(volley_size(view(secondary::concussion, 4, bot_style::balanced, 10, 210)) == 1);
+	/* Section 9.9: from Ace a good target reaches further. */
+	CHECK(volley_size(view(secondary::concussion, 2, bot_style::balanced, 10, 140)) == 1);
+	CHECK(volley_size(view(secondary::concussion, 3, bot_style::balanced, 10, 140)) == 3);
+	CHECK(volley_size(view(secondary::concussion, 4, bot_style::aggressive, 10, 155)) == 5);
+	CHECK(volley_size(view(secondary::homing, 3, bot_style::balanced, 10, 190)) == 3);
+	CHECK(volley_size(view(secondary::homing, 2, bot_style::balanced, 10, 190)) == 1);
+	{
+		auto v{view(secondary::concussion, 3, bot_style::balanced, 10, 80)};
+		v.target_lateral_speed = 45;
+		CHECK(volley_size(v) == 3);
+		v.smarts = 2;
+		CHECK(volley_size(v) == 1);
+	}
 	{
 		auto v{view(secondary::concussion, 4, bot_style::balanced, 10, 80)};
-		v.target_lateral_speed = 60;
+		v.target_lateral_speed = 55;
+		CHECK(volley_size(v) == 4);
+		v.target_lateral_speed = 70;
+		CHECK(volley_size(v) == 2);
+		v.smarts = 3;
 		CHECK(volley_size(v) == 1);
+		v.smarts = 4;
 		/* A homing volley follows a crosser. */
 		v.s = secondary::homing;
 		CHECK(volley_size(v) == 4);
@@ -1369,6 +1389,9 @@ void test_volleys()
 		v.cloaked = true;
 		CHECK(volley_size(v) == 1);
 	}
+	/* Section 9.9: the stream's cone after the first round. */
+	CHECK(volley_cone(radians(3)) > radians(5.9) && volley_cone(radians(3)) < radians(6.1));
+	CHECK(volley_cone(radians(9)) > radians(17.9));
 	/* Smart missiles: a burst at a target behind cover (seen a moment
 	 * ago), from Ace also at one in sight at mid range.
 	 */
@@ -1504,6 +1527,91 @@ void test_heavy_boldness()
 			CHECK(judge_blast(close, sc, md, risk_profile_of(k, st)) == risk_verdict::point_blank);
 			CHECK(judge_blast(lethal, sc, md, risk_profile_of(k, st)) == risk_verdict::lethal);
 		}
+}
+
+/* Section 9.9: after the exp-19 playtest ("do not use missiles
+ * aggressive enough, even on insane"): the style's missile interval,
+ * the heavy missile's least distance by the risk the bot accepts, a
+ * cloaked Ace or Insane bot's heavy missile at a close target, and the
+ * light missiles' verdict for the log.
+ */
+void test_log_tuning_missiles()
+{
+	/* The interval by style: Aggressive fires sooner, Cautious later. */
+	CHECK(missile_interval_scale(bot_style::aggressive) < 1 && missile_interval_scale(bot_style::cautious) > 1 && missile_interval_scale(bot_style::balanced) == 1);
+	{
+		auto m{only(armed(4), {secondary::concussion})};
+		m.since_missile = 0.8;
+		CHECK(!choose_secondary(m));
+		m.missile_interval_scale = missile_interval_scale(bot_style::aggressive);
+		CHECK(choose_secondary(m) == secondary::concussion);
+	}
+	/* The heavy missile's least distance with the log's data (blast 80,
+	 * damage 199 and 220): 1 and 1.2 radii plus the margin without risk
+	 * (92, 108); an aggressive Insane bot at full shields accepts 66
+	 * points and needs 66 and 79 units; never below the share's bound or
+	 * the range's least.
+	 */
+	missile_data mega{.speed = 160, .blast_radius = 80, .thrust = true, .homing = true, .damage = 199};
+	missile_data shaker{.speed = 160, .blast_radius = 80, .thrust = true, .homing = true, .child_blast_radius = 80, .damage = 220, .child_damage = 100, .children = 6};
+	CHECK(std::abs(heavy_min_distance(secondary::mega, mega) - 92) < 1e-9);
+	CHECK(std::abs(heavy_min_distance(secondary::earthshaker, shaker) - 108) < 1e-9);
+	const auto agg{risk_profile_of(bot_skill::insane, bot_style::aggressive)};
+	const double accept{agg.self_budget * 100};
+	CHECK(accept > 60 && accept < 70);
+	CHECK(heavy_min_distance(secondary::mega, mega, accept) > 64 && heavy_min_distance(secondary::mega, mega, accept) < 68);
+	CHECK(heavy_min_distance(secondary::earthshaker, shaker, accept) > 77 && heavy_min_distance(secondary::earthshaker, shaker, accept) < 81);
+	CHECK(heavy_min_distance(secondary::mega, mega, 1000) >= 80 * (1 - HEAVY_ACCEPT_SHARE) + BLAST_MARGIN - 1e-9);
+	CHECK(heavy_min_distance(secondary::mega, blast(20), 1000) == HEAVY_MIN_DISTANCE);
+	/* A cautious Hotshot keeps nearly the whole distance. */
+	CHECK(heavy_min_distance(secondary::mega, mega, risk_profile_of(bot_skill::hotshot, bot_style::cautious).self_budget * 100) > 90);
+	/* The standoff follows. */
+	{
+		auto m{only(armed(4), {secondary::mega})};
+		m.data[idx(secondary::mega)] = mega;
+		m.target_distance = 40;
+		m.standoff_scale = agg.standoff_scale;
+		const double strict{heavy_standoff(m)};
+		m.accepted_damage = accept;
+		CHECK(heavy_standoff(m) < strict - 15);
+	}
+	/* Cloaked: from Ace a heavy missile at a target within 100 units. */
+	{
+		auto m{only(armed(4), {secondary::mega})};
+		m.cloaked = true;
+		m.target_distance = 80;
+		CHECK(heavy_check(m, secondary::mega) != heavy_verdict::cloaked);
+		m.target_distance = 120;
+		CHECK(heavy_check(m, secondary::mega) == heavy_verdict::cloaked);
+		m.target_distance = 80;
+		m.smarts = 2;
+		CHECK(heavy_check(m, secondary::mega) == heavy_verdict::cloaked);
+	}
+	/* The light missiles' verdict. */
+	{
+		auto m{only(armed(4), {secondary::concussion})};
+		CHECK(light_check(m, choose_secondary(m)) == light_verdict::chosen);
+		m.since_missile = 0.5;
+		CHECK(light_check(m, choose_secondary(m)) == light_verdict::cooldown);
+		m.since_missile = 1e9;
+		m.shot_clear = false;
+		CHECK(light_check(m, choose_secondary(m)) == light_verdict::no_clear_shot);
+		m.target_visible = false;
+		CHECK(light_check(m, choose_secondary(m)) == light_verdict::not_visible);
+		m.target_visible = m.shot_clear = true;
+		m.target_distance = 20;
+		CHECK(light_check(m, choose_secondary(m)) == light_verdict::too_close);
+		m.target_distance = 250;
+		CHECK(light_check(m, choose_secondary(m)) == light_verdict::too_far);
+		m.has_target = false;
+		CHECK(light_check(m, choose_secondary(m)) == light_verdict::no_target);
+		const auto none{only(armed(4), {secondary::guided})};
+		CHECK(light_check(none, choose_secondary(none)) == light_verdict::none_owned);
+		const auto heavy{armed(4)};
+		CHECK(light_check(heavy, choose_secondary(heavy)) == light_verdict::heavy);
+		CHECK(std::string_view{name_of(light_verdict::nose_blast)} == "nose-blast");
+		CHECK(std::string_view{name_of(light_verdict::fired)} == "fired");
+	}
 }
 
 /* Section 9.8: the death dump. */
@@ -1663,6 +1771,7 @@ void test_dump_blast()
 
 int main()
 {
+	test_log_tuning_missiles();
 	test_volleys();
 	test_heavy_boldness();
 	test_dump_blast();

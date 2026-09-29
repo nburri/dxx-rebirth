@@ -433,6 +433,14 @@ struct bot_state
 	uint32_t turn_from{}, turn_until{};
 	/* Section 9.5: a valuable powerup close by is the collect goal. */
 	bool grabbing{};
+	/* Section 9.9: with no target, the enemy whose last known place the
+	 * bot flies to (b::seek_utility), and for each enemy the memory
+	 * tick + 1 of the place it searched already (reached, nobody there).
+	 */
+	std::optional<uint8_t> seek_who;
+	per_player_array<uint32_t> seek_done{};
+	/* Section 9.9: what it holds to fight with (the log). */
+	b::armed_level armed{b::armed_level::none};
 	/* Section 9.5, the log: the goal's choice at the last strategy
 	 * tick (the chosen one and the best other), the heavy missiles'
 	 * verdict, the last denied touch, the next summary line.
@@ -443,6 +451,8 @@ struct bot_state
 	double runner_up_u{};
 	double collect_u{};
 	b::heavy_verdict heavy_why{b::heavy_verdict::none_owned};
+	/* Section 9.9: the light missiles' verdict (the log). */
+	b::light_verdict light_why{b::light_verdict::none_owned};
 	double heavy_min{};
 	uint16_t deny_key{0xffff};
 	uint8_t deny_reason{};
@@ -1798,7 +1808,8 @@ goal_place best_grab(const bot_state &bs, const object &obj, const b::resource_v
 			continue;
 		if (!net_objects_bot_can_use(bs.pid, type, k.count))
 			continue;
-		const double score{value / (straight + 20)};
+		/* Section 9.9: the nearest reasonable one first. */
+		const double score{b::grab_rank(value, path)};
 		if (score > best_score)
 		{
 			best_score = score;
@@ -2074,6 +2085,44 @@ void think(bot_state &bs, object &obj, const uint32_t tick)
 			phase_upgrade = up;
 		}
 	}
+	/* Section 9.9: what it holds to fight with, whether its armament is
+	 * weak, and with no target the enemy to seek (the freshest place it
+	 * saw one within b::SEEK_MEMORY_SCALE of its memory time, not
+	 * searched yet, not where it is now).
+	 */
+	std::array<uint8_t, b::BOT_SECONDARY_COUNT> own_ammo{};
+	for (unsigned i = 0; i < b::BOT_SECONDARY_COUNT && i < MAX_SECONDARY_WEAPONS; ++i)
+		own_ammo[i] = obj.ctype.player_info.secondary_ammo[static_cast<secondary_weapon_index>(i)];
+	bs.armed = b::armed_of(own_ammo, sk.weapon_smarts);
+	const bool weak{b::weak_armament(res.weapons, own_ammo)};
+	bs.seek_who.reset();
+	double seek{0};
+	if (!bs.target && bs.armed != b::armed_level::none)
+	{
+		const auto seek_ticks{static_cast<uint32_t>(memory_ticks * b::SEEK_MEMORY_SCALE)};
+		uint32_t freshest{0};
+		for (playernum_t i = 0; i < N_players && i < MAX_PLAYERS; ++i)
+		{
+			const auto &m{bs.memory[i]};
+			if (i == bs.pid || !m.valid || same_team(bs.pid, i) || tick - m.tick > seek_ticks)
+				continue;
+			if (bs.seek_done[i] == m.tick + 1)
+				continue;
+			if (b::distance(pos, m.pos) <= b::SEEK_ARRIVED)
+			{
+				/* Searched: nobody there. */
+				bs.seek_done[i] = m.tick + 1;
+				continue;
+			}
+			if (!bs.seek_who || m.tick > freshest)
+			{
+				bs.seek_who = i;
+				freshest = m.tick;
+			}
+		}
+		if (bs.seek_who)
+			seek = b::seek_utility(bs.armed, st.engage_weight * bs.tactics.engage_weight);
+	}
 	const b::goal_inputs gin{
 		.has_target = bs.target.has_value(),
 		.target_visible = target_visible,
@@ -2088,6 +2137,10 @@ void think(bot_state &bs, object &obj, const uint32_t tick)
 		.grab_shields = grab.shields,
 		.grab_value = grab.value,
 		.grab_invulnerability = grab.invulnerability,
+		.grab_path = grab.path,
+		.armed = bs.armed,
+		.weak = weak,
+		.seek = seek,
 		.phase_engage = phase_engage,
 		.phase_collect = phase_collect,
 		.third_party = b::third_party_factor(bs.cfg.style, bs.third_parties),
@@ -2099,18 +2152,21 @@ void think(bot_state &bs, object &obj, const uint32_t tick)
 		.current = current_goal(bs, target_visible),
 	};
 	const auto goal{b::choose_goal(gin)};
-	/* The grab is the collect goal while it applies. */
-	bs.grabbing = goal == b::goal_kind::collect && b::grab_applies(gin);
+	const auto u{b::goal_utility(gin)};
+	/* The grab is the collect goal while it is what made collecting win
+	 * (section 9.9: b::collect_source), and so is the phase's upgrade
+	 * (section 9.8).
+	 */
+	bs.grabbing = goal == b::goal_kind::collect && u.collect_from == b::collect_source::grab;
 	if (bs.grabbing)
 		collect = grab;
-	/* Section 9.8: the phase's upgrade, when it is what made collecting
-	 * win.
-	 */
-	else if (goal == b::goal_kind::collect && phase_upgrade && phase_collect >= b::goal_utility(gin)[b::goal_kind::collect])
+	else if (goal == b::goal_kind::collect && phase_upgrade && u.collect_from == b::collect_source::phase)
 		collect = *phase_upgrade;
+	/* Section 9.9: seeking is the hunt without a target. */
+	if (goal != b::goal_kind::hunt || bs.target)
+		bs.seek_who.reset();
 	/* The log: the goal's utility against the best other. */
 	{
-		const auto u{b::goal_utility(gin)};
 		bs.chosen = goal;
 		bs.chosen_u = u[goal];
 		bs.collect_u = u[b::goal_kind::collect];
@@ -2141,7 +2197,8 @@ void think(bot_state &bs, object &obj, const uint32_t tick)
 			 * moments.  A target that moves on is planned for again at
 			 * most every half second.
 			 */
-			const auto &m{bs.memory[*bs.target]};
+			/* Section 9.9: or, without one, the enemy it seeks. */
+			const auto &m{bs.memory[bs.target ? *bs.target : *bs.seek_who]};
 			const bool moved{bs.goal != bot_goal::hunt || bs.goal_seg != m.segment};
 			if (replan_due || (moved && tick - bs.last_plan_tick >= BOT_HUNT_REPLAN_TICKS))
 				set_goal(bs, obj, bot_goal::hunt, m.segment, m.pos, tick);
@@ -2731,8 +2788,8 @@ void plan_heavy(bot_state &bs, const object &obj, const uint32_t tick, b::missil
 	const auto t{bs.target ? *bs.target : 0xffu};
 	const bool may{bs.target && target_pos && (target_visible || m.target_seen_ago <= b::CORNER_SEEN_WITHIN) &&
 		m.smarts >= b::min_smarts(b::secondary::mega) &&
-		m.since_missile >= b::missile_interval(m.smarts) && m.since_heavy >= b::heavy_interval(m.smarts) &&
-		!m.cloaked && !m.heavy_used_on_target};
+		m.since_missile >= b::missile_interval(m.smarts) * m.missile_interval_scale && m.since_heavy >= b::heavy_interval(m.smarts) &&
+		!(m.cloaked && (m.smarts < 3 || m.target_distance > b::CLOAKED_MISSILE_DISTANCE)) && !m.heavy_used_on_target};
 	if (!may)
 		bs.heavy_planned = false;
 	else
@@ -3031,6 +3088,8 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 		}
 		m.smarts = sk.weapon_smarts;
 		m.mine_interval_scale = bs.style->mine_interval;
+		m.missile_interval_scale = b::missile_interval_scale(bs.cfg.style);
+		m.accepted_damage = bs.risk.self_budget * std::clamp(obj.shields / 65536.0, 0.0, 200.0);
 		m.has_target = target_pos.has_value();
 		m.target_visible = target_visible;
 		m.shot_clear = target_visible && bs.shot_clear;
@@ -3094,7 +3153,7 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 			if (m.ammo[static_cast<unsigned>(s)])
 			{
 				heavy_md = &m.data[static_cast<unsigned>(s)];
-				bs.heavy_min = b::heavy_min_distance(s, *heavy_md) * m.standoff_scale;
+				bs.heavy_min = b::heavy_min_distance(s, *heavy_md, m.accepted_damage) * m.standoff_scale;
 				break;
 			}
 		/* The log: each change of the verdict while the bot has one. */
@@ -3135,7 +3194,12 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 			}
 		}
 		if (!chosen)
+		{
 			chosen = b::choose_secondary(m);
+			bs.light_why = b::light_check(m, chosen);
+		}
+		else
+			bs.light_why = b::light_verdict::chosen;
 		if (!chosen)
 			return;
 		bs.missile = chosen;
@@ -3247,8 +3311,20 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 	}
 	/* Section 9.5: the bot's own flight toward the burst along the nose. */
 	const double closing{b::dot(vel, frame.f)};
-	if (!heavy && !b::missile_release(s, err, cone, impact, md, invulnerable_left, closing, target_closing))
-		return;
+	if (!heavy && role != b::missile_role::mine)
+	{
+		/* Section 9.9: the rounds after the first of a straight volley
+		 * within the wider cone of the stream.
+		 */
+		const bool stream{bs.volley_left && bs.volley_missile == s && role == b::missile_role::straight};
+		const double release_cone{stream ? b::volley_cone(cone) : cone};
+		if (!b::missile_release(s, err, release_cone, impact, md, invulnerable_left, closing, target_closing))
+		{
+			bs.light_why = err > b::missile_cone(role, release_cone, md.homing) ? b::light_verdict::aiming : b::light_verdict::nose_blast;
+			return;
+		}
+		bs.light_why = b::light_verdict::fired;
+	}
 	bs.missile.reset();
 	bs.heavy_aim.reset();
 	bs.missile_fire = s;
@@ -3304,7 +3380,7 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 			/* Section 9.5: clear of its own blast until it is over (the
 			 * cooldown now drops the standoff).
 			 */
-			bs.blast_hold = b::heavy_min_distance(s, md) * bs.risk.standoff_scale + 8;
+			bs.blast_hold = b::heavy_min_distance(s, md, bs.risk.self_budget * std::clamp(obj.shields / 65536.0, 0.0, 200.0)) * bs.risk.standoff_scale + 8;
 			bs.blast_hold_until = tick + static_cast<uint32_t>(std::ceil(b::blast_danger_seconds(role, impact, md) * b::BOT_TICK_RATE));
 			bs.standoff = std::max(bs.standoff, bs.blast_hold);
 		}
@@ -3416,16 +3492,17 @@ void log_summary(const bot_state &bs, const object &obj, const uint32_t tick)
 		std::snprintf(powerup, sizeof(powerup), "-");
 	char arm[160];
 	describe_armament(pi, arm, sizeof(arm));
-	con_printf(CON_VERBOSE, "bots: '%s' goal=%s %.2f (next %s %.2f, collect %.2f%s%s%s) tgt=%s | %s [%s] | sh=%.0f en=%.0f | pu=%s | heavy=%s min=%.0f keep=%.0f risk=%.2f/%.1f%s%s%s%s",
+	con_printf(CON_VERBOSE, "bots: '%s' goal=%s %.2f (next %s %.2f, collect %.2f%s%s%s%s) tgt=%s | %s [%s] | sh=%.0f en=%.0f | pu=%s | heavy=%s min=%.0f keep=%.0f risk=%.2f/%.1f%s%s%s%s | light=%s armed=%s",
 		static_cast<const char *>(bs.cfg.name),
-		goal_name(bs.chosen), bs.chosen_u, goal_name(bs.runner_up), bs.runner_up_u, bs.collect_u, bs.grabbing ? " grab" : "", bs.powerup_phase ? " phase" : "", bs.third_parties ? " 3rd-party" : "",
+		goal_name(bs.chosen), bs.chosen_u, goal_name(bs.runner_up), bs.runner_up_u, bs.collect_u, bs.grabbing ? " grab" : "", bs.powerup_phase ? " phase" : "", bs.third_parties ? " 3rd-party" : "", bs.seek_who ? " seek" : "",
 		target,
 		primary_name(underlying_value(pi.Primary_weapon.get_active())), arm,
 		obj.shields / 65536.0, pi.energy / 65536.0,
 		powerup,
 		b::name_of(bs.heavy_why), bs.heavy_min, bs.standoff,
 		bs.risk.self_budget, bs.risk.trade, bs.hugging ? " hug" : "", bs.duck_point && tick < bs.duck_until ? " duck" : "",
-		bs.dumping ? " dump" : "", bs.turning.phase == b::turn_phase::reversing ? " reverse-turn" : bs.turning.phase == b::turn_phase::boost ? " boost" : "");
+		bs.dumping ? " dump" : "", bs.turning.phase == b::turn_phase::reversing ? " reverse-turn" : bs.turning.phase == b::turn_phase::boost ? " boost" : "",
+		b::name_of(bs.light_why), b::name_of(bs.armed));
 }
 
 /* Section 9.6: toward the duck point, slowing to a hold on it. */

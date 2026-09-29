@@ -2339,6 +2339,228 @@ the velocities, the flight model at four frame rates).
 untouched: the bots fire through the same calls as before), clients,
 the protocol (still 104), the aim and the primaries.
 
+### 9.9 After the v0.61-exp-19 playtest: fight more, collect smarter, missiles; respawn placement, ghost kills
+
+The playtest (the host alone against five bots on the tight level "Earth
+Shaker": havoc Insane Balanced, nomad Insane Cautious, ravager Hotshot
+Balanced, sparky Insane Aggressive, wraith Insane Collector; a
+`-verbose` log of ten minutes).  The user: "the on-dying trigger for
+missiles works well.  While alive the bots are more hesitant."  "Bots
+still do not properly react to powerups in their vicinity (they ignore
+them) and also do not use missiles aggressive enough, even on insane
+level."  Files: `bot_goals.h` (grabs, armed, seeking), `bot_weapons.h`
+(volleys, intervals, the heavy missiles' distance, the light verdict),
+`bot.cpp`, `segment_depths.h` and `fireball.cpp` (respawn placement),
+`multi.cpp` (ghost kills), `contrib/bot-log-replay/` (the replay).
+
+**The log** (20:35:27-20:45:16, 2589 per-second summary lines of the
+five bots; `grep "bots: '"`):
+
+| | Seconds | Share |
+|---|---|---|
+| collect | 1703 | 66 % |
+| of which the grab (utility 6.5 or 4) | 878 | |
+| of which the power-up phase / plain | 195 / 630 | |
+| engage | 504 | 19 % |
+| retreat | 188 | 7 % |
+| hunt | 182 | 7 % |
+| roam | 12 | 0.5 % |
+
+By what the bot knew of its target: in sight 1004 s (39 %), known but
+out of sight 622 s (24 %), none 963 s (37 %).  With an enemy in sight
+the bots engaged 490 s and collected 448 s, 383 of them grabs: the
+grab's fixed utility (`GRAB_HIGH_UTILITY` 6.5 or `GRAB_UTILITY` 4,
+`bot_goals.h:720`, taken as the collection at `bot_goals.h:791`) beat the
+engagement (median 2.0) every time, for a powerup up to 85 units away,
+the target at a median 74 units.  Out of sight but known: collect 359
+(184 grabs at 6.5 against a hunt of median 0.7), hunt 177.  With none:
+collect 896.  About the vicinity: while collecting something else, a
+known and usable powerup within 20 units (the line's nearest valuable
+one, `goal-lower`) was 67 times a concussion pack, 16 flash, 11 super
+laser, 10 mercury, 6 smart, 4 mega missiles: the grab's ranking, value
+over (straight distance + 20) (`bot.cpp:1801`), put a quad 45 units away
+(3.6 / 65) before a smart missile 14 units away (2 / 34).  Farther ones
+(40-85 units, 189 seconds while engaging or hunting) were rightly left.
+
+*Heavy missiles* (the real data, printed at each shot: mega blast 80,
+damage 199, homing; earthshaker blast 80, damage 220, six children blast
+80, damage 100).  The bots held a mega or an earthshaker 844 s; 20 megas
+and 14 earthshakers were fired (and 2 dumped), 20 of the 34 aimed at a
+corner or a wall.  The verdicts of the 844 summary lines: no-target 338,
+cooldown 154, not-visible 119, cloaked 64, lethal 41, aiming 32,
+too-close 32, risky 31, nose-blast 22, low-value 5, too-far 5.  While
+holding one a bot collected 630 s (75 %) and engaged 126 s.  The
+distance needed (`heavy_min_distance`, `bot_weapons.h:1385`: 1 and 1.2
+radii plus 12, times the standoff scale) was 74-130 units, beyond the
+fight's 35-95.  So the heavy missiles were held mostly by bots that were
+not fighting; the risk rules (section 9.6) were a minor brake.
+
+*Light missiles*: 88 volleys (concussion 29 x 4, 24 x 2, 20 x 3, 11 x 5;
+smart 3 x 2; mercury 1 x 4), about 305 concussion, 32 mercury, 60 smart
+and 6 flash missiles by the ammunition counts (44, 9, 11 and 0 of them
+dumped), for 810 summary lines with light missiles and an enemy in sight
+with a clear line (660 at 30-200 units): a volley every 7.5 s of such
+opportunity.  The crossing speeds of the heavy missile lines: 78 % at
+most 40 units/s (the straight volley's limit), 14 % 40-60, 8 % above.
+The log said nothing about what held a light missile back (no verdict).
+
+*Engine errors*: 918 times `fireball.cpp:279: error: count=655xx,
+skip_count=..., and no segment found at depth 23`, and 6 times
+`multi.cpp:914: BUG: object ... has type 12, expected 4`.
+
+**(1) Grabs are detours in a fight** (`grab_goal_utility`,
+`grab_is_detour`).  With an enemy in sight, or known while the bot is
+armed (below), or while it seeks one, a bot that is not weak
+(`weak_armament`) takes a powerup only as a short detour:
+`GRAB_DETOUR_PATH` 25 units of path for any, `GRAB_DETOUR_HIGH_PATH` 60
+for a high-value one (`GRAB_HIGH_VALUE`: the big missiles, a better gun,
+quad, super laser, cloak, invulnerability, the afterburner, shields it
+needs), a Collector 1.5 times further.  The detour is worth
+`GRAB_DETOUR_FACTOR` 1.3 times the fight (it flies there shooting; above
+the fight's hysteresis 1.2, so it is taken and kept).  Beyond, the grab
+is worth nothing and the fight goes on.  Without an enemy (and nothing
+to seek), weak, or in danger (shields, invulnerability) the grab keeps
+its utility of section 9.8.  `goal_utility` now says which part made the
+collect goal (`collect_source`: plain, phase, grab), and `think` goes
+where that part says (before, a grab that applied but had lost to the
+plain collection still redirected the bot).
+
+**(2) The nearest reasonable powerup first** (`grab_rank`: value over
+the square of (path + 20)).  The smart missile 14 units away (2 / 34²)
+now comes before the quad 45 away (3.6 / 65²), a concussion pack at 20
+before a mega at 80; at equal distance the more valuable.
+
+**(3) Armed, it fights** (`armed_of`, `armed_engage_factor`,
+`ARMED_COLLECT`).  A bot holding a smart missile, mega or earthshaker
+(heavy; from Hotshot) or at least three light missiles (concussion,
+homing, mercury; from Rookie) values the fight (engage and hunt) 1.5
+(heavy) or 1.25 (light) times, and a plain collection (not a big
+upgrade, not needed shields) 0.6 times, unless it is weak.
+
+**(4) Seeking a fight** (`seek_utility`, `SEEK_MEMORY_SCALE`,
+`SEEK_ARRIVED`).  An armed bot that knows of no target flies to where it
+last saw an enemy, up to three times its memory time ago (Insane
+Balanced 30 s, Aggressive 60 s), as a hunt without a target: worth 1
+(heavy) or 0.8 (light) times the style's engage weight.  Within 50 units
+of the place it has searched it (nobody there) and takes the next
+freshest one; a grab on the way is a detour of the seek.  The log says
+` seek` in the goal's brackets.
+
+**(5) The Collector fights** (`COLLECTOR_UNDER_FIRE` 0.75).  Section 4.7
+did not reduce a Collector's collection with an enemy in sight, so with
+its collect weight 1.8 against its engage weight 0.7 it hardly fought
+(wraith: collect 407 s, engage 83 s).  Now its collection counts 0.75 in
+sight of an enemy (the others: 0.35, 0.8 for a big upgrade), and 0.6
+more when armed.  It still takes a prize in an even fight and a small
+one when behind (`test_style_goals`).
+
+**(6) Missiles.**
+
+| | Before (9.8) | Now |
+|---|---|---|
+| Straight volley's good target (Hotshot and below / Ace / Insane) | 30-130 units, crossing up to 40 units/s | 130 & 40 / 150 & 50 / 160 & 60 |
+| Homing volley's good target | 40-170 units | Ace and Insane 40-200 |
+| Other target in sight, clear, 30-200 units | 1 round | Insane a pair |
+| Rounds after the first of a straight volley | the skill's cone | `volley_cone`: twice it, at least 6 degrees |
+| Between volleys (`missile_interval`) | by skill | times the style's scale: Aggressive 0.75, Cautious 1.2 |
+| Heavy missile while cloaked | never | from Ace at a target within 100 units (as a light one) |
+| Insane risk scales (budget, trade) | 1.9, 0.75 | 2.2, 0.7 (aggressive Insane: budget 66 % of shields, trade 1.05) |
+| Heavy missile's least distance (log data, full shields) | 92 mega, 108 earthshaker, times the standoff scale | where the nominal blast falls to the damage the bot accepts (budget x shields), at most 0.4 radius nearer: aggressive Insane 66 and 79, balanced Insane 81 and 97, cautious Hotshot 91 and 107 |
+
+The least distance (`heavy_min_distance` with `accepted_damage`) sets
+the standoff and the log's `min=`; the release is still the expected
+outcome's (`judge_blast`: never point blank, never lethal, within the
+budget and the trade), as the indirect and corner shots of section 9.6.
+The heavy missiles' cooldowns stay (Insane 3 s between two, 6 s per
+target): not spammed, but a bot that fights more fires them more.  A
+light missile verdict (`light_check`: none-owned, no-target, cooldown,
+not-visible, no-clear-shot, too-close, too-far, cloaked, heavy, chosen;
+at the release aiming, nose-blast, fired) and what the bot holds are
+now in the summary line (` | light=... armed=...`), so the next log
+shows what holds the volleys back.
+
+**Replay of the log** (`contrib/bot-log-replay/`: `extract.py` parses the
+summary lines into the goal choice's inputs as far as the log shows
+them, `replay.cpp` runs `goal_utility` and `choose_goal` of this code on
+them, each bot's previous replayed goal as its current one; the
+estimates are in the script's header: notably a grab's path is 1.2
+times the straight distance of the nearest valuable powerup when the
+grab started, a lower bound, so the grabs left are an upper bound):
+
+| | Log | Replayed |
+|---|---|---|
+| collect (plain + phase / grab) | 66 % (32 / 34) | 41 % (17 / 24) |
+| engage | 19 % | 26 % |
+| hunt (of which seeking) | 7 % | 27 % (17 %) |
+| retreat | 7 % | 5 % |
+| Enemy in sight: engage / collect | 49 % / 45 % | 67 % / 28 % |
+| No target: hunt (seek) / collect | 0 % / 93 % | 47 % / 53 % |
+| Holding a mega or earthshaker: engage + hunt / collect | 19 % / 75 % | 62 % / 33 % |
+
+By style (engage + hunt): Balanced 31 % to 61 %, Aggressive 40 % to
+62 %, Cautious 15 % to 46 %, Collector 16 % to 35 %.  The replay cannot
+show the fights that seeking and hunting find (the visible time is the
+log's), nor the pickups on the way: in play the engaged share should
+rise further.  Missiles: with an enemy in sight the bots now fight 67 %
+instead of 49 % of the time, while holding a heavy missile they fight or
+hunt 3.3 times as long, an Insane straight volley's good target covers
+about 85 % of the in-range seconds (distance 613 of 660, crossing 92 %)
+instead of about 67 % (563, 78 %), and an aggressive bot's interval is
+0.75 s.  Expected: roughly 1.5-2 times the light volleys (about one per
+bot every 15-20 s) and about twice the heavy shots; the new verdicts
+will tell.
+
+**Engine: respawn placement** (`segment_depths.h`,
+`visit_segment_depths`; `fireball.cpp` `connected_segment_raw_distances`).
+The network powerup drop (`choose_drop_segment`, the host's stage-3
+creation of powerups) draws a segment at a random depth of 8-24 segments
+from a player, scanning the builder's maximum depth first; the thief's
+recreation does the same.  The builder counted a segment at a depth only
+below its maximum depth (`fireball.cpp:303` returned before the count at
+`:334`) but took one off the count of the old depth whenever it found a
+shorter route (`:300`), also at the maximum depth, where it had never
+counted it.  The 16-bit count wrapped (65511 = 25 taken off), the draw
+among 0-65510 skipped past every segment at that depth and the error
+followed; the drop then fell back to the next depth, so powerups never
+landed at the drawn maximum depth (and the log filled up).  Now each
+segment is counted at the depth it is recorded with, the maximum
+included, and taken off exactly that count when it moves; the control
+centre's segment is excluded at any depth (it was only below the
+maximum: at the maximum it could be drawn).  The traversal is a
+standard-library template over the level's accessors, so
+`test-segment-depths` checks it on 400 random levels (up to 400 segments
+with loops and control centres): the depths are the shortest routes not
+through a control centre, and every count equals the number of segments
+recorded at its depth; the old traversal's count at the maximum depth
+wrapped on 389 of 399 levels.
+
+**Engine: kills by a ghost** (`multi_compute_kill`).  A missile (or
+mine) of a player that died before it hit is credited to that player,
+whose object is by then its ghost (`OBJ_GHOST`, the same object with
+its `player_info`): the function accepted the ghost and credited the
+kill correctly, but read its player number with `get_player_id`, which
+warns on anything but `OBJ_PLAYER` (`multi.cpp:914`; the six BUG lines,
+all a dead bot's missile).  It now calls the getter itself after its own
+type check (as `multi_do_reappear` does for a player or its ghost), for the killed
+object too, and the bounty's name comes from the player number.  The
+kill counts as before, as a human's post-death kill.
+
+**Tests.**  `test-bot-goals`: `test_log_tuning_goals` (the log's fight:
+no grab at 80 units, a detour at 50 worth 1.3 times the fight and kept;
+a concussion pack only within 25; a Collector 1.5 times further; weak
+and calm keep the grab of 9.8; hunting armed and seeking make it a
+detour; `grab_rank`; `armed_of`; the armed factors; seeking against a
+plain collection, roaming and grabs; the Collector under fire; the
+collection's source); `test_pickup_scenarios` and `test_high_value_grab`
+with the grab's path and the new limits.  `test-bot-weapons`:
+`test_log_tuning_missiles` (the style's interval, the heavy missile's
+least distance with the log's data by risk, the standoff, cloaked heavy
+missiles, the light verdicts); `test_volleys` with the new good targets,
+the Insane pair and `volley_cone`.  New `test-segment-depths`.
+
+**Unchanged:** the protocol, clients, the human's firing, the death dump,
+the aim, the heavy missiles' release rules and cooldowns.
+
 ---
 
 ## 10. Risks

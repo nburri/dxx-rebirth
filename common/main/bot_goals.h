@@ -599,6 +599,69 @@ constexpr double collect_utility(const double value, const double path_cost)
 	return value * COLLECT_DISTANCE_SCALE / (COLLECT_DISTANCE_SCALE + std::max(path_cost, 0.0));
 }
 
+/* Section 9.9: what the bot holds to start a fight with.  "When holding
+ * heavy or light missiles, bots should actively seek fights rather than
+ * collecting more": a smart missile, mega or earthshaker (heavy), or at
+ * least ARMED_LIGHT_COUNT light missiles (concussion, homing, mercury),
+ * each only if the skill fires it (min_smarts in bot_weapons.h: the
+ * light ones from Rookie, the heavy ones from Hotshot).
+ */
+enum class armed_level : uint8_t
+{
+	none,
+	light,
+	heavy,
+};
+constexpr unsigned ARMED_LIGHT_COUNT{3};
+
+[[nodiscard]]
+constexpr armed_level armed_of(const std::array<uint8_t, BOT_SECONDARY_COUNT> &ammo, const unsigned weapon_smarts)
+{
+	const auto n{[&](const secondary s) -> unsigned {
+		return ammo[static_cast<unsigned>(s)];
+	}};
+	if (weapon_smarts >= 2 && (n(secondary::smart) || n(secondary::mega) || n(secondary::earthshaker)))
+		return armed_level::heavy;
+	if (weapon_smarts >= 1 && n(secondary::concussion) + n(secondary::homing) + n(secondary::mercury) >= ARMED_LIGHT_COUNT)
+		return armed_level::light;
+	return armed_level::none;
+}
+
+[[nodiscard]]
+constexpr const char *name_of(const armed_level a)
+{
+	switch (a)
+	{
+		case armed_level::heavy:
+			return "heavy";
+		case armed_level::light:
+			return "light";
+		case armed_level::none:
+			break;
+	}
+	return "none";
+}
+
+/* Section 9.9: armed, the fight is worth this much more (engage and
+ * hunt), and a plain collection (not a big upgrade, not needed shields)
+ * this much less.
+ */
+[[nodiscard]]
+constexpr double armed_engage_factor(const armed_level a)
+{
+	switch (a)
+	{
+		case armed_level::heavy:
+			return 1.5;
+		case armed_level::light:
+			return 1.25;
+		case armed_level::none:
+			break;
+	}
+	return 1;
+}
+constexpr double ARMED_COLLECT{0.6};
+
 /* Section 4.1: the goals of the strategy layer. */
 enum class goal_kind : uint8_t
 {
@@ -648,6 +711,17 @@ struct goal_inputs
 	 */
 	double grab_value{0.75};
 	bool grab_invulnerability{};
+	/* Section 9.9: the grab's path cost (the detour, grab_is_detour). */
+	double grab_path{};
+	/* Section 9.9: what the bot holds to fight with (armed_of), whether
+	 * its armament is weak (weak_armament: it needs weapons, so it
+	 * keeps the grab of section 9.8 in a fight), and the utility of
+	 * seeking an enemy it saw a while ago when it knows of no target
+	 * (seek_utility; 0: none to seek).
+	 */
+	armed_level armed{armed_level::none};
+	bool weak{};
+	double seek{};
 	/* Section 9.8: the early-life power-up phase (in_powerup_phase):
 	 * the engage weight's factor, and the best known weapon upgrade's
 	 * collection utility with the phase's weight (taken as the collect
@@ -670,9 +744,21 @@ struct goal_inputs
 	std::optional<goal_kind> current;
 };
 
+/* Section 9.9: which of its parts the collect goal's utility is: the
+ * best collection by value over path (plain), the power-up phase's
+ * weapon upgrade, or the grab close by.
+ */
+enum class collect_source : uint8_t
+{
+	plain,
+	phase,
+	grab,
+};
+
 struct goal_utilities
 {
 	std::array<double, BOT_GOAL_COUNT> u{};
+	collect_source collect_from{collect_source::plain};
 	[[nodiscard]]
 	double operator[](const goal_kind g) const
 	{
@@ -751,6 +837,80 @@ constexpr double grab_utility(const double value)
 	return value >= GRAB_HIGH_VALUE ? GRAB_HIGH_UTILITY : GRAB_UTILITY;
 }
 
+/* Section 9.9: the grab scan's ranking (best_grab in bot.cpp): the
+ * nearest reasonable powerup first.  Section 9.8 ranked by value over
+ * (distance + 20), so a quad 45 units away (3.6 / 65) beat a smart
+ * missile 14 units away (2 / 34) and the bot flew past the smart one
+ * (the exp-19 log: 67 concussion packs, 16 flash, 11 super lasers, 6
+ * smart and 4 mega missiles lay within 20 units, known and usable,
+ * while the bot collected something else).  Now value over the square
+ * of (path + 20): the smart one first, then the quad.
+ */
+[[nodiscard]]
+constexpr double grab_rank(const double value, const double path_cost)
+{
+	const double d{std::max(path_cost, 0.0) + 20};
+	return value / (d * d);
+}
+
+/* Section 9.9: grabbing in a fight.  The exp-19 playtest ("the bots are
+ * more hesitant"): the grab's fixed utility 6.5 (4) beat every
+ * engagement (1.4-2.0 in the log), so with an enemy in sight 74 units
+ * away (the median) a bot left the fight for a powerup up to 85 units
+ * away in 383 of the 1004 seconds it had one in sight; bots collected
+ * 66 % of the time.  Now with an enemy in sight (or known while the bot
+ * is armed, armed_of), a bot that is not weak (weak_armament) takes a
+ * powerup only as a short detour: GRAB_DETOUR_PATH of path for any, 
+ * GRAB_DETOUR_HIGH_PATH for a high-value one (GRAB_HIGH_VALUE: the big
+ * missiles, a better gun, quad, cloak, invulnerability, shields it
+ * needs), a Collector GRAB_DETOUR_COLLECTOR times further; then the grab
+ * is worth GRAB_DETOUR_FACTOR times the fight (it flies there shooting,
+ * and the hysteresis of the fight, 1.2, does not keep it from the
+ * detour).  Else the fight goes on.  Without an enemy (or unarmed with
+ * one out of sight), weak, or in danger (shields, invulnerability), the
+ * grab keeps its utility of section 9.8.
+ */
+constexpr double GRAB_DETOUR_PATH{25};
+constexpr double GRAB_DETOUR_HIGH_PATH{60};
+constexpr double GRAB_DETOUR_COLLECTOR{1.5};
+constexpr double GRAB_DETOUR_FACTOR{1.3};
+
+[[nodiscard]]
+constexpr bool grab_is_detour(const double value, const double path_cost, const bool collector)
+{
+	const double scale{collector ? GRAB_DETOUR_COLLECTOR : 1.0};
+	return path_cost <= (value >= GRAB_HIGH_VALUE ? GRAB_DETOUR_HIGH_PATH : GRAB_DETOUR_PATH) * scale;
+}
+
+/* Section 9.9: seeking a fight.  An armed bot (armed_of) that knows of
+ * no target (none seen within its memory time) flies to where it last
+ * saw an enemy, up to SEEK_MEMORY_SCALE times its memory time ago, as a
+ * hunt: in the exp-19 log the bots knew no target 37 % of the time and
+ * collected then (the heavy missile's verdict "no-target" for 338 of
+ * the 1000 seconds a bot held one).  Worth 1 with a heavy missile, 0.8
+ * with light ones, times the style's engage weight: above roaming and
+ * most plain collections while armed (the log's median 0.76, times
+ * ARMED_COLLECT); a grab on the way is a detour of it, as of a hunt.
+ * Arrived within SEEK_ARRIVED of the place, the bot has searched it.
+ */
+constexpr double SEEK_MEMORY_SCALE{3};
+constexpr double SEEK_ARRIVED{50};
+
+[[nodiscard]]
+constexpr double seek_utility(const armed_level a, const double engage_weight)
+{
+	switch (a)
+	{
+		case armed_level::heavy:
+			return 1.0 * engage_weight;
+		case armed_level::light:
+			return 0.8 * engage_weight;
+		case armed_level::none:
+			break;
+	}
+	return 0;
+}
+
 /* Threatened, weak and not invulnerable: the bot would retreat. */
 [[nodiscard]]
 constexpr bool in_danger(const goal_inputs &in)
@@ -764,6 +924,35 @@ constexpr bool grab_applies(const goal_inputs &in)
 	return in.grab && (!in_danger(in) || in.grab_shields || in.grab_invulnerability);
 }
 
+/* Section 9.9: a Collector with an enemy in sight: its collection
+ * counts this much (section 4.7 did not reduce it at all, so with its
+ * collect weight 1.8 it hardly fought).
+ */
+constexpr double COLLECTOR_UNDER_FIRE{0.75};
+
+/* Section 9.9: the grab's utility against the fight (`fight`: the
+ * engage or hunt utility); 0 when the grab does not apply.
+ */
+[[nodiscard]]
+constexpr double grab_goal_utility(const goal_inputs &in, const double fight)
+{
+	if (!grab_applies(in))
+		return 0;
+	const double base{grab_utility(in.grab_value)};
+	if (in_danger(in) || in.weak)
+		return base;
+	/* No enemy to fight or seek, or unarmed with the enemy out of
+	 * sight: the grab of section 9.8.  Seeking is a hunt: a detour.
+	 */
+	if (!in.has_target && !(in.seek > 0))
+		return base;
+	if (in.has_target && !in.target_visible && in.armed == armed_level::none)
+		return base;
+	if (!grab_is_detour(in.grab_value, in.grab_path, in.collector))
+		return 0;
+	return std::max(fight * GRAB_DETOUR_FACTOR, ROAM_UTILITY * 2);
+}
+
 [[nodiscard]]
 inline goal_utilities goal_utility(const goal_inputs &in)
 {
@@ -773,25 +962,38 @@ inline goal_utilities goal_utility(const goal_inputs &in)
 		return u[static_cast<unsigned>(g)];
 	}};
 	at(goal_kind::roam) = ROAM_UTILITY;
+	const bool armed{in.armed != armed_level::none};
 	if (in.has_target)
 	{
-		const double engage{2 * in.target_score * in.engage_weight * in.phase_engage * in.third_party};
+		const double engage{2 * in.target_score * in.engage_weight * in.phase_engage * in.third_party * armed_engage_factor(in.armed)};
 		if (in.target_visible)
 			at(goal_kind::engage) = engage;
 		else
 			at(goal_kind::hunt) = engage;
 	}
-	const bool under_fire{in.target_visible && !in.collector};
+	/* Section 9.9: no target known, armed: seek the last one seen. */
+	else if (in.seek > 0)
+		at(goal_kind::hunt) = in.seek * in.phase_engage;
 	double collect{in.collect * in.collect_weight};
-	if (under_fire && in.collect_path > GRAB_DISTANCE)
-		collect *= in.collect_upgrade ? COLLECT_UPGRADE_UNDER_FIRE : COLLECT_UNDER_FIRE;
+	if (in.target_visible && in.collect_path > GRAB_DISTANCE)
+		collect *= in.collector ? COLLECTOR_UNDER_FIRE : in.collect_upgrade ? COLLECT_UPGRADE_UNDER_FIRE : COLLECT_UNDER_FIRE;
+	/* Section 9.9: armed, it fights rather than collect more. */
+	if (armed && !in.weak && !in.collect_upgrade)
+		collect *= ARMED_COLLECT;
 	/* Section 9.8: in the power-up phase, the weapon upgrade. */
-	collect = std::max(collect, in.phase_collect);
-	if (grab_applies(in))
-		collect = std::max(collect, grab_utility(in.grab_value));
+	if (in.phase_collect > collect)
+	{
+		collect = in.phase_collect;
+		r.collect_from = collect_source::phase;
+	}
+	if (const double grab{grab_goal_utility(in, std::max(at(goal_kind::engage), at(goal_kind::hunt)))}; grab > 0 && grab >= collect)
+	{
+		collect = grab;
+		r.collect_from = collect_source::grab;
+	}
 	at(goal_kind::collect) = collect;
 	double refuel{in.refuel * in.collect_weight};
-	if (under_fire)
+	if (in.target_visible && !in.collector)
 		refuel *= COLLECT_UNDER_FIRE;
 	at(goal_kind::refuel) = refuel;
 	/* Section 4.7: below the style's threshold, a threatened bot strongly
