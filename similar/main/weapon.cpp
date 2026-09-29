@@ -1151,7 +1151,12 @@ int pick_up_primary(player_info &player_info, const primary_weapon_index weapon_
 
 	player_info.primary_weapon_flags |= flag;
 
-	maybe_autoselect_primary_weapon(player_info, weapon_index, Controls);
+	/* An empty vulcan or gauss cannon is not worth switching to.  If the
+	 * cannon carries ammo, the caller adds it next, and
+	 * pick_up_vulcan_ammo then auto-selects the best owned ammo weapon.
+	 */
+	if (!weapon_index_uses_vulcan_ammo(weapon_index) || player_info.vulcan_ammo)
+		maybe_autoselect_primary_weapon(player_info, weapon_index, Controls);
 
 	PALETTE_FLASH_ADD(7,14,21);
 
