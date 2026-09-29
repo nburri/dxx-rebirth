@@ -818,6 +818,13 @@ static void write_fault_report(exception_report_file &f, const EXCEPTION_POINTER
 
 static LONG WINAPI unhandled_exception_filter(EXCEPTION_POINTERS *const ep)
 {
+	/* GCC raises uncaught C++ exceptions on x86_64 MinGW as 0x20474343
+	 * ("GCC"); MinGW's startup handler resumes them so that
+	 * std::terminate and terminate_handler run and write the proper
+	 * report with what().  Pass them on untouched.
+	 */
+	if (ep && ep->ExceptionRecord && (ep->ExceptionRecord->ExceptionCode & 0x20ffffffu) == 0x20474343u && !(ep->ExceptionRecord->ExceptionFlags & EXCEPTION_NONCONTINUABLE))
+		return g_previous_exception_filter ? g_previous_exception_filter(ep) : EXCEPTION_CONTINUE_SEARCH;
 	/* One report: a fault while writing it ends here. */
 	if (InterlockedExchange(&g_exception_report_started, 1) || !ep || !ep->ExceptionRecord || !ep->ContextRecord)
 		return g_previous_exception_filter ? g_previous_exception_filter(ep) : EXCEPTION_CONTINUE_SEARCH;
@@ -884,6 +891,13 @@ void d_set_exception_handler()
 {
 	std::set_terminate(&terminate_handler);
 	g_previous_exception_filter = SetUnhandledExceptionFilter(&unhandled_exception_filter);
+	{
+		/* Keep stack for the report after a stack overflow: the filter
+		 * runs on the overflowed stack and needs several KiB.
+		 */
+		ULONG guarantee{64 * 1024};
+		SetThreadStackGuarantee(&guarantee);
+	}
 	std::array<wchar_t, MAX_PATH> ws;
 	if (const auto lws = GetSystemDirectoryW(ws.data(), ws.size()))
 	{
