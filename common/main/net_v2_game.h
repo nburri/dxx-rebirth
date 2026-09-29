@@ -168,6 +168,11 @@ void host_end_level();
  */
 [[nodiscard]]
 bool host_slot_has_peer(playernum_t slot);
+/* Host: the afterburner bit of the newest INPUT accepted from the client
+ * in `slot` (1 or 0), or -1 if there is none (movement_record.cpp).
+ */
+[[nodiscard]]
+int host_input_afterburner(playernum_t slot);
 /* Remove player `slot`, which has no connection (a bot), from the game:
  * the others are told it left for `why`, and the host drops what it
  * carried (multi_disconnect_player).

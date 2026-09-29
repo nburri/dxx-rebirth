@@ -48,6 +48,7 @@
 #include "net_v2_game.h"
 #include "multi.h"
 #include "bot.h"
+#include "movement_record.h"
 #include "object.h"
 #include "player.h"
 #include "powerup.h"
@@ -601,6 +602,9 @@ const char *player_role(const playernum_t pnum)
 void log_grant(const playernum_t pnum, const netid_t id, const powerup_type_t powerup, const uint32_t taken, const uint32_t remaining, const bool removed)
 {
 	con_printf(CON_NORMAL, "net: P#%u (%s) takes %s [%u] id %04x: taken %u, %s %u", pnum, player_role(pnum), powerup_short_name(powerup), underlying_value(powerup), id, taken, removed ? "removed, left" : "stays, left", remaining);
+	/* The host's own pickups are recorded by do_powerup. */
+	if (pnum != Player_num)
+		movement_record_pickup(pnum, underlying_value(powerup));
 }
 
 /* The host's accounting of the item `powerup` gives: the bookkeeping's

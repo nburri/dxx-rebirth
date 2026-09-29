@@ -50,6 +50,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "powerup.h"
 #include "multi.h"
 #include "bot.h"
+#include "movement_record.h"
 #include "physics.h"
 #include "multi.h"
 #include "fwd-wall.h"
@@ -1916,6 +1917,7 @@ void do_laser_firing_player(pilot &p, const vmobjptridx_t plrobjidx)
 			const auto shot_fired{do_laser_firing(plrobjidx, Primary_weapon, laser_level, flags, plrobj.orient.fvec, object_none)};
 			if (!shot_fired)
 				break;
+			movement_record_fire(plrobj, false, underlying_value(Primary_weapon.get_active()), flags);
 			rval += shot_fired;
 			Next_laser_fire_time = GameTime64 - fire_frame_overhead + (unlikely(human && cheats.rapidfire)
 				? (F1_0 / 25)
@@ -2379,6 +2381,7 @@ void do_missile_firing(pilot &p, const secondary_weapon_index weapon, const vmob
 			 * it, and do not report it to other players.
 			 */
 			return;
+		movement_record_fire(plrobj, true, underlying_value(weapon), 0);
 		/* Toggle between the left and right missile guns.
 		 */
 		if (base_weapon_gun == player_gun_number::_4)

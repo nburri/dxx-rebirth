@@ -52,6 +52,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "controls.h"
 #include "kconfig.h"
 #include "newdemo.h"
+#include "movement_record.h"
 #include "escort.h"
 #if DXX_USE_EDITOR
 #include "gr.h"	//	for powerup outline drawing
@@ -715,6 +716,7 @@ int do_powerup(const vmobjptridx_t obj, const powerup_pickup_mode mode)
 
 	if (used || special_used)
 	{
+		movement_record_pickup(Player_num, underlying_value(id));
 		if (const auto hit_sound{Powerup_info[id].hit_sound}; hit_sound != sound_effect::None)
 			multi_digi_play_sample(hit_sound, F1_0);
 		detect_escort_goal_accomplished(obj);

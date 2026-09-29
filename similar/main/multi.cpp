@@ -41,6 +41,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "game.h"
 #include "multi.h"
 #include "bot.h"
+#include "movement_record.h"
 #include "multiinternal.h"
 #include "net_v2_state.h"
 #include "net_v2_objects.h"
@@ -851,6 +852,7 @@ static void multi_compute_kill(const d_robot_info_array &Robot_info, const imobj
 	killed_pnum = (get_player_id)(killed);
 
 	Assert (killed_pnum < N_players);
+	movement_record_kill(killed, killer == object_none ? nullptr : static_cast<const object *>(killer));
 
 	kill_name_storage killed_buf;
 	const auto killed_name = prepare_kill_name(vcplayerptr, Game_mode, Netgame, killed_pnum, killed_buf);
@@ -1661,6 +1663,7 @@ static void multi_do_fire(fvmobjptridx &vmobjptridx, const playernum_t pnum, con
 	const auto &&obj = vmobjptridx(vcplayerptr(pnum)->objnum);
 	if (obj->type == object_type::OBJ_GHOST)
 		multi_make_ghost_player(pnum);
+	movement_record_fire_remote(*obj, untrusted_raw_weapon, flags);
 
 	if (untrusted_raw_weapon == FLARE_ADJUST)
 		Laser_player_fire(LevelSharedRobotInfoState.Robot_info, obj, weapon_id_type::FLARE_ID, player_gun_number::center, weapon_sound_flag::audible, shot_orientation, object_none);

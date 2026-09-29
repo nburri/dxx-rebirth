@@ -92,6 +92,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 
 #include "multi.h"
 #include "bot.h"
+#include "movement_record.h"
 #include "cntrlcen.h"
 #include "pcx.h"
 #include "state.h"
@@ -1869,6 +1870,7 @@ window_event_result game_window::event_handler(const d_event &event)
 
 			if ( (Newdemo_state == ND_STATE_RECORDING) || (Newdemo_state == ND_STATE_PAUSED) )
 				newdemo_stop_recording();
+			movement_record_end_session();
 
 			multi_leave_game();
 
@@ -2184,6 +2186,7 @@ window_event_result GameProcessFrame(const d_level_shared_robot_info_state &Leve
 			do_laser_firing_player(Local_pilot, Objects.vmptridx(get_local_player().objnum));
 		delayed_autoselect(player_info, Controls);
 		bots_fire();
+		movement_record_frame(LevelSharedRobotInfoState.Robot_info);
 	}
 
 	if (Do_appearance_effect) {

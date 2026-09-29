@@ -63,6 +63,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "textures.h"
 #include "multi.h"
 #include "bot.h"
+#include "movement_record.h"
 #include "cntrlcen.h"
 #include "newdemo.h"
 #include "endlevel.h"
@@ -2373,6 +2374,7 @@ static void collide_player_and_weapon(const d_robot_info_array &Robot_info, cons
 	}
 #endif
 
+	movement_record_hit(*playerobj, *weapon, damage);
 	const auto &&player_segp = vmsegptridx(playerobj->segnum);
 	if (get_player_id(playerobj) == Player_num)
 	{

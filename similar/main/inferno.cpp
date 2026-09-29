@@ -187,6 +187,9 @@ static void print_commandline_help()
 	VERB("  -auto-record-demo             Start recording on level entry\n")	\
 	VERB("  -record-demo-format           Set demo name automatically\n")	\
 	VERB("  -autodemo                     Start in demo mode\n")	\
+	VERB("  -recordmoves                  Record how the players move, for bot styles\n\t\t\t\t(recordings/ next to gamelog.txt)\n")	\
+	VERB("  -recordmoves-rate <n>         Movement samples per second (10-60, default 30)\n")	\
+	VERB("  -recordmoves-bots             Record the bots' movement too\n")	\
 	VERB("  -window                       Run the game in a window\n")	\
 	VERB("  -noborders                    Don't show borders in window mode\n")	\
 	DXX_COMMAND_LINE_HELP_D1(	\
