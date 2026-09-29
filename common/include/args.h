@@ -122,6 +122,10 @@ struct CArg : prohibit_void_ptr<>
 	bool DbgRenderStats;
 	uint8_t DbgBpp;
 	int8_t DbgVerbose;
+	/* -lagtest N: a host's own pickups take N ms (0-500, 0 = off), as a
+	 * client's with that round trip do (net_objects.cpp).
+	 */
+	uint16_t DbgLagTestMs;
 #if DXX_USE_SHAREPATH
 	bool SysNoHogDir;
 #endif

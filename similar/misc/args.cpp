@@ -404,6 +404,8 @@ static void ReadCmdArgs(Inilist &ini, Arglist &&Args)
 			CGameArg.DbgSafelog = true;
 		else if (!d_stricmp(p, "-frametimes"))
 			CGameArg.DbgFrameTimeHud = true;
+		else if (!d_stricmp(p, "-lagtest"))
+			CGameArg.DbgLagTestMs = static_cast<uint16_t>(std::clamp<long>(arg_integer(pp, end), 0, 500));
 		else if (!d_stricmp(p, "-norun"))
 			CGameArg.DbgNoRun = true;
 		else if (!d_stricmp(p, "-renderstats"))

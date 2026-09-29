@@ -14,7 +14,8 @@
  * plays simultaneous, stale and duplicate requests, denials, partial
  * cannon ammunition, drops and a join in progress through the reliable
  * ordered channel, and checks that every machine ends up with the same
- * objects and that nothing is ever granted twice.
+ * objects and that nothing is ever granted twice; and the queue of the
+ * host's own pickups under -lagtest (net_v2_lagtest.h).
  *
  * Build and run with SCons:
  *
@@ -35,6 +36,7 @@
 #include <vector>
 
 #include "net_v2_objects.h"
+#include "net_v2_lagtest.h"
 
 using namespace dcx::net_v2;
 
@@ -1549,6 +1551,137 @@ void test_joiner_snapshot()
 	CHECK(joiner_table->netid_of(some.objnum, joiner[some.objnum].signature) == NETID_NONE);
 }
 
+
+/* -lagtest (net_v2_lagtest.h): the host's own pickups as a client's. */
+void test_lag_pickups()
+{
+	using stage = lag_pickup::stage;
+	CHECK(lagtest_time(0) == 0);
+	CHECK(lagtest_time(1000) == F1);
+	CHECK(lagtest_time(500) == F1 / 2);
+	lag_pickups<4> q;
+	/* The round trip splits into the request's way and the answer's,
+	 * together exactly the round trip.
+	 */
+	q.set_round_trip(lagtest_time(1));
+	CHECK(q.up() == 32 && q.down() == 33);
+	const std::int64_t rtt{lagtest_time(60)};
+	q.set_round_trip(rtt);
+	CHECK(q.up() + q.down() == rtt && q.up() <= q.down());
+	/* Ordering and due times: A and B touched at 0 (in that order), C
+	 * at 10.  Nothing is due before half the round trip.
+	 */
+	CHECK(q.request(0, 0x8001, 5, 1, 11));
+	CHECK(q.request(0, 0x8002, 6, 2, 12));
+	CHECK(q.request(10, 0x8003, 7, 3, 13));
+	CHECK(q.size() == 3);
+	CHECK(q.holds(1, 11) && q.holds(3, 13) && !q.holds(1, 12) && !q.holds(4, 11));
+	CHECK(!q.next_due(q.up() - 1));
+	/* A clock that stands still (a paused game) makes nothing due. */
+	CHECK(!q.next_due(q.up() - 1));
+	const auto a{q.next_due(q.up())};
+	CHECK(a && a->what == stage::request && a->netid == 0x8001 && a->powerup_id == 5);
+	CHECK(!q.holds(1, 11));
+	const auto b{q.next_due(q.up())};
+	CHECK(b && b->netid == 0x8002);
+	CHECK(!q.next_due(q.up()));
+	/* A is granted and B denied when they arrive: the answers are due
+	 * the other half later, one full round trip after the touch.
+	 */
+	const auto rules{make_rules()};
+	CHECK(q.grant(q.up(), *a, MISSILE_4, {true, true, 4, 0}, 0));
+	CHECK(q.deny(q.up(), *b));
+	CHECK(q.holds(1, 11) && q.holds(2, 12));
+	const auto c{q.next_due(10 + q.up())};
+	CHECK(c && c->netid == 0x8003 && c->objnum == 3);
+	CHECK(q.deny(10 + q.up(), *c));
+	CHECK(!q.next_due(rtt - 1));
+	const auto ga{q.next_due(rtt + 100)};
+	CHECK(ga && ga->what == stage::grant && ga->netid == 0x8001 && ga->due == rtt && ga->outcome.taken == 4 && ga->life == 0);
+	const auto db{q.next_due(rtt + 100)};
+	CHECK(db && db->what == stage::deny && db->netid == 0x8002 && db->due == rtt);
+	const auto dc{q.next_due(rtt + 100)};
+	CHECK(dc && dc->what == stage::deny && dc->due == 10 + rtt);
+	CHECK(!q.next_due(rtt + 100) && q.size() == 0);
+	/* A full queue refuses a touch (the powerup is not asked for). */
+	for (std::uint16_t i = 0; i < 4; ++i)
+		CHECK(q.request(0, static_cast<netid_t>(0x8010 + i), 1, i, 1));
+	CHECK(!q.request(0, 0x8020, 1, 9, 1));
+	q.reset();
+	CHECK(q.size() == 0 && !q.next_due(1 << 30));
+
+	/* The decision counts the grants still on their way (as the host's
+	 * copy of a client does): two packs of 4 missiles within one round
+	 * trip with room for 2 give 2, then nothing.
+	 */
+	auto ship{spawn_inventory()};
+	ship.secondary[0] = 18;
+	own_life life;
+	CHECK(q.request(0, 0x8001, 1, 1, 1));
+	CHECK(q.request(0, 0x8002, 1, 2, 1));
+	for (int i = 0; i < 2; ++i)
+	{
+		const auto r{q.next_due(q.up())};
+		CHECK(r);
+		const auto inv{q.with_grants(ship, rules, life.life, true)};
+		const auto o{evaluate_pickup(inv, rules, MISSILE_4, 0)};
+		if (i == 0)
+		{
+			CHECK(o.usable && o.taken == 2);
+			CHECK(q.grant(q.up(), *r, MISSILE_4, o, life.life));
+		}
+		else
+		{
+			CHECK(!o.usable);
+			CHECK(q.deny(q.up(), *r));
+		}
+	}
+	/* Shields count for the decision, not for a dead ship's inventory. */
+	CHECK(q.request(q.up() - 1, 0x8003, 2, 3, 1));
+	const auto s{q.next_due(2 * q.up() - 1)};
+	CHECK(s && s->netid == 0x8003);
+	CHECK(q.grant(2 * q.up() - 1, *s, SHIELD, {true, true, 18 * F1, 0}, life.life));
+	CHECK(q.with_grants(ship, rules, life.life, true).secondary[0] == 20);
+	CHECK(q.with_grants(ship, rules, life.life, true).shields == ship.shields + 18 * F1);
+	CHECK(q.with_grants(ship, rules, life.life, false).shields == ship.shields);
+	CHECK(q.with_grants(ship, rules, life.life, false).secondary[0] == 20);
+	/* A grant for another life is not counted. */
+	CHECK(q.with_grants(ship, rules, static_cast<std::uint8_t>(life.life + 1), true) == ship);
+
+	/* The ship dies with the missile grant on its way: at the deres it
+	 * goes into the ship (so the drop has it, as the host's copy of a
+	 * client would), the life ends, and the grant that arrives after
+	 * that is not applied again (the client's late grant rule).
+	 */
+	const auto folded{q.with_grants(ship, rules, life.life, false)};
+	CHECK(folded.secondary[0] == 20 && folded.shields == ship.shields);
+	ship = folded;
+	life.on_deres();
+	/* The next life's decisions do not count the old life's grants. */
+	CHECK(q.with_grants(spawn_inventory(), rules, life.life, true) == spawn_inventory());
+	unsigned applied{0}, ignored{0}, denied{0};
+	while (const auto e{q.next_due(1 << 30)})
+	{
+		if (e->what == stage::deny)
+		{
+			++denied;
+			continue;
+		}
+		if (life.current(e->life))
+			++applied;
+		else
+			++ignored;
+	}
+	CHECK(applied == 0 && ignored == 2 && denied == 1);
+	CHECK(ship.secondary[0] == 20);
+	/* A grant decided in the new life applies. */
+	life.on_reappear();
+	CHECK(q.request(0, 0x8004, 1, 4, 1));
+	const auto n{q.next_due(q.up())};
+	CHECK(n && q.grant(q.up(), *n, MISSILE_1, {true, true, 1, 0}, life.life));
+	const auto ng{q.next_due(rtt)};
+	CHECK(ng && life.current(ng->life));
+}
 }
 
 int main()
@@ -1572,6 +1705,7 @@ int main()
 	test_rejoin_after_drop();
 	test_random_game();
 	test_joiner_snapshot();
+	test_lag_pickups();
 	std::puts("all tests passed");
 	return 0;
 }

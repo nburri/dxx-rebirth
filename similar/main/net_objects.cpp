@@ -25,6 +25,11 @@
  *
  * The rules and tables are game-independent and tested on their own:
  * common/main/net_v2_objects.h, common/unittest/net_v2_authority.cpp.
+ *
+ * With -lagtest N the host's own pickups take the client's way instead,
+ * with a round trip of N ms (common/main/net_v2_lagtest.h): the powerup
+ * is hidden at the touch, decided half the round trip later and the
+ * answer applied at the full round trip.
  */
 
 #include "dxxsconf.h"
@@ -36,6 +41,8 @@
 #include <span>
 
 #include "net_v2_objects.h"
+#include "net_v2_lagtest.h"
+#include "args.h"
 #include "net_v2_session.h"
 #include "net_v2_game.h"
 #include "multi.h"
@@ -115,9 +122,25 @@ struct authority_state
 		fix64 time{};
 	};
 	std::array<own_ship_report, MAX_PLAYERS> own_ships{};
+	/* Host with -lagtest: its own pickups on their way (game time). */
+	nv::lag_pickups<32> lag;
 };
 
 authority_state A;
+bool lagtest_announced;
+
+/* -lagtest: this machine is the host and delays its own pickups. */
+[[nodiscard]]
+bool lagtest_active()
+{
+	return CGameArg.DbgLagTestMs != 0 && multi_i_am_master();
+}
+
+void lagtest_reset()
+{
+	A.lag.reset();
+	A.lag.set_round_trip(nv::lagtest_time(CGameArg.DbgLagTestMs));
+}
 
 template <std::size_t N>
 void send(const session_msg type, const std::array<uint8_t, N> &buf, const playernum_t exclude = MAX_PLAYERS)
@@ -587,7 +610,14 @@ host_decision host_decide(const playernum_t pnum, const netid_t id, const uint8_
 	nv::requester_view q{static_cast<uint8_t>(pnum), player_alive_for_authority(pnum), true};
 	nv::inventory inv;
 	if (pnum == Player_num)
+	{
 		inv = own_inventory();
+		/* -lagtest: the grants on their way to the ship count, as in
+		 * the host's copy of a client.
+		 */
+		if (lagtest_active())
+			inv = A.lag.with_grants(inv, rules_for(Player_num), A.life.life, true);
+	}
 	else if (pnum < MAX_PLAYERS)
 	{
 		inv = A.mirrors[pnum].current();
@@ -731,6 +761,127 @@ void receive_deny(const std::span<const uint8_t> payload)
 		return;
 	if (const auto was{A.pending.deny(d->netid, timer_query(), PICKUP_COOLDOWN)})
 		unhide(*was);
+}
+
+/* -lagtest: the host's own ship touched a powerup.  As a client's touch
+ * (net_objects_touch): the rules are checked with the ship's inventory,
+ * the powerup is hidden, and the request is on its way.  The times are
+ * game time, which stands still while the game is paused.
+ */
+void lag_touch(const vmobjptridx_t powerup, const netid_t id)
+{
+	if (powerup->render_type == render_type::RT_NONE)
+		return;
+	const fix64 now{GameTime64};
+	if (!A.pending.can_request(id, now))
+		return;
+	auto &pinfo{powerup->ctype.powerup_info};
+	if ((pinfo.flags & PF_SPAT_BY_PLAYER) && pinfo.creation_time > 0 && GameTime64 < pinfo.creation_time + SPAT_DELAY)
+		return;
+	const auto powerup_id{get_powerup_id(powerup)};
+	const auto desc{desc_of(powerup_id)};
+	const auto inv{own_inventory()};
+	if (!nv::evaluate_pickup(for_rules(inv), rules_for(Player_num), desc, static_cast<uint32_t>(std::max(pinfo.count, 0))).usable)
+	{
+		show_cannot_use(powerup_id, desc, inv);
+		return;
+	}
+	const uint16_t objnum{powerup.get_unchecked_index()};
+	if (!A.lag.request(now, id, static_cast<uint8_t>(powerup_id), objnum, underlying_value(powerup->signature)))
+		return;
+	std::optional<nv::pending_pickup> evicted;
+	A.pending.add({id, objnum, underlying_value(powerup->signature), static_cast<uint8_t>(powerup->render_type), true, now, 0}, evicted);
+	if (evicted)
+		unhide(*evicted);
+	powerup->render_type = render_type::RT_NONE;
+}
+
+/* -lagtest: the request arrived.  The host's decision, as for a client's
+ * request (host_receive_request, host_grant_remote): the grant goes to
+ * everyone now, the powerup's net id ends now (the others remove it), and
+ * the answer reaches the ship the other half of the round trip later.  A
+ * removed powerup stays here, hidden and without an id, until then: the
+ * effect is do_powerup's on it, as on a client's copy.
+ */
+void lag_decide(const nv::lag_pickup &e, const fix64 now)
+{
+	const auto h{host_decide(Player_num, e.netid, e.powerup_id)};
+	if (!h.d.grant)
+	{
+		A.lag.deny(now, e);
+		return;
+	}
+	auto &obj{*h.obj};
+	const auto powerup{get_powerup_id(obj)};
+	const bool removed{h.d.outcome.consumed};
+	if (removed)
+		A.table.unbind(e.netid);
+	else
+		obj.ctype.powerup_info.count = static_cast<int>(h.d.outcome.remaining);
+	send_grant(Player_num, e.netid, powerup, h.d.outcome.taken, h.d.outcome.remaining, removed);
+	auto granted{e};
+	granted.objnum = h.obj.get_unchecked_index();
+	granted.signature = underlying_value(obj.signature);
+	A.lag.grant(now, granted, h.desc, h.d.outcome, A.life.life);
+	con_printf(CON_VERBOSE, "net: lag test: P#%u takes powerup %u (id %04x), applied in %i ms", Player_num, underlying_value(powerup), e.netid, static_cast<int>(A.lag.down() * 1000 / F1_0));
+}
+
+/* -lagtest: the grant reached the ship: as receive_grant for the local
+ * player, the life rule included (apply_own_grant).
+ */
+void lag_apply_grant(const nv::lag_pickup &e)
+{
+	if (const auto was{A.pending.erase(e.netid)})
+		unhide(*was);
+	auto &Objects{LevelUniqueObjectState.Objects};
+	imobjptridx_t objp{object_none};
+	if (e.objnum <= Highest_object_index)
+	{
+		const auto &&o{Objects.vmptridx(objnum_t{e.objnum})};
+		if (underlying_value(o->signature) == e.signature && o->type == object_type::OBJ_POWERUP && !(o->flags & OF_SHOULD_BE_DEAD))
+			objp = o;
+	}
+	const nv::pickup_grant_msg g{static_cast<uint8_t>(Player_num), e.netid, e.powerup_id, e.outcome.taken, e.outcome.remaining, static_cast<uint8_t>(e.outcome.consumed ? underlying_value(nv::grant_flag::removed) : 0), e.life};
+	const int count{objp != object_none ? objp->ctype.powerup_info.count : 0};
+	apply_own_grant(objp, g);
+	if (objp == object_none)
+		return;
+	if (e.outcome.consumed)
+		objp->flags |= OF_SHOULD_BE_DEAD;
+	else
+		/* A cannon that stays: the host's count, which another pickup
+		 * may have changed since.
+		 */
+		objp->ctype.powerup_info.count = count;
+}
+
+/* -lagtest, every frame: the requests and answers that arrived. */
+void lag_frame()
+{
+	const fix64 now{GameTime64};
+	if (!lagtest_announced)
+	{
+		lagtest_announced = true;
+		HUD_init_message(HM_DEFAULT, "Lag test: host pickups delayed by %u ms", static_cast<unsigned>(CGameArg.DbgLagTestMs));
+		con_printf(CON_NORMAL, "Lag test: host pickups delayed by %u ms", static_cast<unsigned>(CGameArg.DbgLagTestMs));
+	}
+	while (const auto e{A.lag.next_due(now)})
+	{
+		switch (e->what)
+		{
+			case nv::lag_pickup::stage::request:
+				lag_decide(*e, now);
+				break;
+			case nv::lag_pickup::stage::grant:
+				lag_apply_grant(*e);
+				break;
+			case nv::lag_pickup::stage::deny:
+				if (const auto was{A.pending.deny(e->netid, now, PICKUP_COOLDOWN)})
+					unhide(*was);
+				break;
+		}
+	}
+	A.pending.expire(now, PICKUP_TIMEOUT, PICKUP_COOLDOWN, [](const nv::pending_pickup &p) { unhide(p); });
 }
 
 void receive_create(const std::span<const uint8_t> payload)
@@ -955,6 +1106,7 @@ void net_objects_level_start()
 	A.table.reset();
 	A.meta.fill({});
 	A.pending.reset();
+	lagtest_reset();
 	A.dropped.fill(false);
 	A.applied_grants = 0;
 	A.life.reset();
@@ -977,6 +1129,7 @@ void net_objects_snapshot_begin()
 	A.table.reset();
 	A.meta.fill({});
 	A.pending.reset();
+	lagtest_reset();
 	A.dropped.fill(false);
 	A.applied_grants = 0;
 	A.life.reset();
@@ -1020,6 +1173,8 @@ void net_objects_frame()
 	scan_objects();
 	if (!multi_i_am_master())
 		A.pending.expire(timer_query(), PICKUP_TIMEOUT, PICKUP_COOLDOWN, [](const nv::pending_pickup &p) { unhide(p); });
+	else if (lagtest_active())
+		lag_frame();
 	send_own_inventory(false);
 }
 
@@ -1077,6 +1232,11 @@ bool net_objects_touch(const vmobjptridx_t powerup)
 {
 	if (!net_objects_active())
 		return false;
+	/* -lagtest: a powerup the host's own ship asked for, which may have
+	 * no id any more (granted, the answer on its way): not taken again.
+	 */
+	if (lagtest_active() && A.lag.holds(powerup.get_unchecked_index(), underlying_value(powerup->signature)))
+		return true;
 	const auto id{netid_of(*powerup, powerup.get_unchecked_index())};
 	if (id == NETID_NONE)
 		return false;
@@ -1092,7 +1252,10 @@ bool net_objects_touch(const vmobjptridx_t powerup)
 	}
 	if (multi_i_am_master())
 	{
-		host_touch(powerup, id);
+		if (lagtest_active())
+			lag_touch(powerup, id);
+		else
+			host_touch(powerup, id);
 		return true;
 	}
 	if (powerup->render_type == render_type::RT_NONE)
@@ -1207,6 +1370,19 @@ void net_objects_own_deres()
 {
 	if (!net_objects_active())
 		return;
+	/* -lagtest: the host drops its own items from its ship, which does
+	 * not hold the grants still on their way to it yet; the host's copy
+	 * of a client would.  They go into the ship now (without effects,
+	 * shields and energy excepted, as a grant that reaches a dead ship
+	 * before its deres), and are not applied when they arrive: they are
+	 * for the life that ends here.
+	 */
+	if (lagtest_active() && !A.life.dropped)
+	{
+		auto &vmobjptr{LevelUniqueObjectState.Objects.vmptr};
+		auto &plrobj{get_local_plrobj()};
+		write_inventory(plrobj, A.lag.with_grants(inventory_of(plrobj), rules_for(Player_num), A.life.life, false), false);
+	}
 	A.life.on_deres();
 }
 

@@ -2156,6 +2156,33 @@ Differences from §6.1–§6.4 and decisions:
   grant after its effect is not possible; the host has no other
   advantage (no check is skipped for it, and it cannot take a powerup
   another player already has).
+- **`-lagtest <ms>` (test option).** A host playing alone with bots can
+  feel a client's pickups: with `-lagtest N` (0–500, 0 = off) the host's
+  *own* pickups take the client's way with a round trip of N ms
+  (`common/main/net_v2_lagtest.h`, tested in `test-net-v2-authority`).
+  At the touch the ship checks the rules with its inventory and hides the
+  powerup, exactly as a client does (same "already have" message, same
+  0.5 s cooldown after a denial). The request reaches the normal decision
+  (`host_decide`) N/2 ms later, not at the touch: a real client's request
+  is decided when it arrives, so a bot (or another player) may take the
+  powerup in between and the host is then denied, as a client would be.
+  On a grant, `PICKUP_GRANT` goes to everyone at the decision and a
+  removed powerup loses its net id then (the others remove it); on the
+  host the object stays, hidden and without an id, until the answer
+  reaches the ship the other N/2 ms later, when the effect is
+  `do_powerup`'s on it (`apply_own_grant`, as on a client's copy of the
+  object); a denial shows it again at that time. Decisions count the
+  grants still on their way, as the host's copy of a client does. The
+  lives rule is the client's: a grant that reaches a dead ship before its
+  deres goes into the inventory without effects; at the deres every grant
+  still on its way goes into the ship without effects (the host drops its
+  own items from the ship, which then holds them as the copy of a client
+  would), and when it arrives after that it is for an ended life and not
+  applied. The delays are game time (`GameTime64`): independent of the
+  frame rate, and they stand still while the game is paused. Bots, the
+  clients and everything on the wire are unchanged; without the option
+  the host's pickups are immediate as before. A console and HUD message
+  says the option is active the first time it applies.
 - **Vulcan and gauss cannons.** As in `do_powerup`: a player without the
   cannon takes it with the ammunition that fits, and it is removed; a
   player with the cannon takes only ammunition, and the cannon stays with

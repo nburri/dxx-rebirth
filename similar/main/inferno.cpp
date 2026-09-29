@@ -261,6 +261,7 @@ static void print_commandline_help()
 	VERB("  -verbose                      Enable verbose output.\n")	\
 	VERB("  -safelog                      Write gamelog.txt unbuffered.\n\t\t\t\tUse to keep helpful output to trace program crashes.\n")	\
 	VERB("  -frametimes                   Show the frame time and where it went\n\t\t\t\tnext to the FPS counter (-verbose logs it).\n")	\
+	VERB("  -lagtest <ms>                 As network host, delay your own pickups as a\n\t\t\t\tclient with a round trip of <ms> feels them (0-500)\n")	\
 	VERB("  -norun                        Bail out after initialization\n")	\
 	VERB("  -no-grab                      Never grab keyboard/mouse\n")	\
 	VERB("  -renderstats                  Enable renderstats info by default\n")	\
