@@ -230,8 +230,10 @@ static constexpr int is_alphablend_eclip(const effect_index eclip_num)
 //	It would be nice to not have to pass in segnum and sidenum, but
 //	they are used for our hideously hacked in headlight system.
 //	vp is a pointer to vertex ids.
+//	corners are the segment corners of those vertices (the dynamic light
+//	of objects is stored per segment corner, see lighting.h).
 //	tmap1, tmap2 are texture map ids.  tmap2 is the pasty one.
-static void render_face(grs_canvas &canvas, const shared_segment &segp, const sidenum_t sidenum, const unsigned nv, const std::array<vertnum_t, 4> &vp, const texture1_value tmap1, const texture2_value tmap2, std::array<g3s_uvl, 4> uvl_copy, const wall_is_doorway_result wid_flags)
+static void render_face(grs_canvas &canvas, const vcsegptridx_t segp, const sidenum_t sidenum, const unsigned nv, const std::array<vertnum_t, 4> &vp, const std::array<segment_relative_vertnum, 4> &corners, const texture1_value tmap1, const texture2_value tmap2, std::array<g3s_uvl, 4> uvl_copy, const wall_is_doorway_result wid_flags)
 {
 	auto &LevelUniqueControlCenterState = LevelUniqueObjectState.ControlCenterState;
 	auto &TmapInfo = LevelUniqueTmapInfoState.TmapInfo;
@@ -255,7 +257,7 @@ static void render_face(grs_canvas &canvas, const shared_segment &segp, const si
 #elif DXX_BUILD_DESCENT == 2
 	//handle cloaked walls
 	if (wid_flags & WALL_IS_DOORWAY_FLAG::cloaked) {
-		const auto wall_num = segp.shared_segment::sides[sidenum].wall_num;
+		const auto wall_num = segp->shared_segment::sides[sidenum].wall_num;
 		auto &Walls = LevelUniqueWallSubsystemState.Walls;
 		auto &vcwallptr = Walls.vcptr;
 		gr_settransblend(canvas, static_cast<gr_fade_level>(vcwallptr(wall_num)->cloak_value), gr_blend::normal);
@@ -324,11 +326,20 @@ static void render_face(grs_canvas &canvas, const shared_segment &segp, const si
 #endif
 	const auto control_center_destroyed = LevelUniqueControlCenterState.Control_center_destroyed;
 	const auto need_flashing_lights = (control_center_destroyed | Seismic_tremor_magnitude);	//make lights flash
-	auto &Dynamic_light = LevelUniqueLightState.Dynamic_light;
+	auto &Headlight_dynamic_light = LevelUniqueLightState.Headlight_dynamic_light;
+	/* The lights that reached this segment, or nullptr. */
+	const auto segment_light{LevelUniqueLightState.get_segment_dynamic_light(segp)};
 	//set light values for each vertex & build pointlist
-	for (auto &&[dli, uvli, vpi] : zip(std::span(dyn_light).first(nv), uvl_copy, vp))
+	for (auto &&[dli, uvli, vpi, ci] : zip(std::span(dyn_light).first(nv), uvl_copy, vp, corners))
 	{
-		auto &Dlvpi = Dynamic_light[vpi];
+		g3s_lrgb Dlvpi{Headlight_dynamic_light[vpi]};
+		if (segment_light)
+		{
+			auto &c{(*segment_light)[ci]};
+			Dlvpi.r += c.r;
+			Dlvpi.g += c.g;
+			Dlvpi.b += c.b;
+		}
 		dli.r = dli.g = dli.b = uvli.l;
 		//the uvl struct has static light already in it
 
@@ -474,10 +485,12 @@ template <std::size_t... N>
 static inline void check_render_face(grs_canvas &canvas, std::index_sequence<N...>, const vcsegptridx_t segnum, const sidenum_t sidenum, const unsigned facenum, const std::array<vertnum_t, 4> &ovp, const texture1_value tmap1, const texture2_value tmap2, const std::array<uvl, 4> &uvlp, const wall_is_doorway_result wid_flags, const std::size_t nv)
 {
 	const std::array<vertnum_t, 4> vp{{ovp[N]...}};
+	auto &sv{Side_to_verts[sidenum]};
+	const std::array<segment_relative_vertnum, 4> corners{{sv[side_relative_vertnum{N}]...}};
 	const std::array<g3s_uvl, 4> uvl_copy{{
 		{uvlp[N].u, uvlp[N].v, uvlp[N].l}...
 	}};
-	render_face(canvas, segnum, sidenum, nv, vp, tmap1, tmap2, uvl_copy, wid_flags);
+	render_face(canvas, segnum, sidenum, nv, vp, corners, tmap1, tmap2, uvl_copy, wid_flags);
 	check_face(canvas, segnum, sidenum, facenum, nv, vp, tmap1, tmap2, uvl_copy);
 }
 
