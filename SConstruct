@@ -5025,6 +5025,11 @@ class DXXArchive(DXXCommon):
 		RuntimeTest('test-segment-depths', (
 			'common/unittest/segment_depths.cpp',
 			)),
+		# Test of the walk over the segments a dynamic light reaches, so
+		# that it does not pass solid walls (light_reach.h, lighting.cpp).
+		RuntimeTest('test-light-reach', (
+			'common/unittest/light_reach.cpp',
+			)),
 		# Test of the bots' navigation: A*, string pulling, stuck
 		# recovery (bot_nav.h, Documentation/multiplayer-bots.md).
 		RuntimeTest('test-bot-nav', (
