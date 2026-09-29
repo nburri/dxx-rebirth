@@ -1454,6 +1454,46 @@ The table lives in `net_v2.h` as a `for_each_net_v2_message(VALUE)` macro
 with `(NAME, id, min_len, max_len, allowed_sender)` so the length and
 direction checks of §3.7 are table-driven like v1's `command_length`.
 
+### 6.11 Demo recording in a v2 game
+
+A demo is a local recording of what the recorder's screen shows, not a
+network replay; v2 adds no demo records. Remote ships (interpolated,
+§5) and the host's bots are player objects that the renderer records
+with `ND_EVENT_RENDER_OBJECT` at the positions it draws them, and the
+multiplayer events keep their v1 records (`newdemo_record_multi_*`:
+connect, reconnect, disconnect, kills, deaths, cloak, score). Playback
+sets `Game_mode` to `GM_NORMAL` around its frames, and every v2 path
+(`net_objects_active`, the interpolation, the bots) is off while
+`Newdemo_state` is `ND_STATE_PLAYBACK`.
+
+Starting a recording (F5) hung the game in a multiplayer game, for two
+reasons (fixed with `common/main/world_time_pause.h`):
+
+- `_newdemo_write` compared the byte count of `PHYSFS_writeBytes` with
+  the element count, a leftover of the upstream switch from `PHYSFS_write`.
+  The first `short`, `int` or `fix` of every recording "failed", so the
+  recording stopped at once and opened the "not enough space" prompt
+  from inside the write, while `newdemo_record_start_demo` held a
+  `pause_game_world_time`.
+- In a multiplayer game, the game window does not stop the time when a
+  menu covers it, but starts it on activation if it is paused. The
+  prompt's close released the recorder's pause, and the recorder's own
+  release then decremented a count of zero: the count wrapped, and the
+  game window never processed another frame. While the prompt was open,
+  no frame ran either, so the network was not served.
+
+A write failure now only marks the recording (`nd_record_v_no_space`);
+the game window stops it at its next input event, outside any pause
+(`newdemo_record_stop_if_failed`), and releasing a pause that is not held
+is ignored.
+
+Limitations: the demo shows other ships where the recorder saw them
+(interpolated, about one interpolation delay behind the host's truth);
+objects the recorder never rendered are not in the demo; the v2 state
+(net ids, the host's inventory copies, bot brains) is not recorded; and
+the save prompt when the recording stops (F5 again) does not pause a
+multiplayer game.
+
 ---
 
 ## 7. Bandwidth estimate (8 players, 60 Hz, D2 anarchy)
