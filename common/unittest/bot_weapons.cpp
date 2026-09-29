@@ -1767,10 +1767,125 @@ void test_dump_blast()
 	}
 }
 
+/* Section 9.10: a homing missile round the corner of a pursuit (from
+ * Ace, the target seen a moment ago, at a homing distance).
+ */
+void test_homing_round_corner()
+{
+	missile_situation m;
+	m.ammo[static_cast<unsigned>(secondary::homing)] = 4;
+	m.smarts = 3;
+	m.has_target = true;
+	m.target_visible = false;
+	m.pursuing = true;
+	m.target_seen_ago = 1;
+	m.target_distance = 80;
+	CHECK(homing_round_corner(m));
+	CHECK(choose_secondary(m) == secondary::homing);
+	CHECK(light_check(m, choose_secondary(m)) == light_verdict::chosen);
+	/* Not pursuing: nothing to fire at unseen. */
+	m.pursuing = false;
+	CHECK(!choose_secondary(m));
+	m.pursuing = true;
+	/* Below Ace, too long ago, too close, too far, cloaked, in the
+	 * cooldown: no.
+	 */
+	m.smarts = 2;
+	CHECK(!choose_secondary(m));
+	m.smarts = 4;
+	m.target_seen_ago = HOMING_CORNER_SEEN_WITHIN + 0.5;
+	CHECK(!choose_secondary(m));
+	m.target_seen_ago = 0.5;
+	m.target_distance = HOMING_MIN_DISTANCE - 5;
+	CHECK(!choose_secondary(m));
+	m.target_distance = HOMING_CORNER_MAX_DISTANCE + 5;
+	CHECK(!choose_secondary(m));
+	m.target_distance = 80;
+	m.cloaked = true;
+	CHECK(!choose_secondary(m));
+	m.cloaked = false;
+	m.since_missile = 0.1;
+	CHECK(!choose_secondary(m));
+	m.since_missile = 1e9;
+	/* The PR #47 review: one try per HOMING_CORNER_INTERVAL. */
+	m.since_corner_homing = HOMING_CORNER_INTERVAL - 0.5;
+	CHECK(!homing_round_corner(m));
+	CHECK(!choose_secondary(m));
+	m.since_corner_homing = HOMING_CORNER_INTERVAL;
+	CHECK(choose_secondary(m) == secondary::homing);
+	/* In sight it is the normal choice. */
+	m.target_visible = true;
+	m.shot_clear = true;
+	CHECK(!homing_round_corner(m));
+}
+
+/* The PR #47 review: the release of a chosen missile.  The corner shot
+ * was chosen and held for ever (the release let only the smart and the
+ * indirect heavy missile go at an unseen target).
+ */
+void test_release_aim()
+{
+	release_view v{
+		.role = missile_role::homing,
+		.has_target_pos = true,
+		.target_visible = false,
+		.shot_clear = false,
+		.indirect = false,
+		.corner_shot = true,
+		.pursuing = true,
+	};
+	CHECK(release_aim_of(v) == release_aim::corner);
+	/* Not chosen as the corner shot, or the pursuit over: held. */
+	v.corner_shot = false;
+	CHECK(release_aim_of(v) == release_aim::hold);
+	v.corner_shot = true;
+	v.pursuing = false;
+	CHECK(release_aim_of(v) == release_aim::hold);
+	v.pursuing = true;
+	/* No place of the target: held. */
+	v.has_target_pos = false;
+	CHECK(release_aim_of(v) == release_aim::hold);
+	v.has_target_pos = true;
+	/* Seen again: at the target with a clear line, else held. */
+	v.target_visible = true;
+	CHECK(release_aim_of(v) == release_aim::hold);
+	v.shot_clear = true;
+	CHECK(release_aim_of(v) == release_aim::target);
+	/* Unchanged: a straight missile at an unseen target is held; a
+	 * smart one and an indirect heavy one go at the remembered target.
+	 */
+	v = {.role = missile_role::straight, .has_target_pos = true};
+	CHECK(release_aim_of(v) == release_aim::hold);
+	v.corner_shot = v.pursuing = true;
+	CHECK(release_aim_of(v) == release_aim::hold);
+	v = {.role = missile_role::smart, .has_target_pos = true};
+	CHECK(release_aim_of(v) == release_aim::target);
+	v = {.role = missile_role::heavy, .has_target_pos = true, .indirect = true};
+	CHECK(release_aim_of(v) == release_aim::target);
+	v.target_visible = true;
+	CHECK(release_aim_of(v) == release_aim::target);
+	v.indirect = false;
+	CHECK(release_aim_of(v) == release_aim::hold);
+	/* The whole decision: pursuing, the corner shot chosen is released
+	 * at the corner.
+	 */
+	missile_situation m;
+	m.ammo[static_cast<unsigned>(secondary::homing)] = 2;
+	m.smarts = 3;
+	m.has_target = true;
+	m.pursuing = true;
+	m.target_seen_ago = 1;
+	m.target_distance = 80;
+	const auto s{choose_secondary(m)};
+	CHECK(s == secondary::homing);
+	CHECK(s && release_aim_of({.role = role_of(*s), .has_target_pos = true, .corner_shot = homing_round_corner(m), .pursuing = m.pursuing}) == release_aim::corner);
+}
 }
 
 int main()
 {
+	test_homing_round_corner();
+	test_release_aim();
 	test_log_tuning_missiles();
 	test_volleys();
 	test_heavy_boldness();

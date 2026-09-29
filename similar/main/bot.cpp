@@ -111,6 +111,12 @@ constexpr double BOT_ROAM_MIN_DISTANCE{120};
  * at most this often (the plan also expires after 2 s).
  */
 constexpr unsigned BOT_HUNT_REPLAN_TICKS{b::BOT_TICK_RATE / 2};
+/* Section 9.10: a target out of sight this long starts a new engagement
+ * (its shields at the start: the damage seen, b::pursuit_view).
+ */
+constexpr unsigned BOT_ENGAGEMENT_GAP_TICKS{10 * b::BOT_TICK_RATE};
+/* Section 9.10: the speed of a corner peek, a share of the top speed. */
+constexpr double BOT_PEEK_SPEED{0.7};
 /* Section 4.6, dodge: projectiles within this distance are looked at,
  * their closest pass within this time, for this long a dodge.
  */
@@ -358,6 +364,12 @@ struct bot_state
 	std::optional<b::secondary> missile_fire;
 	unsigned missile_volley{};
 	std::optional<uint32_t> last_missile, last_heavy, last_mine;
+	/* Section 9.10 and the PR #47 review: the pending missile is the
+	 * homing shot round the corner of a pursuit (b::release_aim::corner),
+	 * and when the last such shot was chosen (b::HOMING_CORNER_INTERVAL).
+	 */
+	bool corner_shot{};
+	std::optional<uint32_t> last_corner_homing;
 	/* Section 9.8: the volley under way (b::volley_size): its missile
 	 * and the rounds still to go.
 	 */
@@ -439,6 +451,42 @@ struct bot_state
 	 */
 	std::optional<uint8_t> seek_who;
 	per_player_array<uint32_t> seek_done{};
+	/* Section 9.10: the pursuit of a target round a corner. */
+	struct pursuit_track
+	{
+		bool active{};
+		uint8_t who{0xff};
+		b::pursuit_reason reason{b::pursuit_reason::none};
+		uint32_t started{};
+		/* The engagement: the target last in sight while the bot
+		 * engaged it, when, and its shields at the engagement's start
+		 * (the most seen since).
+		 */
+		uint8_t engaged_who{0xff};
+		uint32_t engaged_tick{};
+		double engage_shields{};
+		/* The bot's last hit on an enemy (bot_take_damage). */
+		uint8_t hit_who{0xff};
+		uint32_t hit_tick{};
+		/* Hysteresis: after the bot gave up a pursuit, none again (nor
+		 * a hunt) until it has seen that target again
+		 * (b::pursuit_block).
+		 */
+		b::pursuit_block ended;
+		/* Predicted places reached without finding the target. */
+		unsigned advances{};
+		/* The predicted place (b::predict_pursuit), when planned. */
+		uint32_t seg{};
+		vec3 point;
+		bool dead_end{};
+		/* Corner clearing (b::corner_approach_point): done for this
+		 * pursuit, or the peek under way (until peek_until).
+		 */
+		bool corner_done{};
+		bool peek{};
+		vec3 peek_point, peek_aim;
+		uint32_t peek_until{};
+	} pursuit;
 	/* Section 9.9: what it holds to fight with (the log). */
 	b::armed_level armed{b::armed_level::none};
 	/* Section 9.5, the log: the goal's choice at the last strategy
@@ -539,6 +587,7 @@ struct bot_state
 		turn_to = 0xff;
 		turn_from = turn_until = 0;
 		grabbing = false;
+		pursuit = {};
 		heavy_why = b::heavy_verdict::none_owned;
 		missile.reset();
 		missile_fire.reset();
@@ -554,6 +603,8 @@ struct bot_state
 		last_missile.reset();
 		last_heavy.reset();
 		last_mine.reset();
+		corner_shot = false;
+		last_corner_homing.reset();
 		heavy_target = 0xff;
 		tactics = {};
 		clear_path();
@@ -1222,7 +1273,22 @@ void plan_path(bot_state &bs, const object &obj, const uint32_t goal_seg, const 
 		bs.points.push_back(B.graph.position(steps[i].node));
 		bs.point_edges.emplace_back(from, side);
 	}
-	if (B.path.complete && goal_pos)
+	/* The PR #47 review: the goal's place replaces the centre of its
+	 * segment only if a straight line reaches it from there (from the
+	 * ship, already in that segment): a place inside a wall (a
+	 * predicted one) left the bot pressing against the wall.
+	 */
+	if (B.path.complete && goal_pos && !line_clear(obj, bs.points.empty() ? obj.pos : to_fixvec(B.graph.position(goal_seg)), bs.points.empty() ? obj.segnum : static_cast<segnum_t>(goal_seg), to_fixvec(*goal_pos), 0, false))
+	{
+		if (bot_log_on())
+			con_printf(CON_VERBOSE, "bots: '%s' goal place in segment %u out of reach: its centre instead", static_cast<const char *>(bs.cfg.name), goal_seg);
+		if (bs.points.empty())
+		{
+			bs.points.push_back(B.graph.position(goal_seg));
+			bs.point_edges.emplace_back(start, b::NAV_NO_SIDE);
+		}
+	}
+	else if (B.path.complete && goal_pos)
 	{
 		if (bs.points.empty())
 		{
@@ -1927,6 +1993,202 @@ std::optional<goal_place> retreat_place(bot_state &bs, const object &obj, const 
 	return best;
 }
 
+/* Section 9.10: pursuit.  Seconds from ticks. */
+[[nodiscard]]
+double tick_seconds(const uint32_t ticks)
+{
+	return ticks / static_cast<double>(b::BOT_TICK_RATE);
+}
+
+/* Section 9.10: what the pursuit rules (b::pursuit_start,
+ * b::pursuit_stop) see of the bot and target `who`.
+ */
+[[nodiscard]]
+b::pursuit_view pursuit_view_of(const bot_state &bs, const object &obj, const uint8_t who, const uint32_t tick, const unsigned memory_ticks)
+{
+	auto &Objects = LevelUniqueObjectState.Objects;
+	const auto &p{bs.pursuit};
+	const auto res{resources_of(obj)};
+	const double own_arms{b::armament_score(res.weapons)};
+	double target_shields{100}, advantage{1};
+	if (const auto &t{*Objects.vcptr(vcplayerptr(who)->objnum)}; t.type == object_type::OBJ_PLAYER)
+	{
+		target_shields = t.shields / 65536.0;
+		advantage = b::fight_advantage(res.shields, own_arms, target_shields, b::armament_score(weapons_of(t.ctype.player_info)));
+	}
+	/* Stronger enemies known near where the target went. */
+	unsigned stronger{0};
+	const auto &m{bs.memory[who]};
+	for (playernum_t i = 0; i < N_players && i < MAX_PLAYERS; ++i)
+	{
+		if (i == bs.pid || i == who || !bs.memory[i].valid || same_team(bs.pid, i))
+			continue;
+		if (tick - bs.memory[i].tick > memory_ticks || b::distance(bs.memory[i].pos, m.pos) > b::THIRD_PARTY_DISTANCE)
+			continue;
+		const auto &o{*Objects.vcptr(vcplayerptr(i)->objnum)};
+		if (o.type == object_type::OBJ_PLAYER && b::fight_advantage(o.shields / 65536.0, b::armament_score(weapons_of(o.ctype.player_info)), res.shields, own_arms) > b::THIRD_PARTY_STRONGER)
+			++stronger;
+	}
+	return {
+		.skill = bs.skill_level,
+		.style = bs.cfg.style,
+		.since_engaged = p.engaged_who == who ? tick_seconds(tick - p.engaged_tick) : 1e9,
+		.since_hit = p.hit_who == who ? tick_seconds(tick - p.hit_tick) : 1e9,
+		.target_shields = target_shields,
+		.damage_seen = p.engaged_who == who ? std::max(0.0, p.engage_shields - target_shields) : 0,
+		.advantage = advantage,
+		.shields = res.shields,
+		.retreat_shields = b::style_retreat_shields(*bs.style, advantage),
+		.invulnerable = res.invulnerable,
+		.stronger_near = stronger,
+		.target_heavy = bs.heavy_holding[who].held(tick),
+	};
+}
+
+void end_pursuit(bot_state &bs, const b::pursuit_end why, const uint32_t tick)
+{
+	auto &p{bs.pursuit};
+	if (!p.active)
+		return;
+	if (bot_log_on())
+		con_printf(CON_VERBOSE, "bots: '%s' ends the pursuit of P#%u: %s (after %.1f s, %u predicted places reached)", static_cast<const char *>(bs.cfg.name), p.who, b::name_of(why), tick_seconds(tick - p.started), p.advances);
+	p.ended.on_end(why, p.who, p.who < MAX_PLAYERS && bs.memory[p.who].valid ? bs.memory[p.who].tick : tick);
+	p.active = false;
+	p.who = 0xff;
+	p.peek = false;
+}
+
+/* Section 9.10, at each strategy tick before the target choice: the
+ * engagement (the target in sight while the bot engages or hunts it),
+ * the end of a pursuit (seen again, gone, the rules of b::pursuit_stop),
+ * and the start of one when the engaged target just broke the line of
+ * sight (b::pursuit_start; not again for a target before it is seen
+ * again).
+ */
+void update_pursuit(bot_state &bs, const object &obj, const uint32_t tick, const unsigned memory_ticks)
+{
+	auto &p{bs.pursuit};
+	if (bs.target && bs.visible_now[*bs.target] && (bs.chosen == b::goal_kind::engage || bs.chosen == b::goal_kind::hunt))
+	{
+		const auto t{*bs.target};
+		const double sh{ship_of(t).shields / 65536.0};
+		/* A new engagement: another target, or none for a while. */
+		if (p.engaged_who != t || tick - p.engaged_tick > BOT_ENGAGEMENT_GAP_TICKS)
+			p.engage_shields = sh;
+		else
+			p.engage_shields = std::max(p.engage_shields, sh);
+		p.engaged_who = t;
+		p.engaged_tick = tick;
+	}
+	if (p.active)
+	{
+		const auto w{p.who};
+		std::optional<b::pursuit_end> end;
+		if (w >= MAX_PLAYERS || !bs.memory[w].valid)
+			end = b::pursuit_end::lost;
+		else if (bs.visible_now[w])
+			end = b::pursuit_end::seen;
+		else
+			end = b::pursuit_stop(pursuit_view_of(bs, obj, w, tick, memory_ticks), tick_seconds(tick - p.started));
+		if (end)
+			end_pursuit(bs, *end, tick);
+		return;
+	}
+	if (!bs.target)
+		return;
+	const auto w{*bs.target};
+	const auto &m{bs.memory[w]};
+	if (bs.visible_now[w] || !m.valid || p.engaged_who != w)
+		return;
+	if (p.ended.blocks(w, m.tick))
+		return;
+	const auto v{pursuit_view_of(bs, obj, w, tick, memory_ticks)};
+	const auto reason{b::pursuit_start(v)};
+	if (reason == b::pursuit_reason::none)
+		return;
+	p.active = true;
+	p.who = w;
+	p.reason = reason;
+	p.started = tick;
+	p.advances = 0;
+	p.dead_end = false;
+	p.corner_done = false;
+	p.peek = false;
+	if (bot_log_on())
+		con_printf(CON_VERBOSE, "bots: '%s' pursues P#%u round a corner: %s (for %.1f s; last seen %.0f units away %.1f s ago at %.0f units/s; shields %.0f against %.0f, advantage %.2f)", static_cast<const char *>(bs.cfg.name), w, b::name_of(reason), b::pursuit_seconds(v.skill, v.style), b::distance(to_vec(obj.pos), m.pos), tick_seconds(tick - m.tick), b::length(m.vel), v.shields, v.target_shields, v.advantage);
+}
+
+/* Section 9.10: where the pursued target probably is (b::predict_pursuit
+ * from its last known place and velocity), unless out of the bot's
+ * reach (the path costs of this strategy tick): then where it was seen.
+ */
+void predict_pursued(bot_state &bs, const object &obj, const uint32_t tick)
+{
+	auto &p{bs.pursuit};
+	const auto &m{bs.memory[p.who]};
+	const auto flags{obj.ctype.player_info.powerup_flags};
+	const double travel{b::pursuit_travel(b::length(m.vel), tick_seconds(tick - m.tick), p.advances)};
+	/* The PR #47 review: the predicted point's leg checked against the
+	 * walls (one fvi call), else a place inside (b::predict_pursuit).
+	 */
+	const auto r{b::predict_pursuit(B.graph, m.segment, m.pos, m.vel, travel, [flags](const uint32_t from, const b::nav_edge &e) {
+		return edge_passable(from, e, flags);
+	}, [&obj](const uint32_t seg, const vec3 &from, const vec3 &to) {
+		return line_clear(obj, to_fixvec(from), static_cast<segnum_t>(seg), to_fixvec(to), 0, false);
+	})};
+	p.dead_end = r.dead_end;
+	if (r.segment == m.segment || bs.dist.cost(r.segment))
+	{
+		p.seg = r.segment;
+		p.point = r.point;
+	}
+	else
+	{
+		p.seg = m.segment;
+		p.point = m.pos;
+	}
+}
+
+/* Section 9.10, corner clearing: near the place the pursued target was
+ * last seen (the corner), once per pursuit, a peek point short of it and
+ * swung wide (b::corner_approach_point), if the bot can fly there in a
+ * straight line (at most three probes: the full swing, half, none).
+ */
+void plan_corner(bot_state &bs, const object &obj, const uint32_t tick)
+{
+	auto &p{bs.pursuit};
+	if (p.corner_done || p.peek)
+		return;
+	const auto &m{bs.memory[p.who]};
+	const auto pos{to_vec(obj.pos)};
+	const double keep{b::corner_keep(bs.skill_level, bs.cfg.style)};
+	const double d{b::distance(pos, m.pos)};
+	if (keep <= 0 || d <= keep)
+	{
+		p.corner_done = true;
+		return;
+	}
+	if (d > b::CORNER_APPROACH_RANGE)
+		return;
+	const fix rad{obj.size * 2 / 3};
+	for (const double share : {b::CORNER_SWING_SHARE, b::CORNER_SWING_SHARE / 2, 0.0})
+	{
+		const auto a{b::corner_approach_point(pos, m.pos, m.vel, keep, share)};
+		if (!a.peek)
+			break;
+		if (!line_clear(obj, obj.pos, obj.segnum, to_fixvec(a.point), rad, false))
+			continue;
+		p.peek = true;
+		p.peek_point = a.point;
+		p.peek_aim = a.aim;
+		p.peek_until = tick + static_cast<uint32_t>(b::CORNER_PEEK_SECONDS * b::BOT_TICK_RATE);
+		if (bot_log_on())
+			con_printf(CON_VERBOSE, "bots: '%s' clears the corner where P#%u went: peeks from %.0f units, swing %.0f", static_cast<const char *>(bs.cfg.name), p.who, keep, keep * share);
+		return;
+	}
+	p.corner_done = true;
+}
+
 /* The goal of the last strategy tick, as the goal choice sees it. */
 [[nodiscard]]
 std::optional<b::goal_kind> current_goal(const bot_state &bs, const bool target_visible)
@@ -1960,11 +2222,16 @@ void think(bot_state &bs, object &obj, const uint32_t tick)
 	unsigned n{0};
 	/* Section 9.7: an aggressive bot hunts a lost target longer. */
 	const unsigned memory_ticks{b::ticks_from_ms(b::effective_memory_ms(sk, st))};
+	/* Section 9.10: the pursuit starts or ends before the target choice
+	 * (the pursued target keeps its score).
+	 */
+	update_pursuit(bs, obj, tick, memory_ticks);
 	for (playernum_t i = 0; i < N_players && i < MAX_PLAYERS; ++i)
 	{
 		if (i == bs.pid || !bs.memory[i].valid)
 			continue;
 		auto &c{cand[n++]};
+		c.pursued = bs.pursuit.active && bs.pursuit.who == i;
 		c.id = i;
 		c.excluded = same_team(bs.pid, i);
 		c.visible = bs.visible_now[i];
@@ -1975,6 +2242,8 @@ void think(bot_state &bs, object &obj, const uint32_t tick)
 		c.bounty = +(Game_mode & GM_BOUNTY) && Bounty_target == i;
 	}
 	bs.target = b::choose_target(std::span(cand.data(), n), bs.target, sk.awareness);
+	if (bs.pursuit.active && bs.target != bs.pursuit.who)
+		end_pursuit(bs, b::pursuit_end::other_target, tick);
 	double target_score{0};
 	bool target_visible{false};
 	std::optional<double> target_distance;
@@ -2123,8 +2392,14 @@ void think(bot_state &bs, object &obj, const uint32_t tick)
 		if (bs.seek_who)
 			seek = b::seek_utility(bs.armed, st.engage_weight * bs.tactics.engage_weight);
 	}
+	/* Section 9.10: pursuing its unseen target; or done with it (a
+	 * pursuit given up: persistence over, weak, an ambush, searched)
+	 * until it is seen again: no hunt for it.
+	 */
+	const bool pursuing{bs.pursuit.active && bs.target == bs.pursuit.who && !target_visible};
+	const bool given_up{bs.target && !target_visible && !bs.pursuit.active && bs.pursuit.ended.blocks(*bs.target, bs.memory[*bs.target].tick)};
 	const b::goal_inputs gin{
-		.has_target = bs.target.has_value(),
+		.has_target = bs.target.has_value() && !given_up,
 		.target_visible = target_visible,
 		.target_score = target_score,
 		.threatened = bs.target.has_value() || attacked,
@@ -2149,6 +2424,7 @@ void think(bot_state &bs, object &obj, const uint32_t tick)
 		.engage_weight = st.engage_weight * b::style_engage_factor(st, advantage) * bs.tactics.engage_weight,
 		.collect_weight = st.collect_weight * bs.tactics.collect_weight,
 		.collector = bs.cfg.style == b::bot_style::collector,
+		.pursuing = pursuing,
 		.current = current_goal(bs, target_visible),
 	};
 	const auto goal{b::choose_goal(gin)};
@@ -2199,10 +2475,24 @@ void think(bot_state &bs, object &obj, const uint32_t tick)
 			 */
 			/* Section 9.9: or, without one, the enemy it seeks. */
 			const auto &m{bs.memory[bs.target ? *bs.target : *bs.seek_who]};
-			const bool moved{bs.goal != bot_goal::hunt || bs.goal_seg != m.segment};
+			uint32_t hunt_seg{m.segment};
+			vec3 hunt_pos{m.pos};
+			/* Section 9.10: pursuing, where the target probably is now
+			 * (a walk of at most b::PREDICT_MAX_STEPS segments each
+			 * strategy tick; a new path at most every half second), and
+			 * the corner it went round cleared first.
+			 */
+			if (pursuing)
+			{
+				predict_pursued(bs, obj, tick);
+				plan_corner(bs, obj, tick);
+				hunt_seg = bs.pursuit.seg;
+				hunt_pos = bs.pursuit.point;
+			}
+			const bool moved{bs.goal != bot_goal::hunt || bs.goal_seg != hunt_seg};
 			if (replan_due || (moved && tick - bs.last_plan_tick >= BOT_HUNT_REPLAN_TICKS))
 			{
-				set_goal(bs, obj, bot_goal::hunt, m.segment, m.pos, tick);
+				set_goal(bs, obj, bot_goal::hunt, hunt_seg, hunt_pos, tick);
 				/* Section 9.9: a place sought without a path to it is
 				 * given up (b::seek_place_done), not planned for again
 				 * every strategy tick.
@@ -2353,7 +2643,20 @@ vec3 follow_path(bot_state &bs, object &obj, const bool engaged)
 		 * bot does not come back for a while; a refuelling bot hovers.
 		 */
 		if (bs.goal == bot_goal::hunt && bs.target)
-			bs.memory[*bs.target] = {};
+		{
+			/* Section 9.10: a pursuit goes on to the next predicted
+			 * place (further along the target's way), until a dead end
+			 * or b::PURSUIT_MAX_ADVANCES places: searched.
+			 */
+			auto &p{bs.pursuit};
+			if (p.active && *bs.target == p.who && !p.dead_end && ++p.advances <= b::PURSUIT_MAX_ADVANCES)
+				p.corner_done = true;
+			else
+			{
+				end_pursuit(bs, b::pursuit_end::searched, B.tick.tick());
+				bs.memory[*bs.target] = {};
+			}
+		}
 		if (collecting)
 			bs.powerups.ignore_for(bs.collect_key, B.tick.tick() + BOT_COLLECT_IGNORE_TICKS);
 		if (bs.goal != bot_goal::refuel)
@@ -2936,6 +3239,27 @@ void plan_heavy(bot_state &bs, const object &obj, const uint32_t tick, b::missil
  * target, a wall near it, the corner it hides behind) and released when
  * the outcome along the nose is favourable.
  */
+/* Section 9.10 and the PR #47 review: the homing shot round the corner
+ * of a pursuit is pending (chosen as such, the pursuit of the target
+ * still under way).
+ */
+[[nodiscard]]
+bool corner_shot_pending(const bot_state &bs)
+{
+	return bs.corner_shot && bs.missile == b::secondary::homing && bs.pursuit.active && bs.pursuit.who < MAX_PLAYERS && bs.target == bs.pursuit.who && bs.memory[bs.pursuit.who].valid;
+}
+
+/* Its aim: the corner's exit (the peek's aim, b::corner_approach_point),
+ * the place the target was last seen plus b::CORNER_AIM_AHEAD along its
+ * way.
+ */
+[[nodiscard]]
+vec3 corner_exit(const bot_state &bs, const vec3 &pos)
+{
+	const auto &m{bs.memory[bs.pursuit.who]};
+	return b::corner_approach_point(pos, m.pos, m.vel, 0).aim;
+}
+
 void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept *const p)
 {
 	auto &Objects = LevelUniqueObjectState.Objects;
@@ -3101,6 +3425,8 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 		m.has_target = target_pos.has_value();
 		m.target_visible = target_visible;
 		m.shot_clear = target_visible && bs.shot_clear;
+		m.pursuing = bs.pursuit.active && bs.target == bs.pursuit.who;
+		m.since_corner_homing = seconds_since(bs.last_corner_homing);
 		m.invulnerable_left = invulnerable_left;
 		m.cloaked = res_cloaked;
 		m.since_missile = seconds_since(bs.last_missile);
@@ -3177,6 +3503,7 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 		 * choice (whose interval runs from the volley's last round).
 		 */
 		std::optional<b::secondary> chosen;
+		bs.corner_shot = false;
 		if (bs.volley_left && bs.volley_missile)
 		{
 			if (m.since_missile < b::VOLLEY_GAP)
@@ -3205,6 +3532,16 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 		{
 			chosen = b::choose_secondary(m);
 			bs.light_why = b::light_check(m, chosen);
+			/* The PR #47 review: the corner shot, one try per
+			 * b::HOMING_CORNER_INTERVAL.
+			 */
+			if (chosen == b::secondary::homing && b::homing_round_corner(m))
+			{
+				bs.corner_shot = true;
+				bs.last_corner_homing = tick;
+				if (bot_log_on())
+					con_printf(CON_VERBOSE, "bots: '%s' aims a homing missile round the corner at P#%u (last seen %.0f units away %.1f s ago)", static_cast<const char *>(bs.cfg.name), bs.pursuit.who, m.target_distance, m.target_seen_ago);
+			}
 		}
 		else
 			bs.light_why = b::light_verdict::chosen;
@@ -3232,15 +3569,25 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 	const bool heavy{role == b::missile_role::heavy || role == b::missile_role::shaker};
 	/* Section 9.6: a heavy missile aimed at a wall or a corner. */
 	const bool indirect{heavy && bs.heavy_aim && bs.heavy_aim->kind != b::aim_kind::direct};
+	b::release_aim aim_at{b::release_aim::target};
 	if (role != b::missile_role::mine)
 	{
-		/* The target: in sight, or a smart missile's seen a moment ago.
-		 * In sight, the line of fire must be clear for every missile,
-		 * the smart one too (no teammate, reactor or robot first).
+		/* The target: in sight, or a smart missile's seen a moment ago,
+		 * or (the PR #47 review) the corner's exit for the homing shot
+		 * round it (b::release_aim_of).  In sight, the line of fire
+		 * must be clear for every missile, the smart one too (no
+		 * teammate, reactor or robot first).
 		 */
-		if (!target_pos || (!target_visible && role != b::missile_role::smart && !indirect))
-			return;
-		if (target_visible && !bs.shot_clear && !indirect)
+		aim_at = b::release_aim_of({
+			.role = role,
+			.has_target_pos = target_pos.has_value(),
+			.target_visible = target_visible,
+			.shot_clear = bs.shot_clear,
+			.indirect = indirect,
+			.corner_shot = bs.corner_shot,
+			.pursuing = corner_shot_pending(bs),
+		});
+		if (aim_at == b::release_aim::hold)
 			return;
 	}
 	double err{0}, impact{1e9}, target_closing{0};
@@ -3301,7 +3648,10 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 	}
 	else if (role != b::missile_role::mine)
 	{
-		err = b::angle_between(frame.f, target_visible ? bs.face_dir : *target_pos - pos);
+		/* Section 9.10: round a corner, at its exit (peeking, the bot
+		 * faces it).
+		 */
+		err = b::angle_between(frame.f, aim_at == b::release_aim::corner ? corner_exit(bs, pos) - pos : target_visible || (bs.pursuit.active && bs.pursuit.peek) ? bs.face_dir : *target_pos - pos);
 		/* Where it bursts: the wall along the nose, or the target on
 		 * the way.
 		 */
@@ -3500,9 +3850,9 @@ void log_summary(const bot_state &bs, const object &obj, const uint32_t tick)
 		std::snprintf(powerup, sizeof(powerup), "-");
 	char arm[160];
 	describe_armament(pi, arm, sizeof(arm));
-	con_printf(CON_VERBOSE, "bots: '%s' goal=%s %.2f (next %s %.2f, collect %.2f%s%s%s%s) tgt=%s | %s [%s] | sh=%.0f en=%.0f | pu=%s | heavy=%s min=%.0f keep=%.0f risk=%.2f/%.1f%s%s%s%s | light=%s armed=%s",
+	con_printf(CON_VERBOSE, "bots: '%s' goal=%s %.2f (next %s %.2f, collect %.2f%s%s%s%s%s) tgt=%s | %s [%s] | sh=%.0f en=%.0f | pu=%s | heavy=%s min=%.0f keep=%.0f risk=%.2f/%.1f%s%s%s%s | light=%s armed=%s",
 		static_cast<const char *>(bs.cfg.name),
-		goal_name(bs.chosen), bs.chosen_u, goal_name(bs.runner_up), bs.runner_up_u, bs.collect_u, bs.grabbing ? " grab" : "", bs.powerup_phase ? " phase" : "", bs.third_parties ? " 3rd-party" : "", bs.seek_who ? " seek" : "",
+		goal_name(bs.chosen), bs.chosen_u, goal_name(bs.runner_up), bs.runner_up_u, bs.collect_u, bs.grabbing ? " grab" : "", bs.powerup_phase ? " phase" : "", bs.third_parties ? " 3rd-party" : "", bs.seek_who ? " seek" : "", bs.pursuit.active ? " pursuit" : "",
 		target,
 		primary_name(underlying_value(pi.Primary_weapon.get_active())), arm,
 		obj.shields / 65536.0, pi.energy / 65536.0,
@@ -3721,6 +4071,38 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 			}
 			wanted = turn_velocity(obj, turn, wanted, err, to, vel, frame.r * static_cast<double>(bs.heading_pref), max_speed);
 		}
+		/* Section 9.10, corner clearing: to the peek point short of the
+		 * corner and wide of it, facing the corner's exit (strafing
+		 * across it), until there or the peek's time is up; then on
+		 * along the path.
+		 */
+		else if (bs.pursuit.active && bs.pursuit.peek)
+		{
+			if (tick >= bs.pursuit.peek_until || b::distance(pos, bs.pursuit.peek_point) < b::CORNER_PEEK_REACHED)
+			{
+				bs.pursuit.peek = false;
+				bs.pursuit.corner_done = true;
+			}
+			else
+			{
+				if (bs.turning.phase == b::turn_phase::boost)
+					bs.turning.reset();
+				bs.face_dir = b::normalized(bs.pursuit.peek_aim - pos);
+				bs.face_rate = {};
+				wanted = duck_velocity(pos, bs.pursuit.peek_point, max_speed * BOT_PEEK_SPEED);
+			}
+		}
+		/* The PR #47 review: the homing shot round the corner pending,
+		 * the bot turns to the corner's exit (flying its path) for the
+		 * release.
+		 */
+		else if (corner_shot_pending(bs))
+		{
+			if (bs.turning.phase == b::turn_phase::boost)
+				bs.turning.reset();
+			bs.face_dir = b::normalized(corner_exit(bs, pos) - pos);
+			bs.face_rate = {};
+		}
 		/* Out of sight, no boost toward a remembered place. */
 		else if (bs.turning.phase == b::turn_phase::boost)
 			bs.turning.reset();
@@ -3863,6 +4245,7 @@ void start_death(bot_state &bs, object &obj)
 {
 	bs.death_pending = false;
 	stop_afterburner(bs, obj);
+	end_pursuit(bs, b::pursuit_end::died, B.tick.tick());
 	bs.life = bot_life::dying;
 	bs.pl.dead_state = player_dead_state::yes;
 	bs.died_at = GameTime64;
@@ -4547,6 +4930,15 @@ bool bot_take_damage(object &ship, const icobjptridx_t killer, const fix damage,
 			const auto tick{B.tick.tick()};
 			bs->last_attacker = who;
 			bs->attacked_tick = tick;
+			/* Section 9.10: the attacker, if a bot, landed a hit (its
+			 * hits on a human show only as the human's shields: the
+			 * damage seen, b::pursuit_view).
+			 */
+			if (const auto attacker{find_bot(who)})
+			{
+				attacker->pursuit.hit_who = static_cast<uint8_t>(pid);
+				attacker->pursuit.hit_tick = tick;
+			}
 			auto &m{bs->memory[who]};
 			if (!m.valid || tick - m.tick > b::PERCEPTION_DIVISOR * 4)
 			{

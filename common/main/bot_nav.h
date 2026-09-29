@@ -476,6 +476,119 @@ std::optional<uint32_t> pick_explore_goal(const nav_graph &graph, const uint32_t
 	return best;
 }
 
+/* Section 9.10: where a target that broke the line of sight probably is
+ * now.  From its last known place `pos` (in segment `seg`) the walk
+ * follows its last known velocity through the segment graph: at each
+ * segment the exit (a `passable` edge, not back to a segment passed)
+ * whose next centre lies best along the way (at least
+ * PREDICT_MIN_ALIGN: a corridor that bends is followed, a way back is
+ * not), the way turning half toward each exit taken, until `travel`
+ * units are covered (the point then lies between the two centres) or
+ * `max_steps` segments are passed.  A dead end (no exit along the way)
+ * ends the walk where it is.  Without a velocity: the last known place.
+ * The cost is at most `max_steps` times a segment's six edges.
+ *
+ * The PR #47 review: a point between two places is not always inside the
+ * level (from a last known place at the inner edge of an L-junction, the
+ * straight line to the next centre crosses the wall; so may a line
+ * between two centres in a twisted corridor), and a goal inside a wall
+ * left the bot stuck against it.  `clear(seg, from, to)` says whether
+ * the line from `from` (in segment `seg`) to `to` is open; the final leg
+ * is checked (once per walk), and if it is not, the point falls back to
+ * a place known to be inside: the centre of the segment it lies nearer,
+ * or where the leg began (the last known place, or a centre).
+ */
+constexpr double PREDICT_MIN_ALIGN{-0.25};
+constexpr unsigned PREDICT_MAX_STEPS{12};
+
+struct pursuit_prediction
+{
+	uint32_t segment{};
+	vec3 point;
+	/* Segments passed. */
+	unsigned steps{};
+	/* The way ended before `travel` (no exit along it). */
+	bool dead_end{};
+};
+
+template <typename Passable, typename Clear>
+[[nodiscard]]
+pursuit_prediction predict_pursuit(const nav_graph &graph, const uint32_t seg, const vec3 &pos, const vec3 &vel, const double travel, Passable &&passable, Clear &&clear, const unsigned max_steps = PREDICT_MAX_STEPS)
+{
+	pursuit_prediction r{seg, pos, 0, false};
+	auto heading{normalized(vel)};
+	if (seg >= graph.size() || heading == vec3{} || !(travel > 0))
+		return r;
+	std::array<uint32_t, PREDICT_MAX_STEPS + 1> passed{};
+	passed[0] = seg;
+	unsigned n_passed{1};
+	uint32_t cur{seg};
+	vec3 at{pos};
+	double left{travel};
+	const unsigned steps{std::min(max_steps, PREDICT_MAX_STEPS)};
+	for (unsigned k = 0; k < steps; ++k)
+	{
+		std::optional<uint32_t> best;
+		double best_align{PREDICT_MIN_ALIGN};
+		vec3 best_dir;
+		double best_len{};
+		for (const auto &e : graph.neighbours(cur))
+		{
+			if (e.to >= graph.size() || !passable(cur, e))
+				continue;
+			if (std::find(passed.begin(), passed.begin() + n_passed, e.to) != passed.begin() + n_passed)
+				continue;
+			const auto to{graph.position(e.to) - at};
+			const double l{length(to)};
+			if (!(l > 0))
+				continue;
+			const double align{dot(to * (1 / l), heading)};
+			if (align > best_align)
+			{
+				best = e.to;
+				best_align = align;
+				best_dir = to * (1 / l);
+				best_len = l;
+			}
+		}
+		if (!best)
+		{
+			r.dead_end = true;
+			break;
+		}
+		if (best_len >= left)
+		{
+			/* The segment the point is nearer the centre of. */
+			const bool next{left > best_len / 2};
+			r.point = at + best_dir * left;
+			r.segment = next ? *best : cur;
+			r.steps = k + (next ? 1 : 0);
+			if (!clear(cur, at, r.point))
+				r.point = next ? graph.position(*best) : at;
+			return r;
+		}
+		left -= best_len;
+		heading = normalized(heading + best_dir);
+		if (heading == vec3{})
+			heading = best_dir;
+		cur = *best;
+		at = graph.position(cur);
+		passed[n_passed++] = cur;
+		r.segment = cur;
+		r.point = at;
+		r.steps = k + 1;
+	}
+	return r;
+}
+
+/* Without a wall check (the graph alone). */
+template <typename Passable>
+[[nodiscard]]
+pursuit_prediction predict_pursuit(const nav_graph &graph, const uint32_t seg, const vec3 &pos, const vec3 &vel, const double travel, Passable &&passable, const unsigned max_steps = PREDICT_MAX_STEPS)
+{
+	return predict_pursuit(graph, seg, pos, vel, travel, passable, [](uint32_t, const vec3 &, const vec3 &) { return true; }, max_steps);
+}
+
 /* Section 9.5: a spawn site a bot can fly out of.  A level may start
  * players in a sealed cell whose walls open when a human shoots a
  * switch (Schwarzbrenner Outpost: two of eight sites, nine segments each,
