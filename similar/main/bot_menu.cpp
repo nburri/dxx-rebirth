@@ -8,10 +8,11 @@
  * The host's bot setup and its menus (Documentation/multiplayer-bots.md
  * sections 6.1 to 6.3): the "Bots..." item of the host setup menu, the
  * Bots screen (count, default skill and style, the list of bots) and
- * the per-bot screen (name, skill, style, team, remove).
- *
- * Stage B1 plays every bot at the Hotshot preset; the skill and style
- * fields are kept and shown, and take effect with the presets of B2.
+ * the per-bot screen (name, skill, style, team, remove), the setup in
+ * the pilot's netgame profile (section 6.5) and the bot flag of each
+ * player slot (section 2.2).  Each bot plays its own skill and style
+ * (stage B2, section 9.7), so bots of different skills and styles play
+ * in the same game.
  */
 
 #include "dxxsconf.h"
@@ -39,6 +40,28 @@ namespace dcx {
 
 bot_setup Bot_setup;
 
+namespace {
+
+std::array<bool, MAX_PLAYERS> Player_bot_flags{};
+
+}
+
+bool player_is_bot(const unsigned pnum)
+{
+	return pnum < Player_bot_flags.size() && Player_bot_flags[pnum];
+}
+
+void set_player_is_bot(const unsigned pnum, const bool bot)
+{
+	if (pnum < Player_bot_flags.size())
+		Player_bot_flags[pnum] = bot;
+}
+
+void clear_player_bot_flags()
+{
+	Player_bot_flags = {};
+}
+
 }
 
 namespace dsx {
@@ -55,6 +78,9 @@ constexpr int MENU_REBUILD{-3};
 constexpr int MENU_SET_ALL_SKILL{-4};
 constexpr int MENU_NEW_NAMES{-5};
 constexpr int MENU_EDIT_BOT_BASE{-100};
+
+/* The Bots list's short style names. */
+constexpr std::array<const char *, b::BOT_STYLE_COUNT> style_short_names{{"Bal", "Aggr", "Caut", "Coll"}};
 
 [[nodiscard]]
 bool name_in_use(const char *const name, const unsigned except)
@@ -130,6 +156,13 @@ const char *style_name(const b::bot_style s)
 {
 	const auto i{static_cast<unsigned>(s)};
 	return i < b::BOT_STYLE_COUNT ? b::bot_style_names[i] : "?";
+}
+
+[[nodiscard]]
+const char *style_short_name(const b::bot_style s)
+{
+	const auto i{static_cast<unsigned>(s)};
+	return i < b::BOT_STYLE_COUNT ? style_short_names[i] : "?";
 }
 
 [[nodiscard]]
@@ -223,7 +256,7 @@ void run_bot_edit(const unsigned i, const network_game_type mode)
 	nm_set_item_menu(e.m[bot_edit_menu::remove], "Remove this bot");
 	nm_set_item_menu(e.m[bot_edit_menu::done], "Done");
 	e.update_labels();
-	const int r{newmenu_do2(menu_title{title}, menu_subtitle{"Stage B1: every bot plays Hotshot"}, e.m, bot_edit_handler, &e, bot_edit_menu::done)};
+	const int r{newmenu_do2(menu_title{title}, menu_subtitle{nullptr}, e.m, bot_edit_handler, &e, bot_edit_menu::done)};
 	if (r == MENU_REBUILD)
 	{
 		remove_bot(i);
@@ -243,9 +276,9 @@ void run_bot_edit(const unsigned i, const network_game_type mode)
  */
 struct bots_menu
 {
-	static constexpr unsigned first_line{5};
+	static constexpr unsigned first_line{6};
 	unsigned max_bots;
-	unsigned opt_count{0}, opt_skill{1}, opt_style{2};
+	unsigned opt_count{0}, opt_skill{1}, opt_style{2}, opt_replace{3};
 	unsigned opt_set_all{}, opt_names{}, opt_done{};
 	unsigned nitems{};
 	/* The bots listed on this screen: the item indices are taken from
@@ -272,20 +305,21 @@ struct bots_menu
 		nm_set_item_slider(m[n++], count_text, Bot_setup.count, 0, max_bots, count_saved);
 		nm_set_item_slider(m[n++], skill_text, static_cast<unsigned>(Bot_setup.default_skill), 0, b::BOT_SKILL_COUNT - 1, skill_saved);
 		nm_set_item_slider(m[n++], style_text, static_cast<unsigned>(Bot_setup.default_style), 0, b::BOT_STYLE_COUNT - 1, style_saved);
+		nm_set_item_checkbox(m[n++], "Humans replace bots when full", Bot_setup.replace);
 		nm_set_item_text(m[n++], "(new bots take the default skill and style)");
 		nm_set_item_text(m[n++], "");
 		listed = Bot_setup.count;
 		for (unsigned i = 0; i < listed; ++i)
 		{
 			auto &c{Bot_setup.bots[i]};
-			std::snprintf(lines[i].data(), lines[i].size(), "%u. %-8s  %s  %s", i + 1, static_cast<const char *>(c.name), skill_name(c.skill), style_name(c.style));
+			std::snprintf(lines[i].data(), lines[i].size(), "%u. %-8s  %-7s %s", i + 1, static_cast<const char *>(c.name), skill_name(c.skill), style_short_name(c.style));
 			nm_set_item_menu(m[n++], lines[i].data());
 		}
 		if (!Bot_setup.count)
 			nm_set_item_text(m[n++], max_bots ? "(no bots)" : "(raise Maximum players to add bots)");
 		nm_set_item_text(m[n++], "");
 		opt_set_all = n;
-		nm_set_item_menu(m[n++], "Set all bots to default skill");
+		nm_set_item_menu(m[n++], "Set all bots to default skill/style");
 		opt_names = n;
 		nm_set_item_menu(m[n++], "New random names");
 		opt_done = n;
@@ -321,6 +355,8 @@ int bots_menu_handler(newmenu *, const d_event &event, bots_menu *const bm)
 				Bot_setup.default_skill = b::bot_skill{static_cast<uint8_t>(bm->m[bm->opt_skill].value)};
 			else if (citem == bm->opt_style)
 				Bot_setup.default_style = b::bot_style{static_cast<uint8_t>(bm->m[bm->opt_style].value)};
+			else if (citem == bm->opt_replace)
+				Bot_setup.replace = bm->m[bm->opt_replace].value != 0;
 			bm->update_labels();
 			return 0;
 		}
@@ -353,6 +389,67 @@ void bots_setup_init()
 	set_count(std::min<unsigned>(CGameArg.MplBots, MAX_BOTS));
 }
 
+void bots_setup_load(const b::bot_profile &p)
+{
+	const bool first{!Bot_setup.initialized};
+	Bot_setup.initialized = true;
+	Bot_setup.default_skill = p.default_skill;
+	Bot_setup.default_style = p.default_style;
+	Bot_setup.replace = p.replace;
+	Bot_setup.count = std::min<unsigned>(p.count, MAX_BOTS);
+	for (unsigned i = 0; i < MAX_BOTS; ++i)
+	{
+		auto &c{Bot_setup.bots[i]};
+		c = {};
+		if (i >= Bot_setup.count)
+			continue;
+		const auto &e{p.bots[i]};
+		c.skill = e.skill;
+		c.style = e.style;
+		c.team = e.team;
+	}
+	/* Names after every line is in place, so that a missing or taken
+	 * one gets the next built-in name no other bot has.
+	 */
+	for (unsigned i = 0; i < Bot_setup.count; ++i)
+	{
+		const char *const n{p.bots[i].name.data()};
+		if (n[0] && !name_in_use(n, i))
+			set_name(Bot_setup.bots[i].name, n);
+	}
+	for (unsigned i = 0; i < Bot_setup.count; ++i)
+		if (!Bot_setup.bots[i].name[0u])
+			assign_next_name(i);
+	/* The developer switch wins for the first setup of the session. */
+	if (first && CGameArg.MplBots)
+	{
+		const unsigned n{std::min<unsigned>(CGameArg.MplBots, MAX_BOTS)};
+		if (n < Bot_setup.count)
+			Bot_setup.count = n;
+		else
+			set_count(n);
+	}
+}
+
+b::bot_profile bots_setup_profile()
+{
+	b::bot_profile p;
+	p.count = std::min<unsigned>(Bot_setup.count, b::BOT_PROFILE_MAX_BOTS);
+	p.default_skill = Bot_setup.default_skill;
+	p.default_style = Bot_setup.default_style;
+	p.replace = Bot_setup.replace;
+	for (unsigned i = 0; i < p.count; ++i)
+	{
+		const auto &c{Bot_setup.bots[i]};
+		auto &e{p.bots[i]};
+		std::snprintf(e.name.data(), e.name.size(), "%s", static_cast<const char *>(c.name));
+		e.skill = c.skill;
+		e.style = c.style;
+		e.team = c.team;
+	}
+	return p;
+}
+
 bool bots_allowed_in_mode(const network_game_type mode)
 {
 	return mode == network_game_type::anarchy || mode == network_game_type::team_anarchy || mode == network_game_type::bounty;
@@ -371,8 +468,12 @@ void bots_setup_label(char *const buf, const std::size_t size, const network_gam
 		return;
 	}
 	const auto first{Bot_setup.bots[0].skill};
-	const bool mixed{std::ranges::any_of(std::span(Bot_setup.bots.data(), Bot_setup.count), [first](const bot_config &c) { return c.skill != first; })};
-	std::snprintf(buf, size, "Bots: %u (%s)...", Bot_setup.count, mixed ? "mixed" : skill_name(first));
+	const auto first_style{Bot_setup.bots[0].style};
+	const bool mixed{std::ranges::any_of(std::span(Bot_setup.bots.data(), Bot_setup.count), [first, first_style](const bot_config &c) { return c.skill != first || c.style != first_style; })};
+	if (mixed)
+		std::snprintf(buf, size, "Bots: %u (mixed)...", Bot_setup.count);
+	else
+		std::snprintf(buf, size, "Bots: %u (%s, %s)...", Bot_setup.count, skill_name(first), style_name(first_style));
 }
 
 void bots_setup_menu(const network_game_type mode, const unsigned max_players)

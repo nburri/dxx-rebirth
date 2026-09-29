@@ -1812,7 +1812,7 @@ struct param_opt
 #endif
 	std::array<char, sizeof("S100")> slevel{{"1"}};
 	char srmaxnet[sizeof("Maximum players: 99")];
-	char sbots[sizeof("Bots: not in this mode") + 8];
+	char sbots[48];
 	ntstring<NM_MAX_TEXT_LEN> max_numplayers_saved_text;
 	std::array<newmenu_item, 23> m;
 	void update_bots_label()

@@ -90,9 +90,11 @@ constexpr missile_role role_of(const secondary s)
 }
 
 /* The least weapon smarts (section 5.1) that uses a secondary.  The
- * design's table has mega from Ace and the earthshaker from Insane; the
- * presets are not applied before B2 and every bot plays Hotshot, so
- * Hotshot uses them too, under the strict rules below (section 9.4).
+ * design's table has mega from Ace and the earthshaker from Insane;
+ * Hotshot uses them too (section 9.4, kept in B2, section 9.7): the risk
+ * profile of each skill and style bounds them, and the cooldowns
+ * (missile_interval) grow toward the lower skills.  Trainee fires no
+ * secondary, Rookie only the light ones.
  */
 [[nodiscard]]
 constexpr unsigned min_smarts(const secondary s)
@@ -395,19 +397,25 @@ struct risk_profile
 	double standoff_scale{1};
 	/* It aims heavy missiles at walls and corners too. */
 	bool indirect{true};
+	/* Section 9.7, ducking (want_duck): a target nearer than this share
+	 * of the standoff, or closing faster than duck_closing units/s, makes
+	 * it break the line of sight (Cautious ducks early, Aggressive late).
+	 */
+	double duck_share{0.6};
+	double duck_closing{5};
 };
 
 [[nodiscard]]
 constexpr risk_profile risk_profile_of(const bot_skill k, const bot_style s)
 {
 	/* By style: the budget, the trade, the hug, the standoff, the
-	 * chance.
+	 * chance, the duck share and closing speed.
 	 */
-	constexpr std::array<std::array<double, 5>, BOT_STYLE_COUNT> by_style{{
-		{{0.12, 2.5, 0.45, 1.0, 0.20}},	/* balanced */
-		{{0.30, 1.5, 0.80, 0.8, 0.40}},	/* aggressive */
-		{{0.02, 8.0, 0.15, 1.2, 0.00}},	/* cautious: the strict rule, with the uncertainty */
-		{{0.06, 4.0, 0.25, 1.1, 0.10}},	/* collector */
+	constexpr std::array<std::array<double, 7>, BOT_STYLE_COUNT> by_style{{
+		{{0.12, 2.5, 0.45, 1.0, 0.20, 0.60, 5}},	/* balanced */
+		{{0.30, 1.5, 0.80, 0.8, 0.40, 0.35, 15}},	/* aggressive */
+		{{0.02, 8.0, 0.15, 1.2, 0.00, 0.90, 3}},	/* cautious: the strict rule, with the uncertainty */
+		{{0.06, 4.0, 0.25, 1.1, 0.10, 0.75, 5}},	/* collector */
 	}};
 	/* By skill: scales of the budget, the trade and the hug. */
 	constexpr std::array<std::array<double, 3>, BOT_SKILL_COUNT> by_skill{{
@@ -428,6 +436,8 @@ constexpr risk_profile risk_profile_of(const bot_skill k, const bot_style s)
 		.hug = std::min(1.0, st[2] * sk[2]),
 		.standoff_scale = st[3],
 		.indirect = ki >= static_cast<unsigned>(bot_skill::hotshot),
+		.duck_share = st[5],
+		.duck_closing = st[6],
 	};
 }
 
@@ -1207,6 +1217,9 @@ struct duck_view
 	double standoff{};
 	double target_closing{};
 	bool back_blocked{};
+	/* The style's tendency (risk_profile::duck_share, duck_closing). */
+	double duck_share{0.6};
+	double duck_closing{5};
 };
 
 [[nodiscard]]
@@ -1214,7 +1227,7 @@ constexpr bool want_duck(const duck_view &v)
 {
 	if (!v.heavy_ready || v.favourable || !(v.standoff > 0) || v.distance >= v.standoff)
 		return false;
-	return v.target_closing > 5 || v.back_blocked || v.distance < 0.6 * v.standoff;
+	return v.target_closing > v.duck_closing || v.back_blocked || v.distance < v.duck_share * v.standoff;
 }
 
 /* How a bot that sees its target moves (sections 4.6, 4.7 and 9.6):
@@ -1288,6 +1301,8 @@ struct missile_situation
 	std::array<uint8_t, BOT_SECONDARY_COUNT> ammo{};
 	std::array<missile_data, BOT_SECONDARY_COUNT> data{};
 	unsigned smarts{2};
+	/* Section 9.7: the style's scale of the time between two mines. */
+	double mine_interval_scale{1};
 	/* The target. */
 	bool has_target{};
 	bool target_visible{};
@@ -1485,7 +1500,7 @@ constexpr std::optional<secondary> choose_secondary(const missile_situation &m)
 	 * (it must pass there); the smart mine (its children home) first.
 	 * Never with a teammate following on the same route.
 	 */
-	if (m.chased && !m.teammate_behind && m.since_mine >= mine_interval(m.smarts) && m.pursuer_distance < MINE_PURSUER_DISTANCE * (m.at_doorway ? 1.5 : 1))
+	if (m.chased && !m.teammate_behind && m.since_mine >= mine_interval(m.smarts) * m.mine_interval_scale && m.pursuer_distance < MINE_PURSUER_DISTANCE * (m.at_doorway ? 1.5 : 1))
 	{
 		if (usable(secondary::smart_mine))
 			return secondary::smart_mine;

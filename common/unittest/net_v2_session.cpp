@@ -262,6 +262,163 @@ void test_admission()
 	}
 }
 
+/* Documentation/multiplayer-bots.md section 2.3: humans replace bots,
+ * and a bot's slot is never rejoined by callsign.
+ */
+void test_admission_with_bots()
+{
+	/* Host, a human, three bots added in the order 1, 2, 3; limit 5. */
+	std::vector<slot_view> slots(8);
+	slots[0] = {.occupied = true, .connected = true};
+	slots[1] = {.occupied = true, .connected = true, .last_packet_time = 10};
+	slots[2] = {.occupied = true, .connected = true, .bot = true, .bot_order = 1};
+	slots[3] = {.occupied = true, .connected = true, .bot = true, .bot_order = 3};
+	slots[4] = {.occupied = true, .connected = true, .bot = true, .bot_order = 2};
+	/* Full, the option off: denied as before. */
+	CHECK(decide_admission(slots, 5, false).result == admission_result::deny_full);
+	CHECK(decide_admission(slots, 5, false, false).result == admission_result::deny_full);
+	/* The option on: the most recently added bot leaves. */
+	{
+		const auto d{decide_admission(slots, 5, false, true)};
+		CHECK(d.result == admission_result::accept_replace_bot && d.slot == 3);
+		CHECK(admission_accepts(d.result));
+		CHECK(bot_to_replace(slots, 5) == 3u);
+	}
+	/* A closed game stays closed. */
+	CHECK(decide_admission(slots, 5, true, true).result == admission_result::deny_closed);
+	/* A free slot (below the limit) is taken before any bot leaves. */
+	{
+		const auto d{decide_admission(slots, 6, false, true)};
+		CHECK(d.result == admission_result::accept_new && d.slot == 5);
+	}
+	/* A bot leaves before a disconnected human's slot is handed out: the
+	 * human may come back to it.
+	 */
+	slots[1].connected = false;
+	{
+		const auto d{decide_admission(slots, 5, false, true)};
+		CHECK(d.result == admission_result::accept_replace_bot && d.slot == 3);
+	}
+	/* The option off: the disconnected human's slot, as before. */
+	{
+		const auto d{decide_admission(slots, 5, false, false)};
+		CHECK(d.result == admission_result::accept_new && d.slot == 1);
+	}
+	/* The human returns to its slot while the bots play. */
+	slots[1].callsign_matches = true;
+	{
+		const auto d{decide_admission(slots, 5, false, true)};
+		CHECK(d.result == admission_result::accept_rejoin && d.slot == 1);
+	}
+	slots[1].callsign_matches = false;
+	slots[1].connected = true;
+	/* After the last bot left (disconnected, still listed as a bot), its
+	 * slot is the free one: the next bot is not removed.
+	 */
+	slots[3].connected = false;
+	{
+		const auto d{decide_admission(slots, 5, false, true)};
+		CHECK(d.result == admission_result::accept_new && d.slot == 3);
+		CHECK(bot_to_replace(slots, 5) == 4u);
+	}
+	/* A departed bot's name never rejoins its slot (no score carried);
+	 * the slot is only reused as a new player's.
+	 */
+	slots[3].callsign_matches = true;
+	{
+		const auto d{decide_admission(slots, 5, false, true)};
+		CHECK(d.result == admission_result::accept_new && d.slot == 3);
+	}
+	/* Even in a closed game a departed bot's name is no rejoin. */
+	CHECK(decide_admission(slots, 5, true, true).result == admission_result::deny_closed);
+	slots[3].callsign_matches = false;
+	slots[3].connected = true;
+	/* A playing bot with the joiner's name, the game full: that bot is
+	 * replaced (option on), or the name is a duplicate (option off).
+	 */
+	slots[2].callsign_matches = true;
+	{
+		const auto d{decide_admission(slots, 5, false, true)};
+		CHECK(d.result == admission_result::accept_replace_bot && d.slot == 2);
+	}
+	CHECK(decide_admission(slots, 5, false, false).result == admission_result::deny_duplicate_callsign);
+	/* With room in the game the name is a duplicate: cycling names must
+	 * not strip bots.  A free slot, or a departed bot's slot, is room.
+	 */
+	{
+		const auto d{decide_admission(slots, 8, false, true)};
+		CHECK(d.result == admission_result::deny_duplicate_callsign && d.slot == 2);
+	}
+	slots[4].connected = false;
+	CHECK(decide_admission(slots, 5, false, true).result == admission_result::deny_duplicate_callsign);
+	slots[4].connected = true;
+	slots[2].callsign_matches = false;
+	/* Bots at or above the limit (a lowered limit) are not replaced. */
+	CHECK(!bot_to_replace(slots, 2).has_value());
+	CHECK(decide_admission(slots, 2, false, true).result == admission_result::deny_full);
+	/* No bots at all: nothing to replace. */
+	std::vector<slot_view> humans(4, slot_view{.occupied = true, .connected = true});
+	CHECK(!bot_to_replace(humans, 4).has_value());
+	CHECK(decide_admission(humans, 4, false, true).result == admission_result::deny_full);
+}
+
+/* A slot handed to a new player stays new until its CLIENT_READY: a
+ * restarted client's rejoin by callsign does not inherit the score of the
+ * bot (or departed player) that held the slot.
+ */
+void test_admission_is_new()
+{
+	CHECK(admission_is_new(admission_result::accept_new, false));
+	CHECK(admission_is_new(admission_result::accept_replace_bot, false));
+	CHECK(!admission_is_new(admission_result::accept_rejoin, false));
+	CHECK(!admission_is_new(admission_result::accept_replace, false));
+	CHECK(admission_is_new(admission_result::accept_rejoin, true));
+	CHECK(admission_is_new(admission_result::accept_replace, true));
+	CHECK(!admission_is_new(admission_result::deny_full, true));
+	CHECK(!admission_is_new(admission_result::deny_duplicate_callsign, true));
+	/* The scenario: a human replaces the bot in slot 3, then restarts
+	 * during its join.  The slot now carries the human's callsign and is
+	 * disconnected: the admission is a rejoin, made new by the mark.
+	 */
+	std::vector<slot_view> slots(4);
+	slots[0] = {.occupied = true, .connected = true};
+	slots[1] = {.occupied = true, .connected = true};
+	slots[2] = {.occupied = true, .connected = true, .bot = true, .bot_order = 1};
+	slots[3] = {.occupied = true, .connected = true, .bot = true, .bot_order = 2};
+	auto d{decide_admission(slots, 4, false, true)};
+	CHECK(d.result == admission_result::accept_replace_bot && d.slot == 3);
+	bool awaits_entry{admission_is_new(d.result, false)};
+	slots[3] = {.occupied = true, .connected = false, .callsign_matches = true};
+	d = decide_admission(slots, 4, false, true);
+	CHECK(d.result == admission_result::accept_rejoin && d.slot == 3);
+	CHECK(admission_is_new(d.result, awaits_entry));
+	/* After its CLIENT_READY the mark is gone: a later drop and return is
+	 * a real rejoin.
+	 */
+	awaits_entry = false;
+	CHECK(!admission_is_new(d.result, awaits_entry));
+}
+
+/* Section 4.5: the PLAYER_LIST bot flag in the `connected` byte. */
+void test_player_list_bot_flag()
+{
+	for (std::uint8_t status = 0; status < 8; ++status)
+		for (const bool bot : {false, true})
+		{
+			const auto b{encode_list_connected(status, bot)};
+			CHECK(((b & PLAYER_LIST_BOT_FLAG) != 0) == bot);
+			const auto d{decode_list_connected(b)};
+			CHECK(d.status == status);
+			CHECK(d.bot == bot);
+		}
+	/* A human's byte is unchanged by the encoding (older layouts). */
+	CHECK(encode_list_connected(1, false) == 1);
+	CHECK(encode_list_connected(1, true) == 0x81);
+	/* A stray high bit in the status never survives as status. */
+	CHECK(decode_list_connected(encode_list_connected(0x81, false)).status == 1);
+	CHECK(!decode_list_connected(encode_list_connected(0x81, false)).bot);
+}
+
 void test_lobby_slot()
 {
 	/* Host only: slot 1. */
@@ -494,6 +651,9 @@ int main()
 	test_unconnected_framing();
 	test_message_layouts();
 	test_admission();
+	test_admission_with_bots();
+	test_admission_is_new();
+	test_player_list_bot_flag();
 	test_lobby_slot();
 	test_player_count_including();
 	test_duplicate_join();

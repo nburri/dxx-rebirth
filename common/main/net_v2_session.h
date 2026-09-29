@@ -499,6 +499,30 @@ public:
 	}
 };
 
+/* Section 4.5, PLAYER_LIST: bit 7 of a slot's `connected` byte marks a
+ * bot (Documentation/multiplayer-bots.md section 2.2); the low bits are
+ * the connection status.
+ */
+constexpr std::uint8_t PLAYER_LIST_BOT_FLAG{0x80};
+
+[[nodiscard]]
+constexpr std::uint8_t encode_list_connected(const std::uint8_t status, const bool bot)
+{
+	return static_cast<std::uint8_t>((status & ~PLAYER_LIST_BOT_FLAG) | (bot ? PLAYER_LIST_BOT_FLAG : 0));
+}
+
+struct list_connected
+{
+	std::uint8_t status;
+	bool bot;
+};
+
+[[nodiscard]]
+constexpr list_connected decode_list_connected(const std::uint8_t b)
+{
+	return {static_cast<std::uint8_t>(b & ~PLAYER_LIST_BOT_FLAG), (b & PLAYER_LIST_BOT_FLAG) != 0};
+}
+
 /* Section 4.2: the admission table, on a view of the host's player slots.
  * The caller has already handled version mismatch, the endlevel state, the
  * refuse prompt and a retry of a pending accept.
@@ -517,6 +541,12 @@ struct slot_view
 	 * disconnected slot is taken over first.
 	 */
 	net_clock last_packet_time{};
+	/* Documentation/multiplayer-bots.md section 2.3: the slot's player is
+	 * a bot (flown by the host; `connected` while it plays, not after it
+	 * left), added as the `bot_order`th bot of the game.
+	 */
+	bool bot{};
+	unsigned bot_order{};
 };
 
 enum class admission_result : std::uint8_t
@@ -533,7 +563,19 @@ enum class admission_result : std::uint8_t
 	deny_closed,
 	deny_full,
 	deny_duplicate_callsign,
+	/* The bot playing in `slot` leaves and a new player takes the slot
+	 * (humans replace bots: the game is full, or the bot has the
+	 * requester's callsign).
+	 */
+	accept_replace_bot,
 };
+
+/* The results that give the requester `slot`. */
+[[nodiscard]]
+constexpr bool admission_accepts(const admission_result r)
+{
+	return r == admission_result::accept_new || r == admission_result::accept_rejoin || r == admission_result::accept_replace || r == admission_result::accept_replace_bot;
+}
 
 struct admission_decision
 {
@@ -541,15 +583,72 @@ struct admission_decision
 	unsigned slot;
 };
 
+/* The bot a joining human replaces (bots section 2.3): the most recently
+ * added bot still playing below the player limit.
+ */
 [[nodiscard]]
-constexpr admission_decision decide_admission(const std::span<const slot_view> slots, const unsigned max_players, const bool game_closed)
+constexpr std::optional<unsigned> bot_to_replace(const std::span<const slot_view> slots, const unsigned max_players)
 {
+	std::optional<unsigned> r;
+	for (unsigned i = 1; i < slots.size() && i < max_players; ++i)
+	{
+		const auto &s{slots[i]};
+		if (s.bot && s.connected && (!r || s.bot_order > slots[*r].bot_order))
+			r = i;
+	}
+	return r;
+}
+
+/* A slot a new player may take without anyone leaving: a free slot below
+ * the player limit, else the slot of a bot that left (a bot's slot is
+ * never rejoined, so it is as good as free).
+ */
+[[nodiscard]]
+constexpr std::optional<unsigned> free_admission_slot(const std::span<const slot_view> slots, const unsigned max_players)
+{
+	for (unsigned i = 0; i < slots.size() && i < max_players; ++i)
+		if (!slots[i].occupied)
+			return i;
+	if (slots.size() < max_players)
+		return static_cast<unsigned>(slots.size());
+	for (unsigned i = 1; i < slots.size() && i < max_players; ++i)
+	{
+		const auto &s{slots[i]};
+		if (s.bot && !s.connected)
+			return i;
+	}
+	return std::nullopt;
+}
+
+/* `bots_replaceable`: the host lets humans replace bots (the Bots
+ * screen's option).  A bot's slot is never rejoined by callsign: a human
+ * with a departed bot's name is a new player; one with a playing bot's
+ * name replaces that bot only when the game is full (option on),
+ * otherwise it is refused as a duplicate, so that cycling names cannot
+ * strip bots from a game with room.  In a full game the most recently
+ * added bot leaves before a disconnected human's slot is handed out: a
+ * human who dropped keeps a slot to rejoin while bots play.
+ */
+[[nodiscard]]
+constexpr admission_decision decide_admission(const std::span<const slot_view> slots, const unsigned max_players, const bool game_closed, const bool bots_replaceable = false)
+{
+	const auto free_slot{free_admission_slot(slots, max_players)};
 	/* A returning player first: the callsign names its slot. */
 	for (unsigned i = 0; i < slots.size(); ++i)
 	{
 		const auto &s{slots[i]};
 		if (!s.occupied || !s.callsign_matches)
 			continue;
+		if (s.bot)
+		{
+			if (!s.connected)
+				continue;
+			if (game_closed)
+				return {admission_result::deny_closed, 0};
+			if (bots_replaceable && i < max_players && !free_slot)
+				return {admission_result::accept_replace_bot, i};
+			return {admission_result::deny_duplicate_callsign, i};
+		}
 		if (!s.connected)
 			return {admission_result::accept_rejoin, i};
 		if (s.address_matches)
@@ -558,17 +657,16 @@ constexpr admission_decision decide_admission(const std::span<const slot_view> s
 	}
 	if (game_closed)
 		return {admission_result::deny_closed, 0};
-	/* A free slot below the player limit. */
-	for (unsigned i = 0; i < slots.size() && i < max_players; ++i)
-		if (!slots[i].occupied)
-			return {admission_result::accept_new, i};
-	if (slots.size() < max_players)
-		return {admission_result::accept_new, static_cast<unsigned>(slots.size())};
-	/* Every slot below the limit is taken: replace the player disconnected
-	 * the longest.  Slots at or above the limit are never handed out: the
-	 * level has start positions (and the game per-player tables) only for
-	 * the first `max_players` slots.
+	if (free_slot)
+		return {admission_result::accept_new, *free_slot};
+	/* Every slot below the limit is taken.  Slots at or above the limit
+	 * are never handed out: the level has start positions (and the game
+	 * per-player tables) only for the first `max_players` slots.  A bot
+	 * leaves first, then the player disconnected the longest is replaced.
 	 */
+	if (bots_replaceable)
+		if (const auto b{bot_to_replace(slots, max_players)})
+			return {admission_result::accept_replace_bot, *b};
 	std::optional<unsigned> oldest;
 	for (unsigned i = 0; i < slots.size() && i < max_players; ++i)
 	{
@@ -581,6 +679,29 @@ constexpr admission_decision decide_admission(const std::span<const slot_view> s
 	if (oldest)
 		return {admission_result::accept_new, *oldest};
 	return {admission_result::deny_full, 0};
+}
+
+/* Whether an accepted player enters `slot` as a new player (scores and
+ * kill-matrix row reset, "joined" rather than "rejoined").  A slot handed
+ * to a new player (a free or departed player's slot, or a replaced bot's)
+ * `awaits_entry` until that player's CLIENT_READY: a client that restarts
+ * during its join comes back by callsign as a rejoin, but it never
+ * entered the game and must not inherit the previous holder's score.
+ */
+[[nodiscard]]
+constexpr bool admission_is_new(const admission_result r, const bool awaits_entry)
+{
+	switch (r)
+	{
+		case admission_result::accept_new:
+		case admission_result::accept_replace_bot:
+			return true;
+		case admission_result::accept_rejoin:
+		case admission_result::accept_replace:
+			return awaits_entry;
+		default:
+			return false;
+	}
 }
 
 /* Section 4.3, the lobby: the slot a new player gets while the host forms

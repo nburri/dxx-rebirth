@@ -1,8 +1,10 @@
 # Multiplayer bots (design)
 
 Status: design; stage B0 (the pilot refactor, §3.2.1), stage B1 (the
-first bot with its setup menus, §9.1) and stage B3 (pickups, resources and
-weapon choice, §9.2) are implemented. Target branch: `experimental-netcode`
+first bot with its setup menus, §9.1), stage B3 (pickups, resources and
+weapon choice, §9.2), stage B4 (secondaries, §9.4, §9.6) and stage B2
+(skill presets, styles, mixed bots, persistence, the `BOT` marker and
+humans replacing bots, §9.7) are implemented. Target branch: `experimental-netcode`
 (protocol v2, `Documentation/network-protocol-v2.md`, cited as "v2 §n").
 D2X-Rebirth only (v2 decision 6). Line numbers are omitted; function names are
 the anchors.
@@ -109,7 +111,8 @@ controls, pilot state, memory and path. Nothing about bots goes into `player`,
   for each bot with the bot as originator). After stage 3 it arrives in
   `SNAPSHOT_INVENTORY`, one part per player, which covers bots automatically.
 - **Humans replace bots**: with the option on (default), a `JOIN_REQUEST`
-  that finds the game full removes the most recently added bot first. The
+  that finds the game full removes the most recently added bot first
+  (before a disconnected human's slot is reused). The
   removal is broadcast as `PLAYER_LEFT(quit)`, the same as a quitting player.
   The human then gets that slot.
 - **Removal**: the host treats a removed bot like a player who sent `LEAVE`
@@ -1712,9 +1715,8 @@ shields, plus 30 for a likely kill) at least `trade` times the
 expected self-damage (`poor-trade`).
 
 **Risk profile** (`risk_profile_of`), from the bot's skill and style as
-stored in its settings (`bot_config`, section 6.3; the presets of B2
-are not applied yet, so today every bot is Hotshot, Balanced unless
-the host set another style):
+stored in its settings (`bot_config`, section 6.3; since B2 every bot
+plays its own skill and style, section 9.7):
 
 | Style | Budget (share of shields) | Chance of any self-damage | Trade | Hug | Standoff |
 |---|---|---|---|---|---|
@@ -1933,6 +1935,188 @@ the standoff, dropped out of sight.
 **Unchanged:** the human's firing and every human path (all changes are
 in the bots' code; `laser.cpp` untouched), non-bot games, clients, the
 protocol; the other missiles' rules.
+
+### 9.7 B2 as implemented
+
+**Files.** `common/main/bot_brain.h` (the final skill and style tables,
+the style helpers, `fight_advantage`, `fire_burst`),
+`common/main/bot_weapons.h` (the duck tendency in `risk_profile`, the
+mine interval scale), `common/main/bot_profile.h` (new, pure: the bot
+lines of the `.ngp`), `common/main/net_v2_session.h` (the `PLAYER_LIST`
+bot flag, the admission with bots), `similar/main/bot.cpp` (each bot's
+own presets, removal for a human), `similar/main/bot_menu.cpp` (the
+screens, the persistence glue, the slot flags), `net_v2.cpp` (the flag
+on the wire, the replacement), `playsave.cpp` (the `.ngp`), `gauges.cpp`,
+`gamerend.cpp`, `kmatrix.cpp` (the marker). Tests: `test-bot-presets`
+(new) and `test-net-v2-session` (the flag, the admission with bots).
+`MULTI_PROTO_VERSION` and `NET_V2_PROTO_VERSION` are 104.
+
+**Each bot plays its own skill and style.** B1-B4 flew every bot with
+the Hotshot preset (the risk profile of §9.6 already read the bot's
+settings). Now `bot_state::apply_config` takes the skill, the style and
+the risk profile from the bot's setup line at creation and at every
+respawn, so bots of different skills and styles play in the same game.
+Every parameter reads them: reaction, aim error and drift, lead, turn
+cap, fire cone, field of view, awareness, hearing, target memory,
+dodge, weapon smarts (primary table from Hotshot, secondaries, missile
+and mine intervals, fusion charge, converter), afterburner rule, map
+knowledge, powerup memory, strafe (runs, vertical share, speed), the
+trigger's duty, and from the style: retreat threshold, engage and
+collect weights, range band, hunt memory, dodge bonus, mines, strafe
+and closing pace, afterburner chase distance, heavy-missile risk budget,
+trade, hug and duck. Hotshot Balanced plays exactly as before (every new
+factor is 1 there, and a full trigger duty draws no random numbers).
+
+**Skill presets (final).** Monotonic from Trainee to Insane in every
+row (`test_skill_monotonic`):
+
+| Parameter | Trainee | Rookie | Hotshot | Ace | Insane |
+|---|---|---|---|---|---|
+| Reaction delay | 550 ms | 400 ms | 280 ms | 200 ms | 140 ms |
+| Aim error σ (per axis) | 7° | 4.5° | 2.8° | 1.7° | 1.0° |
+| Aim drift period | 0.6 s | 0.5 s | 0.4 s | 0.3 s | 0.25 s |
+| Lead accuracy ℓ (error (1 − ℓ) × 0.35) | 0 (no lead) | 0.4 | 0.7 | 0.9 | 1.0 |
+| Turn-rate cap (× ship max) | 0.45 | 0.6 | 0.75 | 0.9 | 1.0 |
+| Fire cone | 12° | 9° | 6° | 4° | 3° |
+| Field of view (half angle) | 45° | 60° | 70° | 80° | 90° |
+| Awareness radius | 150 | 250 | 350 | 450 | 600 |
+| Hearing radius | 0 | 80 | 150 | 250 | 350 |
+| Target memory | 2 s | 3 s | 5 s | 7 s | 10 s |
+| Dodge probability | 0 | 0.2 | 0.45 | 0.7 | 0.85 |
+| Weapon smarts | 0 | 1 | 2 | 3 | 4 |
+| Primary choice | fixed order | fixed order | range table | range table | range table |
+| Secondaries | none | concussion, homing, flash, mercury | all but guided (smart, mines, mega, shaker) | all | all |
+| Missile / mine interval | — | 4 s / no mines | 2.5 / 3 s | 1.8 / 2.5 s | 1.2 / 2 s |
+| Heavy missiles: indirect fire, risk scale, hug scale | no, 0.3, 0 | no, 0.6, 0.3 | yes, 1, 1 | yes, 1.25, 1.15 | yes, 1.5, 1.3 |
+| Fusion release charge | 0.5 s | 0.6 s | 1.0 s | 1.3 s | 1.5 s |
+| Converter below shields | never | 50 | 80 | 100 | 110 |
+| Afterburner | never | chase | + retreat | + dodge | + long legs |
+| Strafe | none | runs 0.9–1.8 s, 0.5 × top speed, 25 % vertical | 0.6–1.4 s, 0.7, 50 % | 0.5–1.3 s, 0.75, 80 % | 0.4–1.1 s, 0.8, 100 % |
+| Trigger duty (`fire_burst`) | 0.55 | 0.8 | 1 | 1 | 1 |
+| Map knowledge | 0 | 3 seg. (120 u) | 8 (320 u) | 15 (600 u) | whole level |
+| Powerup memory | 36 s | 39 s | 45 s | 51 s | 60 s |
+
+Trainee is meant to lose to a new player: slow and imprecise, no lead,
+no strafe, no dodge, no missiles, no afterburner, no map knowledge, a
+narrow view, and a trigger that pauses between bursts (0.5–1.1 s
+bursts, pauses making 55 % duty; every life starts with a burst; new
+in B2, `fire_burst`). Insane is
+hard but no aimbot: 140 ms reaction (the tactics layer still aims at
+where it saw the target 140 ms ago), a 1° aim error and a 3° fire
+cone, and a dodge chance of 0.85 at most (0.95 with Cautious). No
+preset has a zero reaction or a zero aim error (`test_skill_extremes`).
+
+**Styles (final).** Multipliers and offsets on the skill:
+
+| | Balanced | Aggressive | Cautious | Collector |
+|---|---|---|---|---|
+| Retreat at shields | 35 | 20 | 55 | 40 |
+| … when outgunned (advantage < 0.6) | 35 | 20 | 80 | 55 |
+| Engage / collect weight | 1.0 / 1.0 | 1.5 / 0.6 | 0.8 / 1.2 | 0.7 / 1.8 (keeps collecting in sight of enemies) |
+| Engage weight when behind (advantage ≤ 0.5) | × 1 | × 1 | × 0.8 | × 0.5 |
+| Fight band (35–95 units) | × 1 | × 0.75 | × 1.25 | × 1 |
+| Hunts a lost target (× memory) | 1 | 2 | 0.8 | 1 |
+| Dodge probability | + 0 | + 0 | + 0.1 | + 0.05 |
+| Mine interval | × 1 | × 2 (fewer) | × 0.7 | × 1 |
+| Strafe pace / closing pace | 1 / 1 | 0.9 / 1.15 | 1.1 / 0.85 | 1 / 1 |
+| Afterburner chase beyond | 150 | 100 | 200 | 150 |
+| Heavy missile budget, chance, trade (§9.6) | 0.12, 0.2, 2.5 | 0.30, 0.4, 1.5 | 0.02, 0, 8 | 0.06, 0.1, 4 |
+| Hug / standoff (§9.6) | 0.45 / 1.0 | 0.80 / 0.8 | 0.15 / 1.2 | 0.25 / 1.1 |
+| Ducks within (× standoff) or closing faster than | 0.6, 5 u/s | 0.35, 15 u/s | 0.9, 3 u/s | 0.75, 5 u/s |
+
+The *advantage* (`fight_advantage`) is the square root of the bot's
+shields over its target's times the square root of its armament over
+the target's (`armament_score`, the best primary in the mid band),
+bounded to 0.1–10: 1 is an even fight. It is judged at each strategy
+tick for the current target (the host's numbers, as a human judges an
+opponent by its ship, its shots and how hurt it looks). A dodge chance
+of 0 stays 0 whatever the style, so no style makes a Trainee dodge.
+`test_style_goals` checks the goal choice for the same situation per
+style: at full shields everyone but the collector engages (the collector
+takes the powerup), at low shields the cautious and the collector retreat
+while the balanced and the aggressive fight on, outgunned the cautious
+bot breaks off, and behind in a fight the collector goes for a small
+prize it would ignore in an even one.
+
+**Setup UI (§6.1–§6.3).** The host setup menu's label shows `Bots: 3
+(Hotshot, Balanced)...`, or `(mixed)` when the skills or styles differ
+(its buffer grew to 48). The Bots screen has the count, the default skill
+and style, the checkbox "Humans replace bots when full", one line per bot
+with its skill and short style (`1. ravager   Ace     Aggr`; styles Bal,
+Aggr, Caut, Coll), "Set all bots to default skill/style", "New random
+names" and "Done". The per-bot screen (name, skill, style, team in team
+modes, remove) lost B1's "every bot plays Hotshot" subtitle. The host's
+console names each bot's slot with its skill and style.
+
+**Persistence (§6.5).** The setup is saved in the pilot's `.ngp` whenever
+the host setup menu closes (with the other netgame settings) and read
+when it opens: `BotCount`, `BotDefault=skill,style`, `BotReplace`,
+`Bot<i>=name,skill,style,team`. The pure part (`bot_profile.h`) writes
+the lines and parses them; the three numbers of a bot line are read from
+the right, so a name may hold a comma; a bad or missing line below the
+count is ignored (the bot then gets the file's `BotDefault` skill and
+style, in whatever order the lines come, and the next built-in name),
+the count is bounded
+to 7, lines beyond the count are dropped, names are cut to 8 characters,
+unknown keys stay the profile reader's. A profile of an older build has no
+bot lines and leaves the setup as it was (no bots, or `-bots N`); the
+`-bots N` switch still sets the count of the first setup of the session.
+`test_profile` round-trips mixed setups, all combinations and a profile
+with gaps, and checks the bad values and the line length (under the
+reader's 50).
+
+**The `BOT` marker (§2.2, decision 2).** Bit 7 of each slot's `connected`
+byte in `PLAYER_LIST` marks a bot (network-protocol-v2 §4.5); the
+protocol is 104 on both constants. The host keeps the flag per slot
+(`player_is_bot`) from the bot's allocation until a human takes the slot
+(`accept_peer`), so a departed bot's line still shows it; clients take
+it from every `PLAYER_LIST` and clear it at `PLAYER_JOINED`. Shown: `BOT`
+instead of the ping in the kill list's ping column and in the netgame
+info table (`show_netplayerinfo`, the pause key in a netgame), `[B]`
+after the name on the score screen (`kmatrix`; before it when the column
+has no room), and `, Bot` after a bot's name tag in the view. The session reset clears the flags.
+
+**Humans replace bots (§2.3, decision 3).** `decide_admission` takes the
+host's option. A joiner who finds the game full (no free slot below the
+limit, no departed bot's slot) replaces the most recently added bot
+still playing (`bot_to_replace`: the highest order of addition, below
+the player limit): the host removes it as a player who quits
+(`bots_remove_for_human`: a tumbling bot explodes first, else the host's
+copy of its inventory is brought up to date; `multi_disconnect_player`
+drops its eggs, makes the ship a ghost, prints "has left the game" and
+sends `PLAYER_LEFT(quit)`), then admits the human into the slot as a new
+player (scores zeroed by `new_player`; in team games the slot's team).
+A bot leaves before a disconnected human's slot is handed out, so a
+human who dropped can rejoin their slot while bots play; with the option
+off (or no bot playing) the slot of the human disconnected the longest
+is taken, as before. A closed game stays closed. A bot's slot is never
+rejoined by callsign: a human with a departed bot's name is a new player
+(the slot is reused as a free one, without the bot's scores); one with a
+playing bot's name replaces that bot only when the game is full and the
+option is on, and is otherwise refused as a duplicate (so that cycling
+names cannot strip bots from a game with room). A slot handed to a new
+player (a replaced bot's, a departed player's or a free one) is marked
+until that player's `CLIENT_READY` (`S.awaits_entry`): a client that
+restarts during its join comes back by callsign as a rejoin, and
+`admission_is_new` still admits it as new (scores reset by the snapshot
+and `new_player`, "joined" rather than "rejoined"), so it never inherits
+the bot's or the departed player's score. *Decision:* a replaced bot stays out for the rest of the
+game, even if a slot frees up (simplest, and no bot pops back in while
+humans come and go); the setup keeps it, so the next game has it again.
+`test_admission_with_bots` covers the order, the option, the closed game,
+free and departed-bot slots first, bots before disconnected humans, the
+departed bot's name, the playing bot's name (full game or not) and the
+limit; `test_admission_is_new` the restart during a join.
+
+**Unchanged:** non-bot games and human play (only the protocol number
+changed; a human's `connected` byte is the same), clients' behaviour
+apart from the marker, the setup menu's layout apart from the label.
+
+**Not in B2:** changing a bot's skill or style during a game (the in-game
+Bots screen is B5; `apply_config` is ready for it), per-bot parameter
+overrides in the `.ngp` (§5.1 mentions them for tuning; not needed so
+far), the `-botarena` ladder that would measure the kill ratios between
+adjacent skills (§8.2).
 
 ---
 

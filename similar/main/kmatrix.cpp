@@ -58,6 +58,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 
 #include "compiler-range_for.h"
 #include "d_levelstate.h"
+#include "bot.h"
 
 #define CENTERING_OFFSET(x) ((300 - (70 + (x)*25 ))/2)
 #define CENTERSCREEN (SWIDTH/2)
@@ -79,7 +80,18 @@ static void kmatrix_draw_item(fvcobjptr &vcobjptr, grs_canvas &canvas, const grs
 	const auto y = fspacy(80 + i * 9);
 	const auto &&fspacx = FSPACX();
 	auto &p = *vcplayerptr(sorted[i]);
-	gr_string(canvas, cv_font, fspacx(CENTERING_OFFSET(N_players)), y, static_cast<const char *>(p.callsign));
+	const auto x_name{fspacx(CENTERING_OFFSET(N_players))};
+	gr_string(canvas, cv_font, x_name, y, static_cast<const char *>(p.callsign));
+	/* Documentation/multiplayer-bots.md section 2.2: a bot is tagged,
+	 * after its name where the column has room, else before it.
+	 */
+	if (player_is_bot(sorted[i]))
+	{
+		const auto name_w{gr_get_string_size(cv_font, static_cast<const char *>(p.callsign)).width};
+		const auto tag_w{gr_get_string_size(cv_font, "[B]").width};
+		const auto after{x_name + name_w + fspacx(2)};
+		gr_string(canvas, cv_font, after + tag_w <= x_name + fspacx(68) ? after : std::max(0.0f, x_name - tag_w - fspacx(2)), y, "[B]");
+	}
 
 	const auto &&rgb10 = BM_XRGB(10, 10, 10);
 	const auto &&rgb25 = BM_XRGB(25, 25, 25);

@@ -107,7 +107,11 @@ inline constexpr std::array<const char *, 16> bot_default_names{{
 	"Rook", "Jinx", "Vortex", "Grinder", "Cinder", "Specter", "Brick", "Dart",
 }};
 
-/* Section 5.1.  Distances in game units, angles in degrees. */
+/* Section 5.1 (the final table: section 9.7).  Distances in game units,
+ * angles in degrees.  Every value is monotonic from Trainee to Insane;
+ * none is perfect (no zero reaction, no zero aim error), so Insane plays
+ * like a very good human, not a machine.
+ */
 struct skill_params
 {
 	unsigned reaction_ms;
@@ -132,14 +136,23 @@ struct skill_params
 	unsigned strafe_max_ms;
 	/* The vertical share of the strafe (0: flat; section 4.6, bobbing). */
 	double strafe_vertical;
+	/* Section 9.7: the strafe's speed, a share of the top speed (B1:
+	 * 0.7 for every skill that strafes).
+	 */
+	double strafe_speed;
+	/* Section 9.7: the share of the time the trigger is held while a
+	 * shot is on (fire_burst): a beginner pauses between bursts.
+	 */
+	double fire_duty;
 };
 
 inline constexpr std::array<skill_params, BOT_SKILL_COUNT> skill_table{{
-	{550, 7.0, 600, 0.0, 0.45, 12, 45, 150, 0, 2000, 0.0, 0, 0, false, 1200, 2000, 0.0},
-	{400, 4.5, 500, 0.4, 0.60, 9, 60, 250, 80, 3000, 0.2, 1, 3, true, 900, 1800, 0.25},
-	{280, 2.8, 400, 0.7, 0.75, 6, 70, 350, 150, 5000, 0.45, 2, 8, true, 600, 1400, 0.5},
-	{200, 1.7, 300, 0.9, 0.90, 4, 80, 450, 250, 7000, 0.7, 3, 15, true, 500, 1300, 0.8},
-	{140, 1.0, 250, 1.0, 1.00, 3, 90, 600, 350, 10000, 0.85, 4, 0xffff, true, 400, 1100, 1.0},
+	/* reaction, sigma, drift, lead, turn, cone, fov, aware, hear, memory, dodge, smarts, map, strafe, runs, vertical, strafe speed, duty */
+	{550, 7.0, 600, 0.0, 0.45, 12, 45, 150, 0, 2000, 0.0, 0, 0, false, 1200, 2000, 0.0, 0.0, 0.55},
+	{400, 4.5, 500, 0.4, 0.60, 9, 60, 250, 80, 3000, 0.2, 1, 3, true, 900, 1800, 0.25, 0.5, 0.8},
+	{280, 2.8, 400, 0.7, 0.75, 6, 70, 350, 150, 5000, 0.45, 2, 8, true, 600, 1400, 0.5, 0.7, 1.0},
+	{200, 1.7, 300, 0.9, 0.90, 4, 80, 450, 250, 7000, 0.7, 3, 15, true, 500, 1300, 0.8, 0.75, 1.0},
+	{140, 1.0, 250, 1.0, 1.00, 3, 90, 600, 350, 10000, 0.85, 4, 0xffff, true, 400, 1100, 1.0, 0.8, 1.0},
 }};
 
 [[nodiscard]]
@@ -149,20 +162,50 @@ constexpr const skill_params &skill_of(const bot_skill s)
 	return skill_table[i < BOT_SKILL_COUNT ? i : static_cast<unsigned>(BOT_DEFAULT_SKILL)];
 }
 
-/* Section 5.2. */
+/* Section 5.2 (the final table: section 9.7): multipliers and offsets on
+ * top of the skill.
+ */
 struct style_params
 {
 	double retreat_shields;
 	double engage_weight;
 	double collect_weight;
 	double range_scale;
+	/* How long a lost target is hunted: a scale of the skill's memory
+	 * (Aggressive chases twice as long).
+	 */
+	double chase_memory;
+	/* Added to the skill's dodge probability (a skill that never dodges
+	 * still does not).
+	 */
+	double dodge_bonus;
+	/* A scale of the time between two mines (Aggressive drops fewer,
+	 * Cautious more).
+	 */
+	double mine_interval;
+	/* Scales of the strafe speed and of the speed it closes in or backs
+	 * off with inside the fight band.
+	 */
+	double strafe_scale;
+	double close_scale;
+	/* Not ahead in a fight (fight_advantage below 1), the engage weight
+	 * falls toward this share (at an advantage of one half and below).
+	 */
+	double behind_engage;
+	/* Outgunned (advantage below OUTGUNNED_ADVANTAGE), the retreat
+	 * threshold rises by this many shields: the bot breaks off.
+	 */
+	double outgunned_retreat;
+	/* Chasing a target further than this lights the afterburner. */
+	double burn_chase_distance;
 };
 
 inline constexpr std::array<style_params, BOT_STYLE_COUNT> style_table{{
-	{35, 1.0, 1.0, 1.0},
-	{20, 1.5, 0.6, 0.75},
-	{55, 0.8, 1.2, 1.25},
-	{40, 0.7, 1.8, 1.0},
+	/* retreat, engage, collect, range, chase, dodge, mines, strafe, close, behind, outgunned, burn */
+	{35, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0, 150},	/* balanced */
+	{20, 1.5, 0.6, 0.75, 2.0, 0.0, 2.0, 0.9, 1.15, 1.0, 0, 100},	/* aggressive */
+	{55, 0.8, 1.2, 1.25, 0.8, 0.1, 0.7, 1.1, 0.85, 0.8, 25, 200},	/* cautious */
+	{40, 0.7, 1.8, 1.0, 1.0, 0.05, 1.0, 1.0, 1.0, 0.5, 15, 150},	/* collector */
 }};
 
 [[nodiscard]]
@@ -170,6 +213,69 @@ constexpr const style_params &style_of(const bot_style s)
 {
 	const auto i{static_cast<unsigned>(s)};
 	return style_table[i < BOT_STYLE_COUNT ? i : 0];
+}
+
+/* Section 9.7: how the style modifies the skill. */
+[[nodiscard]]
+constexpr double effective_dodge(const skill_params &k, const style_params &s)
+{
+	return k.dodge_prob > 0 ? std::clamp(k.dodge_prob + s.dodge_bonus, 0.0, 0.95) : 0.0;
+}
+
+[[nodiscard]]
+constexpr unsigned effective_memory_ms(const skill_params &k, const style_params &s)
+{
+	return static_cast<unsigned>(k.memory_ms * s.chase_memory + 0.5);
+}
+
+[[nodiscard]]
+constexpr double effective_strafe_speed(const skill_params &k, const style_params &s)
+{
+	return k.strafe ? std::min(0.9, k.strafe_speed * s.strafe_scale) : 0.0;
+}
+
+/* B1's closing speed in the fight band, a share of the top speed. */
+constexpr double COMBAT_CLOSE_SPEED{0.8};
+
+[[nodiscard]]
+constexpr double effective_close_speed(const style_params &s)
+{
+	return std::min(1.0, COMBAT_CLOSE_SPEED * s.close_scale);
+}
+
+/* How the bot stands against its target: its shields over the target's
+ * times its armament over the target's (armament_score, bot_goals.h),
+ * the square root of each (a better gun does not make up for no
+ * shields), bounded.  1: even; above: ahead.
+ */
+[[nodiscard]]
+inline double fight_advantage(const double own_shields, const double own_armament, const double target_shields, const double target_armament)
+{
+	const double shields{std::max(own_shields, 1.0) / std::max(target_shields, 1.0)};
+	const double arms{std::max(own_armament, 0.1) / std::max(target_armament, 0.1)};
+	return std::clamp(std::sqrt(shields) * std::sqrt(arms), 0.1, 10.0);
+}
+
+/* Below this advantage a bot is outgunned (outgunned_retreat). */
+constexpr double OUTGUNNED_ADVANTAGE{0.6};
+
+/* The style's engage weight factor for an advantage: 1 when ahead or
+ * even, falling to behind_engage at an advantage of one half.
+ */
+[[nodiscard]]
+constexpr double style_engage_factor(const style_params &s, const double advantage)
+{
+	if (advantage >= 1)
+		return 1;
+	const double t{std::clamp((advantage - 0.5) / 0.5, 0.0, 1.0)};
+	return s.behind_engage + (1 - s.behind_engage) * t;
+}
+
+/* The style's retreat threshold for an advantage. */
+[[nodiscard]]
+constexpr double style_retreat_shields(const style_params &s, const double advantage)
+{
+	return s.retreat_shields + (advantage < OUTGUNNED_ADVANTAGE ? s.outgunned_retreat : 0);
 }
 
 /* Section 3.4: each bot's own random numbers, seeded from the session,
@@ -403,6 +509,70 @@ public:
 	double factor() const
 	{
 		return m_factor;
+	}
+};
+
+/* Section 9.7: a beginner's trigger.  With a duty below 1 the trigger
+ * is held in bursts of FIRE_BURST_MIN_S to FIRE_BURST_MAX_S and released
+ * between them for as long as makes the duty on average.  A duty of 1
+ * holds it always and draws no random numbers (Hotshot and better play
+ * exactly as before).  Every life (reset) starts with a burst, not a
+ * pause.
+ */
+constexpr double FIRE_BURST_MIN_S{0.5};
+constexpr double FIRE_BURST_MAX_S{1.1};
+
+class fire_burst
+{
+	bool m_on{true};
+	/* The first burst was drawn (since the reset, at a duty below 1). */
+	bool m_started{};
+	uint32_t m_left{};
+public:
+	void reset()
+	{
+		*this = {};
+	}
+	/* Once per tick. */
+	void update(bot_rng &rng, const double duty)
+	{
+		if (!(duty < 1))
+		{
+			m_on = true;
+			m_started = false;
+			m_left = 0;
+			return;
+		}
+		if (!m_started)
+		{
+			m_started = true;
+			m_on = true;
+			m_left = static_cast<uint32_t>(rng.uniform(FIRE_BURST_MIN_S, FIRE_BURST_MAX_S) * BOT_TICK_RATE + 0.5);
+			return;
+		}
+		if (m_left)
+		{
+			--m_left;
+			return;
+		}
+		const double d{std::clamp(duty, 0.05, 1.0)};
+		const double burst{rng.uniform(FIRE_BURST_MIN_S, FIRE_BURST_MAX_S)};
+		if (m_on)
+		{
+			/* The burst is over: the pause that makes the duty. */
+			m_on = false;
+			m_left = static_cast<uint32_t>(burst * (1 - d) / d * BOT_TICK_RATE + 0.5);
+		}
+		else
+		{
+			m_on = true;
+			m_left = static_cast<uint32_t>(burst * BOT_TICK_RATE + 0.5);
+		}
+	}
+	[[nodiscard]]
+	bool on() const
+	{
+		return m_on;
 	}
 };
 

@@ -657,6 +657,13 @@ struct session_state
 	/* Client: the token the host assigned. */
 	uint32_t my_token{};
 	per_player_array<peer> peers{};
+	/* Host: the slot was handed to a new player who has not entered the
+	 * game yet (no CLIENT_READY).  Kept across the peer's connection, so
+	 * that a client restarting during its join, which comes back by
+	 * callsign as a rejoin, is still admitted as new
+	 * (net_v2::admission_is_new).
+	 */
+	per_player_array<bool> awaits_entry{};
 	/* Stage 2 (section 5).  Host: the newest INPUT per player and the
 	 * session's tick counter (section 2.3).  Client: the sequence of its
 	 * INPUT chunks and the newest bundle header applied.
@@ -1338,7 +1345,8 @@ void write_player_list(writer &w)
 	for (auto &&[i, np] : enumerate(Netgame.players))
 	{
 		w.bytes(&np.callsign[0u], CALLSIGN_LEN + 1);
-		w.u8(underlying_value(np.connected));
+		/* Bots section 2.2: bit 7 marks a bot. */
+		w.u8(::dcx::net_v2::encode_list_connected(underlying_value(np.connected), player_is_bot(i)));
 		w.u8(underlying_value(np.rank));
 		w.u8((Netgame.team_vector >> i) & 1);
 	}
@@ -1346,11 +1354,16 @@ void write_player_list(writer &w)
 
 void read_player_list(reader &r)
 {
-	for (auto &np : Netgame.players)
+	for (auto &&[i, np] : enumerate(Netgame.players))
 	{
 		if (const auto p{r.take(CALLSIGN_LEN + 1)})
 			np.callsign.copy_lower(std::span<const char, CALLSIGN_LEN>(reinterpret_cast<const char *>(p), CALLSIGN_LEN));
-		np.connected = player_connection_status{r.u8()};
+		const auto c{::dcx::net_v2::decode_list_connected(r.u8())};
+		np.connected = player_connection_status{c.status};
+		/* Only clients read the list (the host sets its own flags when
+		 * it allocates the bots, after a session reset).
+		 */
+		set_player_is_bot(i, c.bot);
 		np.rank = build_rank_from_untrusted(r.u8());
 		r.u8();	/* team: derived from team_vector */
 	}
@@ -2993,6 +3006,7 @@ void vacate_slot(const playernum_t slot)
 	Netgame.players[slot].protocol.udp.addr = {};
 	vmplayerptr(slot)->connected = player_connection_status::disconnected;
 	vmplayerptr(slot)->callsign = {};
+	S.awaits_entry[slot] = false;
 	while (N_players > 1 && vcplayerptr(N_players - 1)->connected == player_connection_status::disconnected && !Netgame.players[N_players - 1].callsign[0u] && S.peers[N_players - 1].ph == peer::phase::none)
 		--N_players;
 	Netgame.numplayers = N_players;
@@ -3053,6 +3067,7 @@ void accept_peer(const playernum_t slot, const ::dcx::net_v2::join_request &req,
 {
 	/* A human takes the slot: whatever bot was there is gone. */
 	bot_slot_released(slot);
+	set_player_is_bot(slot, false);
 	auto &p = S.peers[slot];
 	drop_peer(p);
 	drop_extras_for(slot);
@@ -3098,6 +3113,16 @@ per_player_array<slot_view> build_slot_views(const callsign_t &callsign, const _
 		v.callsign_matches = has_player && !d_stricmp(np.callsign, callsign);
 		v.address_matches = np.protocol.udp.addr == from;
 		v.last_packet_time = np.LastPacketTime;
+		/* Bots section 2.3: a bot's slot (playing, or left) is never
+		 * rejoined by callsign; a playing one may be replaced.
+		 */
+		const auto pn{static_cast<playernum_t>(i)};
+		v.bot = has_player && player_is_bot(pn);
+		if (v.bot)
+		{
+			v.connected = bot_is_local(pn);
+			v.bot_order = bot_added_order(pn);
+		}
 	}
 	/* The host itself is always occupied and connected. */
 	views[0].occupied = true;
@@ -3138,14 +3163,14 @@ void welcome_player(const ::dcx::net_v2::join_request &req, const callsign_t &ca
 			host_peer_gone(p, kick_player_reason::timeout);
 
 	const auto views{build_slot_views(callsign, from)};
-	const auto decision{::dcx::net_v2::decide_admission(views, Netgame.max_numplayers, (Netgame.game_flag & netgame_rule_flags::closed) != netgame_rule_flags::None)};
-	if ((decision.result == admission_result::accept_new || decision.result == admission_result::accept_rejoin || decision.result == admission_result::accept_replace) && decision.slot >= Netgame.max_numplayers)
+	const auto decision{::dcx::net_v2::decide_admission(views, Netgame.max_numplayers, (Netgame.game_flag & netgame_rule_flags::closed) != netgame_rule_flags::None, bots_replaceable())};
+	if (::dcx::net_v2::admission_accepts(decision.result) && decision.slot >= Netgame.max_numplayers)
 	{
 		/* Only a stale slot from before could be above the limit. */
 		deny_join(from, req.client_nonce, kick_player_reason::full);
 		return;
 	}
-	bool is_new{false};
+	const bool is_new{decision.slot < MAX_PLAYERS && ::dcx::net_v2::admission_is_new(decision.result, S.awaits_entry[static_cast<playernum_t>(decision.slot)])};
 	switch (decision.result)
 	{
 		case admission_result::deny_closed:
@@ -3169,6 +3194,9 @@ void welcome_player(const ::dcx::net_v2::join_request &req, const callsign_t &ca
 				const playernum_t slot{static_cast<playernum_t>(decision.slot)};
 				if (slot == 0 || slot >= MAX_PLAYERS)
 					return;
+				/* Restarted during its own join: still a new player. */
+				if (is_new)
+					break;
 				if (Newdemo_state == ND_STATE_RECORDING)
 					newdemo_record_multi_reconnect(slot);
 				digi_play_sample(sound_effect::SOUND_HUD_MESSAGE, F1_0);
@@ -3178,7 +3206,17 @@ void welcome_player(const ::dcx::net_v2::join_request &req, const callsign_t &ca
 			}
 			break;
 		case admission_result::accept_new:
-			is_new = true;
+			break;
+		case admission_result::accept_replace_bot:
+			/* Bots section 2.3: the bot leaves (its eggs, PLAYER_LEFT)
+			 * and the human takes its slot as a new player.  The bot
+			 * does not come back in this game.
+			 */
+			if (!bots_remove_for_human(static_cast<playernum_t>(decision.slot)))
+			{
+				deny_join(from, req.client_nonce, kick_player_reason::full);
+				return;
+			}
 			break;
 	}
 	const playernum_t slot{static_cast<playernum_t>(decision.slot)};
@@ -3190,6 +3228,7 @@ void welcome_player(const ::dcx::net_v2::join_request &req, const callsign_t &ca
 		auto &obj = *LevelUniqueObjectState.Objects.vmptr(vcplayerptr(slot)->objnum);
 		obj.ctype.player_info.KillGoalCount = 0;
 	}
+	S.awaits_entry[slot] = is_new;
 	accept_peer(slot, req, callsign, rank, from, peer::phase::joining, is_new);
 	auto &p = S.peers[slot];
 	send_game_settings(p);
@@ -3288,8 +3327,8 @@ void do_refuse_stuff(const ::dcx::net_v2::join_request &req, const callsign_t &c
 			if (+(Game_mode & GM_TEAM))
 			{
 				const auto views{build_slot_views(callsign, from)};
-				const auto decision{::dcx::net_v2::decide_admission(views, Netgame.max_numplayers, false)};
-				if (decision.result == admission_result::accept_new || decision.result == admission_result::accept_rejoin || decision.result == admission_result::accept_replace)
+				const auto decision{::dcx::net_v2::decide_admission(views, Netgame.max_numplayers, false, bots_replaceable())};
+				if (::dcx::net_v2::admission_accepts(decision.result))
 				{
 					Assert (RefuseTeam==1 || RefuseTeam==2);
 					if (RefuseTeam==1)
@@ -3443,6 +3482,7 @@ void handle_client_ready(peer &p)
 		 * level it was late for) must not reset its score again.
 		 */
 		p.is_new = false;
+		S.awaits_entry[slot] = false;
 		new_player(slot, Netgame.players[slot].callsign, Netgame.players[slot].rank);
 		std::array<uint8_t, PLAYER_JOINED_SIZE> buf;
 		writer w{buf.data()};
@@ -4133,6 +4173,8 @@ void handle_reliable(peer &p, const session_msg type, const std::span<const uint
 				const auto rank{build_rank_from_untrusted(r.u8())};
 				if (pnum >= Netgame.max_numplayers || pnum == Player_num)
 					break;
+				/* A human took the slot (bots section 2.3). */
+				set_player_is_bot(pnum, false);
 				new_player(pnum, callsign, rank);
 			}
 			break;
@@ -4602,6 +4644,7 @@ void session_reset()
 	bots_session_reset();
 	for (auto &p : S.peers)
 		drop_peer(p);
+	S.awaits_entry = {};
 	S.session_id = 0;
 	S.my_token = 0;
 	S.inputs = {};
