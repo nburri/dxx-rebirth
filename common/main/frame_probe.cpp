@@ -13,6 +13,12 @@
 #include <cstdio>
 #include <string>
 #include <SDL.h>
+#if SDL_VERSION_ATLEAST(2, 0, 18)
+#include <SDL_hidapi.h>
+#define DXX_FRAME_PROBE_HID_CHANGES	1
+#else
+#define DXX_FRAME_PROBE_HID_CHANGES	0
+#endif
 #if SDL_MAJOR_VERSION == 1
 #include <chrono>
 #endif
@@ -117,6 +123,9 @@ struct window_totals
 	unsigned max_render_vertices{};
 	unsigned logged_events{};
 	unsigned suppressed_events{};
+	uint64_t input_pump_max_ticks{};
+	uint64_t input_joystick_max_ticks{};
+	unsigned hid_changes{};
 };
 
 struct probe_state
@@ -138,6 +147,14 @@ struct probe_state
 	std::array<std::array<char, 64>, 3> hud{};
 	bool hud_valid{};
 	bool announced{};
+	/* Device interface arrivals and removals that Windows reported to
+	 * SDL's HIDAPI layer (SDL_hid_device_change_count; on Windows it
+	 * counts WM_DEVICECHANGE for all interface classes).  Each one
+	 * makes SDL enumerate devices again on the main thread.
+	 */
+	uint32_t hid_change_count{};
+	bool hid_change_count_valid{};
+	unsigned frame_hid_changes{};
 };
 
 probe_state state;
@@ -145,6 +162,41 @@ probe_state state;
 constexpr std::array<const char *, n_phases> phase_names{{
 	"input", "wait", "net", "obj", "game", "vis", "light", "world", "tex", "sound", "hud", "swap",
 }};
+
+constexpr std::array<const char *, static_cast<std::size_t>(input_event_kind::count)> input_event_names{{
+	"key", "text", "mousemotion", "mousebutton", "mousewheel", "joyaxis", "joyball", "joyhat", "joybutton", "joydevice", "padaxis", "padbutton", "paddevice", "window", "other",
+}};
+
+/* Long frames are logged at CON_NORMAL with -frametimes, so that they
+ * reach gamelog.txt without the rest of the -verbose output.
+ */
+con_priority long_frame_priority()
+{
+	return CGameArg.DbgFrameTimeHud ? CON_NORMAL : CON_VERBOSE;
+}
+
+/* Changes since the previous frame, or 0 if unknown. */
+unsigned update_hid_changes()
+{
+#if DXX_FRAME_PROBE_HID_CHANGES
+	/* SDL_hid_device_change_count would initialize hidapi if nothing
+	 * else did; the joystick subsystem does, so only ask when it is up.
+	 */
+	if (!SDL_WasInit(SDL_INIT_JOYSTICK))
+	{
+		state.hid_change_count_valid = false;
+		return 0;
+	}
+	const uint32_t c{SDL_hid_device_change_count()};
+	const bool valid{state.hid_change_count_valid};
+	const uint32_t previous{state.hid_change_count};
+	state.hid_change_count = c;
+	state.hid_change_count_valid = true;
+	return valid ? c - previous : 0;
+#else
+	return 0;
+#endif
+}
 
 double seconds_since_start(const uint64_t t)
 {
@@ -181,7 +233,25 @@ void log_long_frame(const uint64_t t, const double total_ms, const std::array<do
 		return ms[a] - state.phase_average_ms[a] > ms[b] - state.phase_average_ms[b];
 	});
 	const auto grew = [&ms](const std::size_t i) { return ms[i] - state.phase_average_ms[i]; };
-	con_printf(CON_VERBOSE, "frame: t=%.3f long %.2f ms (avg %.2f), grew: %s %+.2f, %s %+.2f | input %.2f wait %.2f net %.2f obj %.2f game %.2f vis %.2f light %.2f world %.2f tex %.2f sound %.2f hud %.2f swap %.2f other %.2f | limiter asked %.2f waited %.2f sleeps %u (max %.2f) yields %u | seg %u vis %u verts %u%s | texmerge-miss %u uploads %u pageins %u | mixer calls %u max %.3f ms, sound conversions %u | cpu %i%s%i",
+	/* Events handled in this frame, by kind, e.g. "joyaxis 4 mousemotion 2". */
+	std::array<char, 256> events;
+	{
+		std::size_t used{};
+		events[0] = 0;
+		for (std::size_t i{}; i != counters.input_events.size(); ++i)
+		{
+			const auto n{counters.input_events[i]};
+			if (!n)
+				continue;
+			const auto r{std::snprintf(events.data() + used, events.size() - used, "%s%s %u", used ? " " : "", input_event_names[i], n)};
+			if (r < 0 || static_cast<std::size_t>(r) >= events.size() - used)
+				break;
+			used += static_cast<std::size_t>(r);
+		}
+		if (!used)
+			std::snprintf(events.data(), events.size(), "none");
+	}
+	con_printf(long_frame_priority(), "frame: t=%.3f long %.2f ms (avg %.2f), grew: %s %+.2f, %s %+.2f | input %.2f wait %.2f net %.2f obj %.2f game %.2f vis %.2f light %.2f world %.2f tex %.2f sound %.2f hud %.2f swap %.2f other %.2f | limiter asked %.2f waited %.2f sleeps %u (max %.2f) yields %u | seg %u vis %u verts %u%s | texmerge-miss %u uploads %u pageins %u | mixer calls %u max %.3f ms, sound conversions %u | input: pumps %u, os-pump %.2f (max %.2f), joystick-update %.2f (max %.2f), dispatch %.2f, hid-changes %u, events %s | cpu %i%s%i",
 		seconds_since_start(t), total_ms, state.average_ms,
 		phase_names[order[0]], grew(order[0]), phase_names[order[1]], grew(order[1]),
 		ms[index(phase::input)], ms[index(phase::wait)], ms[index(phase::multi)], ms[index(phase::objects)], ms[index(phase::game)], ms[index(phase::vis)], ms[index(phase::light)], ms[index(phase::world)], ms[index(phase::tex)], ms[index(phase::sound)], ms[index(phase::hud)], ms[index(phase::swap)],
@@ -191,6 +261,7 @@ void log_long_frame(const uint64_t t, const double total_ms, const std::array<do
 		counters.light_frame ? " (light pass)" : "",
 		counters.texmerge_misses, counters.texture_uploads, counters.texture_pageins,
 		counters.mixer_calls, ticks_to_ms(counters.mixer_max_ticks), counters.sound_conversions,
+		counters.input_pumps, ticks_to_ms(counters.input_pump_ticks), ticks_to_ms(counters.input_pump_max_ticks), ticks_to_ms(counters.input_joystick_ticks), ticks_to_ms(counters.input_joystick_max_ticks), ticks_to_ms(counters.input_dispatch_ticks), state.frame_hid_changes, events.data(),
 		state.last_cpu, cpu == state.last_cpu ? "=" : "->", cpu);
 }
 
@@ -222,7 +293,7 @@ void close_window(const uint64_t t)
 	std::snprintf(hud[1].data(), hud[1].size(), "R%.2f T%.2f A%.2f H%.2f S%.2f X%.2f", a(phase::world), a(phase::tex), a(phase::sound), a(phase::hud), a(phase::swap), other);
 	std::snprintf(hud[2].data(), hud[2].size(), "max%.1f >2.5:%u >4:%u seg%u tm%u mx%.2f", ticks_to_ms(w.max_frame_ticks), over_2_5, over_4, w.max_render_segs, w.texmerge_misses, ticks_to_ms(w.mixer_max_ticks));
 	state.hud_valid = true;
-	con_printf(CON_VERBOSE, "frames: t=%.3f %u in %.0f ms, avg %.3f max %.2f ms, long %u | hist <1.9:%u <2.1:%u <2.5:%u <3:%u <4:%u <6:%u <10:%u <20:%u >=20:%u | avg ms: input %.3f wait %.3f net %.3f obj %.3f game %.3f vis %.3f light %.3f world %.3f tex %.3f sound %.3f hud %.3f swap %.3f other %.3f | limiter overshoot avg %.3f max %.3f ms, sleeps %u (max %.2f ms) yields %u | max vis segs %u verts %u | texmerge-miss %u uploads %u pageins %u | mixer calls %u max %.3f ms, sound conversions %u | events logged %u suppressed %u | cpu migrations %u, cpu %i",
+	con_printf(CON_VERBOSE, "frames: t=%.3f %u in %.0f ms, avg %.3f max %.2f ms, long %u | hist <1.9:%u <2.1:%u <2.5:%u <3:%u <4:%u <6:%u <10:%u <20:%u >=20:%u | avg ms: input %.3f wait %.3f net %.3f obj %.3f game %.3f vis %.3f light %.3f world %.3f tex %.3f sound %.3f hud %.3f swap %.3f other %.3f | limiter overshoot avg %.3f max %.3f ms, sleeps %u (max %.2f ms) yields %u | max vis segs %u verts %u | texmerge-miss %u uploads %u pageins %u | mixer calls %u max %.3f ms, sound conversions %u | events logged %u suppressed %u | input os-pump max %.2f joystick-update max %.2f ms, hid-changes %u | cpu migrations %u, cpu %i",
 		seconds_since_start(t), frames, window_ms, avg_frame, ticks_to_ms(w.max_frame_ticks), w.long_frames,
 		hg[0], hg[1], hg[2], hg[3], hg[4], hg[5], hg[6], hg[7], hg[8],
 		a(phase::input), a(phase::wait), a(phase::multi), a(phase::objects), a(phase::game), a(phase::vis), a(phase::light), a(phase::world), a(phase::tex), a(phase::sound), a(phase::hud), a(phase::swap), other,
@@ -231,6 +302,7 @@ void close_window(const uint64_t t)
 		w.texmerge_misses, w.texture_uploads, w.texture_pageins,
 		w.mixer_calls, ticks_to_ms(w.mixer_max_ticks), w.sound_conversions,
 		w.logged_events, w.suppressed_events,
+		ticks_to_ms(w.input_pump_max_ticks), ticks_to_ms(w.input_joystick_max_ticks), w.hid_changes,
 		w.cpu_migrations, state.last_cpu);
 }
 
@@ -309,7 +381,7 @@ void frame_mark()
 		if (!state.announced)
 		{
 			state.announced = true;
-			con_printf(CON_VERBOSE, "frame: probe enabled; logical CPUs %i, timer frequency %" PRIu64 " Hz; logging frames longer than %.1f ms and %.1fx the running average",
+			con_printf(long_frame_priority(), "frame: probe enabled; logical CPUs %i, timer frequency %" PRIu64 " Hz; logging frames longer than %.1f ms and %.1fx the running average",
 #if SDL_MAJOR_VERSION == 1
 				-1,
 #else
@@ -319,11 +391,13 @@ void frame_mark()
 		}
 		if (!state.first_mark)
 			state.first_mark = t;
+		update_hid_changes();
 		restart(t, cpu);
 		return;
 	}
 	const auto frame_ticks{t - state.last_mark};
 	const double total_ms{ticks_to_ms(frame_ticks)};
+	state.frame_hid_changes = update_hid_changes();
 	if (total_ms > gap_ms)
 	{
 		restart(t, cpu);
@@ -360,6 +434,9 @@ void frame_mark()
 	w.limiter_max_sleep_ticks = std::max(w.limiter_max_sleep_ticks, counters.limiter_max_sleep_ticks);
 	w.max_render_segs = std::max(w.max_render_segs, counters.render_segs);
 	w.max_render_vertices = std::max(w.max_render_vertices, counters.render_vertices);
+	w.input_pump_max_ticks = std::max(w.input_pump_max_ticks, counters.input_pump_max_ticks);
+	w.input_joystick_max_ticks = std::max(w.input_joystick_max_ticks, counters.input_joystick_max_ticks);
+	w.hid_changes += state.frame_hid_changes;
 	if (cpu != state.last_cpu)
 		++w.cpu_migrations;
 	if (state.average_ms <= 0)

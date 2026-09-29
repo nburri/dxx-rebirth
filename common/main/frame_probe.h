@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <span>
 
@@ -43,6 +44,27 @@ enum class phase : uint8_t
 };
 
 inline bool enabled;
+
+/* Kinds of SDL events counted in the input phase (see event.cpp). */
+enum class input_event_kind : uint8_t
+{
+	key,
+	text,
+	mouse_motion,
+	mouse_button,
+	mouse_wheel,
+	joy_axis,
+	joy_ball,
+	joy_hat,
+	joy_button,
+	joy_device,	// SDL_JOYDEVICEADDED/REMOVED
+	pad_axis,
+	pad_button,
+	pad_device,	// SDL_CONTROLLERDEVICEADDED/REMOVED/REMAPPED
+	window,
+	other,
+	count
+};
 
 class scope
 {
@@ -100,6 +122,19 @@ struct frame_counters
 	 */
 	unsigned render_vertices;
 	bool light_frame;
+	/* Input phase (event_poll), in timer ticks: time spent in
+	 * SDL_PumpEvents (the OS message pump), in SDL_JoystickUpdate
+	 * (joystick polling and device detection), both summed and the
+	 * longest single call, and time spent dispatching the events to
+	 * the windows.  input_pumps counts the pump calls.
+	 */
+	uint64_t input_pump_ticks;
+	uint64_t input_pump_max_ticks;
+	uint64_t input_joystick_ticks;
+	uint64_t input_joystick_max_ticks;
+	uint64_t input_dispatch_ticks;
+	unsigned input_pumps;
+	std::array<unsigned, static_cast<std::size_t>(input_event_kind::count)> input_events;
 };
 inline frame_counters counters;
 
@@ -179,6 +214,22 @@ public:
 		}
 	}
 };
+
+inline void note_input_pump(const uint64_t pump_ticks, const uint64_t joystick_ticks)
+{
+	++counters.input_pumps;
+	counters.input_pump_ticks += pump_ticks;
+	counters.input_joystick_ticks += joystick_ticks;
+	if (counters.input_pump_max_ticks < pump_ticks)
+		counters.input_pump_max_ticks = pump_ticks;
+	if (counters.input_joystick_max_ticks < joystick_ticks)
+		counters.input_joystick_max_ticks = joystick_ticks;
+}
+
+inline void note_input_event(const input_event_kind k)
+{
+	++counters.input_events[static_cast<std::size_t>(k)];
+}
 
 inline void note_render_list(const unsigned n_render_segs, const unsigned start_segnum)
 {

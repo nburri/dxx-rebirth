@@ -73,6 +73,91 @@ static void event_notify_end_loop()
 	event_send(d_event_end_loop{});
 }
 
+/* Run the OS message pump, then poll the joysticks.
+ *
+ * On SDL2, arch_init sets SDL_HINT_AUTO_UPDATE_JOYSTICKS to 0, so that
+ * SDL_PumpEvents does not call SDL_JoystickUpdate itself.  Calling it
+ * here, right after the pump, keeps SDL's own order (OS messages first,
+ * then joystick polling and device detection), and lets the frame probe
+ * tell the two apart: on Windows, a device change makes
+ * SDL_JoystickUpdate enumerate devices again on this thread, which can
+ * take tens of milliseconds, while the OS message pump can stall on its
+ * own (hooks, message floods).
+ */
+static void event_joystick_update()
+{
+#if SDL_MAJOR_VERSION == 2 && DXX_MAX_JOYSTICKS
+	/* Returns at once if the joystick subsystem is not initialized
+	 * (-nojoystick).
+	 */
+	SDL_JoystickUpdate();
+#endif
+}
+
+static void event_pump()
+{
+	if (!frame_probe::enabled)
+	{
+		SDL_PumpEvents();
+		event_joystick_update();
+		return;
+	}
+	const auto t0{frame_probe::now()};
+	SDL_PumpEvents();
+	const auto t1{frame_probe::now()};
+	event_joystick_update();
+	const auto t2{frame_probe::now()};
+	frame_probe::note_input_pump(t1 - t0, t2 - t1);
+}
+
+static frame_probe::input_event_kind classify_event(const uint32_t type)
+{
+	using k = frame_probe::input_event_kind;
+	switch (type)
+	{
+		case SDL_KEYDOWN:
+		case SDL_KEYUP:
+			return k::key;
+#if SDL_MAJOR_VERSION == 2
+		case SDL_TEXTINPUT:
+		case SDL_TEXTEDITING:
+			return k::text;
+		case SDL_MOUSEWHEEL:
+			return k::mouse_wheel;
+		case SDL_WINDOWEVENT:
+			return k::window;
+		case SDL_JOYDEVICEADDED:
+		case SDL_JOYDEVICEREMOVED:
+			return k::joy_device;
+		case SDL_CONTROLLERAXISMOTION:
+			return k::pad_axis;
+		case SDL_CONTROLLERBUTTONDOWN:
+		case SDL_CONTROLLERBUTTONUP:
+			return k::pad_button;
+		case SDL_CONTROLLERDEVICEADDED:
+		case SDL_CONTROLLERDEVICEREMOVED:
+		case SDL_CONTROLLERDEVICEREMAPPED:
+			return k::pad_device;
+#endif
+		case SDL_MOUSEMOTION:
+			return k::mouse_motion;
+		case SDL_MOUSEBUTTONDOWN:
+		case SDL_MOUSEBUTTONUP:
+			return k::mouse_button;
+		case SDL_JOYAXISMOTION:
+			return k::joy_axis;
+		case SDL_JOYBALLMOTION:
+			return k::joy_ball;
+		case SDL_JOYHATMOTION:
+			return k::joy_hat;
+		case SDL_JOYBUTTONDOWN:
+		case SDL_JOYBUTTONUP:
+			return k::joy_button;
+		default:
+			return k::other;
+	}
+}
+
 }
 
 window_event_result event_poll()
@@ -88,7 +173,7 @@ window_event_result event_poll()
 			break;
 		std::array<SDL_Event, 128> events;
 
-		SDL_PumpEvents();
+		event_pump();
 #if SDL_MAJOR_VERSION == 1
 		const auto peep = SDL_PeepEvents(events.data(), events.size(), SDL_GETEVENT, SDL_ALLEVENTS);
 #elif SDL_MAJOR_VERSION == 2
@@ -96,7 +181,17 @@ window_event_result event_poll()
 #endif
 		if (peep <= 0)
 			break;
-		state.process_event_batch(unchecked_partial_range(events, static_cast<unsigned>(peep)));
+		const auto batch{unchecked_partial_range(events, static_cast<unsigned>(peep))};
+		if (frame_probe::enabled)
+		{
+			for (auto &&event : batch)
+				frame_probe::note_input_event(classify_event(event.type));
+			const auto t0{frame_probe::now()};
+			state.process_event_batch(batch);
+			frame_probe::counters.input_dispatch_ticks += frame_probe::now() - t0;
+		}
+		else
+			state.process_event_batch(batch);
 		if (state.highest_result == window_event_result::deleted)
 			break;
 	}
@@ -213,7 +308,7 @@ void event_flush()
 	std::array<SDL_Event, 128> events;
 	for (;;)
 	{
-		SDL_PumpEvents();
+		event_pump();
 #if SDL_MAJOR_VERSION == 1
 		const auto peep = SDL_PeepEvents(events.data(), events.size(), SDL_GETEVENT, SDL_ALLEVENTS);
 #elif SDL_MAJOR_VERSION == 2
