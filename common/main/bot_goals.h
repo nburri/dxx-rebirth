@@ -727,6 +727,24 @@ constexpr bool grab_worthwhile(const double value, const double straight_distanc
 	return value >= GRAB_MIN_VALUE && straight_distance <= GRAB_RADIUS && path_cost <= GRAB_PATH;
 }
 
+/* The cheap first filter of the grab scan (best_grab in bot.cpp), before
+ * the path cost and the value: the widest radius of grab_worthwhile, so
+ * that a high-value powerup between GRAB_RADIUS and GRAB_HIGH_RADIUS
+ * reaches it (the PR #38 review: the filter used GRAB_RADIUS).
+ */
+[[nodiscard]]
+constexpr bool grab_in_range(const double straight_distance)
+{
+	return straight_distance <= (GRAB_HIGH_RADIUS > GRAB_RADIUS ? GRAB_HIGH_RADIUS : GRAB_RADIUS);
+}
+
+/* Both steps of the grab scan for one powerup. */
+[[nodiscard]]
+constexpr bool grab_candidate(const double value, const double straight_distance, const double path_cost)
+{
+	return grab_in_range(straight_distance) && grab_worthwhile(value, straight_distance, path_cost);
+}
+
 [[nodiscard]]
 constexpr double grab_utility(const double value)
 {

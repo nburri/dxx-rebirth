@@ -1801,8 +1801,9 @@ inline constexpr std::array<secondary, 9> death_dump_order{{
 }};
 
 /* The secondary to dump now: the first of death_dump_order held that the
- * skill uses and that may go (`blast_ok`: a missile's blast along the
- * nose clear of the bot, blast_safe; a mine always).
+ * skill uses and that may go (`blast_ok`: a missile's blast clear of the
+ * bot, dump_outcome and dump_blast_ok; a mine only without a teammate
+ * behind, as the normal path's).
  */
 template <typename BlastOk>
 [[nodiscard]]
@@ -1812,11 +1813,86 @@ constexpr std::optional<secondary> death_dump_choice(const std::array<uint8_t, B
 	{
 		if (!ammo[static_cast<unsigned>(s)] || smarts < min_smarts(s))
 			continue;
-		if (role_of(s) != missile_role::mine && !blast_ok(s))
+		if (!blast_ok(s))
 			continue;
 		return s;
 	}
 	return std::nullopt;
+}
+
+/* The PR #38 review: the dump's missile is weighed with the heavy
+ * missiles' model (evaluate_burst, section 9.6), not only against the
+ * wall along the nose: it bursts on the first ship on the line, and it
+ * may meet any ship near the line or, homing, within its homing cone
+ * (may_meet_target) -- the attacker, another enemy, a teammate.  The
+ * worse of all those (merge_meet) counts.  A teammate it may meet
+ * refuses the shot (the normal path's shot_clear: never a teammate on
+ * the line; homing missiles do not track teammates, so only the line
+ * counts for one).
+ */
+struct dump_ship
+{
+	vec3 pos{};
+	vec3 vel{};
+	bool teammate{};
+	/* First on the line along the nose (the game's object cast). */
+	bool on_line{};
+};
+
+template <typename Geometry>
+[[nodiscard]]
+std::optional<blast_outcome> dump_outcome(const Geometry &geo, blast_scene sc, const missile_role r, const missile_data &md, const vec3 &dir, const std::span<const dump_ship> ships)
+{
+	const auto u{normalized(dir)};
+	/* Along the nose to the wall: no target (a point far behind, out of
+	 * sight, that the children do not find).
+	 */
+	sc.target = sc.bot - u * (4 * BURST_CAST_LIMIT);
+	sc.target_vel = {};
+	sc.target_visible = false;
+	sc.unseen_for = 0;
+	auto o{evaluate_burst(geo, sc, r, md, u, false)};
+	for (const auto &ship : ships)
+	{
+		auto meet_sc{sc};
+		meet_sc.target = ship.pos;
+		meet_sc.target_vel = ship.vel;
+		meet_sc.target_visible = true;
+		auto line_md{md};
+		if (ship.teammate)
+			line_md.homing = false;
+		if (!ship.on_line && !(may_meet_target(meet_sc, u, line_md) && geo.sees(sc.bot, ship.pos)))
+			continue;
+		if (ship.teammate)
+			return std::nullopt;
+		o = merge_meet(o, evaluate_burst(geo, meet_sc, r, md, ship.pos - sc.bot, true));
+	}
+	return o;
+}
+
+/* The rule for a dump: never any self-damage (a bot about to die would
+ * kill itself: no budget, no trade), never at point blank, the blast
+ * clear of the bot where it is fired and at the burst (blast_safe's
+ * distance), and an earthshaker only with the wall behind clear of its
+ * children (shaker_behind_safe; evaluate_burst weighs them too).
+ * Invulnerable beyond the danger, the distance rules alone.
+ */
+constexpr double DUMP_SELF_DAMAGE_MAX{0.5};
+
+[[nodiscard]]
+constexpr bool dump_blast_ok(const blast_outcome &o, const missile_role r, const missile_data &md, const double invulnerable_left, const double behind_distance)
+{
+	if (!(blast_factor(r) > 0))
+		return true;
+	const double nearest{std::min(o.impact, o.burst_distance)};
+	if (nearest < MISSILE_MIN_DISTANCE)
+		return false;
+	if (!shaker_behind_safe(r, behind_distance, o.impact, md, invulnerable_left))
+		return false;
+	if (invulnerable_left > blast_danger_seconds(r, o.impact, md))
+		return true;
+	const double need{blast_factor(r) * std::max(md.blast_radius, 0.0) + BLAST_MARGIN};
+	return nearest >= need && !(o.self_nominal > 0) && o.self_damage < DUMP_SELF_DAMAGE_MAX;
 }
 
 /* Section 9.5: the fusion cannon, charged by the bot's own trigger as

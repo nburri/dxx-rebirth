@@ -721,6 +721,11 @@ reverse_turn_result reverse_turn(const vec3 &target_local, const double fps, con
 void test_reverse_turn()
 {
 	const auto lim{ship_limits()};
+	/* Reversing needs room behind (the PR #38 review): a wall closer
+	 * than REVERSE_TURN_CLEARANCE along the velocity makes it slide.
+	 */
+	CHECK(reverse_turn_has_room(REVERSE_TURN_CLEARANCE) && reverse_turn_has_room(400));
+	CHECK(!reverse_turn_has_room(REVERSE_TURN_CLEARANCE - 1) && !reverse_turn_has_room(0));
 	/* The state machine: behind starts it, facing ends the turn in the
 	 * boost (a target beyond the band's near edge) or in nothing (a
 	 * target inside it); the boost ends on time, and a target behind

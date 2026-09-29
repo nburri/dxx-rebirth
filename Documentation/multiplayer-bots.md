@@ -2139,9 +2139,16 @@ clears them but a human taking the slot; its pause table showed `BOT`.
 The kill list, what one reads in play, marked a bot only in its ping
 column, which is shown only with "Show Player ping" (off by default):
 so neither host nor clients saw a marker there.  Now every bot's line in
-the kill list carries ` BOT` after the name (in grey; the name is cut
-to leave it room, `kill_list_marker_room`), with or without the ping
-column, which keeps its own `BOT`; not in the team view.  The score
+the kill list says so: with the ping column, its `BOT` there; without
+it, a grey `*` right after the name (the name is cut to leave it room,
+`kill_list_marker_room`); not in the team view (`kill_list_marks_bot`).
+The first version put ` BOT` after the name; the PR #38 review found
+that the name column is narrow (about 40 units, about 22 with a kill
+goal or a time limit and in the co-op left column), so a bot's name was
+cut to three or four letters or to nothing, and with the ping column
+the marker showed twice.  The `*` costs one narrow character in every
+layout (full screen, cockpit, status bar; one or two columns of up to
+eight players; kill goal and co-op score columns).  The score
 screen (`kmatrix`) says `BOT` instead of `[B]`; the pause table and the
 name tags (`, Bot`) are unchanged.  The host re-asserts the flag of each
 bot it flies every frame (`bots_frame`), whatever might clear it.
@@ -2196,7 +2203,11 @@ aggressive bot that was just shot engages at most at 2 x 1.5 x 1.5 x
 enemy in sight).  Invulnerability is grabbed in danger too, as shields
 are.  In the scenario of section 9.5 (Hotshot, spawn laser, an enemy
 100 units away) an earthshaker is now taken up to 85 units away (B4-B2:
-45), plasma for a vulcan owner up to 85 (before: 45).
+45), plasma for a vulcan owner up to 85 (before: 45).  The scan's cheap
+first filter (`best_grab`, before the path and the value) is the widest
+radius, `grab_in_range` (the PR #38 review: it filtered on 45 units, so
+the 85 of a high-value powerup was never reached); `grab_candidate` is
+both steps.
 
 **(5) The death dump** (`death_dump_wanted`, `death_dump_choice`).  A
 bot about to die fires its missiles and drops its mines as fast as the
@@ -2216,9 +2227,29 @@ once whether this bot does it (the reliability):
 No exploit: every shot goes through the normal firing as the bot
 (`bots_fire`: `do_missile_firing`, `MULTI_FIRE`), one at a time as the
 refire limit allows, only what the skill uses (`min_smarts`), and a
-missile only with its blast clear of the bot along the nose
-(`blast_safe`, the wall or the target in front): a bot never kills
-itself to deny the kill.  Invulnerable, it does not dump.  A bot that
+missile only with its blast clear of the bot: a bot never kills itself
+to deny the kill.  The first version checked only the wall along the
+nose and a target within 20 degrees; the PR #38 review found that the
+attacker, a teammate or a target 25 degrees off (which a homing missile
+turns to) were not counted, that the earthshaker's children bursting on
+the wall behind were not either, and that the dump skipped the normal
+path's friendly-fire checks.  Now each missile is weighed with the heavy
+missiles' model of section 9.6 (`dump_outcome`): the wall along the nose
+(`evaluate_burst`, the earthshaker's children included), the ship first
+on the line along the nose (an object cast as `shot_line_clear`'s, whose
+teammate, reactor, robot or clutter refuses every missile), and every
+ship ahead within 400 units that it may meet (`may_meet_target`: near
+the line, or in the homing cone of a homing missile; seen), the worse of
+all (`merge_meet`); a teammate it may meet (friendly fire on) refuses it
+(homing missiles do not track teammates, so only the line counts for
+one).  The rule (`dump_blast_ok`): never at point blank, the blast
+distance of `blast_safe` where it is fired and at the burst, no nominal
+self-damage and an expected one below 0.5, and an earthshaker only with
+the wall behind clear of its children (`shaker_behind_safe`);
+invulnerable beyond the danger, the distance rules alone.  The weighing
+shares the heavy missiles' fvi budget per tick.  A mine is dropped only
+without a teammate behind (`teammate_behind`, `MINE_TEAMMATE_DISTANCE`,
+as a chased bot drops one).  Invulnerable, it does not dump.  A bot that
 survives (shields picked up, no longer hit) stops.  The log says
 `dumps its missiles: about to die`, each round, and ` dump` in the
 summary line.
@@ -2237,7 +2268,14 @@ the near edge of its fight band (+15 units) or it gets more than 60
 degrees off again; a turn that has not ended after 2.5 s is given up.
 It applies to the fight's own movement (not on a path, ducking, hugging
 or holding clear of its blast) and to the turn to an unseen attacker
-(not while collecting, retreating or refuelling).  In the flight model
+(not while collecting, retreating or refuelling); there the turn ends
+when the nose is round, without the boost toward a remembered place
+(the PR #38 review: the state went on to the boost and the afterburner
+fired for a boost that was not flown).  Flying backwards, the bot
+reverses only with `REVERSE_TURN_CLEARANCE` (25) units clear along the
+velocity it wants (`reverse_turn_has_room`, a `wall_distance` cast);
+else it slides round (`keep_moving_in_turn`) while the nose comes
+round (`turn_velocity`).  In the flight model
 (`test_reverse_turn`, Hotshot, flying at 40 units/s, a target 80 units
 behind, 30-500 fps): the bot faces the target in 1.37-1.48 s (the slide
 of section 9.5: 1.40-1.56 s), never below 44 units/s, always at 41
@@ -2285,13 +2323,17 @@ gains ` phase` and ` 3rd-party`.
 **Tests.**  `test-bot-weapons`: `test_volleys` (sizes by skill, style,
 ammo and target, smart bursts, continuation, the refire model),
 `test_heavy_boldness`, `test_death_dump` (the trigger, reliability and
-thresholds by skill, the order and the blast rule).  `test-bot-goals`:
-`test_high_value_grab`, `test_powerup_phase` (weakness, weapon-poor
+thresholds by skill, the order and the blast rule), `test_dump_blast`
+(the attacker first on the line, an enemy 35 degrees off that a homing
+missile turns to and a straight one passes, a teammate near the line
+and off it, the earthshaker with a wall close behind, a wall close in
+front, invulnerable).  `test-bot-goals`: `test_high_value_grab` (with
+the scan's filter, `grab_in_range`, `grab_candidate`), `test_powerup_phase` (weakness, weapon-poor
 levels, the phase and its exceptions, the goal by style, third
 parties); the pickup scenarios of section 9.5 updated to the new values
-and radii.  `test-bot-flight`: `test_reverse_turn` (the state machine,
+and radii.  `test-bot-flight`: `test_reverse_turn` (the room behind, the state machine,
 the velocities, the flight model at four frame rates).
-`test-bot-presets`: `test_marker`.
+`test-bot-presets`: `test_marker` (the `*`, not with the ping column).
 
 **Unchanged:** the human's firing and every human path (`laser.cpp`
 untouched: the bots fire through the same calls as before), clients,

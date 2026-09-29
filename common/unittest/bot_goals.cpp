@@ -916,6 +916,16 @@ void test_high_value_grab()
 	CHECK(!grab_worthwhile(v_mega, 100, 100));
 	CHECK(!grab_worthwhile(v_mega, 70, 150));
 	CHECK(grab_utility(v_mega) == GRAB_HIGH_UTILITY && grab_utility(v_conc) == GRAB_UTILITY);
+	/* The scan's first filter (best_grab) lets the high-value radius
+	 * through: a mega 70 units away is a candidate, a concussion there
+	 * is not, nothing beyond GRAB_HIGH_RADIUS is.
+	 */
+	CHECK(grab_in_range(70) && grab_in_range(GRAB_HIGH_RADIUS) && !grab_in_range(GRAB_HIGH_RADIUS + 1));
+	CHECK(grab_candidate(v_mega, 70, 100));
+	CHECK(grab_candidate(v_mega, 84, 120));
+	CHECK(!grab_candidate(v_conc, 70, 100));
+	CHECK(grab_candidate(v_conc, 40, 60));
+	CHECK(!grab_candidate(v_mega, 90, 100));
 	/* The high-value items, with the spawn laser. */
 	for (const item_desc d : {item_desc{item::secondary, primary::laser, 3}, item_desc{item::secondary, primary::laser, 9}, item_desc{item::invulnerability}, item_desc{item::cloak}, item_desc{item::afterburner}, item_desc{item::quad}, item_desc{item::super_laser}, item_desc{item::primary, primary::plasma, 0}})
 	{

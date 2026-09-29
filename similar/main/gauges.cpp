@@ -3593,9 +3593,11 @@ static void hud_show_kill_list(fvcobjptr &vcobjptr, grs_canvas &canvas, const ga
 		else
 			name = vcplayerptr(player_num)->callsign;	// Note link to above if!!
 		/* Documentation/multiplayer-bots.md section 9.8: a bot's line
-		 * always says so, after the name (cut to leave it room).
+		 * always says so: a grey `*` after the name (cut to leave it
+		 * room), unless the ping column shows its `BOT`.
 		 */
-		const bool marked{::dcx::bot::kill_list_marks_bot(player_is_bot(player_num), Show_kill_list == show_kill_list_mode::team_kills)};
+		const bool team_view{Show_kill_list == show_kill_list_mode::team_kills};
+		const bool marked{::dcx::bot::kill_list_marks_bot(player_is_bot(player_num), team_view, PlayerCfg.MultiPingHud && !team_view)};
 		const auto marker_room{::dcx::bot::kill_list_marker_room(marked, marked ? gr_get_string_size(game_font, ::dcx::bot::BOT_KILL_LIST_MARKER).width : 0)};
 		auto [sw, sh] = gr_get_string_size(game_font, static_cast<const char *>(name));
 		{

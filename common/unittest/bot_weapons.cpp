@@ -1564,8 +1564,9 @@ void test_death_dump()
 		CHECK(!death_dump_wanted(v, bot_skill::hotshot, bot_style::balanced));
 		CHECK(death_dump_wanted(v, bot_skill::ace, bot_style::balanced));
 	}
-	/* The order: the most valuable first; a missile only with its blast
-	 * clear of the bot, a mine always; only what the skill uses.
+	/* The order: the most valuable first; each only if it may go (a
+	 * missile with its blast clear of the bot, a mine without a
+	 * teammate behind); only what the skill uses.
 	 */
 	std::array<uint8_t, BOT_SECONDARY_COUNT> ammo{};
 	ammo[idx(secondary::earthshaker)] = 1;
@@ -1574,12 +1575,88 @@ void test_death_dump()
 	const auto all_ok{[](secondary) { return true; }};
 	const auto none_ok{[](secondary) { return false; }};
 	CHECK(death_dump_choice(ammo, 4, all_ok) == secondary::earthshaker);
-	CHECK(death_dump_choice(ammo, 4, none_ok) == secondary::proximity);
+	CHECK(!death_dump_choice(ammo, 4, none_ok));
+	CHECK(death_dump_choice(ammo, 4, [](const secondary s) { return role_of(s) == missile_role::mine; }) == secondary::proximity);
 	CHECK(death_dump_choice(ammo, 4, [](const secondary s) { return s != secondary::earthshaker; }) == secondary::homing);
 	CHECK(death_dump_choice(ammo, 1, all_ok) == secondary::homing);
 	ammo = {};
 	ammo[idx(secondary::guided)] = 2;
 	CHECK(!death_dump_choice(ammo, 4, all_ok));
+}
+
+/* The PR #38 review: the dump's blast weighed with the heavy missiles'
+ * model: the wall along the nose, the ships it may meet (the attacker in
+ * front, one off the line that a homing missile turns to, a teammate),
+ * the earthshaker's children and the wall behind.
+ */
+void test_dump_blast()
+{
+	const auto room{open_room()};
+	const vec3 nose{1, 0, 0};
+	const auto sc{still_scene({0, 0, 0}, {0, 0, 0})};
+	const missile_data homing{.speed = 160, .blast_radius = 12, .thrust = true, .homing = true, .damage = 30};
+	const missile_data conc{.speed = 160, .blast_radius = 10, .thrust = true, .damage = 20};
+	const auto mega{test_mega()};
+	const auto shaker{test_shaker()};
+	/* Nothing near, the walls far: every missile may go. */
+	for (const auto &[r, md] : {std::pair{missile_role::straight, conc}, std::pair{missile_role::homing, homing}, std::pair{missile_role::heavy, mega}, std::pair{missile_role::shaker, shaker}})
+	{
+		const auto o{dump_outcome(room, sc, r, md, nose, {})};
+		CHECK(o && dump_blast_ok(*o, r, md, 0, 400));
+	}
+	/* The attacker first on the line 20 units ahead: it bursts there. */
+	{
+		const dump_ship ships[]{{.pos = {20, 0, 0}, .on_line = true}};
+		const auto o{dump_outcome(room, sc, missile_role::straight, conc, nose, ships)};
+		CHECK(o && o->impact <= 20 && !dump_blast_ok(*o, missile_role::straight, conc, 0, 400));
+	}
+	/* An enemy 35 degrees off the nose, 22 units away: a homing missile
+	 * turns to it (the old check saw only the wall and a target within
+	 * 20 degrees); a straight one passes it (13 units off its line).
+	 */
+	{
+		const double a{35 * 3.14159265358979323846 / 180};
+		const dump_ship ships[]{{.pos = {22 * std::cos(a), 22 * std::sin(a), 0}}};
+		const auto h{dump_outcome(room, sc, missile_role::homing, homing, nose, ships)};
+		CHECK(h && !dump_blast_ok(*h, missile_role::homing, homing, 0, 400));
+		const auto c{dump_outcome(room, sc, missile_role::straight, conc, nose, ships)};
+		CHECK(c && dump_blast_ok(*c, missile_role::straight, conc, 0, 400));
+		/* A mega at 22 units: its blast reaches the bot. */
+		const auto m{dump_outcome(room, sc, missile_role::heavy, mega, nose, ships)};
+		CHECK(m && !dump_blast_ok(*m, missile_role::heavy, mega, 0, 400));
+	}
+	/* A teammate near the line refuses the shot; off the line a homing
+	 * missile does not track it.
+	 */
+	{
+		const dump_ship near_line[]{{.pos = {100, 3, 0}, .teammate = true}};
+		CHECK(!dump_outcome(room, sc, missile_role::homing, homing, nose, near_line));
+		const dump_ship off_line[]{{.pos = {100, 60, 0}, .teammate = true}};
+		CHECK(dump_outcome(room, sc, missile_role::homing, homing, nose, off_line));
+	}
+	/* The earthshaker in a corridor: the wall 150 units ahead, 6 behind:
+	 * its children bursting behind the bot refuse it; with the wall far
+	 * behind (and no target for the children) it may go.
+	 */
+	{
+		const box_level near_back{{{{-6, -10, -10}, {150, 10, 10}}}};
+		const auto o{dump_outcome(near_back, sc, missile_role::shaker, shaker, nose, {})};
+		CHECK(o && !dump_blast_ok(*o, missile_role::shaker, shaker, 0, 6));
+		/* The wall behind alone refuses it too. */
+		CHECK(!dump_blast_ok(*dump_outcome(room, sc, missile_role::shaker, shaker, nose, {}), missile_role::shaker, shaker, 0, 6));
+	}
+	/* A wall 25 units along the nose: nothing may go but, invulnerable
+	 * beyond the danger, a missile beyond point blank.
+	 */
+	{
+		const box_level close{{{{-200, -100, -100}, {35, 100, 100}}}};
+		const auto o{dump_outcome(close, sc, missile_role::heavy, mega, nose, {})};
+		CHECK(o && !dump_blast_ok(*o, missile_role::heavy, mega, 0, 200));
+		auto inv{sc};
+		inv.invulnerable_left = 10;
+		const auto i{dump_outcome(close, inv, missile_role::heavy, mega, nose, {})};
+		CHECK(i && dump_blast_ok(*i, missile_role::heavy, mega, 10, 200));
+	}
 }
 
 }
@@ -1588,6 +1665,7 @@ int main()
 {
 	test_volleys();
 	test_heavy_boldness();
+	test_dump_blast();
 	test_death_dump();
 	test_risk_profiles();
 	test_expected_outcome();

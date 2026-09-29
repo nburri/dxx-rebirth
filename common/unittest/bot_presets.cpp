@@ -502,18 +502,22 @@ void test_profile()
 }
 
 
-/* Section 9.8: the BOT marker in the kill list, always (not only with
- * the ping column), never in the team view; its room comes off the
- * name's column.
+/* Section 9.8: the BOT marker in the kill list, always (a grey `*`
+ * without the ping column, the ping column's `BOT` with it), never in
+ * the team view; one narrow character off the name's column (the PR #38
+ * review: ` BOT` cut the names to nothing).
  */
 void test_marker()
 {
-	CHECK(kill_list_marks_bot(true, false));
-	CHECK(!kill_list_marks_bot(false, false));
-	CHECK(!kill_list_marks_bot(true, true));
-	CHECK(kill_list_marker_room(true, 21) == 21);
-	CHECK(kill_list_marker_room(false, 21) == 0);
-	CHECK(std::string_view{BOT_KILL_LIST_MARKER} == " BOT");
+	CHECK(kill_list_marks_bot(true, false, false));
+	CHECK(!kill_list_marks_bot(false, false, false));
+	CHECK(!kill_list_marks_bot(true, true, false));
+	/* The ping column says BOT already: not twice. */
+	CHECK(!kill_list_marks_bot(true, false, true));
+	CHECK(kill_list_marker_room(true, 5) == 5);
+	CHECK(kill_list_marker_room(false, 5) == 0);
+	CHECK(std::string_view{BOT_KILL_LIST_MARKER} == "*");
+	CHECK(std::string_view{BOT_KILL_LIST_MARKER}.size() == 1);
 	CHECK(std::string_view{BOT_SCORE_MARKER} == "BOT");
 }
 }

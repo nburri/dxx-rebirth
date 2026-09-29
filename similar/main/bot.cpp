@@ -1782,7 +1782,7 @@ goal_place best_grab(const bot_state &bs, const object &obj, const b::resource_v
 		if (tick < k.ignore_until)
 			continue;
 		const double straight{b::distance(pos, k.pos)};
-		if (straight > b::GRAB_RADIUS)
+		if (!b::grab_in_range(straight))
 			continue;
 		const auto cost{bs.dist.cost(k.segment)};
 		if (!cost)
@@ -1794,7 +1794,7 @@ goal_place best_grab(const bot_state &bs, const object &obj, const b::resource_v
 		const auto type{static_cast<powerup_type_t>(k.type)};
 		const auto desc{item_of(type)};
 		const double value{b::item_value(desc, res)};
-		if (!b::grab_worthwhile(value, straight, path))
+		if (!b::grab_candidate(value, straight, path))
 			continue;
 		if (!net_objects_bot_can_use(bs.pid, type, k.count))
 			continue;
@@ -2395,6 +2395,23 @@ double wall_distance(const object &obj, const vec3 &dir, const double limit)
 	return b::distance(pos, to_vec(hit.hit_pnt));
 }
 
+/* Section 9.8: the velocity while the nose comes round: the reverse turn
+ * or its boost (b::turn_round_velocity), else the slide of section 9.5
+ * (b::keep_moving_in_turn); reversing only with room behind along the
+ * velocity it wants (the PR #38 review, b::reverse_turn_has_room).
+ */
+[[nodiscard]]
+vec3 turn_velocity(const object &obj, const b::turn_phase turn, const vec3 &wanted, const double err, const vec3 &to, const vec3 &vel, const vec3 &hint, const double max_speed)
+{
+	if (turn != b::turn_phase::none)
+	{
+		const auto v{b::turn_round_velocity(turn, wanted, to, vel, hint, max_speed)};
+		if (turn != b::turn_phase::reversing || b::reverse_turn_has_room(wall_distance(obj, b::normalized(v), b::REVERSE_TURN_CLEARANCE)))
+			return v;
+	}
+	return b::keep_moving_in_turn(wanted, err, to, vel, hint, max_speed);
+}
+
 /* Section 9.6: the fvi calls of the heavy missile tactics, all bots
  * together, per brain tick: a weighing starts only while fewer than
  * BOT_HEAVY_FVI_PER_TICK were made this tick (or when it has waited
@@ -2559,6 +2576,49 @@ bool aim_line_clear(const bot_state &bs, const object &obj, const vec3 &point, c
 		}
 		default:
 			/* The reactor, robots, clutter. */
+			return false;
+	}
+}
+
+/* Section 9.8, the death dump (the PR #38 review): the line along the
+ * nose with the objects, as shot_line_clear casts it: a teammate, the
+ * reactor, a robot or clutter first on it refuses every missile (false);
+ * an enemy ship first on it is where the missile bursts (`ship`).
+ */
+[[nodiscard]]
+bool dump_nose_clear(const bot_state &bs, const object &obj, const vec3 &point, std::optional<playernum_t> &ship, unsigned &calls)
+{
+	ship.reset();
+	auto &Objects = LevelUniqueObjectState.Objects;
+	fvi_info hit;
+	++calls;
+	const auto type{find_vector_intersection(fvi_query{
+		obj.pos,
+		to_fixvec(point),
+		fvi_query::unused_ignore_obj_list,
+		&LevelUniqueObjectState,
+		&LevelSharedRobotInfoState.Robot_info,
+		FQ_IGNORE_POWERUPS,
+		Objects.vcptridx(&obj),
+	}, obj.segnum, F1_0 / 2, hit)};
+	if (type != fvi_hit_type::Object)
+		return true;
+	if (hit.hit_object == object_none)
+		return false;
+	const auto &o{*Objects.vcptr(hit.hit_object)};
+	switch (o.type)
+	{
+		case object_type::OBJ_WEAPON:
+			return true;
+		case object_type::OBJ_PLAYER:
+		{
+			const auto who{get_player_id(o)};
+			if (who == bs.pid || same_team(bs.pid, who))
+				return false;
+			ship = who;
+			return true;
+		}
+		default:
 			return false;
 	}
 }
@@ -2874,16 +2934,73 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 		bs.dumping = dump;
 		if (dump)
 		{
-			std::optional<double> wall;
+			/* Section 9.8 and the PR #38 review: each missile weighed as
+			 * the heavy ones are (b::dump_outcome: the wall along the
+			 * nose, the ship first on the line, any ship it may meet;
+			 * the children), under the same fvi budget, with the rule
+			 * of b::dump_blast_ok; a mine as the normal path drops one
+			 * (no teammate behind).
+			 */
+			struct nose_view
+			{
+				bool clear{};
+				double behind{};
+				std::vector<b::dump_ship> ships;
+			};
+			std::optional<nose_view> nose;
+			std::optional<bool> mine_ok;
+			unsigned &fvi_used{heavy_budget.at(tick)};
+			const fvi_geometry geo{obj, {{pos, obj.segnum}}};
 			const auto blast_ok{[&](const b::secondary s) {
-				if (!wall)
-					wall = wall_distance(obj, frame.f, 400);
-				double impact{*wall};
-				if (target_visible && target_pos && b::angle_between(frame.f, *target_pos - pos) < b::radians(20))
-					impact = std::min({impact, b::distance(pos, *target_pos), bs.shot_first_hit});
-				return b::blast_safe(b::role_of(s), impact, missile_data_of(game_secondary(s)), invulnerable_left, b::dot(vel, frame.f));
+				const auto r{b::role_of(s)};
+				if (r == b::missile_role::mine)
+				{
+					if (!mine_ok)
+						mine_ok = !teammate_behind(bs, obj);
+					return *mine_ok;
+				}
+				if (fvi_used + geo.calls >= 2 * BOT_HEAVY_FVI_PER_TICK)
+					return false;
+				if (!nose)
+				{
+					nose.emplace();
+					const double wall{wall_distance(obj, frame.f, b::BURST_CAST_LIMIT)};
+					nose->behind = wall_distance(obj, -frame.f, b::BURST_CAST_LIMIT);
+					std::optional<playernum_t> first;
+					nose->clear = dump_nose_clear(bs, obj, pos + frame.f * wall, first, geo.calls);
+					geo.calls += 2;
+					if (nose->clear)
+						for (playernum_t i = 0; i < N_players && i < MAX_PLAYERS; ++i)
+						{
+							if (i == bs.pid)
+								continue;
+							const auto &plr{*vcplayerptr(i)};
+							if (plr.connected != player_connection_status::playing)
+								continue;
+							const auto &t{*Objects.vcptr(plr.objnum)};
+							if (t.type != object_type::OBJ_PLAYER)
+								continue;
+							const auto tp{to_vec(t.pos)};
+							/* Only ships ahead and within the cast. */
+							if (b::dot(tp - pos, frame.f) <= 0 || b::distance(tp, pos) > b::BURST_CAST_LIMIT)
+								continue;
+							nose->ships.push_back({
+								.pos = tp,
+								.vel = to_vec(t.mtype.phys_info.velocity),
+								.teammate = same_team(bs.pid, i) && !Netgame.NoFriendlyFire,
+								.on_line = first == i,
+							});
+						}
+				}
+				if (!nose->clear)
+					return false;
+				const auto md{missile_data_of(game_secondary(s))};
+				const auto o{b::dump_outcome(geo, heavy_scene(bs, obj, pos, {}, false, 0, 100, invulnerable_left), r, md, frame.f, nose->ships)};
+				return o && b::dump_blast_ok(*o, r, md, invulnerable_left, nose->behind);
 			}};
-			if (const auto s{b::death_dump_choice(ammo, sk.weapon_smarts, blast_ok)})
+			const auto dumped{b::death_dump_choice(ammo, sk.weapon_smarts, blast_ok)};
+			fvi_used += geo.calls;
+			if (const auto s{dumped})
 			{
 				const auto w{game_secondary(*s)};
 				bs.missile.reset();
@@ -3469,11 +3586,8 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 		const auto turn{free_move ? bs.turning.update(err, tick, dist, range_lo) : b::turn_phase::none};
 		if (!free_move)
 			bs.turning.reset();
-		if (turn != b::turn_phase::none)
-			wanted = b::turn_round_velocity(turn, wanted, to, vel, frame.r * static_cast<double>(bs.heading_pref), max_speed);
-		else
-			/* Section 9.5: turning far round, the bot keeps moving. */
-			wanted = b::keep_moving_in_turn(wanted, err, to, vel, frame.r * static_cast<double>(bs.heading_pref), max_speed);
+		/* Section 9.5: turning far round, the bot keeps moving. */
+		wanted = turn_velocity(obj, turn, wanted, err, to, vel, frame.r * static_cast<double>(bs.heading_pref), max_speed);
 		/* Section 4.5: beyond the mid band, no shot that hits less than
 		 * one time in ten.
 		 */
@@ -3510,11 +3624,17 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 			 * from it (not on a path it must follow).
 			 */
 			const bool path_goal{bs.goal == bot_goal::collect || bs.goal == bot_goal::retreat || bs.goal == bot_goal::refuel};
-			const auto turn{path_goal ? b::turn_phase::none : bs.turning.update(err, tick, b::length(to), range_lo)};
-			if (turn == b::turn_phase::reversing)
-				wanted = b::turn_round_velocity(turn, wanted, to, vel, frame.r * static_cast<double>(bs.heading_pref), max_speed);
-			else
-				wanted = b::keep_moving_in_turn(wanted, err, to, vel, frame.r * static_cast<double>(bs.heading_pref), max_speed);
+			auto turn{path_goal ? b::turn_phase::none : bs.turning.update(err, tick, b::length(to), range_lo)};
+			/* Out of sight, no boost toward a remembered place: the
+			 * turn ends there, so the afterburner (turn_boost) does not
+			 * fire for a boost that is not flown (the PR #38 review).
+			 */
+			if (turn == b::turn_phase::boost)
+			{
+				bs.turning.reset();
+				turn = b::turn_phase::none;
+			}
+			wanted = turn_velocity(obj, turn, wanted, err, to, vel, frame.r * static_cast<double>(bs.heading_pref), max_speed);
 		}
 		/* Out of sight, no boost toward a remembered place. */
 		else if (bs.turning.phase == b::turn_phase::boost)

@@ -1194,6 +1194,19 @@ inline vec3 turn_round_velocity(const turn_phase phase, const vec3 &wanted, cons
 	return wanted;
 }
 
+/* The PR #38 review: flying backwards, the bot does not see the wall
+ * behind it; the reverse turn needs REVERSE_TURN_CLEARANCE units clear
+ * along the velocity it wants, else it slides round (keep_moving_in_turn)
+ * while the nose comes round.
+ */
+constexpr double REVERSE_TURN_CLEARANCE{25};
+
+[[nodiscard]]
+constexpr bool reverse_turn_has_room(const double clearance)
+{
+	return clearance >= REVERSE_TURN_CLEARANCE;
+}
+
 /* Section 9.5: a hit from an attacker the bot does not see (behind it,
  * outside its field of view).  B1-B4 learnt the attacker's place from the
  * hit and turned to it after the reaction time, the target choice (5 Hz)
