@@ -203,21 +203,40 @@ static fix compute_fireball_light_emission_intensity(const d_vclip_array &Vclip,
 namespace dsx {
 namespace {
 
+/* The cost of the walk is bounded (light_reach.h): per light, it
+ * processes at most this many segments, the nearest ones in steps.  A
+ * light that would need more (a big light in a big room split into small
+ * segments) keeps the old rule, no occlusion, beyond the distance the
+ * walk covered.
+ */
+constexpr light_reach_limits light_reach_budget{
+	.max_segments = 32,
+	/* Segments that are not rendered (behind the viewer, beyond the
+	 * render depth) are passed only in short runs: enough for a light
+	 * just behind the viewer to reach the rendered segments.
+	 */
+	.max_hidden_hops = 3,
+};
+
 /* The segments and vertices reached by the light being applied
- * (light_reach.h).  Several hundred KB: one instance, since apply_light
- * is not re-entrant.
+ * (light_reach.h), and the segments rendered in this lighting pass.
+ * Several hundred KB: one instance, since set_dynamic_light and
+ * apply_light are not re-entrant.
  */
 struct light_reach_state
 {
-	generation_marks<MAX_SEGMENTS> segments;
+	generation_marks<MAX_SEGMENTS> rendered;
+	generation_marks<MAX_SEGMENTS> discovered;
 	generation_marks<MAX_VERTICES> vertices;
-	std::array<segnum_t, MAX_SEGMENTS> queue;
+	std::array<light_reach_entry<segnum_t>, light_reach_queue_size(light_reach_budget.max_segments)> queue;
 };
+
+light_reach_state reach_state;
 
 /* The level as walk_light_reach sees it: a side lets light through if
  * it can be rendered past (no wall, an open door, a grate, glass), and
- * it is within reach if the nearest point of the box around its four
- * vertices is.  The test of each vertex against the radius is left to
+ * its distance is that of the nearest point of the box around its four
+ * vertices.  The test of each vertex against the radius is left to
  * apply_light, so a reached segment gets the same light as before.
  */
 class light_reach_graph
@@ -232,35 +251,79 @@ public:
 		state{state}, vcvertptr{vcvertptr}, vcwallptr{vcwallptr}, light_pos{light_pos}, light_reach{light_reach}
 	{
 	}
-	bool enter(const segnum_t segnum)
+	bool rendered(const segnum_t segnum) const
 	{
-		if (!state.segments.set(segnum))
-			return false;
+		return state.rendered.test(segnum);
+	}
+	bool discover(const segnum_t segnum)
+	{
+		return state.discovered.set(segnum);
+	}
+	fix distance(const segnum_t segnum) const
+	{
+		auto &verts{vcsegptr(segnum)->verts};
+		const auto &p0{*vcvertptr(verts[segment_relative_vertnum{0}])};
+		render_vertex_bounds b{p0, p0};
+		for (const auto v : verts)
+			b.include(*vcvertptr(v));
+		return static_cast<fix>(std::min<int64_t>(quick_distance_lower_bound(light_pos, b), light_reach));
+	}
+	void process(const segnum_t segnum)
+	{
+		/* All 8 vertices: each vertex of the segment is on three of its
+		 * sides, so even one on a side that blocks the light is also on
+		 * one of the segment's own walls or on an open side within
+		 * reach, and must stay lit.
+		 */
 		for (const auto v : vcsegptr(segnum)->verts)
 			state.vertices.set(underlying_value(v));
-		return true;
 	}
 	template <typename F>
 	void for_each_lit_child(const segnum_t segnum, F &&f) const
 	{
 		const auto &&seg{vcsegptridx(segnum)};
+		/* Each vertex is fetched once, not once per side. */
+		per_segment_relative_vertnum_array<const vms_vector *> p;
+		for (const auto &&[i, v] : enumerate(seg->verts))
+			p[i] = &*vcvertptr(v);
 		for (const auto &&[side, sv] : enumerate(Side_to_verts))
 		{
 			const auto child{seg->shared_segment::children[side]};
-			if (!IS_CHILD(child) || state.segments.test(child))
-				continue;
-			const auto &p0{*vcvertptr(seg->verts[sv[side_relative_vertnum{0}]])};
-			render_vertex_bounds portal{p0, p0};
-			for (const auto i : sv)
-				portal.include(*vcvertptr(seg->verts[i]));
-			if (quick_distance_lower_bound(light_pos, portal) >= light_reach)
+			if (!IS_CHILD(child) || state.discovered.test(child))
 				continue;
 			if (!(WALL_IS_DOORWAY(GameBitmaps, Textures, vcwallptr, seg, side) & WALL_IS_DOORWAY_FLAG::rendpast))
 				continue;
-			f(child);
+			const auto &p0{*p[sv[side_relative_vertnum{0}]]};
+			render_vertex_bounds portal{p0, p0};
+			for (const auto i : sv)
+				portal.include(*p[i]);
+			const auto d{quick_distance_lower_bound(light_pos, portal)};
+			if (d >= light_reach)
+				continue;
+			f(child, static_cast<fix>(d));
 		}
 	}
 };
+
+/* The segment that contains `pos`: obj_seg, or a neighbour of it if pos
+ * already crossed one of its sides (the object's segment is updated
+ * after it moves; a muzzle flash is at the gun, in front of the ship).
+ */
+static segnum_t light_start_segment(fvcvertptr &vcvertptr, const vcsegptridx_t obj_seg, const vms_vector &pos)
+{
+	const auto outside{get_seg_masks(vcvertptr, pos, obj_seg, 0).centermask};
+	if (outside == sidemask_t{})
+		return obj_seg;
+	for (const auto side : MAX_SIDES_PER_SEGMENT)
+	{
+		if (!(outside & build_sidemask(side)))
+			continue;
+		const auto child{obj_seg->shared_segment::children[side]};
+		if (IS_CHILD(child) && get_seg_masks(vcvertptr, pos, vcsegptr(child), 0).centermask == sidemask_t{})
+			return child;
+	}
+	return obj_seg;
+}
 
 static void apply_light(const g3s_lrgb obj_light_emission, const vcsegptridx_t obj_seg, const vms_vector &obj_pos, const render_vertex_list &rvl, const icobjptridx_t objnum)
 {
@@ -345,23 +408,26 @@ static void apply_light(const g3s_lrgb obj_light_emission, const vcsegptridx_t o
 			 * level, and in a network game the beam of another player's
 			 * headlight already stops at the first wall it hits.
 			 */
-			static light_reach_state reach_state;
 			const bool occluded{!headlight_shift};
+			/* Vertices at `complete` or beyond were not checked by the
+			 * walk and keep the old rule.
+			 */
+			fix complete{light_reach};
 			if (occluded)
 			{
-				reach_state.segments.next();
+				reach_state.discovered.next();
 				reach_state.vertices.next();
 				light_reach_graph g{reach_state, vcvertptr, LevelUniqueWallSubsystemState.Walls.vcptr, obj_pos, light_reach};
-				walk_light_reach(g, segnum_t{obj_seg}, reach_state.queue.data(), reach_state.queue.size());
+				complete = walk_light_reach(g, light_start_segment(vcvertptr, obj_seg, obj_pos), light_reach, reach_state.queue.data(), light_reach_budget);
 			}
 			const auto apply_light_to_vertices = [&](const unsigned vv_begin, const unsigned vv_end) {
 				for (unsigned vv{vv_begin}; vv != vv_end; ++vv)
 				{
 					const auto vertnum = rvl.vertices[vv];
-					if (occluded && !reach_state.vertices.test(underlying_value(vertnum)))
-						continue;
 					auto &vertpos = rvl.positions[vv];
 					fix dist = vm_vec_dist_quick(obj_pos, vertpos);
+					if (occluded && dist < complete && !reach_state.vertices.test(underlying_value(vertnum)))
+						continue;
 
 					if ((dist >> headlight_shift) < abs(obji_64)) {
 
@@ -734,6 +800,11 @@ void set_dynamic_light(const d_robot_info_array &Robot_info, render_state_t &rst
 			}
 		}
 	}
+
+	reach_state.rendered.next();
+	range_for (const auto segnum, partial_const_range(rstate.Render_list, rstate.N_render_segs))
+		if (segnum != segment_none)
+			reach_state.rendered.set(segnum);
 
 	if (n_render_vertices)
 	{
