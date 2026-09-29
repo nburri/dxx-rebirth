@@ -37,6 +37,15 @@ private:
 	class window *next = nullptr;				// the next window in the doubly linked list
 	uint8_t w_visible{1};						// whether it's visible
 	uint8_t w_modal{1};						// modal = accept all user input exclusively
+	/* How many calls of event_handler for this window are on the stack.
+	 * A window closed while one of its handlers runs (a nested event loop
+	 * inside the handler closed it, such as the multiplayer "Host left
+	 * the game" path calling game_leave_menus) is not deleted until the
+	 * outermost handler returns: it is hidden and receives no more events
+	 * (w_close_deferred), and send_event deletes it on the way out.
+	 */
+	uint8_t w_dispatch_depth{0};
+	bool w_close_deferred{false};
 public:
 	explicit window(grs_canvas &src, uint16_t x, uint16_t y, uint16_t w, uint16_t h);
 	window(const window &) = delete;

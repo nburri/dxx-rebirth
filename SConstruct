@@ -5078,6 +5078,12 @@ class DXXArchive(DXXCommon):
 		RuntimeTest('test-palette-flash', (
 			'common/unittest/palette_flash.cpp',
 			)),
+		# Test of closing a window from inside its own event handler
+		# (window.cpp): the host-left path on a multiplayer client.
+		RuntimeTest('test-window-close', (
+			'common/unittest/window_close.cpp',
+			'common/arch/sdl/window.cpp',
+			)),
 			)
 	del RuntimeTest
 

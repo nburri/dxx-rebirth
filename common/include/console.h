@@ -54,6 +54,7 @@ using con_priority_wrapper = location_value_wrapper<con_priority, DXX_CONSOLE_SH
 #undef DXX_CONSOLE_SHOW_FILE_LINE
 
 void con_init(void);
+void con_flush_gamelog();
 void con_puts(con_priority_wrapper level, std::span<char> str);
 void con_puts(con_priority_wrapper level, std::span<const char> str);
 

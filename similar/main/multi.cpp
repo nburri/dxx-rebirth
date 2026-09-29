@@ -1163,6 +1163,7 @@ void multi_leave_game()
 		multi_send_player_deres(deres_drop, Player_num);
 	}
 
+	con_printf(CON_VERBOSE, "teardown: multi_leave_game");
 	multi_send_quit();
 	multi::dispatch->leave_game();
 
@@ -2020,6 +2021,8 @@ void multi_disconnect_player(const playernum_t pnum)
 
 	if (pnum == multi_who_is_master()) // Host has left - Quit game!
 	{
+		con_printf(CON_NORMAL, "net: the host left the game");
+		con_flush_gamelog();
 		const auto g{Game_wind};
 		if (g)
 			g->set_visible(0);
@@ -2031,8 +2034,12 @@ void multi_disconnect_player(const playernum_t pnum)
 				}
 		};
 		run_blocking_newmenu<host_left_game>();
-		if (g)
+		/* The game window may have been closed while the message
+		 * showed; `g` is then stale.
+		 */
+		if (g && g == Game_wind)
 			g->set_visible(1);
+		con_printf(CON_VERBOSE, "teardown: host-left message closed; leaving the menus");
 		multi_quit_game = 1;
 		game_leave_menus();
 		return;
@@ -3019,7 +3026,7 @@ void multi_consistency_error(int reset)
 	if (g)
 		g->set_visible(0);
 	nm_messagebox_str(menu_title{nullptr}, nm_messagebox_tie(TXT_OK), menu_subtitle{TXT_CONSISTENCY_ERROR});
-	if (g)
+	if (g && g == Game_wind)
 		g->set_visible(1);
 	count = 0;
 	multi_quit_game = 1;

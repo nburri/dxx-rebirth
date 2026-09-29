@@ -1818,6 +1818,7 @@ window_event_result game_window::event_handler(const d_event &event)
 			break;
 
 		case event_type::window_close:
+			con_printf(CON_VERBOSE, "teardown: game window closing");
 			digi_stop_digi_sounds();
 
 			if ( (Newdemo_state == ND_STATE_RECORDING) || (Newdemo_state == ND_STATE_PAUSED) )
@@ -1828,7 +1829,9 @@ window_event_result game_window::event_handler(const d_event &event)
 			if ( Newdemo_state == ND_STATE_PLAYBACK )
 				newdemo_stop_playback();
 
+			con_printf(CON_VERBOSE, "teardown: title song");
 			songs_play_song(song_number::title, 1);
+			con_printf(CON_VERBOSE, "teardown: back to the menus");
 
 			game_disable_cheats();
 			Game_mode = {};
@@ -1839,6 +1842,7 @@ window_event_result game_window::event_handler(const d_event &event)
 			event_toggle_focus(0);
 			key_toggle_repeat(1);
 			Game_wind = nullptr;
+			con_flush_gamelog();
 			return window_event_result::ignored;
 
 		case event_type::loop_begin_loop:
@@ -1934,6 +1938,7 @@ void game_leave_menus(void)
 			break;
 		if (wind == Game_wind)
 			break;
+		con_printf(CON_VERBOSE, "teardown: game_leave_menus closes window %p", static_cast<const void *>(wind));
 		if (!window_close(wind))
 			break;
 	}
