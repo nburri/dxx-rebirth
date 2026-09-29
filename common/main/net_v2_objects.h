@@ -544,6 +544,7 @@ public:
 		pending_count_ = 0;
 		issued_ = 0;
 		life_ = 0;
+		has_report_ = false;
 	}
 	/* The player died and its items were dropped: nothing is carried
 	 * any more; grants still on their way were dropped with the rest,
@@ -555,6 +556,7 @@ public:
 		base_ = current_ = {};
 		pending_count_ = 0;
 		life_ = static_cast<std::uint8_t>(life_ + 1);
+		has_report_ = false;
 	}
 	/* The host flies this player's ship itself (a bot): the ship is the
 	 * truth, and no grant is on its way.  The life goes on.
@@ -574,6 +576,23 @@ public:
 	const inventory &current() const
 	{
 		return current_;
+	}
+	/* The newest report (or assignment), without the grants on their
+	 * way: current() less base() is what is in flight.
+	 */
+	[[nodiscard]]
+	const inventory &base() const
+	{
+		return base_;
+	}
+	/* The player reported since this copy was started or emptied (a new
+	 * session, a death drop): only then does a report that holds more
+	 * than the copy expects mean something (unexplained_gain).
+	 */
+	[[nodiscard]]
+	bool has_report() const
+	{
+		return has_report_;
 	}
 	[[nodiscard]]
 	std::uint16_t issued() const
@@ -613,6 +632,7 @@ public:
 	/* A report of the player's inventory with `applied` grants. */
 	void on_report(const inventory_rules &r, const inventory &inv, const std::uint16_t applied)
 	{
+		has_report_ = true;
 		base_ = inv;
 		std::size_t kept{0};
 		for (std::size_t i = 0; i < pending_count_; ++i)
@@ -630,7 +650,120 @@ private:
 	std::size_t pending_count_{};
 	std::uint16_t issued_{};
 	std::uint8_t life_{};
+	bool has_report_{};
 };
+
+/* The host's powerup accounting log (net_objects.cpp): how many units of
+ * the item a powerup gives lie in one object or are carried in an
+ * inventory, counted as the respawn bookkeeping counts them (missiles
+ * one by one, so a 4-pack is 4 of the single missile, vulcan rounds,
+ * one per weapon or item).
+ */
+[[nodiscard]]
+constexpr bool same_item(const pickup_desc &a, const pickup_desc &b)
+{
+	if (a.kind != b.kind)
+		return false;
+	switch (a.kind)
+	{
+		case pickup_kind::secondary:
+		case pickup_kind::team_flag:
+			return a.index == b.index;
+		case pickup_kind::primary:
+		case pickup_kind::omega:
+		case pickup_kind::vulcan_cannon:
+		case pickup_kind::flag_item:
+			return a.bit == b.bit;
+		default:
+			return true;
+	}
+}
+
+[[nodiscard]]
+constexpr std::uint32_t units_on_ground(const pickup_desc &d)
+{
+	switch (d.kind)
+	{
+		case pickup_kind::none:
+			return 0;
+		case pickup_kind::secondary:
+		case pickup_kind::vulcan_ammo:
+			return d.amount;
+		default:
+			return 1;
+	}
+}
+
+[[nodiscard]]
+constexpr std::uint32_t units_carried(const inventory &inv, const inventory_rules &r, const pickup_desc &d)
+{
+	switch (d.kind)
+	{
+		case pickup_kind::secondary:
+			return d.index < NET_V2_SECONDARY_WEAPONS ? inv.secondary[d.index] : 0;
+		case pickup_kind::primary:
+		case pickup_kind::omega:
+		case pickup_kind::vulcan_cannon:
+			return (inv.primary_flags & d.bit) ? 1 : 0;
+		case pickup_kind::flag_item:
+			return (inv.powerup_flags & d.bit) ? 1 : 0;
+		case pickup_kind::laser:
+		case pickup_kind::super_laser:
+			return inv.laser_level;
+		case pickup_kind::vulcan_ammo:
+			return inv.vulcan_ammo;
+		case pickup_kind::team_flag:
+			return (inv.powerup_flags & r.has_team_flag_bit) ? 1 : 0;
+		case pickup_kind::orb:
+			return inv.orbs;
+		default:
+			return 0;
+	}
+}
+
+/* A client's report that holds more of an item than the host's copy of
+ * its inventory expects (its previous report, the grants since and its
+ * drops): a player gains missiles, weapons, laser levels and orbs only
+ * through the host's grants, so such a gain is how a duplicated powerup
+ * shows on the host.  Ammunition, energy, shields and the omega charge
+ * change on their own and are not compared; neither are the flags
+ * (the headlight and the respawn invulnerability toggle by themselves).
+ */
+struct inventory_gain
+{
+	enum class what : std::uint8_t
+	{
+		secondary,
+		primary,
+		laser,
+		orbs,
+	};
+	what field{};
+	/* The secondary weapon or the primary weapon's bit number. */
+	std::uint8_t index{};
+	std::uint32_t expected{};
+	std::uint32_t reported{};
+};
+
+[[nodiscard]]
+constexpr std::optional<inventory_gain> unexplained_gain(const inventory &expected, const inventory &reported)
+{
+	for (std::uint8_t i = 0; i < NET_V2_SECONDARY_WEAPONS; ++i)
+		if (reported.secondary[i] > expected.secondary[i])
+			return inventory_gain{inventory_gain::what::secondary, i, expected.secondary[i], reported.secondary[i]};
+	if (const unsigned extra = reported.primary_flags & ~unsigned{expected.primary_flags})
+	{
+		std::uint8_t bit{0};
+		while (!(extra & (1u << bit)))
+			++bit;
+		return inventory_gain{inventory_gain::what::primary, bit, 0, 1};
+	}
+	if (reported.laser_level > expected.laser_level)
+		return inventory_gain{inventory_gain::what::laser, 0, expected.laser_level, reported.laser_level};
+	if (reported.orbs > expected.orbs)
+		return inventory_gain{inventory_gain::what::orbs, 0, expected.orbs, reported.orbs};
+	return std::nullopt;
+}
 
 /* The client's count of its own lives, the counterpart of
  * inventory_mirror::life on the host: a life ends when the player's items

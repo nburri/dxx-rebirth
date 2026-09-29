@@ -1107,6 +1107,12 @@ included) is dropped where it dies. When a bot's cloak runs out
 (`do_cloak_stuff`, `bot_cloak_expired`) or its real invulnerability
 (`life_frame`), the host sends `MULTI_DECLOAK` and puts the item back into
 the level (`maybe_drop_net_powerup`), as the human's game does for its own.
+The respawn bookkeeping counts a bot's items from its ship like any
+player's (it is `playing` and not a ghost until its drop); the host's
+accounting log (network-protocol-v2.md, "Stage 3 as implemented") shows
+bots as `bot` in its grant, drop and count lines, and
+`test-net-v2-authority` covers a bot carrying the only earthshaker, its
+death drop and a bot racing a client for one powerup.
 
 **Fusion and omega are picked up** (decision; since section 9.5 they
 are also fired): a bot still cannot fire them (B1), but taking them denies them to the others and a death drops

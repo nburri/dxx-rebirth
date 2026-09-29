@@ -1684,6 +1684,277 @@ void test_lag_pickups()
 }
 }
 
+namespace {
+
+/* Bots (Documentation/multiplayer-bots.md section 9.2): the host flies
+ * them, so a bot's ship is the truth for its inventory (the host's copy
+ * is assigned from it, no grant is ever on its way to it) and its touch
+ * is decided at once, like the host's own.  A small host world with the
+ * pure components as net_objects.cpp and multi.cpp use them: the ground
+ * (net ids), the copies, the respawn rule and the accounting helpers of
+ * the host's log.  Slot 0 is the host, 1 a client, 2 and 3 bots.
+ */
+constexpr pickup_desc SHAKER{pickup_kind::secondary, 9, 1, 0};
+
+struct bot_world
+{
+	static constexpr unsigned PLAYERS{4};
+	struct ground_object
+	{
+		pickup_desc desc{};
+		std::uint32_t count{1};
+	};
+	std::unique_ptr<table_type> table{std::make_unique<table_type>()};
+	std::map<netid_t, ground_object> ground;
+	std::array<inventory_mirror, PLAYERS> mirrors;
+	std::array<bool, PLAYERS> dropped{};
+	/* The host's and the bots' ships; the client's own inventory. */
+	std::array<inventory, PLAYERS> ships;
+	std::array<bool, PLAYERS> is_bot{{false, false, true, true}};
+	std::uint32_t initial{};
+	unsigned grants{}, denies{}, drops{};
+	std::uint16_t next_objnum{};
+	bot_world()
+	{
+		for (unsigned i = 0; i < PLAYERS; ++i)
+		{
+			ships[i] = spawn_inventory();
+			mirrors[i].reset(spawn_inventory());
+		}
+	}
+	netid_t create(const pickup_desc &d, const bool level = false)
+	{
+		const std::uint16_t objnum{next_objnum++};
+		const netid_t id{level ? level_netid(objnum) : table->allocate(0)};
+		table->bind(id, objnum, 0);
+		ground[id] = {d, 1};
+		return id;
+	}
+	/* The respawn bookkeeping's count: the ground and what every live
+	 * player carries in the host's view (bots' and host's ships, the
+	 * clients' copies with their grants in flight).
+	 */
+	[[nodiscard]]
+	std::uint32_t counted(const pickup_desc &d) const
+	{
+		std::uint32_t n{};
+		for (const auto &[id, o] : ground)
+			if (same_item(o.desc, d))
+				n += units_on_ground(o.desc);
+		for (unsigned i = 0; i < PLAYERS; ++i)
+			if (!dropped[i])
+				n += units_carried(i == 1 ? mirrors[i].current() : ships[i], make_rules(), d);
+		return n;
+	}
+	[[nodiscard]]
+	bool respawn_due(const pickup_desc &d) const
+	{
+		return respawn_allowed(initial, counted(d), 1);
+	}
+	[[nodiscard]]
+	pickup_object_view view(const netid_t id) const
+	{
+		pickup_object_view o{};
+		if (const auto it{ground.find(id)}; it != ground.end() && table->bound(id))
+		{
+			o.exists = true;
+			o.desc = it->second.desc;
+			o.count = it->second.count;
+		}
+		return o;
+	}
+	bool decide(const unsigned pid, const netid_t id)
+	{
+		const auto d{decide_pickup(view(id), {static_cast<std::uint8_t>(pid), !dropped[pid], true}, mirrors[pid].current(), make_rules(), 0)};
+		if (!d.grant)
+		{
+			++denies;
+			return false;
+		}
+		++grants;
+		mirrors[pid].on_grant(make_rules(), ground[id].desc, d.outcome);
+		ground.erase(id);
+		table->unbind(id);
+		return true;
+	}
+	/* A bot's touch (net_objects_bot_touch): the copy from the ship, the
+	 * decision, the grant into the copy and the ship; then the copy is
+	 * the ship again (bot_touch_powerup's own-ship inventory).
+	 */
+	bool bot_touch(const unsigned pid, const netid_t id)
+	{
+		mirrors[pid].assign(ships[pid]);
+		if (!decide(pid, id))
+			return false;
+		ships[pid] = mirrors[pid].current();
+		mirrors[pid].assign(ships[pid]);
+		return true;
+	}
+	/* A client's request, decided with the host's copy; the client
+	 * applies the grant when it arrives.
+	 */
+	bool client_request(const unsigned pid, const netid_t id)
+	{
+		const auto d{view(id).desc};
+		if (!decide(pid, id))
+			return false;
+		apply_pickup(ships[pid], make_rules(), d, evaluate_pickup(ships[pid], make_rules(), d, 1));
+		return true;
+	}
+	/* A bot's death (explode: multi_send_player_deres brings the copy up
+	 * to date, then net_objects_host_drop_player_eggs), once per life; a
+	 * disconnect after it drops nothing more.
+	 */
+	unsigned bot_die(const unsigned pid)
+	{
+		if (!dropped[pid])
+			mirrors[pid].assign(ships[pid]);
+		if (dropped[pid])
+			return 0;
+		dropped[pid] = true;
+		const unsigned n{mirrors[pid].current().secondary[SHAKER.index]};
+		for (unsigned i = 0; i < n; ++i)
+			create(SHAKER);
+		drops += n;
+		mirrors[pid].clear();
+		ships[pid] = {};
+		return n;
+	}
+};
+
+void test_bot_accounting()
+{
+	/* The accounting helpers: a 4-pack is 4 missiles, a shaker 1. */
+	CHECK(same_item(MISSILE_1, MISSILE_4) && !same_item(MISSILE_1, MEGA) && !same_item(PLASMA, VULCAN));
+	CHECK(units_on_ground(MISSILE_4) == 4 && units_on_ground(SHAKER) == 1 && units_on_ground(PLASMA) == 1 && units_on_ground(KEY) == 0);
+	{
+		auto inv{spawn_inventory()};
+		inv.secondary[SHAKER.index] = 2;
+		CHECK(units_carried(inv, make_rules(), SHAKER) == 2 && units_carried(inv, make_rules(), MISSILE_4) == 2);
+		CHECK(units_carried(inv, make_rules(), PLASMA) == 0);
+	}
+	/* A bot carries the level's only shaker: nothing is missing, no
+	 * respawn; only when it fires it does the level miss one.
+	 */
+	{
+		bot_world w;
+		const auto shaker{w.create(SHAKER, true)};
+		w.initial = w.counted(SHAKER);
+		CHECK(w.initial == 1 && !w.respawn_due(SHAKER));
+		CHECK(w.bot_touch(2, shaker));
+		CHECK(w.ground.empty() && w.ships[2].secondary[SHAKER.index] == 1);
+		CHECK(w.counted(SHAKER) == 1 && !w.respawn_due(SHAKER));
+		/* The host's copy is the ship: nothing in flight. */
+		CHECK(w.mirrors[2].pending() == 0 && w.mirrors[2].current() == w.ships[2]);
+		--w.ships[2].secondary[SHAKER.index];
+		CHECK(w.counted(SHAKER) == 0 && w.respawn_due(SHAKER));
+	}
+	/* The bot dies with it: it is dropped exactly once (a kick or a
+	 * second explosion after the death drops nothing), the count stays,
+	 * and a client that takes the drop carries the only one.
+	 */
+	{
+		bot_world w;
+		const auto shaker{w.create(SHAKER, true)};
+		w.initial = w.counted(SHAKER);
+		CHECK(w.bot_touch(3, shaker));
+		CHECK(w.bot_die(3) == 1);
+		CHECK(w.bot_die(3) == 0);
+		CHECK(w.drops == 1 && w.ground.size() == 1);
+		CHECK(w.counted(SHAKER) == 1 && !w.respawn_due(SHAKER));
+		const auto dropped_id{w.ground.begin()->first};
+		CHECK(!is_level_netid(dropped_id));
+		/* A dead bot takes nothing. */
+		CHECK(!w.bot_touch(3, dropped_id));
+		CHECK(w.client_request(1, dropped_id));
+		CHECK(w.ground.empty() && w.counted(SHAKER) == 1 && !w.respawn_due(SHAKER));
+		CHECK(w.ships[1].secondary[SHAKER.index] == 1);
+	}
+	/* A bot and a client on the same shaker in the same frame, in both
+	 * orders: one grant, the other finds it gone, one shaker in all.
+	 */
+	for (int client_first = 0; client_first < 2; ++client_first)
+	{
+		bot_world w;
+		const auto shaker{w.create(SHAKER, true)};
+		w.initial = w.counted(SHAKER);
+		bool client_got, bot_got;
+		if (client_first)
+		{
+			client_got = w.client_request(1, shaker);
+			bot_got = w.bot_touch(2, shaker);
+		}
+		else
+		{
+			bot_got = w.bot_touch(2, shaker);
+			client_got = w.client_request(1, shaker);
+		}
+		CHECK(client_got != bot_got && client_got == (client_first != 0));
+		CHECK(w.grants == 1 && w.denies == 1);
+		CHECK(w.ships[1].secondary[SHAKER.index] + w.ships[2].secondary[SHAKER.index] == 1);
+		CHECK(w.counted(SHAKER) == 1 && !w.respawn_due(SHAKER));
+		CHECK(!w.table->bound(shaker));
+	}
+}
+
+/* The host's "suspicious inventory" check: a client's report that holds
+ * more than the host's copy expects.  A grant it acknowledges, a report
+ * from before a grant arrived, a drop and a new ship's first report are
+ * not suspicious; a missile from nowhere is.
+ */
+void test_unexplained_gain()
+{
+	const auto r{make_rules()};
+	inventory_mirror m;
+	m.reset(spawn_inventory());
+	CHECK(!m.has_report());
+	m.on_report(r, spawn_inventory(), 0);
+	CHECK(m.has_report());
+	CHECK(!unexplained_gain(spawn_inventory(), spawn_inventory()));
+	/* A grant on its way; a report sent before it arrived. */
+	const auto seq{m.on_grant(r, SHAKER, {true, true, 1, 0})};
+	auto expected{m.current()};
+	CHECK(expected.secondary[SHAKER.index] == 1 && m.base().secondary[SHAKER.index] == 0);
+	m.on_report(r, spawn_inventory(), static_cast<std::uint16_t>(seq - 1));
+	CHECK(!unexplained_gain(expected, m.current()));
+	/* The report that acknowledges it. */
+	auto with{spawn_inventory()};
+	with.secondary[SHAKER.index] = 1;
+	expected = m.current();
+	m.on_report(r, with, seq);
+	CHECK(!unexplained_gain(expected, m.current()) && m.pending() == 0);
+	/* A second shaker from nowhere. */
+	auto dup{with};
+	dup.secondary[SHAKER.index] = 2;
+	expected = m.current();
+	m.on_report(r, dup, seq);
+	const auto g{unexplained_gain(expected, m.current())};
+	CHECK(g && g->field == inventory_gain::what::secondary && g->index == SHAKER.index && g->expected == 1 && g->reported == 2);
+	/* Fired, dropped, energy and shields: less is never suspicious. */
+	auto less{spawn_inventory()};
+	less.secondary[0] = 0;
+	less.energy = 1;
+	CHECK(!unexplained_gain(spawn_inventory(), less));
+	/* A weapon, a laser level, an orb. */
+	auto gained{spawn_inventory()};
+	gained.primary_flags |= BIT_PLASMA;
+	const auto p{unexplained_gain(spawn_inventory(), gained)};
+	CHECK(p && p->field == inventory_gain::what::primary && p->index == 3);
+	gained = spawn_inventory();
+	gained.laser_level = 2;
+	CHECK(unexplained_gain(spawn_inventory(), gained)->field == inventory_gain::what::laser);
+	gained = spawn_inventory();
+	gained.orbs = 1;
+	CHECK(unexplained_gain(spawn_inventory(), gained)->field == inventory_gain::what::orbs);
+	/* The death drop empties the copy: the new ship's first report is
+	 * not compared.
+	 */
+	m.clear();
+	CHECK(!m.has_report());
+}
+
+}
+
 int main()
 {
 	test_netid_encoding();
@@ -1706,6 +1977,8 @@ int main()
 	test_random_game();
 	test_joiner_snapshot();
 	test_lag_pickups();
+	test_bot_accounting();
+	test_unexplained_gain();
 	std::puts("all tests passed");
 	return 0;
 }

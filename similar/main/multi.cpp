@@ -5067,6 +5067,27 @@ bool MultiLevelInv_AllowSpawn(powerup_type_t powerup_type)
 	return ::dcx::net_v2::respawn_allowed(MultiLevelInv.Initial[powerup_type], MultiLevelInv.Current[powerup_type], req_amount);
 }
 
+void MultiLevelInv_counts(powerup_type_t powerup_type, uint32_t &initial, uint32_t &current)
+{
+	switch (powerup_type)
+	{
+		case powerup_type_t::POW_MISSILE_4:
+		case powerup_type_t::POW_HOMING_AMMO_4:
+#if DXX_BUILD_DESCENT == 2
+		case powerup_type_t::POW_SMISSILE1_4:
+		case powerup_type_t::POW_GUIDED_MISSILE_4:
+		case powerup_type_t::POW_MERCURY_MISSILE_4:
+#endif
+			powerup_type = static_cast<powerup_type_t>(underlying_value(powerup_type) - 1);
+			break;
+		default:
+			break;
+	}
+	MultiLevelInv_Recount();
+	initial = MultiLevelInv.Initial[powerup_type];
+	current = MultiLevelInv.Current[powerup_type];
+}
+
 namespace {
 
 // Repopulate the level with missing items.

@@ -38,6 +38,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
 #include <span>
 
 #include "net_v2_objects.h"
@@ -567,6 +568,99 @@ void send_grant(const playernum_t pnum, const netid_t id, const powerup_type_t p
 	send(session_msg::pickup_grant, buf);
 }
 
+/* The host's powerup accounting log (without -verbose: these are rare
+ * events).  Every grant, death drop, creation and removal is logged with
+ * the net id, so that a powerup can be followed from where it appears to
+ * where it goes; a creation or removal also shows the respawn
+ * bookkeeping's counts of that item (at level start and now) and where
+ * the counted items are: on the ground and in each player's inventory,
+ * grants on their way included.  A duplicated powerup shows as a count
+ * above the level start count, or as a suspicious inventory report.
+ */
+[[nodiscard]]
+const char *powerup_short_name(const powerup_type_t id)
+{
+	static constexpr std::array<const char *, 48> names{{
+		"life", "energy", "shield", "laser", "bluekey", "redkey", "goldkey", "orb",
+		"pow8", "pow9", "conc", "conc4", "quad", "vulcan", "spread", "plasma",
+		"fusion", "prox", "homing", "homing4", "smart", "mega", "vulcanammo", "cloak",
+		"turbo", "invuln", "pow26", "megawow", "gauss", "helix", "phoenix", "omega",
+		"superlaser", "fullmap", "converter", "ammorack", "afterburner", "headlight", "flash", "flash4",
+		"guided", "guided4", "smine", "merc", "merc4", "shaker", "blueflag", "redflag",
+	}};
+	const auto i{underlying_value(id)};
+	return i < names.size() ? names[i] : "?";
+}
+
+[[nodiscard]]
+const char *player_role(const playernum_t pnum)
+{
+	return pnum == Player_num ? "host" : bot_is_local(pnum) ? "bot" : "client";
+}
+
+void log_grant(const playernum_t pnum, const netid_t id, const powerup_type_t powerup, const uint32_t taken, const uint32_t remaining, const bool removed)
+{
+	con_printf(CON_NORMAL, "net: P#%u (%s) takes %s [%u] id %04x: taken %u, %s %u", pnum, player_role(pnum), powerup_short_name(powerup), underlying_value(powerup), id, taken, removed ? "removed, left" : "stays, left", remaining);
+}
+
+/* The host's accounting of the item `powerup` gives: the bookkeeping's
+ * counts, the units on the ground (objects not about to die) and the
+ * units each player carries in the host's view (the host's own ship,
+ * the ships of its bots, its copies of the clients with the grants on
+ * their way, of which "in flight").
+ */
+void log_accounting(const char *const what, const powerup_type_t powerup, const netid_t id)
+{
+	const auto desc{desc_of(powerup)};
+	if (desc.kind == nv::pickup_kind::none || !multi_i_am_master())
+		return;
+	uint32_t initial{}, counted{};
+	MultiLevelInv_counts(powerup, initial, counted);
+	auto &Objects{LevelUniqueObjectState.Objects};
+	uint32_t ground{};
+	for (auto &o : Objects.vcptr)
+		if (o.type == object_type::OBJ_POWERUP && !(o.flags & OF_SHOULD_BE_DEAD))
+			if (const auto od{desc_of(get_powerup_id(o))}; nv::same_item(od, desc))
+				ground += nv::units_on_ground(od);
+	char carried[320]{};
+	std::size_t used{};
+	uint32_t total{ground};
+	for (playernum_t i = 0; i < N_players && i < MAX_PLAYERS; ++i)
+	{
+		auto &plr{*vcplayerptr(i)};
+		if (plr.connected != player_connection_status::playing)
+			continue;
+		const auto &ship{*Objects.vcptr(plr.objnum)};
+		const bool alive{!A.dropped[i] && ship.type == object_type::OBJ_PLAYER};
+		const auto rules{rules_for(i)};
+		uint32_t have{}, flight{};
+		if (i == Player_num || bot_is_local(i))
+		{
+			if (alive)
+				have = nv::units_carried(i == Player_num ? own_inventory() : inventory_of(ship), rules, desc);
+		}
+		else if (!A.dropped[i])
+		{
+			const auto &mirror{A.mirrors[i]};
+			have = nv::units_carried(mirror.current(), rules, desc);
+			const auto reported{nv::units_carried(mirror.base(), rules, desc)};
+			flight = have > reported ? have - reported : 0;
+		}
+		if (!have)
+			continue;
+		total += have;
+		if (used < sizeof(carried))
+		{
+			const int n{flight
+				? std::snprintf(carried + used, sizeof(carried) - used, ", P#%u %s %u (%u in flight)", i, player_role(i), have, flight)
+				: std::snprintf(carried + used, sizeof(carried) - used, ", P#%u %s %u", i, player_role(i), have)};
+			if (n > 0)
+				used = std::min(sizeof(carried), used + static_cast<std::size_t>(n));
+		}
+	}
+	con_printf(CON_NORMAL, "net: %s %s [%u] id %04x: level start %u, counted %u; host view %u = ground %u%s", what, powerup_short_name(powerup), underlying_value(powerup), id, initial, counted, total, ground, carried);
+}
+
 struct host_decision
 {
 	nv::pickup_decision d;
@@ -658,7 +752,7 @@ void host_grant_remote(const playernum_t pnum, const netid_t id, const host_deci
 		obj.ctype.powerup_info.count = static_cast<int>(h.d.outcome.remaining);
 	send_grant(pnum, id, powerup, h.d.outcome.taken, h.d.outcome.remaining, removed);
 	report_others_pickup(pnum, powerup);
-	con_printf(CON_VERBOSE, "net: P#%u takes powerup %u (id %04x)", pnum, underlying_value(powerup), id);
+	log_grant(pnum, id, powerup, h.d.outcome.taken, h.d.outcome.remaining, removed);
 }
 
 /* The host's own ship touched a powerup: the same decision, at once; the
@@ -687,6 +781,7 @@ void host_touch(const vmobjptridx_t obj, const netid_t id)
 	}
 	const uint32_t count{h.desc.kind == nv::pickup_kind::omega ? static_cast<uint32_t>(std::max(before, 0)) : static_cast<uint32_t>(std::max(before - after, 0))};
 	send_grant(Player_num, id, powerup, count, static_cast<uint32_t>(std::max(after, 0)), used);
+	log_grant(Player_num, id, powerup, count, static_cast<uint32_t>(std::max(after, 0)), used);
 }
 
 /* A client's own grant arrived: apply its effect.  A grant that arrives
@@ -819,6 +914,7 @@ void lag_decide(const nv::lag_pickup &e, const fix64 now)
 	else
 		obj.ctype.powerup_info.count = static_cast<int>(h.d.outcome.remaining);
 	send_grant(Player_num, e.netid, powerup, h.d.outcome.taken, h.d.outcome.remaining, removed);
+	log_grant(Player_num, e.netid, powerup, h.d.outcome.taken, h.d.outcome.remaining, removed);
 	auto granted{e};
 	granted.objnum = h.obj.get_unchecked_index();
 	granted.signature = underlying_value(obj.signature);
@@ -975,7 +1071,18 @@ void host_receive_inventory(const playernum_t from, const std::span<const uint8_
 	if (A.dropped[from])
 		return;
 	auto &mirror{A.mirrors[from]};
+	const bool compare{mirror.has_report()};
+	const auto expected{mirror.current()};
 	mirror.on_report(rules_for(from), m->inv, m->seq);
+	/* A report that holds more than the copy expects: a gain that did
+	 * not come from a grant (see unexplained_gain).
+	 */
+	if (compare)
+		if (const auto g{nv::unexplained_gain(expected, mirror.current())})
+		{
+			static constexpr std::array<const char *, 4> fields{{"secondary", "primary", "laser level", "orbs"}};
+			con_printf(CON_NORMAL, "net: suspicious inventory from P#%u (%s): %s %u reported %u, host expected %u (grants in flight %u)", from, player_role(from), fields[static_cast<unsigned>(g->field)], g->index, g->reported, g->expected, static_cast<unsigned>(mirror.pending()));
+		}
 	auto &Objects{LevelUniqueObjectState.Objects};
 	write_inventory(*Objects.vmptr(vcplayerptr(from)->objnum), mirror.current(), true);
 	nv::inventory_msg relay{static_cast<uint8_t>(from), m->seq, mirror.current()};
@@ -1066,6 +1173,10 @@ void scan_objects()
 			if (host)
 			{
 				const bool expired{same && objp->lifeleft <= 0};
+				if (same)
+					log_accounting(expired ? "expired" : "gone", get_powerup_id(objp), id);
+				else
+					con_printf(CON_NORMAL, "net: powerup id %04x gone (its object was replaced)", id);
 				nv::obj_remove_msg r{id, expired ? nv::obj_remove_reason::expired : nv::obj_remove_reason::gone};
 				std::array<uint8_t, nv::obj_remove_msg::SIZE> buf;
 				r.write(buf);
@@ -1317,6 +1428,15 @@ void net_objects_announce(const vmobjptridx_t obj, const uint8_t owner, const bo
 	std::array<uint8_t, nv::obj_create_msg::SIZE> buf;
 	c.write(buf);
 	send(session_msg::obj_create, buf);
+	/* A death's drop is logged as one line by its caller. */
+	if (appear)
+		log_accounting("respawn", get_powerup_id(obj), id);
+	else if (owner != NO_OWNER)
+	{
+		char what[32];
+		std::snprintf(what, sizeof(what), "P#%u drops", owner);
+		log_accounting(what, get_powerup_id(obj), id);
+	}
 }
 
 void net_objects_host_drop_player_eggs(const playernum_t pnum)
@@ -1338,8 +1458,20 @@ void net_objects_host_drop_player_eggs(const playernum_t pnum)
 	Net_create_loc = 0;
 	drop_player_powerup_eggs(objp);
 	const auto created{std::min<unsigned>(Net_create_loc, MAX_NET_CREATE_OBJECTS)};
+	/* The log: what was dropped, with the net ids. */
+	char list[MAX_NET_CREATE_OBJECTS * 20]{};
+	std::size_t used{};
 	for (unsigned i = 0; i < created; ++i)
-		net_objects_announce(Objects.vmptridx(Net_create_objnums[i]), NO_OWNER, false);
+	{
+		const auto &&dropped{Objects.vmptridx(Net_create_objnums[i])};
+		net_objects_announce(dropped, NO_OWNER, false);
+		if (dropped->type != object_type::OBJ_POWERUP || used >= sizeof(list))
+			continue;
+		const auto powerup{get_powerup_id(dropped)};
+		const int n{std::snprintf(list + used, sizeof(list) - used, " %s@%04x", powerup_short_name(powerup), netid_of(*dropped, dropped.get_unchecked_index()))};
+		if (n > 0)
+			used = std::min(sizeof(list), used + static_cast<std::size_t>(n));
+	}
 	Net_create_loc = 0;
 	if (pnum != Player_num)
 	{
@@ -1350,7 +1482,7 @@ void net_objects_host_drop_player_eggs(const playernum_t pnum)
 		A.mirrors[pnum].clear();
 		write_inventory(*objp, A.mirrors[pnum].current(), false);
 	}
-	con_printf(CON_VERBOSE, "net: P#%u dropped %u powerups", pnum, created);
+	con_printf(CON_NORMAL, "net: P#%u (%s) dropped %u powerups:%s", pnum, player_role(pnum), created, list);
 }
 
 void net_objects_player_reappeared(const playernum_t pnum)
