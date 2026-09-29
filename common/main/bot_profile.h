@@ -223,4 +223,38 @@ public:
 	}
 };
 
+
+/* Section 9.8: the BOT marker in the HUD's kill list.  The exp-16
+ * playtest: "Bots do not show up as 'BOT' in scoring for me."  The kill
+ * list marked a bot only in its ping column, shown with the ping display
+ * option alone.  A bot's line now always says so, on the host and the
+ * clients alike (player_is_bot): with the ping column its `BOT` there,
+ * without it a grey `*` after the name.  The name column is narrow
+ * (about 40 units, 22 with a kill goal or a time limit): the PR #38
+ * review found that ` BOT` after the name cut a bot's name to three or
+ * four letters or to nothing, and showed the marker twice with the ping
+ * column.  The `*` costs one narrow character.  The team view lists
+ * teams, not players.
+ */
+inline constexpr char BOT_KILL_LIST_MARKER[]{"*"};
+inline constexpr char BOT_SCORE_MARKER[]{"BOT"};
+
+/* `ping_column`: the kill list shows the ping column, which marks a bot
+ * with its `BOT` already.
+ */
+[[nodiscard]]
+constexpr bool kill_list_marks_bot(const bool is_bot, const bool team_view, const bool ping_column)
+{
+	return is_bot && !team_view && !ping_column;
+}
+
+/* The room the marker takes from the name's column (the name is cut to
+ * what is left, as the kill list cuts a long name).
+ */
+[[nodiscard]]
+constexpr unsigned long kill_list_marker_room(const bool marked, const unsigned long marker_width)
+{
+	return marked ? marker_width : 0;
+}
+
 }

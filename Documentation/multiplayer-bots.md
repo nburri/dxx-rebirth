@@ -2118,6 +2118,227 @@ overrides in the `.ngp` (§5.1 mentions them for tuning; not needed so
 far), the `-botarena` ladder that would measure the kill ratios between
 adjacent skills (§8.2).
 
+### 9.8 After the v0.61-exp-16 playtest: volleys, death dump, power-up phase, turns, marker
+
+The playtest (the user hosting alone against bots of every skill) found:
+(1) the `BOT` marker did not show for the host; (2) even Insane bots
+were too careful with rockets; (3) light missiles must come in volleys,
+heavy ones must not be spammed; (4) bots flew past a mega missile a
+short detour away; (5) humans fire their missiles off just before they
+die, so the killer does not collect them; (6) the 180 degree turn was
+still awkward; (7) the aim with lasers and gauss at Insane is good (no
+change); (8) bots dogfight with the spawn laser instead of first
+collecting weapons.  Files: `bot_weapons.h` (volleys, death dump,
+intervals, risk scales), `bot_goals.h` (values, grabs, the power-up
+phase, third parties), `bot_brain.h` (the turn), `bot_profile.h` (the
+marker), `bot.cpp`, `gauges.cpp`, `kmatrix.cpp`.
+
+**(1) The marker.**  The host sets its flags when it places the bots
+(`bots_allocate_slots`, after the session reset) and nothing on the host
+clears them but a human taking the slot; its pause table showed `BOT`.
+The kill list, what one reads in play, marked a bot only in its ping
+column, which is shown only with "Show Player ping" (off by default):
+so neither host nor clients saw a marker there.  Now every bot's line in
+the kill list says so: with the ping column, its `BOT` there; without
+it, a grey `*` right after the name (the name is cut to leave it room,
+`kill_list_marker_room`); not in the team view (`kill_list_marks_bot`).
+The first version put ` BOT` after the name; the PR #38 review found
+that the name column is narrow (about 40 units, about 22 with a kill
+goal or a time limit and in the co-op left column), so a bot's name was
+cut to three or four letters or to nothing, and with the ping column
+the marker showed twice.  The `*` costs one narrow character in every
+layout (full screen, cockpit, status bar; one or two columns of up to
+eight players; kill goal and co-op score columns).  The score
+screen (`kmatrix`) says `BOT` instead of `[B]`; the pause table and the
+name tags (`, Bot`) are unchanged.  The host re-asserts the flag of each
+bot it flies every frame (`bots_frame`), whatever might clear it.
+
+**(2, 3) Missiles.**
+
+*Volleys* (`volley_size`, `volley_continues`): "A single homing has no
+impact.  A fleet of 3-5 of them make an opponent run."  A light missile
+(concussion, homing, mercury) fired at a good target starts a volley;
+its rounds follow `VOLLEY_GAP` (0.1 s) apart, and the game's own refire
+limit (the weapon's `fire_wait`, `allowed_to_fire_missile` in
+`bots_fire`) holds as for a human.  `missile_interval` now separates two
+volleys and runs from the last round.
+
+| | Rookie | Hotshot | Ace | Insane |
+|---|---|---|---|---|
+| Light missile volley (Aggressive +1, Cautious -1, at most 5 and the ammo) | 1 | 2 | 3 | 4 |
+| Smart burst behind cover (seen within 1 s) / in sight at 40-120 units | - | 2 / 1 | 2 / 2 | 3 / 3 |
+| Between volleys (`missile_interval`; B2) | 4 s | 2.5 s | 1.5 s (1.8) | 1.0 s (1.2) |
+| Heavy missile interval / per target (B2: 5 s / 10 s for all) | - | 5 / 10 s | 4 / 8 s | 3 / 6 s |
+
+A good target for a volley: in sight with a clear line, straight
+missiles at 30-130 units crossing slower than 40 units/s, homing ones at
+40-170 units at any crossing speed; otherwise one missile as before.
+The volley goes on while the target stays in sight and clear (a smart
+burst while it was seen within 1 s); a cloaked bot fires single shots.
+Mega and earthshaker stay one at a time with their cooldowns and the
+risk rule of section 9.6.  `test_volleys` models an Insane bot with ten
+homing missiles and a `fire_wait` of 0.25 s: volleys of 4, 4 and 2, never
+two rounds within the refire limit, the next volley a `missile_interval`
+after the last round.
+
+*Heavy-missile boldness* (`risk_profile_of`, the skill's scales of the
+budget, the trade and the hug): Ace 1.5, 0.85, 1.2 (B2: 1.25, 0.9,
+1.15); Insane 1.9, 0.75, 1.35 (B2: 1.5, 0.8, 1.3).  An aggressive Insane
+bot accepts an expected self-damage of 57 % of its shields and a trade
+of 1.13 (still above 1: more damage to the target than to itself); a
+balanced one 23 % and 1.9 (Hotshot: 12 %, 2.5).  The point blank and the
+lethal rules (`judge_blast`) hold for every profile
+(`test_heavy_boldness`).
+
+**(4) Pickups.**  The big missiles are worth more (`secondary_value`:
+smart 2, mega 2.5, earthshaker 3; B4: 1.5, 1.5, 2); the afterburner is
+worth nothing to a bot that has one.  A *high-value* powerup (value from
+`GRAB_HIGH_VALUE`, 2: the big missiles, a better gun, quad, super laser,
+invulnerability, cloak, the afterburner) is grabbed from 85 units
+straight and 130 by path (the others: 45 and 70) with the utility
+`GRAB_HIGH_UTILITY` 6.5 (the others: 4), which beats any engagement: an
+aggressive bot that was just shot engages at most at 2 x 1.5 x 1.5 x
+1.2 = 5.4.  Such powerups also count as worth a detour in a fight
+(`collect_in_fight`: the collection falls to 0.8, not 0.35, with an
+enemy in sight).  Invulnerability is grabbed in danger too, as shields
+are.  In the scenario of section 9.5 (Hotshot, spawn laser, an enemy
+100 units away) an earthshaker is now taken up to 85 units away (B4-B2:
+45), plasma for a vulcan owner up to 85 (before: 45).  The scan's cheap
+first filter (`best_grab`, before the path and the value) is the widest
+radius, `grab_in_range` (the PR #38 review: it filtered on 45 units, so
+the 85 of a high-value powerup was never reached); `grab_candidate` is
+both steps.
+
+**(5) The death dump** (`death_dump_wanted`, `death_dump_choice`).  A
+bot about to die fires its missiles and drops its mines as fast as the
+game lets it, most valuable first (earthshaker, mega, smart, smart mine,
+homing, mercury, proximity, concussion, flash; guided never).  About to
+die: its shields at or below the threshold while hit by an enemy within
+the last 1.2 s, or enemy shots on a course that meets it within 0.7 s
+(the dodge's scan, `perceive`, below 45 shields) with more damage than
+its shields while it is at most at twice the threshold.  Each life draws
+once whether this bot does it (the reliability):
+
+| | Trainee | Rookie | Hotshot | Ace | Insane |
+|---|---|---|---|---|---|
+| Shields threshold (Collector +4, Cautious +3, Aggressive -2) | never | 10 | 14 | 17 | 20 |
+| Reliability (Collector +0.1) | 0 | 0.25 | 0.6 | 0.85 | 0.97 |
+
+No exploit: every shot goes through the normal firing as the bot
+(`bots_fire`: `do_missile_firing`, `MULTI_FIRE`), one at a time as the
+refire limit allows, only what the skill uses (`min_smarts`), and a
+missile only with its blast clear of the bot: a bot never kills itself
+to deny the kill.  The first version checked only the wall along the
+nose and a target within 20 degrees; the PR #38 review found that the
+attacker, a teammate or a target 25 degrees off (which a homing missile
+turns to) were not counted, that the earthshaker's children bursting on
+the wall behind were not either, and that the dump skipped the normal
+path's friendly-fire checks.  Now each missile is weighed with the heavy
+missiles' model of section 9.6 (`dump_outcome`): the wall along the nose
+(`evaluate_burst`, the earthshaker's children included), the ship first
+on the line along the nose (an object cast as `shot_line_clear`'s, whose
+teammate, reactor, robot or clutter refuses every missile), and every
+ship ahead within 400 units that it may meet (`may_meet_target`: near
+the line, or in the homing cone of a homing missile; seen), the worse of
+all (`merge_meet`); a teammate it may meet (friendly fire on) refuses it
+(homing missiles do not track teammates, so only the line counts for
+one).  The rule (`dump_blast_ok`): never at point blank, the blast
+distance of `blast_safe` where it is fired and at the burst, no nominal
+self-damage and an expected one below 0.5, and an earthshaker only with
+the wall behind clear of its children (`shaker_behind_safe`);
+invulnerable beyond the danger, the distance rules alone.  The weighing
+shares the heavy missiles' fvi budget per tick.  A mine is dropped only
+without a teammate behind (`teammate_behind`, `MINE_TEAMMATE_DISTANCE`,
+as a chased bot drops one).  Invulnerable, it does not dump.  A bot that
+survives (shields picked up, no longer hit) stops.  The log says
+`dumps its missiles: about to die`, each round, and ` dump` in the
+summary line.
+
+**(6) Turning round** (`turn_round_state`, `turn_round_velocity`).  "During
+the turn I switch from flying forward to flying backwards (and usually
+after the turn I boost forward towards the new target)."  A target more
+than 110 degrees off the nose starts a *reverse turn*: the bot wants to
+fly away from the target (at least 0.8 of its top speed, with 0.4 of the
+slide across the line of sight), so while the nose comes round its
+thrust turns from forward to reverse by itself (`velocity_command` holds
+a world velocity).  When the nose is within 26 degrees, it *boosts*
+toward the target at full speed for 0.8 s, with the afterburner from
+Hotshot (`afterburner_view::turn_boost`), unless the target is inside
+the near edge of its fight band (+15 units) or it gets more than 60
+degrees off again; a turn that has not ended after 2.5 s is given up.
+It applies to the fight's own movement (not on a path, ducking, hugging
+or holding clear of its blast) and to the turn to an unseen attacker
+(not while collecting, retreating or refuelling); there the turn ends
+when the nose is round, without the boost toward a remembered place
+(the PR #38 review: the state went on to the boost and the afterburner
+fired for a boost that was not flown).  Flying backwards, the bot
+reverses only with `REVERSE_TURN_CLEARANCE` (25) units clear along the
+velocity it wants (`reverse_turn_has_room`, a `wall_distance` cast);
+else it slides round (`keep_moving_in_turn`) while the nose comes
+round (`turn_velocity`).  In the flight model
+(`test_reverse_turn`, Hotshot, flying at 40 units/s, a target 80 units
+behind, 30-500 fps): the bot faces the target in 1.37-1.48 s (the slide
+of section 9.5: 1.40-1.56 s), never below 44 units/s, always at 41
+units/s or more away from the target while it turns, flies backwards at
+32-37 units/s when the turn ends and reaches 40 units/s toward the
+target in the boost (without the afterburner).
+
+**(7) Aim.**  "Aim with lasers and gauss on insane is good.  In a 1:1 I
+can still dodge lasers but a bot with a gauss nailed me to the wall."
+Unchanged.
+
+**(8) The power-up phase** (`in_powerup_phase`, `third_party_factor`).
+A *weak* bot (`weak_armament`: its best gun scores below 1.55, the laser
+levels 1-3 without quad or level 1 with quad; and no smart missile,
+mega or earthshaker, fewer than 4 homing and mercury, fewer than 8 light
+missiles) that knows a weapon upgrade it can reach (a laser level,
+super laser, quad or gun of at least 1.2 times its armament within 600
+units of path, `best_upgrade`) prefers collecting it to fighting: its
+engage weight is multiplied by the style's factor and that upgrade's
+collection utility by the style's weight, not reduced by an enemy in
+sight:
+
+| | Balanced | Aggressive | Cautious | Collector |
+|---|---|---|---|---|
+| Engage factor in the phase | 0.55 | 0.8 | 0.45 | 0.3 |
+| Upgrade's collection weight | 1.3 | 1.0 | 1.4 | 1.7 |
+| Engage factor, one stronger third party (each further one less) | 0.65 | 0.85 | 0.5 | 0.5 |
+
+The phase does not apply when the bot was hit within the last 3 s from
+within 70 units (it fights back), when its target is as weak and no
+other enemy is known within 200 units (a fair fight), when it is
+invulnerable, and on a *weapon-poor* level: fewer weapon powerups at the
+level's start than half the players (rounded up) or fewer than two
+(`weapon_poor_level`, counted in `bots_level_start` and logged); there
+the bots fight with the laser.  *Third parties*: other enemies than the
+target, seen within their memory time and within 200 units of the bot,
+whose `fight_advantage` over it is above 1.25, lower its engage weight
+in any phase (a dogfight with a stronger player about to swoop in is a
+bad idea).  In `test_powerup_phase` a weak balanced, cautious or
+collector bot with an enemy in sight goes for plasma 200 units away; an
+aggressive one fights on unless it is 60 units away; without the phase
+(the weapon-poor level) they all fight.  The summary line of the log
+gains ` phase` and ` 3rd-party`.
+
+**Tests.**  `test-bot-weapons`: `test_volleys` (sizes by skill, style,
+ammo and target, smart bursts, continuation, the refire model),
+`test_heavy_boldness`, `test_death_dump` (the trigger, reliability and
+thresholds by skill, the order and the blast rule), `test_dump_blast`
+(the attacker first on the line, an enemy 35 degrees off that a homing
+missile turns to and a straight one passes, a teammate near the line
+and off it, the earthshaker with a wall close behind, a wall close in
+front, invulnerable).  `test-bot-goals`: `test_high_value_grab` (with
+the scan's filter, `grab_in_range`, `grab_candidate`), `test_powerup_phase` (weakness, weapon-poor
+levels, the phase and its exceptions, the goal by style, third
+parties); the pickup scenarios of section 9.5 updated to the new values
+and radii.  `test-bot-flight`: `test_reverse_turn` (the room behind, the state machine,
+the velocities, the flight model at four frame rates).
+`test-bot-presets`: `test_marker` (the `*`, not with the ping column).
+
+**Unchanged:** the human's firing and every human path (`laser.cpp`
+untouched: the bots fire through the same calls as before), clients,
+the protocol (still 104), the aim and the primaries.
+
 ---
 
 ## 10. Risks

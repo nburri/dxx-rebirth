@@ -88,9 +88,9 @@ static void kmatrix_draw_item(fvcobjptr &vcobjptr, grs_canvas &canvas, const grs
 	if (player_is_bot(sorted[i]))
 	{
 		const auto name_w{gr_get_string_size(cv_font, static_cast<const char *>(p.callsign)).width};
-		const auto tag_w{gr_get_string_size(cv_font, "[B]").width};
+		const auto tag_w{gr_get_string_size(cv_font, ::dcx::bot::BOT_SCORE_MARKER).width};
 		const auto after{x_name + name_w + fspacx(2)};
-		gr_string(canvas, cv_font, after + tag_w <= x_name + fspacx(68) ? after : std::max(0.0f, x_name - tag_w - fspacx(2)), y, "[B]");
+		gr_string(canvas, cv_font, after + tag_w <= x_name + fspacx(68) ? after : std::max(0.0f, x_name - tag_w - fspacx(2)), y, ::dcx::bot::BOT_SCORE_MARKER);
 	}
 
 	const auto &&rgb10 = BM_XRGB(10, 10, 10);

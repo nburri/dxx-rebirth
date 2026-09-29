@@ -402,7 +402,12 @@ void test_values()
 	CHECK(item_value({item::quad}, r) == 2);
 	/* Section 5.1 values, and the items a bot never seeks. */
 	CHECK(item_value({item::secondary, primary::laser, 0}, r) == 1);
-	CHECK(item_value({item::secondary, primary::laser, 9}, r) == 2);
+	/* Section 9.8: the big missiles are high-value grabs. */
+	CHECK(item_value({item::secondary, primary::laser, 9}, r) == 3);
+	CHECK(item_value({item::secondary, primary::laser, 4}, r) == 2.5);
+	CHECK(item_value({item::secondary, primary::laser, 3}, r) == 2);
+	for (const uint8_t i : {3, 4, 9})
+		CHECK(item_value({item::secondary, primary::laser, i}, r) >= GRAB_HIGH_VALUE);
 	CHECK(item_value({item::headlight}, r) == 0);
 	CHECK(item_value({item::full_map}, r) == 0);
 	CHECK(item_value({item::none}, r) == 0);
@@ -545,6 +550,7 @@ void test_pickup_scenarios()
 		in.collect_path = distance_to;
 		in.collect_upgrade = collect_in_fight(d, r);
 		in.grab = grab_worthwhile(item_value(d, r), distance_to, distance_to);
+		in.grab_value = item_value(d, r);
 		in.grab_shields = d.kind == item::shield;
 		in.current = goal_kind::engage;
 		return in;
@@ -562,12 +568,17 @@ void test_pickup_scenarios()
 	const item_desc shaker{item::secondary, primary::laser, static_cast<uint8_t>(secondary::earthshaker)};
 	auto in{fight_with(shaker, spawn, 20)};
 	CHECK(goal_utility(in)[goal_kind::engage] > collect_utility(2, 20));
+	/* Section 9.8: now worth 3, it is taken even without the grab. */
 	in.grab = false;
-	CHECK(choose_goal(in) == goal_kind::engage);
+	CHECK(choose_goal(in) == goal_kind::collect);
 	in.grab = true;
 	CHECK(choose_goal(in) == goal_kind::collect);
-	/* Beyond the grab radius the fight goes on. */
-	CHECK(choose_goal(fight_with(shaker, spawn, 60)) == goal_kind::engage);
+	/* Section 9.8: a high-value grab reaches 85 units (the old radius:
+	 * 45); beyond it the fight goes on.
+	 */
+	CHECK(choose_goal(fight_with(shaker, spawn, 60)) == goal_kind::collect);
+	CHECK(choose_goal(fight_with(shaker, spawn, 80)) == goal_kind::collect);
+	CHECK(choose_goal(fight_with(shaker, spawn, 100)) == goal_kind::engage);
 	/* A concussion pack 30 units away: grabbed; energy at full energy:
 	 * not worth it.
 	 */
@@ -579,14 +590,16 @@ void test_pickup_scenarios()
 	resource_view drained{spawn};
 	drained.energy = drained.weapons.energy = 30;
 	CHECK(choose_goal(fight_with({item::energy}, drained, 25)) == goal_kind::collect);
-	/* A vulcan owner and plasma 80 units away: not a big upgrade (x1.46),
-	 * so not in a fight; 30 units away: grabbed.
+	/* A vulcan owner and plasma 100 units away: not a big upgrade
+	 * (x1.46), so not in a fight; 80 units away (section 9.8: a better
+	 * gun is a high-value grab) and 30: grabbed.
 	 */
 	resource_view vulcan{spawn};
 	vulcan.weapons.owned = bits({primary::vulcan});
 	vulcan.weapons.vulcan_ammo = 1000;
 	CHECK(upgrade_ratio(plasma, vulcan.weapons) < BIG_UPGRADE_RATIO);
-	CHECK(choose_goal(fight_with(plasma, vulcan, 80)) == goal_kind::engage);
+	CHECK(choose_goal(fight_with(plasma, vulcan, 100)) == goal_kind::engage);
+	CHECK(choose_goal(fight_with(plasma, vulcan, 80)) == goal_kind::collect);
 	CHECK(choose_goal(fight_with(plasma, vulcan, 30)) == goal_kind::collect);
 	/* Shields: at 50 a shield powerup is worth a detour in a fight (0.8,
 	 * not 0.35); close by it is grabbed.
@@ -618,8 +631,12 @@ void test_pickup_scenarios()
 	/* The grab's limits. */
 	CHECK(grab_worthwhile(GRAB_MIN_VALUE, GRAB_RADIUS, GRAB_PATH));
 	CHECK(!grab_worthwhile(GRAB_MIN_VALUE - 0.01, 10, 10));
-	CHECK(!grab_worthwhile(2, GRAB_RADIUS + 1, 50));
-	CHECK(!grab_worthwhile(2, 30, GRAB_PATH + 1));
+	CHECK(!grab_worthwhile(1.5, GRAB_RADIUS + 1, 50));
+	CHECK(!grab_worthwhile(1.5, 30, GRAB_PATH + 1));
+	/* Section 9.8: the high-value ones from further. */
+	CHECK(grab_worthwhile(GRAB_HIGH_VALUE, GRAB_HIGH_RADIUS, GRAB_HIGH_PATH));
+	CHECK(!grab_worthwhile(GRAB_HIGH_VALUE, GRAB_HIGH_RADIUS + 1, 50));
+	CHECK(!grab_worthwhile(GRAB_HIGH_VALUE, 30, GRAB_HIGH_PATH + 1));
 	/* Without an enemy the grab wins over a far collection and roaming. */
 	goal_inputs calm;
 	calm.collect = collect_utility(7, 300);
@@ -880,10 +897,215 @@ void test_afterburner()
 	CHECK(afterburner_of(static_cast<bot_skill>(99)) == afterburner_of(BOT_DEFAULT_SKILL));
 }
 
+/* Section 9.8: a high-value powerup close by is worth a detour, in a
+ * fight too ("several bots fly close by a mega missile and not take a
+ * minor detour").
+ */
+void test_high_value_grab()
+{
+	resource_view r;
+	const item_desc mega{item::secondary, primary::laser, 4};
+	const item_desc conc{item::secondary, primary::laser, 0};
+	const double v_mega{item_value(mega, r)}, v_conc{item_value(conc, r)};
+	/* A mega 70 units away, 100 by path: a detour; a concussion there is
+	 * not, but still one within the old radius.
+	 */
+	CHECK(grab_worthwhile(v_mega, 70, 100));
+	CHECK(!grab_worthwhile(v_conc, 70, 100));
+	CHECK(grab_worthwhile(v_conc, 40, 60));
+	CHECK(!grab_worthwhile(v_mega, 100, 100));
+	CHECK(!grab_worthwhile(v_mega, 70, 150));
+	CHECK(grab_utility(v_mega) == GRAB_HIGH_UTILITY && grab_utility(v_conc) == GRAB_UTILITY);
+	/* The scan's first filter (best_grab) lets the high-value radius
+	 * through: a mega 70 units away is a candidate, a concussion there
+	 * is not, nothing beyond GRAB_HIGH_RADIUS is.
+	 */
+	CHECK(grab_in_range(70) && grab_in_range(GRAB_HIGH_RADIUS) && !grab_in_range(GRAB_HIGH_RADIUS + 1));
+	CHECK(grab_candidate(v_mega, 70, 100));
+	CHECK(grab_candidate(v_mega, 84, 120));
+	CHECK(!grab_candidate(v_conc, 70, 100));
+	CHECK(grab_candidate(v_conc, 40, 60));
+	CHECK(!grab_candidate(v_mega, 90, 100));
+	/* The high-value items, with the spawn laser. */
+	for (const item_desc d : {item_desc{item::secondary, primary::laser, 3}, item_desc{item::secondary, primary::laser, 9}, item_desc{item::invulnerability}, item_desc{item::cloak}, item_desc{item::afterburner}, item_desc{item::quad}, item_desc{item::super_laser}, item_desc{item::primary, primary::plasma, 0}})
+	{
+		CHECK(item_value(d, r) >= GRAB_HIGH_VALUE);
+		CHECK(collect_in_fight(d, r));
+	}
+	CHECK(!collect_in_fight(conc, r));
+	/* The afterburner the bot has is worth nothing. */
+	r.afterburner = true;
+	CHECK(item_value({item::afterburner}, r) == 0);
+	/* An aggressive bot that was just shot (target score 1.5, engage
+	 * weight 1.5, engaged already): it takes the mega on its way, not a
+	 * concussion pack.
+	 */
+	goal_inputs in;
+	in.has_target = true;
+	in.target_visible = true;
+	in.target_score = 1.5;
+	in.threatened = true;
+	in.engage_weight = 1.5;
+	in.collect_weight = 0.6;
+	in.retreat_shields = 20;
+	in.current = goal_kind::engage;
+	in.grab = true;
+	in.grab_value = v_mega;
+	CHECK(choose_goal(in) == goal_kind::collect);
+	in.grab_value = v_conc;
+	CHECK(choose_goal(in) == goal_kind::engage);
+	/* In danger it retreats, but invulnerability is taken. */
+	in.shields = 10;
+	in.target_score = 0.8;
+	in.current.reset();
+	in.grab_value = v_mega;
+	CHECK(choose_goal(in) == goal_kind::retreat);
+	in.grab_value = item_value({item::invulnerability}, resource_view{});
+	in.grab_invulnerability = true;
+	CHECK(choose_goal(in) == goal_kind::collect);
+}
+
+/* Section 9.8: the early-life power-up phase and third parties. */
+void test_powerup_phase()
+{
+	std::array<uint8_t, BOT_SECONDARY_COUNT> none{};
+	weapon_view spawn;
+	CHECK(weak_armament(spawn, none));
+	/* Laser 3 is still weak, laser 4 and quad laser 2 are not. */
+	spawn.laser_level = 2;
+	CHECK(weak_armament(spawn, none));
+	spawn.laser_level = 3;
+	CHECK(!weak_armament(spawn, none));
+	spawn.laser_level = 1;
+	spawn.quad = true;
+	CHECK(!weak_armament(spawn, none));
+	spawn = {};
+	/* A gun, or strong secondaries: not weak. */
+	{
+		auto w{spawn};
+		w.owned = bits({primary::plasma});
+		CHECK(!weak_armament(w, none));
+		auto mega{none};
+		mega[static_cast<unsigned>(secondary::mega)] = 1;
+		CHECK(!weak_armament(spawn, mega));
+		auto homing{none};
+		homing[static_cast<unsigned>(secondary::homing)] = 4;
+		CHECK(!weak_armament(spawn, homing));
+		auto conc{none};
+		conc[static_cast<unsigned>(secondary::concussion)] = 4;
+		CHECK(weak_armament(spawn, conc));
+	}
+	/* Weapon-poor levels: fewer weapon powerups than half the players,
+	 * or fewer than two.
+	 */
+	CHECK(weapon_poor_level(0, 2));
+	CHECK(weapon_poor_level(1, 2));
+	CHECK(!weapon_poor_level(2, 2));
+	CHECK(weapon_poor_level(3, 8));
+	CHECK(!weapon_poor_level(4, 8));
+	CHECK(!weapon_poor_level(12, 8));
+	CHECK(is_weapon_item(item::primary) && is_weapon_item(item::laser) && is_weapon_item(item::quad) && is_weapon_item(item::super_laser));
+	CHECK(!is_weapon_item(item::secondary) && !is_weapon_item(item::shield));
+	/* The phase. */
+	const powerup_phase_view weak{
+		.weak = true,
+		.upgrade_known = true,
+	};
+	CHECK(in_powerup_phase(weak));
+	for (const auto change : {0, 1, 2, 3, 4, 5})
+	{
+		auto v{weak};
+		switch (change)
+		{
+			case 0: v.weak = false; break;
+			case 1: v.upgrade_known = false; break;
+			/* Few weapons on the level: fight with laser 1. */
+			case 2: v.weapon_poor_level = true; break;
+			/* Attacked at close range: fight back. */
+			case 3: v.attacked_close = true; break;
+			case 4: v.invulnerable = true; break;
+			/* The target as weak and alone: a fair fight. */
+			default: v.target_weak = v.target_alone = true; break;
+		}
+		CHECK(!in_powerup_phase(v));
+	}
+	{
+		auto v{weak};
+		v.target_weak = true;
+		CHECK(in_powerup_phase(v));
+		v.target_weak = false;
+		v.target_alone = true;
+		CHECK(in_powerup_phase(v));
+	}
+	/* By style: Collector strongest, Aggressive least. */
+	CHECK(powerup_phase_engage(bot_style::collector) < powerup_phase_engage(bot_style::cautious));
+	CHECK(powerup_phase_engage(bot_style::cautious) < powerup_phase_engage(bot_style::balanced));
+	CHECK(powerup_phase_engage(bot_style::balanced) < powerup_phase_engage(bot_style::aggressive));
+	CHECK(powerup_phase_collect(bot_style::collector) > powerup_phase_collect(bot_style::balanced));
+	CHECK(powerup_phase_collect(bot_style::aggressive) <= powerup_phase_collect(bot_style::balanced));
+	/* The goal: a weak balanced bot with a target in sight and plasma
+	 * 200 units away collects in the phase, fights without it (the
+	 * weapon-poor level).
+	 */
+	resource_view r;
+	const double plasma{item_value({item::primary, primary::plasma, 0}, r)};
+	goal_inputs in;
+	in.has_target = true;
+	in.target_visible = true;
+	in.target_score = 1;
+	in.threatened = true;
+	in.collect = collect_utility(plasma, 200);
+	in.collect_path = 200;
+	in.collect_upgrade = true;
+	CHECK(choose_goal(in) == goal_kind::engage);
+	for (const auto st : {bot_style::balanced, bot_style::cautious, bot_style::collector})
+	{
+		auto p{in};
+		p.phase_engage = powerup_phase_engage(st);
+		p.phase_collect = collect_utility(plasma, 200) * powerup_phase_collect(st);
+		CHECK(choose_goal(p) == goal_kind::collect);
+	}
+	/* An aggressive bot fights on unless the upgrade is nearer. */
+	{
+		auto p{in};
+		p.engage_weight = 1.5;
+		p.collect_weight = 0.6;
+		p.phase_engage = powerup_phase_engage(bot_style::aggressive);
+		p.phase_collect = collect_utility(plasma, 200) * powerup_phase_collect(bot_style::aggressive);
+		CHECK(choose_goal(p) == goal_kind::engage);
+		p.phase_collect = collect_utility(plasma, 60) * powerup_phase_collect(bot_style::aggressive);
+		CHECK(choose_goal(p) == goal_kind::collect);
+	}
+	/* Third parties: stronger enemies near make the dogfight less
+	 * attractive, the more of them the less; the aggressive bot minds
+	 * least.
+	 */
+	for (const auto st : {bot_style::balanced, bot_style::aggressive, bot_style::cautious, bot_style::collector})
+	{
+		CHECK(third_party_factor(st, 0) == 1);
+		CHECK(third_party_factor(st, 1) < 1);
+		CHECK(third_party_factor(st, 2) < third_party_factor(st, 1));
+		CHECK(third_party_factor(st, 2) > 0.1);
+		CHECK(third_party_factor(bot_style::aggressive, 1) >= third_party_factor(st, 1));
+	}
+	{
+		auto p{in};
+		p.collect = 0;
+		p.collect_upgrade = false;
+		p.target_score = 0.6;
+		p.phase_collect = 0.8;
+		CHECK(choose_goal(p) == goal_kind::engage);
+		p.third_party = third_party_factor(bot_style::balanced, 1);
+		CHECK(choose_goal(p) == goal_kind::collect);
+	}
+}
+
 }
 
 int main()
 {
+	test_high_value_grab();
+	test_powerup_phase();
 	test_bands();
 	test_weapon_table();
 	test_weapon_resources();
