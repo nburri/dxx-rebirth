@@ -1625,7 +1625,7 @@ void render_mine(grs_canvas &canvas, const vms_vector &Viewer_eye, const vcsegid
 		build_object_lists(Objects, vcsegptr, Viewer_eye, rstate);
 	}
 
-	if (eye_offset<=0) // Do for left eye or zero.
+	if (eye_offset<=0 && !window.extra_view) // Do for left eye or zero, for the main view only.
 	{
 		const frame_probe::scope probe{frame_probe::phase::light};
 		set_dynamic_light(LevelSharedRobotInfoState.Robot_info, rstate);

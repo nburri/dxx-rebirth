@@ -641,54 +641,76 @@ void test_generation_marks()
 	CHECK(m.test(0));
 }
 
-/* As lighting.cpp. */
-dcx::light_reach_pass_budget game_pass_budget(const std::size_t n_lights)
-{
-	return {
-		.segments = 768,
-		.lights = n_lights,
-		.min_segments = 12,
-		.max_segments = 128,
-		.max_hidden_hops = 3,
-	};
-}
-
 /* Each light gets its share of the segments left, within the bounds;
- * what a light does not use goes to the next ones.
+ * what a light does not use goes to the next ones.  The brightest lights
+ * (up to 8) keep a reserve.
  */
 void test_pass_budget()
 {
+	using dcx::light_reach_game_pass_budget;
 	{
-		/* 50 big lights share the budget. */
-		auto b{game_pass_budget(50)};
+		/* 50 dim lights share the budget. */
+		auto b{light_reach_game_pass_budget(50, 0)};
 		std::size_t total{0};
 		for (unsigned i{0}; i < 50; ++i)
 		{
 			const auto limits{b.next()};
-			CHECK(limits.max_segments >= 12 && limits.max_segments <= 16);
+			CHECK(limits.max_segments >= 12 && limits.max_segments <= 21);
 			CHECK(limits.max_hidden_hops == 3);
 			b.spend(limits.max_segments);
 			total += limits.max_segments;
 		}
-		CHECK(total <= 768 + 12 * 50 / 4);
+		CHECK(total <= 1024 + 12 * 50 / 4);
 		/* Out of budget: the minimum. */
 		CHECK(b.next().max_segments == 12);
 	}
 	{
+		/* 50 bright lights: the 8 brightest (applied last) get at least
+		 * 64 segments, the others share what is left beyond that.
+		 */
+		auto b{light_reach_game_pass_budget(50, 50)};
+		CHECK(b.bright_lights == 8);
+		std::size_t total{0};
+		for (unsigned i{0}; i < 50; ++i)
+		{
+			const auto limits{b.next()};
+			if (i < 42)
+				CHECK(limits.max_segments >= 12 && limits.max_segments <= 13);
+			else
+				CHECK(limits.max_segments >= 64 && limits.max_segments <= 66);
+			b.spend(limits.max_segments);
+			total += limits.max_segments;
+		}
+		CHECK(total <= 1024 + 12);
+	}
+	{
+		/* 100 lights, 3 bright: the bright ones get their minimum even
+		 * when the dim ones used up the budget.
+		 */
+		auto b{light_reach_game_pass_budget(100, 3)};
+		for (unsigned i{0}; i < 97; ++i)
+		{
+			CHECK(b.next().max_segments == 12);
+			b.spend(12);
+		}
+		for (unsigned i{0}; i < 3; ++i)
+			CHECK(b.next().max_segments >= 64);
+	}
+	{
 		/* A few big lights get up to the maximum. */
-		auto b{game_pass_budget(4)};
+		auto b{light_reach_game_pass_budget(4, 4)};
 		CHECK(b.next().max_segments == 128);
 	}
 	{
 		/* 30 shots that need 10 segments each, then 8 ships. */
-		auto b{game_pass_budget(38)};
+		auto b{light_reach_game_pass_budget(38, 8)};
 		for (unsigned i{0}; i < 30; ++i)
 		{
 			CHECK(b.next().max_segments >= 12);
 			b.spend(10);
 		}
-		CHECK(b.segments == 468);
-		CHECK(b.next().max_segments == 58);
+		CHECK(b.segments == 724);
+		CHECK(b.next().max_segments == 90);
 	}
 }
 
@@ -696,8 +718,9 @@ void test_pass_budget()
  * case: real levels have bigger segments and walls) with lights of radius
  * 160 (the ship's glow): the walk before the budget (every segment within
  * reach), then the game's pass budget with the corners lit as apply_light
- * does (per segment, cleared on first use in the pass), for 50 lights
- * (about 15 segments each) and for 8 lights (96 each).
+ * does (per segment, cleared on first use in the pass), for 50 bright
+ * lights (8 with 64 segments, the others 12) and for 8 lights (128
+ * each).
  */
 void benchmark()
 {
@@ -747,6 +770,7 @@ void benchmark()
 	fix sink{0};
 	w.state.queue.resize(dcx::light_reach_queue_size(128));
 	w.state.segments.resize(128);
+	/* All the lights are as bright as the ship's glow. */
 	for (const unsigned n_lights : {max_lights, 8u})
 	{
 		std::size_t visited{0};
@@ -754,7 +778,7 @@ void benchmark()
 		for (unsigned pass{0}; pass < passes; ++pass)
 		{
 			++generation;
-			auto budget{game_pass_budget(n_lights)};
+			auto budget{dcx::light_reach_game_pass_budget(n_lights, n_lights)};
 			for (const auto &p : std::span(lights).first(n_lights))
 			{
 				const auto limits{budget.next()};
@@ -795,7 +819,7 @@ void benchmark()
 		const auto t{per_pass_ms(clock::now() - t0, passes)};
 		std::printf("test-light-reach: %u lights, radius 160, pass budget, walk and corners: %.3f ms/pass (%zu segments/light)%s\n",
 			n_lights, t, visited / (passes * n_lights), sink == 1 ? " " : "");
-		CHECK(visited <= passes * std::max<std::size_t>(50 * 32, 32 * n_lights));
+		CHECK(visited <= passes * std::size_t{1024 + 12});
 	}
 }
 

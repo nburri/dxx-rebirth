@@ -213,20 +213,22 @@ namespace {
  * than 1/32 of full light where the light stops), limited to 64 only 1%.
  *
  * Each pass has a budget of segments for all its lights
- * (light_reach_pass_budget): each light may process its share of what
- * is left, within the bounds below.  Lights are applied dimmest first,
- * so what the shots do not need goes to the ships' glow and explosions.
- * In the benchmark of test-light-reach (50 lights of radius 160 in a big
- * room of 20-unit cubes), a pass takes about 0.1 ms.
+ * (light_reach_game_pass_budget): each light may process its share of
+ * what is left, 12 to 128 segments.  Lights are applied dimmest first,
+ * so what the shots do not need goes to the ships' glow and explosions,
+ * and the (up to 8) brightest lights of at least
+ * light_reach_bright_intensity get no fewer than 64 segments, so they
+ * keep their reach in a busy fight.  In the benchmark of
+ * test-light-reach (50 lights of radius 160 in a big room of 20-unit
+ * cubes), a pass takes about 0.13 ms (8 lights of 128 segments: 0.1 ms).
+ * Segments that are not rendered (behind the viewer, beyond the render
+ * depth) are passed only in short runs of 3: enough for a light just
+ * behind the viewer to reach the rendered segments.
  */
-constexpr std::size_t light_reach_min_segments{12};
 constexpr std::size_t light_reach_max_segments{128};
-constexpr std::size_t light_reach_pass_segments{768};
-/* Segments that are not rendered (behind the viewer, beyond the render
- * depth) are passed only in short runs: enough for a light just behind
- * the viewer to reach the rendered segments.
- */
-constexpr unsigned light_reach_max_hidden_hops{3};
+static_assert(light_reach_game_pass_budget(1, 1).max_segments == light_reach_max_segments);
+/* Radius 128: the ship's glow (160) and big explosions, not most shots. */
+constexpr fix light_reach_bright_intensity{F1_0 * 2};
 
 /* A light of this pass, before it is applied. */
 struct pending_light
@@ -259,6 +261,22 @@ struct light_reach_state
 };
 
 light_reach_state reach_state;
+
+/* A light of the last lighting pass, for the objects in segments that
+ * pass did not light (compute_object_light).
+ */
+struct pass_light
+{
+	vms_vector pos;
+	g3s_lrgb emission;
+	fix reach;
+	segnum_t segnum;
+	/* Dim lights and markers light only their own segment. */
+	bool own_segment_only;
+};
+
+std::array<pass_light, MAX_OBJECTS + MUZZLE_QUEUE_MAX> pass_lights;
+std::size_t n_pass_lights;
 
 /* The level as walk_light_reach sees it: a side lets light through if
  * it can be rendered past (no wall, an open door, a grate, glass), and
@@ -881,13 +899,21 @@ void set_dynamic_light(const d_robot_info_array &Robot_info, render_state_t &rst
 {
 	auto &Objects = LevelUniqueObjectState.Objects;
 	auto &vcobjptridx = Objects.vcptridx;
-	static fix light_time; 
+	static fix light_time;
+	/* FrameTime counts once per frame, even if the frame is rendered
+	 * again (screen shot, saved game thumbnail).
+	 */
+	static fix64 light_time_frame{INT64_MIN};
 
 #if DXX_BUILD_DESCENT == 2
 	LevelUniqueLightState.Num_headlights = 0;
 #endif
 
-	light_time += FrameTime;
+	if (light_time_frame != GameTime64)
+	{
+		light_time_frame = GameTime64;
+		light_time += FrameTime;
+	}
 	if (light_time < (F1_0/60)) // it's enough to stress the CPU 60 times per second
 		return;
 	light_time = light_time - (F1_0/60);
@@ -910,6 +936,12 @@ void set_dynamic_light(const d_robot_info_array &Robot_info, render_state_t &rst
 	 * so keep one instance.  set_dynamic_light is not re-entrant.
 	 */
 	static render_vertex_list rvl;
+	/* Only the vertices of the last pass have headlight light: clear
+	 * them, so a vertex out of this pass's view (and seen in an extra
+	 * view, which does not run a pass) shows no old headlight light.
+	 */
+	for (const auto vnum : std::span(rvl.vertices).first(rvl.n_render_vertices))
+		Headlight_dynamic_light[vnum] = {};
 	rvl.n_render_vertices = 0;
 	auto &n_render_vertices = rvl.n_render_vertices;
 	range_for (const auto segnum, partial_const_range(rstate.Render_list, rstate.N_render_segs))
@@ -925,7 +957,6 @@ void set_dynamic_light(const d_robot_info_array &Robot_info, render_state_t &rst
 					rvl.vertices[n_render_vertices] = vnum;
 					rvl.positions[n_render_vertices] = *vcvertptr(vnum);
 					n_render_vertices++;
-					Headlight_dynamic_light[vnum] = {};
 				}
 			}
 		}
@@ -982,23 +1013,38 @@ void set_dynamic_light(const d_robot_info_array &Robot_info, render_state_t &rst
 	std::sort(pending.begin(), pending.end(), [](const pending_light &a, const pending_light &b) {
 		return a.intensity < b.intensity;
 	});
-	light_reach_pass_budget budget{
-		.segments = light_reach_pass_segments,
-		.lights = n_lights,
-		.min_segments = light_reach_min_segments,
-		.max_segments = light_reach_max_segments,
-		.max_hidden_hops = light_reach_max_hidden_hops,
-	};
+	const auto n_bright{static_cast<std::size_t>(std::ranges::count_if(pending, [](const pending_light &l) {
+		return l.intensity >= light_reach_bright_intensity;
+	}))};
+	auto budget{light_reach_game_pass_budget(n_lights, n_bright)};
+	n_pass_lights = 0;
 	for (const auto &l : pending)
 	{
+		const auto record = [&l](const vms_vector &pos, const segnum_t segnum, const bool is_marker) {
+			const fix reach{l.intensity * 64};
+			pass_lights[n_pass_lights++] = {
+				.pos = pos,
+				.emission = l.emission,
+				.reach = reach,
+				.segnum = segnum,
+				.own_segment_only = reach <= F1_0 * 8 || is_marker,
+			};
+		};
 		if (l.is_muzzle)
 		{
 			auto &m{Muzzle_data[l.muzzle]};
+			record(m.pos, m.segnum, false);
 			apply_light(l.emission, vcsegptridx(m.segnum), m.pos, rvl, object_none, budget);
 		}
 		else
 		{
 			const auto &&obj{vcobjptridx(l.objnum)};
+#if DXX_BUILD_DESCENT == 2
+			const bool is_marker{obj->type == object_type::OBJ_MARKER};
+#else
+			constexpr bool is_marker{false};
+#endif
+			record(obj->pos, obj->segnum, is_marker);
 			apply_light(l.emission, vcsegptridx(obj->segnum), obj->pos, rvl, obj, budget);
 		}
 	}
@@ -1093,6 +1139,45 @@ void start_lighting_frame(const object &viewer)
 
 namespace dsx {
 
+namespace {
+
+/* The dynamic light of an object whose segment the last lighting pass
+ * did not render, so no light was written to its corners (an object
+ * partly in a rendered segment, or seen only in an extra view): the
+ * corners of a rendered neighbour behind an open side, else the light of
+ * the pass's lights at the object's centre (Descent's per-vertex rule,
+ * with no walls: a light walk per object would cost too much).
+ */
+static g3s_lrgb compute_unrendered_segment_light(const ::dcx::d_level_unique_light_state &LevelUniqueLightState, const object_base &obj)
+{
+	const auto &&seg{vcsegptridx(obj.segnum)};
+	auto &vcwallptr{LevelUniqueWallSubsystemState.Walls.vcptr};
+	for (const auto side : MAX_SIDES_PER_SEGMENT)
+	{
+		const auto child{seg->shared_segment::children[side]};
+		if (!IS_CHILD(child) || !reach_state.rendered.test(child))
+			continue;
+		if (!(WALL_IS_DOORWAY(GameBitmaps, Textures, vcwallptr, seg, side) & WALL_IS_DOORWAY_FLAG::rendpast))
+			continue;
+		return compute_seg_dynamic_light(LevelUniqueLightState, child, vcsegptr(child));
+	}
+	g3s_lrgb sum{0, 0, 0};
+	for (const auto &l : std::span(pass_lights).first(n_pass_lights))
+	{
+		if (l.own_segment_only && l.segnum != obj.segnum)
+			continue;
+		fix dist{vm_vec_dist_quick(obj.pos, l.pos)};
+		if (l.own_segment_only)
+			dist = fixmul(dist / 4, dist / 4);
+		if (dist >= l.reach)
+			continue;
+		add_light_div(sum, l.emission, std::max<fix>(dist, MIN_LIGHT_DIST));
+	}
+	return sum;
+}
+
+}
+
 //compute the lighting for an object.  Takes a pointer to the object,
 //and possibly a rotated 3d point.  If the point isn't specified, the
 //object's center point is rotated.
@@ -1141,7 +1226,9 @@ g3s_lrgb compute_object_light(const d_level_unique_light_state &LevelUniqueLight
 	}
 
 	//Finally, add in dynamic light for this segment
-	const auto &&seg_dl = compute_seg_dynamic_light(LevelUniqueLightState, obj->segnum, objsegp);
+	const auto &&seg_dl{reach_state.rendered.test(obj->segnum)
+		? compute_seg_dynamic_light(LevelUniqueLightState, obj->segnum, objsegp)
+		: compute_unrendered_segment_light(LevelUniqueLightState, obj)};
 #if DXX_BUILD_DESCENT == 2
 	//Next, add in (NOTE: WHITE) headlight on this object
 	const fix mlight = compute_headlight_light_on_object(LevelUniqueLightState, obj);

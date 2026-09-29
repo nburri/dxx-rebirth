@@ -98,8 +98,14 @@ struct light_reach_limits
  * each light gets its share of what is left (the segments left over the
  * lights left), no fewer than `min_segments` and no more than
  * `max_segments`.  Applying the lights dimmest first, what the small
- * lights do not need goes to the big ones.  A pass processes at most
- * about max(`segments`, `min_segments` per light).
+ * lights do not need goes to the big ones.
+ *
+ * The last `bright_lights` lights (the brightest) get no fewer than
+ * `bright_min_segments`, and the others share only what is left beyond
+ * that reserve, so in a busy fight the ships' glow and the explosions
+ * are not cut to the share of a shot.  A pass processes at most about
+ * max(`segments`, `min_segments` per other light + `bright_min_segments`
+ * per bright light).
  */
 struct light_reach_pass_budget
 {
@@ -108,14 +114,32 @@ struct light_reach_pass_budget
 	std::size_t min_segments;
 	std::size_t max_segments;
 	unsigned max_hidden_hops;
+	std::size_t bright_lights{0};
+	std::size_t bright_min_segments{0};
 	/* The limits of the next light, which is counted as applied. */
 	light_reach_limits next()
 	{
-		const std::size_t share{lights ? segments / lights : segments};
+		std::size_t share, floor;
+		if (lights > bright_lights)
+		{
+			const std::size_t reserve{bright_lights * bright_min_segments};
+			share = (segments > reserve ? segments - reserve : 0) / (lights - bright_lights);
+			floor = min_segments;
+		}
+		else
+		{
+			share = lights ? segments / lights : segments;
+			floor = min_segments;
+			if (bright_lights)
+			{
+				floor = std::max(floor, bright_min_segments);
+				--bright_lights;
+			}
+		}
 		if (lights)
 			--lights;
 		return {
-			.max_segments = std::clamp(share, min_segments, max_segments),
+			.max_segments = std::clamp(share, floor, std::max(floor, max_segments)),
 			.max_hidden_hops = max_hidden_hops,
 		};
 	}
@@ -124,6 +148,25 @@ struct light_reach_pass_budget
 		segments -= std::min(segments, processed);
 	}
 };
+
+/* The budget of the game's lighting pass (lighting.cpp), `n_bright` of
+ * the `n_lights` lights being bright.  Measured in test-light-reach
+ * (50 lights of radius 160 in a big room of 20-unit cubes), 1024
+ * segments take about 0.13 ms.
+ */
+constexpr std::size_t light_reach_bright_reserved_lights{8};
+constexpr light_reach_pass_budget light_reach_game_pass_budget(const std::size_t n_lights, const std::size_t n_bright)
+{
+	return {
+		.segments = 1024,
+		.lights = n_lights,
+		.min_segments = 12,
+		.max_segments = 128,
+		.max_hidden_hops = 3,
+		.bright_lights = std::min({n_bright, n_lights, light_reach_bright_reserved_lights}),
+		.bright_min_segments = 64,
+	};
+}
 
 /* The queue needs at most this many entries: each processed segment adds
  * at most one entry per side.

@@ -61,6 +61,14 @@ struct window_rendered_data
 	const fix64 time;
 #endif
 	std::vector<objnum_t> rendered_robots;
+	/* An inset window (rear view, guided missile, marker, coop view):
+	 * it does not run a dynamic lighting pass, but shows the light of
+	 * the main view's last pass.  The pass lights only the segments its
+	 * view renders, and one pass is kept at a time, so a pass for the
+	 * small view would leave the main view unlit where the window does
+	 * not look.
+	 */
+	bool extra_view{false};
 };
 
 }
