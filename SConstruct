@@ -5073,6 +5073,17 @@ class DXXArchive(DXXCommon):
 		RuntimeTest('test-world-time-pause', (
 			'common/unittest/world_time_pause.cpp',
 			)),
+		# Test of the curve of the palette effects and of the flash
+		# missile's whiteout at any frame rate (palette_flash.h).
+		RuntimeTest('test-palette-flash', (
+			'common/unittest/palette_flash.cpp',
+			)),
+		# Test of closing a window from inside its own event handler
+		# (window.cpp): the host-left path on a multiplayer client.
+		RuntimeTest('test-window-close', (
+			'common/unittest/window_close.cpp',
+			'common/arch/sdl/window.cpp',
+			)),
 		# Test of the movement recording format: record round trips, the
 		# chunks, a file cut short or damaged, the tick schedule
 		# (movement_record_format.h, movement_record_reader.h).

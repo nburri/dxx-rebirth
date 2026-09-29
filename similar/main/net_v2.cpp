@@ -3642,6 +3642,8 @@ void handle_join_deny(const std::span<const uint8_t> payload, const _sockaddr &f
 /* Client: the host removed us, or left. */
 void handle_kick(const kick_player_reason why)
 {
+	con_printf(CON_NORMAL, "net: removed by the host (reason %u)", static_cast<unsigned>(underlying_value(why)));
+	con_flush_gamelog();
 	if (auto &p{S.peers[0]}; p.conn)
 		drop_peer(p);
 	switch (why)
@@ -3656,7 +3658,7 @@ void handle_kick(const kick_player_reason why)
 				if (g)
 					g->set_visible(0);
 				show_refusal(why);
-				if (g)
+				if (g && g == Game_wind)
 					g->set_visible(1);
 				multi_quit_game = 1;
 				game_leave_menus();
@@ -3673,6 +3675,8 @@ void handle_kick(const kick_player_reason why)
 
 void handle_host_lost(const kick_player_reason why)
 {
+	con_printf(CON_VERBOSE, "teardown: host lost (%s), network status %u", why == kick_player_reason::host_shutdown ? "host shut down" : "connection closed", static_cast<unsigned>(underlying_value(Network_status)));
+	con_flush_gamelog();
 	if (auto &p{S.peers[0]}; p.conn)
 		drop_peer(p);
 	if (Network_status == network_state::waiting || Network_status == network_state::browsing || Network_status == network_state::menu)
@@ -4660,6 +4664,7 @@ void game_send_to(const playernum_t slot, const uint8_t type, const std::span<co
 
 void session_reset()
 {
+	con_printf(CON_VERBOSE, "teardown: network session reset");
 	bots_session_reset();
 	for (auto &p : S.peers)
 		drop_peer(p);
@@ -5159,6 +5164,7 @@ void dispatch_table::leave_game() const
 {
 	int nsave;
 	auto &S = net_v2::S;
+	con_printf(CON_VERBOSE, "teardown: leave_game (%s)", multi_i_am_master() ? "host" : "client");
 
 	dispatch->do_protocol_frame(1, 1);
 
@@ -5221,8 +5227,13 @@ void dispatch_table::leave_game() const
 	write_player_file();
 #endif
 
+	con_printf(CON_VERBOSE, "teardown: leaving the network game, closing the sockets");
 	net_v2::flush_sockets();
 	net_v2::close_sockets();
+	/* The end of a session: the buffered log reaches the disk even if
+	 * something after this crashes.
+	 */
+	con_flush_gamelog();
 	/* Out of the game: a later join's GAME_INFO is accepted only in the
 	 * menus (handle_game_info), and the manual join does not set the
 	 * state itself.
