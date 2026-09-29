@@ -62,7 +62,8 @@ struct d_level_unique_light_state
 	 */
 	uint32_t Segment_dynamic_light_generation{1};
 	/* Headlights only, per vertex (they keep Descent's rule, see
-	 * apply_light).  Cleared for the rendered vertices at every pass.
+	 * apply_light), for the vertices rendered by the last pass (the
+	 * others are cleared).
 	 */
 	per_vertex_array<g3s_lrgb> Headlight_dynamic_light;
 	/* The corner light of `segnum` from the current pass, or nullptr if
