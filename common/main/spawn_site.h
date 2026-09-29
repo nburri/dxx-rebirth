@@ -10,11 +10,22 @@
  * nearest other ship, then draw among the most secluded ones.  Standard
  * library only, so that test-spawn-site can pin the behaviour: the order
  * of the ranked sites, the result and the number of random numbers drawn.
+ *
+ * In a network deathmatch the host assigns every spawn (its own, its
+ * bots' and, on request, its clients'; Documentation/network-protocol-v2.md
+ * section 8, "Host-assigned spawns"), and remembers the sites it assigned
+ * in the last few seconds (spawn_reservations): until the ship that was
+ * sent there shows up in the host's view, the site counts as a ship for
+ * the ranking of the others (count_reserved_spawn_sites) and is left out
+ * while a free site remains (partition_free_spawn_sites).
  */
 
 #pragma once
 
 #include <algorithm>
+#include <array>
+#include <cstddef>
+#include <cstdint>
 #include <span>
 
 namespace dcx {
@@ -55,6 +66,70 @@ auto pick_spawn_site(const std::span<const Site> sites, const unsigned usable, c
 			break;
 	} while (tries < max_tries);
 	return sites[n].first;
+}
+
+/* The sites assigned recently, each until a time (any clock; the game
+ * uses timer_query).  `N` is the number of sites (MAX_PLAYERS).
+ */
+template <std::size_t N>
+class spawn_reservations
+{
+	std::array<std::int64_t, N> until{};
+	std::array<bool, N> held{};
+public:
+	void reset()
+	{
+		held.fill(false);
+	}
+	void reserve(const unsigned site, const std::int64_t now, const std::int64_t duration)
+	{
+		if (site >= N)
+			return;
+		until[site] = now + duration;
+		held[site] = true;
+	}
+	[[nodiscard]]
+	bool reserved(const unsigned site, const std::int64_t now) const
+	{
+		return site < N && held[site] && now < until[site];
+	}
+};
+
+/* Count every reserved site as a ship standing there: the distance of
+ * each site in `sites` (site index, distance to the nearest other ship)
+ * becomes at most its distance to every other reserved site.
+ * `reserved(site)` says whether a site is reserved; `site_distance(a, b)`
+ * is the distance between two sites, negative if there is no path (such
+ * a site is ignored, as an unreachable ship is).
+ */
+template <typename Site, typename Reserved, typename SiteDistance>
+void count_reserved_spawn_sites(const std::span<Site> sites, Reserved &&reserved, SiteDistance &&site_distance)
+{
+	for (auto &s : sites)
+		for (const auto &r : sites)
+		{
+			if (r.first == s.first || !reserved(r.first))
+				continue;
+			const auto d{site_distance(s.first, r.first)};
+			if (d >= 0 && s.second > d)
+				s.second = d;
+		}
+}
+
+/* Move the free (not reserved) sites to the front, keeping their order,
+ * and return their number; if every site is reserved, return the number
+ * of sites (all remain candidates, and count_reserved_spawn_sites made the
+ * ranking prefer the one farthest from the others).
+ */
+template <typename Site, typename Reserved>
+unsigned partition_free_spawn_sites(const std::span<Site> sites, Reserved &&reserved)
+{
+	const auto free_end{std::stable_partition(sites.begin(), sites.end(), [&reserved](const Site &s) {
+		return !reserved(s.first);
+	})};
+	if (free_end == sites.begin())
+		return sites.size();
+	return static_cast<unsigned>(std::distance(sites.begin(), free_end));
 }
 
 }

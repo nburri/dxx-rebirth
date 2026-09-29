@@ -446,6 +446,18 @@ bool net_interp_newest_position(const playernum_t pnum, vms_vector &pos, fix &sp
 	return true;
 }
 
+bool net_interp_newest_live_position(const playernum_t pnum, vms_vector &pos)
+{
+	if (pnum >= MAX_PLAYERS)
+		return false;
+	const auto &ring{I.ships[pnum].ring};
+	if (ring.empty())
+		return false;
+	const auto &s{ring.newest()};
+	pos = {s.pos.x, s.pos.y, s.pos.z};
+	return true;
+}
+
 void net_interp_sweep_driven(const d_robot_info_array &Robot_info, const vmobjptridx_t obj)
 {
 	const objnum_t o{obj};

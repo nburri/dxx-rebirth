@@ -170,16 +170,31 @@ struct spawn_choice
 /* Choose the spawn of player `pnum`: its own start site outside
  * deathmatch; in deathmatch with `random_flag` == 1 a random site among
  * the Netgame.SecludedSpawns + 1 farthest from the other ships (this
- * reseeds and draws d_rand).
+ * reseeds and draws d_rand).  In a network deathmatch the host's choice
+ * is assign_spawn; a client takes the site the host assigned to it
+ * (net_spawn_take_assigned) and chooses itself only without one.
  */
 [[nodiscard]]
 spawn_choice choose_spawn(fvmobjptr &vmobjptr, playernum_t pnum, int random_flag);
 /* A bot's spawn (deathmatch: as choose_spawn with `random_flag` == 1):
  * the sealed sites (`site_open` false) are left out unless none is open,
  * and the draws come from `seed`, not d_rand (which is not reseeded).
+ * On the host of a network game it takes part in the reservations of
+ * assign_spawn.
  */
 [[nodiscard]]
 spawn_choice choose_bot_spawn(fvmobjptr &vmobjptr, playernum_t pnum, const per_player_array<bool> &site_open, uint32_t seed);
+/* The host of a network deathmatch: the spawn of player `pnum` (its own,
+ * a bot's through choose_bot_spawn, a client's on SPAWN_REQUEST or at a
+ * join in progress), ranked as choose_spawn ranks but counting the sites
+ * it assigned in the last seconds as ships and leaving them out while a
+ * free site remains; the chosen site is then reserved in turn.  `none`
+ * elsewhere, or if there is no usable site.
+ */
+[[nodiscard]]
+spawn_choice assign_spawn(fvmobjptr &vmobjptr, playernum_t pnum);
+/* Forget the reserved sites (level start). */
+void spawn_reservations_reset();
 /* Put the player ship `plrobj` where `spawn` says and reset it. */
 void place_player(fvmsegptridx &vmsegptridx, vmobjptridx_t plrobj, spawn_choice spawn);
 }

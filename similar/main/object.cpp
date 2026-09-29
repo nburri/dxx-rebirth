@@ -1685,6 +1685,11 @@ window_event_result dead_player_frame(const d_robot_info_array &Robot_info)
 				drop_local_player_eggs(vmobjptridx(ConsoleObject));
 			}
 
+			/* A network deathmatch client asks the host where to
+			 * respawn and waits for the answer (at most 1 s).
+			 */
+			if (+(Game_mode & GM_MULTI) && !net_spawn_ready())
+				return window_event_result::handled;
 			return DoPlayerDead();		//kill_player();
 		}
 	}

@@ -2291,6 +2291,22 @@ window_event_result StartNewLevel(int level_num)
 
 namespace {
 
+/* Network deathmatch, host: how long a site it assigned counts as taken
+ * (spawn_site.h, spawn_reservations): long enough for the ship sent
+ * there to appear in the host's view (the answer's way to the client,
+ * the client's first state and its interpolation delay), short enough
+ * not to keep a site from the next player for long.
+ */
+constexpr fix64 SPAWN_RESERVATION_TIME{F1_0 * 5 / 2};
+spawn_reservations<MAX_PLAYERS> Spawn_reservations;
+
+/* The host of a network deathmatch assigns every spawn. */
+[[nodiscard]]
+bool host_assigns_spawns()
+{
+	return +(Game_mode & GM_NETWORK) && !(Game_mode & GM_MULTI_COOP) && multi_i_am_master() && Newdemo_state != ND_STATE_PLAYBACK;
+}
+
 class respawn_locations
 {
 	typedef std::pair<int, fix> site;
@@ -2303,9 +2319,15 @@ public:
 	/* `site_open` (bots only): the sites a ship can fly out of; the
 	 * others are left out before the ranking, unless none is open.
 	 */
-	respawn_locations(fvmobjptr &vmobjptr, fvcsegptridx &vcsegptridx, const playernum_t player_num, const per_player_array<bool> *const site_open = nullptr)
+	/* `reservations_now` (the host of a network deathmatch): the time of
+	 * the choice, to count the sites assigned recently as ships and to
+	 * leave them out unless every candidate is taken; the other humans
+	 * are where their newest state has them, not at their delayed
+	 * (interpolated) place.
+	 */
+	respawn_locations(fvmobjptr &vmobjptr, fvcsegptridx &vcsegptridx, const playernum_t player_num, const per_player_array<bool> *const site_open = nullptr, const fix64 *const reservations_now = nullptr)
 	{
-		const auto find_closest_player = [player_num, &vmobjptr, &vcsegptridx](const obj_position &candidate) {
+		const auto find_closest_player = [player_num, &vmobjptr, &vcsegptridx, reservations_now](const obj_position &candidate) {
 			fix closest_dist = INT32_MAX;
 			const auto &&candidate_segp = vcsegptridx(candidate.segnum);
 			for (playernum_t i = N_players; i--;)
@@ -2315,7 +2337,12 @@ public:
 				const auto &&objp = vmobjptr(vcplayerptr(i)->objnum);
 				if (objp->type != object_type::OBJ_PLAYER)
 					continue;
-				const auto dist = find_connected_distance(objp->pos, candidate_segp.absolute_sibling(objp->segnum), candidate.pos, candidate_segp, -1, wall_is_doorway_mask::None);
+				vms_vector pos{objp->pos};
+#if DXX_USE_MULTIPLAYER
+				if (reservations_now && i != Player_num && !net_interp_newest_live_position(i, pos))
+					pos = objp->pos;
+#endif
+				const auto dist = find_connected_distance(pos, candidate_segp.absolute_sibling(objp->segnum), candidate.pos, candidate_segp, -1, wall_is_doorway_mask::None);
 				if (dist >= 0 && closest_dist > dist)
 					closest_dist = dist;
 			}
@@ -2328,6 +2355,16 @@ public:
 			s.first = i;
 			s.second = find_closest_player(Player_init[i]);
 		}
+		const auto reserved = [reservations_now](const int site_index) {
+			return Spawn_reservations.reserved(static_cast<unsigned>(site_index), *reservations_now);
+		};
+		if (reservations_now)
+			count_reserved_spawn_sites(std::span<site>(sites.data(), max_spawn_sites), reserved, [&vcsegptridx](const int a, const int b) {
+				const auto &pa{Player_init[a]};
+				const auto &pb{Player_init[b]};
+				const auto &&segp{vcsegptridx(pa.segnum)};
+				return find_connected_distance(pa.pos, segp, pb.pos, segp.absolute_sibling(pb.segnum), -1, wall_is_doorway_mask::None).d;
+			});
 		unsigned candidate_sites{max_spawn_sites};
 		if (site_open)
 		{
@@ -2337,6 +2374,8 @@ public:
 			if (const auto open{static_cast<unsigned>(std::distance(sites.begin(), open_end))})
 				candidate_sites = open;
 		}
+		if (reservations_now)
+			candidate_sites = partition_free_spawn_sites(std::span<site>(sites.data(), candidate_sites), reserved);
 		max_usable_spawn_sites = rank_secluded_spawn_sites(std::span<site>(sites.data(), candidate_sites), Netgame.SecludedSpawns + 1);
 	}
 	unsigned get_usable_sites() const
@@ -2349,6 +2388,35 @@ public:
 	}
 };
 
+/* The draw of a spawn site among `locations`; on the host of a network
+ * deathmatch the site is then taken for SPAWN_RESERVATION_TIME.
+ */
+template <typename Draw>
+spawn_choice draw_spawn(const respawn_locations &locations, const fix64 *const reservations_now, Draw &&draw)
+{
+	if (!locations.get_usable_sites())
+		return {spawn_choice::kind::none, 0};
+	const auto site{pick_spawn_site(locations.get_sites(), locations.get_usable_sites(), i2f(15*20), MAX_PLAYERS * 2, std::forward<Draw>(draw))};
+	if (reservations_now)
+		Spawn_reservations.reserve(static_cast<unsigned>(site), *reservations_now, SPAWN_RESERVATION_TIME);
+	return {spawn_choice::kind::site, static_cast<unsigned>(site)};
+}
+
+}
+
+void spawn_reservations_reset()
+{
+	Spawn_reservations.reset();
+}
+
+spawn_choice assign_spawn(fvmobjptr &vmobjptr, const playernum_t pnum)
+{
+	if (!host_assigns_spawns())
+		return {spawn_choice::kind::none, 0};
+	const fix64 now{timer_query()};
+	const respawn_locations locations(vmobjptr, vcsegptridx, pnum, nullptr, &now);
+	d_srand(static_cast<fix>(timer_update()));
+	return draw_spawn(locations, &now, d_rand);
 }
 
 spawn_choice choose_spawn(fvmobjptr &vmobjptr, const playernum_t pnum, const int random_flag)
@@ -2357,12 +2425,24 @@ spawn_choice choose_spawn(fvmobjptr &vmobjptr, const playernum_t pnum, const int
 		return {spawn_choice::kind::site, pnum};
 	else if (random_flag == 1)
 	{
+		/* Network deathmatch: the host assigns the spawn (its own at
+		 * once; a client's on request, or at a join in progress).
+		 */
+		if (host_assigns_spawns())
+			return assign_spawn(vmobjptr, pnum);
+#if DXX_USE_MULTIPLAYER
+		if (pnum == Player_num)
+			if (const auto site{net_spawn_take_assigned()}; site && *site < NumNetPlayerPositions)
+				return {spawn_choice::kind::site, *site};
+#endif
+		/* No assignment (not a network game, or the host's answer did
+		 * not come in time): choose here, from what this machine sees.
+		 */
 		const respawn_locations locations(vmobjptr, vcsegptridx, pnum);
 		if (!locations.get_usable_sites())
 			return {spawn_choice::kind::none, 0};
 		d_srand(static_cast<fix>(timer_update()));
-		const auto site{pick_spawn_site(locations.get_sites(), locations.get_usable_sites(), i2f(15*20), MAX_PLAYERS * 2, d_rand)};
-		return {spawn_choice::kind::site, static_cast<unsigned>(site)};
+		return draw_spawn(locations, nullptr, d_rand);
 	}
 	else
 		// If deathmatch and not random, positions were already determined by sync packet
@@ -2373,20 +2453,22 @@ spawn_choice choose_bot_spawn(fvmobjptr &vmobjptr, const playernum_t pnum, const
 {
 	if (! (+(Game_mode & GM_MULTI) && !(Game_mode & GM_MULTI_COOP))) // If not deathmatch
 		return {spawn_choice::kind::site, pnum};
-	const respawn_locations locations(vmobjptr, vcsegptridx, pnum, &site_open);
-	if (!locations.get_usable_sites())
-		return {spawn_choice::kind::none, 0};
+	/* Bots live on the host: their spawns are assigned like everyone
+	 * else's there.
+	 */
+	const fix64 now{timer_query()};
+	const auto reservations_now{host_assigns_spawns() ? &now : nullptr};
+	const respawn_locations locations(vmobjptr, vcsegptridx, pnum, &site_open, reservations_now);
 	/* The bot's own draws (xorshift32 from its seed): the game's d_rand
 	 * is neither reseeded nor advanced.
 	 */
 	uint32_t state{seed ? seed : 0x9e3779b9u};
-	const auto site{pick_spawn_site(locations.get_sites(), locations.get_usable_sites(), i2f(15*20), MAX_PLAYERS * 2, [&state]() {
+	return draw_spawn(locations, reservations_now, [&state]() {
 		state ^= state << 13;
 		state ^= state >> 17;
 		state ^= state << 5;
 		return state;
-	})};
-	return {spawn_choice::kind::site, static_cast<unsigned>(site)};
+	});
 }
 
 void place_player(fvmsegptridx &vmsegptridx, const vmobjptridx_t plrobj, const spawn_choice spawn)
