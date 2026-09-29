@@ -737,6 +737,10 @@ void multi_send_kill_goal_counts();
 #ifdef DXX_BUILD_DESCENT
 namespace dsx {
 extern bool MultiLevelInv_AllowSpawn(powerup_type_t powerup_type);
+/* The respawn bookkeeping's counts for a powerup's item (a 4-pack counts
+ * as its single missile), recounted now: for the host's accounting log.
+ */
+void MultiLevelInv_counts(powerup_type_t powerup_type, uint32_t &initial, uint32_t &current);
 netflag_flag multi_powerup_is_allowed(powerup_type_t id, const netflag_flag AllowedItems);
 netflag_flag multi_powerup_is_allowed(powerup_type_t id, const netflag_flag AllowedItems, const netflag_flag SpawnGrantedItems);
 void show_netgame_info(const netgame_info &netgame);

@@ -2243,6 +2243,27 @@ Differences from §6.1–§6.4 and decisions:
   rules moved to `respawn_allowed` and `respawn_timer` and are tested.
   The counts are now exact because the host's copies include the grants
   in flight.
+- **Accounting log (host, without `-verbose`).** After a playtest report
+  of a duplicated earthshaker (2 humans, 4 bots; not reproduced from the
+  code: bots are counted, their ships being the truth, and every grant,
+  drop and respawn was found to keep the count), the host logs every
+  event that moves a powerup, with its net id, so that a duplication can
+  be traced in the next game's `gamelog.txt`: each grant (`net: P#n
+  (host|bot|client) takes <name> [id] id <netid>: taken, left`), each
+  death drop with what it dropped (`net: P#n dropped k powerups:
+  shaker@02e6 …`), each creation, respawn and removal (`respawn`,
+  `P#n drops`, `expired`, `gone`) with the respawn bookkeeping's level
+  start and current counts of that item and the host's view of where the
+  counted units are (on the ground; each player's inventory, the clients'
+  grants on their way as "in flight"), and a `suspicious inventory` line
+  when a client's report holds more missiles, weapons, laser levels or
+  orbs than the host's copy expects (`unexplained_gain`: such gains only
+  come from grants; the first report after a new copy or a death drop is
+  not compared).  The helpers (`same_item`, `units_on_ground`,
+  `units_carried`, `unexplained_gain`) and the bot cases (a bot carrying
+  the only shaker blocks its respawn, a bot's death drops it once, a bot
+  and a client on one shaker get one grant) are tested in
+  `test-net-v2-authority`.
 - **Join in progress.** Each `SNAPSHOT_OBJECTS` entry carries the object's
   net id (u16, 0xFFFF for none) after the remote object number; the
   joiner binds it to the object number it placed the object at and makes
