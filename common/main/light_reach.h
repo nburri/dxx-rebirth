@@ -9,14 +9,16 @@
  * lights have no occlusion: an object's light is added to every rendered
  * vertex within its radius, so the shots in one room light the walls of
  * the next room through the solid wall between them.  apply_light now
- * lights only the vertices of the segments the light reaches: the
+ * lights only the corners of the segments the light reaches: the
  * segments connected to the light's segment through sides that can be
- * seen through (open sides, open doors, grates, glass), where each side
- * passed lies within the light's radius.  In an open room every vertex
- * within the radius is still reached (the straight line from the light
- * to it crosses only sides within the radius), so the look of open rooms
- * does not change.  The walk's cost is bounded (walk_light_reach): where
- * it stops early, the old rule applies beyond the distance it covered.
+ * seen through (open sides, open doors, grates, glass), where each
+ * segment passed lies within the light's radius.  The light is stored per
+ * segment corner, not per vertex (lighting.h), since the segments on
+ * either side of a wall share its vertices.  In an open room every
+ * vertex within the radius is still reached (the straight line from the
+ * light to it passes only through segments within the radius), so the
+ * look of open rooms does not change.  The walk's cost is bounded (walk_light_reach):
+ * where it stops early, nothing is lit beyond the distance it covered.
  *
  * Standard library only, so that test-light-reach can check the walk on
  * synthetic levels.
@@ -70,12 +72,14 @@ public:
 	}
 };
 
-/* One entry of the walk's queue: a segment to process, and how many
- * segments in a row that are not rendered lead to it.
+/* One entry of the walk's queue: a segment to process, a lower bound of
+ * its distance to the light, and how many segments in a row that are not
+ * rendered lead to it.
  */
-template <typename Index>
+template <typename Index, typename Key = int32_t>
 struct light_reach_entry
 {
+	Key distance;
 	Index segment;
 	uint8_t hidden_hops;
 };
@@ -90,6 +94,80 @@ struct light_reach_limits
 	unsigned max_hidden_hops;
 };
 
+/* The segments that all the lights of a lighting pass may process:
+ * each light gets its share of what is left (the segments left over the
+ * lights left), no fewer than `min_segments` and no more than
+ * `max_segments`.  Applying the lights dimmest first, what the small
+ * lights do not need goes to the big ones.
+ *
+ * The last `bright_lights` lights (the brightest) get no fewer than
+ * `bright_min_segments`, and the others share only what is left beyond
+ * that reserve, so in a busy fight the ships' glow and the explosions
+ * are not cut to the share of a shot.  A pass processes at most about
+ * max(`segments`, `min_segments` per other light + `bright_min_segments`
+ * per bright light).
+ */
+struct light_reach_pass_budget
+{
+	std::size_t segments;
+	std::size_t lights;
+	std::size_t min_segments;
+	std::size_t max_segments;
+	unsigned max_hidden_hops;
+	std::size_t bright_lights{0};
+	std::size_t bright_min_segments{0};
+	/* The limits of the next light, which is counted as applied. */
+	light_reach_limits next()
+	{
+		std::size_t share, floor;
+		if (lights > bright_lights)
+		{
+			const std::size_t reserve{bright_lights * bright_min_segments};
+			share = (segments > reserve ? segments - reserve : 0) / (lights - bright_lights);
+			floor = min_segments;
+		}
+		else
+		{
+			share = lights ? segments / lights : segments;
+			floor = min_segments;
+			if (bright_lights)
+			{
+				floor = std::max(floor, bright_min_segments);
+				--bright_lights;
+			}
+		}
+		if (lights)
+			--lights;
+		return {
+			.max_segments = std::clamp(share, floor, std::max(floor, max_segments)),
+			.max_hidden_hops = max_hidden_hops,
+		};
+	}
+	void spend(const std::size_t processed)
+	{
+		segments -= std::min(segments, processed);
+	}
+};
+
+/* The budget of the game's lighting pass (lighting.cpp), `n_bright` of
+ * the `n_lights` lights being bright.  Measured in test-light-reach
+ * (50 lights of radius 160 in a big room of 20-unit cubes), 1024
+ * segments take about 0.13 ms.
+ */
+constexpr std::size_t light_reach_bright_reserved_lights{8};
+constexpr light_reach_pass_budget light_reach_game_pass_budget(const std::size_t n_lights, const std::size_t n_bright)
+{
+	return {
+		.segments = 1024,
+		.lights = n_lights,
+		.min_segments = 12,
+		.max_segments = 128,
+		.max_hidden_hops = 3,
+		.bright_lights = std::min({n_bright, n_lights, light_reach_bright_reserved_lights}),
+		.bright_min_segments = 64,
+	};
+}
+
 /* The queue needs at most this many entries: each processed segment adds
  * at most one entry per side.
  */
@@ -98,66 +176,71 @@ constexpr std::size_t light_reach_queue_size(const std::size_t max_segments)
 	return 6 * max_segments + 1;
 }
 
-/* Breadth-first walk from `start` over the segments a light reaches:
- * those behind sides that let light through and lie within `reach` of
- * the light.  In an open room, the straight line from the light to a
- * vertex at distance d crosses only sides nearer than d, so every vertex
- * within reach is in a segment the walk reaches.
+/* Walk from `start` over the segments a light reaches: those behind
+ * sides that let light through and within `reach` of the light, nearest
+ * first.  In an open room, the straight line from the light to a vertex
+ * at distance d passes only through segments nearer than d, so every
+ * vertex within reach is in a segment the walk reaches.
  *
  * The cost is bounded: at most `limits.max_segments` segments are
  * processed, and a path through segments that are not rendered stops
  * after `limits.max_hidden_hops` of them.  Where the walk stops early, it
  * lowers the distance it returns, `complete`, to the distance of the
- * nearest side it did not pass or of the nearest segment it did not
- * process.  Any segment reachable through sides all nearer than
- * `complete` was processed, so the straight-line argument
- * holds within `complete`: a vertex nearer than that which was not
- * reached is behind a wall.  The caller keeps the old rule (no
- * occlusion) for vertices at `complete` or beyond.  If nothing stopped
- * the walk early, `complete` is `reach`.
+ * nearest segment it found but did not process, or where a path of
+ * hidden segments stopped.  Any segment reachable through segments all
+ * nearer than `complete` was processed (on such a path, the first
+ * segment not processed would have been found), so the straight-line
+ * argument holds within `complete`: a vertex nearer than that which was
+ * not reached is behind a wall.  The caller lights nothing at `complete` or beyond.  If
+ * nothing stopped the walk early, `complete` is `reach`.  Processing the
+ * nearest segments first makes `complete` as large as the budget allows.
  *
  * `Graph` provides:
  *	bool rendered(Index): whether the segment is in the render list;
- *	bool discover(Index): marks the segment as found; true the first
- *		time;
+ *	void discover(Index): marks the segment as found;
  *	Key distance(Index): a lower bound of the distance from the light
  *		to any point of the segment;
- *	void process(Index): marks the segment's vertices as reached;
- *	void for_each_lit_child(Index, F): F(child, distance) for each
- *		neighbour not found yet behind a side that lets light through,
- *		with a lower bound of the distance to that side, if below
- *		`reach`.
+ *	void process(Index): called for each segment processed, in order;
+ *	void for_each_lit_child(Index, F): F(child) for each neighbour
+ *		not found yet behind a side that lets light through.
  *
- * `queue` holds `light_reach_queue_size(limits.max_segments)` entries.
- * `processed`, if given, receives the number of segments processed.
+ * `queue` holds `light_reach_queue_size(limits.max_segments)` entries,
+ * `segments` receives the segments processed, nearest first (at most
+ * `limits.max_segments`), and `processed`, if given, their number.
  */
 template <typename Graph, typename Index, typename Key>
-Key walk_light_reach(Graph &g, const Index start, const Key reach, light_reach_entry<Index> *const queue, const light_reach_limits limits, std::size_t *const processed = nullptr)
+Key walk_light_reach(Graph &g, const Index start, const Key reach, light_reach_entry<Index, Key> *const queue, Index *const segments, const light_reach_limits limits, std::size_t *const processed = nullptr)
 {
 	Key complete{reach};
-	std::size_t head{0}, tail{0};
+	std::size_t n_processed{0}, tail{0};
+	/* A heap, nearest first. */
+	const auto nearer_first = [](const light_reach_entry<Index, Key> &a, const light_reach_entry<Index, Key> &b) {
+		return a.distance > b.distance;
+	};
 	const uint8_t start_hops{g.rendered(start) ? uint8_t{0} : uint8_t{1}};
 	if (limits.max_segments && start_hops <= limits.max_hidden_hops)
 	{
 		g.discover(start);
-		queue[tail++] = {start, start_hops};
+		queue[tail++] = {Key{0}, start, start_hops};
 	}
 	else
 		complete = Key{0};
-	while (head != tail)
+	while (tail)
 	{
-		if (head == limits.max_segments)
+		if (n_processed == limits.max_segments)
 		{
-			/* Out of budget: the segments left in the queue were not
-			 * processed.
+			/* Out of budget: queue[0] is the nearest segment found but
+			 * not processed.
 			 */
-			for (std::size_t i{head}; i != tail; ++i)
-				complete = std::min(complete, g.distance(queue[i].segment));
+			complete = std::min(complete, queue[0].distance);
 			break;
 		}
-		const auto e{queue[head++]};
+		std::pop_heap(queue, queue + tail, nearer_first);
+		const auto e{queue[--tail]};
+		segments[n_processed++] = e.segment;
 		g.process(e.segment);
-		g.for_each_lit_child(e.segment, [&](const Index child, const Key distance) {
+		g.for_each_lit_child(e.segment, [&](const Index child) {
+			const Key distance{g.distance(child)};
 			if (distance >= complete)
 				return;
 			const uint8_t hops{g.rendered(child) ? uint8_t{0} : static_cast<uint8_t>(e.hidden_hops + 1)};
@@ -166,12 +249,13 @@ Key walk_light_reach(Graph &g, const Index start, const Key reach, light_reach_e
 				complete = distance;
 				return;
 			}
-			if (g.discover(child))
-				queue[tail++] = {child, hops};
+			g.discover(child);
+			queue[tail++] = {distance, child, hops};
+			std::push_heap(queue, queue + tail, nearer_first);
 		});
 	}
 	if (processed)
-		*processed = head;
+		*processed = n_processed;
 	return complete;
 }
 

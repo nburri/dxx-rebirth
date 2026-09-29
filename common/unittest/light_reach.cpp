@@ -11,7 +11,16 @@
  * an open side, stops at its radius, and in an open room still reaches
  * every vertex within its radius (the look of open rooms is unchanged),
  * also when the walk runs out of budget or starts outside the rendered
- * segments.  It ends with a benchmark of the walk in a big open room.
+ * segments.
+ *
+ * The light is stored per segment corner (lighting.h): two rooms on
+ * either side of a wall share the wall's vertices, and light stored per
+ * vertex would reach the faces of both.  The corner model of apply_light
+ * is checked against Descent's per-vertex model: the room behind a wall
+ * that shares its vertices gets nothing, the lit room gets the same
+ * values, and in an open room segments sharing a vertex get the same
+ * value for it (no seams).  It ends with a benchmark of a lighting pass
+ * (walk and corners) in a big open room.
  *
  * Distances are those of the game: fixed-point coordinates and the
  * quick magnitude of vm_vec_dist_quick.
@@ -33,6 +42,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <random>
+#include <span>
 #include <vector>
 
 #include "light_reach.h"
@@ -77,6 +87,14 @@ int64_t quick_magnitude(int64_t a, int64_t b, int64_t c)
 int64_t distance(const vec3 &a, const vec3 &b)
 {
 	return quick_magnitude(std::abs(int64_t{a.x} - b.x), std::abs(int64_t{a.y} - b.y), std::abs(int64_t{a.z} - b.z));
+}
+
+/* As apply_light: fixdiv(emission, max(dist, MIN_LIGHT_DIST)). */
+constexpr fix emission{4 * unit};
+fix light_at(const int64_t d)
+{
+	const int64_t scale{std::max<int64_t>(d, 4 * unit)};
+	return static_cast<fix>((int64_t{emission} << 16) / scale);
 }
 
 struct box
@@ -180,6 +198,7 @@ struct walk_state
 	dcx::generation_marks<max_segments> discovered;
 	dcx::generation_marks<max_vertices> vertices;
 	std::vector<dcx::light_reach_entry<unsigned>> queue;
+	std::vector<unsigned> segments;
 	std::array<unsigned, max_segments> bfs_queue;
 };
 
@@ -190,13 +209,15 @@ struct graph
 	const vec3 light;
 	const fix reach;
 	walk_state &state;
+	/* The benchmark does not mark vertices: the game does not. */
+	bool mark_vertices{true};
 	bool rendered(const unsigned s) const
 	{
 		return l.rendered[s];
 	}
-	bool discover(const unsigned s)
+	void discover(const unsigned s)
 	{
-		return state.discovered.set(s);
+		state.discovered.set(s);
 	}
 	fix distance(const unsigned s) const
 	{
@@ -208,17 +229,14 @@ struct graph
 	}
 	void process(const unsigned s)
 	{
-		for (const auto v : l.segments[s].verts)
-			state.vertices.set(v);
+		if (mark_vertices)
+			for (const auto v : l.segments[s].verts)
+				state.vertices.set(v);
 	}
 	template <typename F>
 	void for_each_lit_child(const unsigned s, F &&f) const
 	{
 		const auto &seg{l.segments[s]};
-		/* As lighting.cpp: each vertex fetched once. */
-		std::array<const vec3 *, 8> p;
-		for (unsigned i{0}; i < 8; ++i)
-			p[i] = &l.vertices[seg.verts[i]];
 		for (unsigned side{0}; side < 6; ++side)
 		{
 			const auto child{seg.children[side]};
@@ -226,14 +244,7 @@ struct graph
 				continue;
 			if (!seg.lets_light_through[side])
 				continue;
-			const auto &sv{side_to_verts[side]};
-			box portal{*p[sv[0]], *p[sv[0]]};
-			for (const auto i : sv)
-				portal.include(*p[i]);
-			const auto d{::distance(light, portal)};
-			if (d >= reach)
-				continue;
-			f(static_cast<unsigned>(child), static_cast<fix>(d));
+			f(static_cast<unsigned>(child));
 		}
 	}
 	/* The walk before the budget: breadth-first over every segment
@@ -249,8 +260,8 @@ struct graph
 		while (head != tail)
 		{
 			const unsigned s{state.bfs_queue[head++]};
-			for_each_lit_child(s, [this, &tail](const unsigned child, fix) {
-				if (!state.discovered.set(child))
+			for_each_lit_child(s, [this, &tail](const unsigned child) {
+				if (distance(child) >= reach || !state.discovered.set(child))
 					return;
 				for (const auto v : l.segments[child].verts)
 					state.vertices.set(v);
@@ -262,7 +273,7 @@ struct graph
 };
 
 constexpr dcx::light_reach_limits unlimited{max_segments, 255};
-/* As lighting.cpp. */
+/* A light's limits within the game's bounds (lighting.cpp). */
 constexpr dcx::light_reach_limits game_budget{32, 3};
 
 struct walker
@@ -279,13 +290,36 @@ struct walker
 	{
 		reset();
 		state.queue.resize(dcx::light_reach_queue_size(limits.max_segments));
+		state.segments.resize(limits.max_segments);
 		graph g{l, light, reach, state};
-		complete = dcx::walk_light_reach(g, start, reach, state.queue.data(), limits, &processed);
+		complete = dcx::walk_light_reach(g, start, reach, state.queue.data(), state.segments.data(), limits, &processed);
 		CHECK(complete <= reach);
 		CHECK(processed <= limits.max_segments);
 	}
-	/* The rendered vertices apply_light lights: within the radius, and
-	 * reached or beyond what the walk checked.
+	/* As apply_light: the corners of the processed segments that are
+	 * rendered, nearer than the distance the walk covered, get the light
+	 * Descent gave their vertex.
+	 */
+	void light_corners(const level &l, const vec3 &light, std::vector<std::array<fix, 8>> &corners) const
+	{
+		corners.assign(l.segments.size(), {});
+		for (std::size_t i{0}; i != processed; ++i)
+		{
+			const auto s{state.segments[i]};
+			if (!l.rendered[s])
+				continue;
+			for (unsigned c{0}; c < 8; ++c)
+			{
+				const auto d{distance(light, l.vertices[l.segments[s].verts[c]])};
+				if (d < complete)
+					corners[s][c] += light_at(d);
+			}
+		}
+	}
+	/* The rendered vertices within the radius that are reached, or
+	 * beyond what the walk covered (the property of the walk that
+	 * light_corners relies on: every vertex nearer than `complete` in
+	 * an open room is reached).
 	 */
 	std::vector<unsigned> lit(const level &l, const vec3 &light, const fix reach) const
 	{
@@ -306,6 +340,22 @@ struct walker
 		return r;
 	}
 };
+
+/* The per-vertex model of Descent: every rendered vertex within reach
+ * gets the light, whatever lies between.
+ */
+std::vector<fix> vertex_light(const level &l, const vec3 &light, const fix reach)
+{
+	std::vector<fix> r(l.vertices.size());
+	for (unsigned s{0}; s < l.segments.size(); ++s)
+		if (l.rendered[s])
+			for (const auto v : l.segments[s].verts)
+			{
+				const auto d{distance(light, l.vertices[v])};
+				r[v] = d < reach ? light_at(d) : 0;
+			}
+	return r;
+}
 
 unsigned count_within(const level &l, const vec3 &light, const fix reach, const unsigned first_vertex, const unsigned end_vertex)
 {
@@ -385,10 +435,10 @@ void test_wall_between_rooms(walker &w)
 	}
 }
 
-/* In an open room, every rendered vertex within the radius is lit,
- * wherever the light is: the look of open rooms does not change.  Also
- * when the budget stops the walk early, and when only part of the room
- * is rendered.
+/* In an open room, every rendered vertex within the radius is reached
+ * or beyond what the walk covered, wherever the light is.  Also when the
+ * budget stops the walk early, and when only part of the room is
+ * rendered.
  */
 void test_open_room_unchanged(walker &w)
 {
@@ -411,6 +461,127 @@ void test_open_room_unchanged(walker &w)
 			const fix reach{radius(rng)};
 			w.walk(l, cell_index(n, light), light, reach, limits);
 			CHECK(w.lit(l, light, reach).size() == count_within(l, light, reach, 0, l.vertices.size()));
+		}
+	}
+}
+
+/* Two rooms on either side of a solid wall (or a closed door) that
+ * share the wall's vertices, as rooms next to each other usually do.
+ * Stored per vertex, a light near the wall reached the faces of the far
+ * room that use the wall's vertices; stored per corner, the far room gets
+ * nothing and the near room gets what it got before.  With the wall
+ * open, both rooms get what they got before (within the distance the
+ * walk covered).
+ */
+void test_wall_shares_vertices(walker &w)
+{
+	constexpr unsigned nx{6}, ny{3}, nz{3};
+	const auto index = [](const unsigned i, const unsigned j, const unsigned k) {
+		return i + nx * (j + ny * k);
+	};
+	for (const bool wall : {true, false})
+	for (const auto limits : {unlimited, game_budget})
+	for (const vec3 light : {vec3{55 * unit, 30 * unit, 30 * unit}, vec3{59 * unit, 5 * unit, 55 * unit}, vec3{45 * unit, 20 * unit, 40 * unit}})
+	{
+		level l;
+		add_room(l, 0, 0, 0, nx, ny, nz);
+		/* The wall at x = 60, between cells i = 2 and i = 3. */
+		if (wall)
+			for (unsigned k{0}; k < nz; ++k)
+				for (unsigned j{0}; j < ny; ++j)
+				{
+					l.segments[index(2, j, k)].lets_light_through[1] = false;
+					l.segments[index(3, j, k)].lets_light_through[0] = false;
+				}
+		const fix reach{40 * unit};
+		const unsigned light_segment{index(static_cast<unsigned>(light.x / cell), static_cast<unsigned>(light.y / cell), static_cast<unsigned>(light.z / cell))};
+		w.walk(l, light_segment, light, reach, limits);
+		/* Behind the wall, the budget is enough.  Open, the two rooms
+		 * may exceed it: nothing is lit beyond what the walk covered.
+		 */
+		if (wall || limits.max_segments == unlimited.max_segments)
+			CHECK(w.complete == reach);
+		std::vector<std::array<fix, 8>> corners;
+		w.light_corners(l, light, corners);
+		const auto per_vertex{vertex_light(l, light, reach)};
+		unsigned far_lit_per_vertex{0}, near_lit{0};
+		for (unsigned s{0}; s < l.segments.size(); ++s)
+		{
+			const bool far{s % nx >= 3};
+			for (unsigned c{0}; c < 8; ++c)
+			{
+				const auto v{l.segments[s].verts[c]};
+				const auto old{distance(light, l.vertices[v]) < w.complete ? per_vertex[v] : 0};
+				if (far && wall)
+				{
+					far_lit_per_vertex += old != 0;
+					CHECK(corners[s][c] == 0);
+				}
+				else
+				{
+					near_lit += old != 0;
+					CHECK(corners[s][c] == old);
+				}
+			}
+		}
+		CHECK(near_lit > 0);
+		/* Per vertex, the far room's faces on the wall were lit. */
+		if (wall)
+			CHECK(far_lit_per_vertex > 0);
+	}
+}
+
+/* In an open room, a corner gets the value Descent gave its vertex if it
+ * is nearer than the distance the walk covered, and nothing beyond (no
+ * wall-ignoring fallback): the segments that share a vertex all get the
+ * same value for it, so faces show no seams.  With no budget, that is
+ * every vertex within the radius.
+ */
+void test_open_room_corners(walker &w)
+{
+	constexpr unsigned n{12};
+	for (const bool half_rendered : {false, true})
+	for (const auto limits : {unlimited, game_budget, dcx::light_reach_limits{8, 1}})
+	{
+		level l;
+		add_room(l, 0, 0, 0, n, n, n);
+		if (half_rendered)
+			for (unsigned s{0}; s < l.segments.size(); ++s)
+				l.rendered[s] = s % n >= n / 2;
+		std::minstd_rand rng{777};
+		std::uniform_int_distribution<fix> coord{unit / 64, static_cast<fix>(n) * cell - unit / 64};
+		std::uniform_int_distribution<fix> radius{5 * unit, 160 * unit};
+		std::vector<std::array<fix, 8>> corners;
+		std::vector<fix> seen(l.vertices.size());
+		std::vector<uint8_t> has_seen(l.vertices.size());
+		for (unsigned iter{0}; iter < 300; ++iter)
+		{
+			const vec3 light{coord(rng), coord(rng), coord(rng)};
+			const fix reach{radius(rng)};
+			w.walk(l, cell_index(n, light), light, reach, limits);
+			if (limits.max_segments == unlimited.max_segments)
+				CHECK(w.complete == reach);
+			w.light_corners(l, light, corners);
+			const auto per_vertex{vertex_light(l, light, reach)};
+			std::fill(has_seen.begin(), has_seen.end(), 0);
+			for (unsigned s{0}; s < l.segments.size(); ++s)
+			{
+				if (!l.rendered[s])
+					continue;
+				for (unsigned c{0}; c < 8; ++c)
+				{
+					const auto v{l.segments[s].verts[c]};
+					const auto value{corners[s][c]};
+					CHECK(value == (distance(light, l.vertices[v]) < w.complete ? per_vertex[v] : 0));
+					if (has_seen[v])
+						CHECK(seen[v] == value);
+					else
+					{
+						has_seen[v] = 1;
+						seen[v] = value;
+					}
+				}
+			}
 		}
 	}
 }
@@ -470,22 +641,99 @@ void test_generation_marks()
 	CHECK(m.test(0));
 }
 
-/* Cost of one lighting pass: 50 lights of radius 160 (the ship's glow,
- * big fireballs) in a big open room of 20-unit cubes, before (every
- * segment within reach) and with the game's budget.
+/* Each light gets its share of the segments left, within the bounds;
+ * what a light does not use goes to the next ones.  The brightest lights
+ * (up to 8) keep a reserve.
+ */
+void test_pass_budget()
+{
+	using dcx::light_reach_game_pass_budget;
+	{
+		/* 50 dim lights share the budget. */
+		auto b{light_reach_game_pass_budget(50, 0)};
+		std::size_t total{0};
+		for (unsigned i{0}; i < 50; ++i)
+		{
+			const auto limits{b.next()};
+			CHECK(limits.max_segments >= 12 && limits.max_segments <= 21);
+			CHECK(limits.max_hidden_hops == 3);
+			b.spend(limits.max_segments);
+			total += limits.max_segments;
+		}
+		CHECK(total <= 1024 + 12 * 50 / 4);
+		/* Out of budget: the minimum. */
+		CHECK(b.next().max_segments == 12);
+	}
+	{
+		/* 50 bright lights: the 8 brightest (applied last) get at least
+		 * 64 segments, the others share what is left beyond that.
+		 */
+		auto b{light_reach_game_pass_budget(50, 50)};
+		CHECK(b.bright_lights == 8);
+		std::size_t total{0};
+		for (unsigned i{0}; i < 50; ++i)
+		{
+			const auto limits{b.next()};
+			if (i < 42)
+				CHECK(limits.max_segments >= 12 && limits.max_segments <= 13);
+			else
+				CHECK(limits.max_segments >= 64 && limits.max_segments <= 66);
+			b.spend(limits.max_segments);
+			total += limits.max_segments;
+		}
+		CHECK(total <= 1024 + 12);
+	}
+	{
+		/* 100 lights, 3 bright: the bright ones get their minimum even
+		 * when the dim ones used up the budget.
+		 */
+		auto b{light_reach_game_pass_budget(100, 3)};
+		for (unsigned i{0}; i < 97; ++i)
+		{
+			CHECK(b.next().max_segments == 12);
+			b.spend(12);
+		}
+		for (unsigned i{0}; i < 3; ++i)
+			CHECK(b.next().max_segments >= 64);
+	}
+	{
+		/* A few big lights get up to the maximum. */
+		auto b{light_reach_game_pass_budget(4, 4)};
+		CHECK(b.next().max_segments == 128);
+	}
+	{
+		/* 30 shots that need 10 segments each, then 8 ships. */
+		auto b{light_reach_game_pass_budget(38, 8)};
+		for (unsigned i{0}; i < 30; ++i)
+		{
+			CHECK(b.next().max_segments >= 12);
+			b.spend(10);
+		}
+		CHECK(b.segments == 724);
+		CHECK(b.next().max_segments == 90);
+	}
+}
+
+/* Cost of one lighting pass in a big open room of 20-unit cubes (a worst
+ * case: real levels have bigger segments and walls) with lights of radius
+ * 160 (the ship's glow): the walk before the budget (every segment within
+ * reach), then the game's pass budget with the corners lit as apply_light
+ * does (per segment, cleared on first use in the pass), for 50 bright
+ * lights (8 with 64 segments, the others 12) and for 8 lights (128
+ * each).
  */
 void benchmark()
 {
 	static walker w;
 	constexpr unsigned n{24};
-	constexpr unsigned n_lights{50};
+	constexpr unsigned max_lights{50};
 	/* The walk before the budget is slow: fewer passes. */
 	constexpr unsigned passes_before{20}, passes{500};
 	level l;
 	add_room(l, 0, 0, 0, n, n, n);
 	std::minstd_rand rng{4242};
 	std::uniform_int_distribution<fix> coord{unit, static_cast<fix>(n) * cell - unit};
-	std::array<vec3, n_lights> lights;
+	std::array<vec3, max_lights> lights;
 	for (auto &p : lights)
 		p = {coord(rng), coord(rng), coord(rng)};
 	const fix reach{160 * unit};
@@ -493,7 +741,7 @@ void benchmark()
 	const auto per_pass_ms = [](const clock::duration d, const unsigned n) {
 		return std::chrono::duration<double, std::milli>(d).count() / n;
 	};
-	std::size_t visited_before{0}, visited_after{0};
+	std::size_t visited_before{0};
 	auto t0{clock::now()};
 	for (unsigned pass{0}; pass < passes_before; ++pass)
 		for (const auto &p : lights)
@@ -503,23 +751,76 @@ void benchmark()
 			visited_before += g.walk_unbounded(cell_index(n, p));
 		}
 	const auto before{per_pass_ms(clock::now() - t0, passes_before)};
-	w.state.queue.resize(dcx::light_reach_queue_size(game_budget.max_segments));
-	t0 = clock::now();
-	for (unsigned pass{0}; pass < passes; ++pass)
-		for (const auto &p : lights)
+	std::printf("test-light-reach: %u lights, radius 160, %ux%ux%u room of 20-unit cubes: before the budget %.3f ms/pass (%zu segments/light)\n",
+		max_lights, n, n, n,
+		before, visited_before / (passes_before * max_lights));
+	struct segment_light
+	{
+		uint32_t generation;
+		std::array<std::array<fix, 3>, 8> corners;
+	};
+	std::vector<segment_light> seg_light(l.segments.size());
+	uint32_t generation{0};
+	/* As apply_light: the light of each vertex is computed once per
+	 * light, then added to the corners of the processed segments that
+	 * use it.
+	 */
+	dcx::generation_marks<max_vertices> vertex_seen;
+	std::vector<fix> vertex_value(l.vertices.size());
+	fix sink{0};
+	w.state.queue.resize(dcx::light_reach_queue_size(128));
+	w.state.segments.resize(128);
+	/* All the lights are as bright as the ship's glow. */
+	for (const unsigned n_lights : {max_lights, 8u})
+	{
+		std::size_t visited{0};
+		t0 = clock::now();
+		for (unsigned pass{0}; pass < passes; ++pass)
 		{
-			w.reset();
-			graph g{l, p, reach, w.state};
-			std::size_t processed;
-			dcx::walk_light_reach(g, cell_index(n, p), reach, w.state.queue.data(), game_budget, &processed);
-			visited_after += processed;
+			++generation;
+			auto budget{dcx::light_reach_game_pass_budget(n_lights, n_lights)};
+			for (const auto &p : std::span(lights).first(n_lights))
+			{
+				const auto limits{budget.next()};
+				w.reset();
+				graph g{l, p, reach, w.state, false};
+				std::size_t processed;
+				const auto complete{dcx::walk_light_reach(g, cell_index(n, p), reach, w.state.queue.data(), w.state.segments.data(), limits, &processed)};
+				budget.spend(processed);
+				visited += processed;
+				vertex_seen.next();
+				for (std::size_t i{0}; i != processed; ++i)
+				{
+					const auto s{w.state.segments[i]};
+					auto &sl{seg_light[s]};
+					if (sl.generation != generation)
+					{
+						sl.generation = generation;
+						sl.corners = {};
+					}
+					for (unsigned c{0}; c < 8; ++c)
+					{
+						const auto vertex{l.segments[s].verts[c]};
+						auto &v{vertex_value[vertex]};
+						if (vertex_seen.set(vertex))
+						{
+							const auto d{distance(p, l.vertices[vertex])};
+							v = d < complete ? light_at(d) : 0;
+						}
+						if (!v)
+							continue;
+						for (auto &ch : sl.corners[c])
+							ch += v;
+					}
+				}
+			}
+			sink += seg_light[pass % seg_light.size()].corners[0][0];
 		}
-	const auto after{per_pass_ms(clock::now() - t0, passes)};
-	std::printf("test-light-reach: %u lights, radius 160, %ux%ux%u room of 20-unit cubes: before %.3f ms/pass (%zu segments/light), after %.3f ms/pass (%zu segments/light)\n",
-		n_lights, n, n, n,
-		before, visited_before / (passes_before * n_lights),
-		after, visited_after / (passes * n_lights));
-	CHECK(visited_after <= passes * n_lights * game_budget.max_segments);
+		const auto t{per_pass_ms(clock::now() - t0, passes)};
+		std::printf("test-light-reach: %u lights, radius 160, pass budget, walk and corners: %.3f ms/pass (%zu segments/light)%s\n",
+			n_lights, t, visited / (passes * n_lights), sink == 1 ? " " : "");
+		CHECK(visited <= passes * std::size_t{1024 + 12});
+	}
 }
 
 }
@@ -528,8 +829,11 @@ int main()
 {
 	static walker w;
 	test_generation_marks();
+	test_pass_budget();
 	test_wall_between_rooms(w);
 	test_open_room_unchanged(w);
+	test_wall_shares_vertices(w);
+	test_open_room_corners(w);
 	test_radius_bounds_walk(w);
 	benchmark();
 	std::printf("test-light-reach: all checks passed\n");

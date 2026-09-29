@@ -4141,6 +4141,7 @@ void do_cockpit_window_view(grs_canvas &canvas, const gauge_inset_window_view wi
 	int rear_view_save = Rear_view;
 
 	window_rendered_data window;
+	window.extra_view = true;
 
 	inset_window[win].user = user;						//say who's using window
 
