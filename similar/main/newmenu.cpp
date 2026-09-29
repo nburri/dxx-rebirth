@@ -999,6 +999,12 @@ static window_event_result newmenu_mouse(const d_event &event, newmenu *menu, co
 					// Tell callback, allow staying in menu
 					if (const auto r{menu->event_handler(d_select_event{menu->citem, d_event::source::mouse})}; r == window_event_result::handled)
 						return r;
+					/* A callback that closed the menu with its own code
+					 * (below -1) keeps it; only otherwise does the result
+					 * become the selected item.
+					 */
+					else if (r == window_event_result::close && menu->rval && *menu->rval < -1)
+						return r;
 
 					if (menu->rval)
 						*menu->rval = menu->citem;
@@ -1197,6 +1203,12 @@ static window_event_result newmenu_key_command(const d_event &event, newmenu *co
 
 				// Tell callback, allow staying in menu
 				if (const auto r{menu->event_handler(d_select_event{menu->citem, event_key_get_source(event)})}; r == window_event_result::handled)
+					return r;
+				/* A callback that closed the menu with its own code
+				 * (below -1) keeps it; only otherwise does the result
+				 * become the selected item.
+				 */
+				else if (r == window_event_result::close && menu->rval && *menu->rval < -1)
 					return r;
 
 				if (menu->rval)
