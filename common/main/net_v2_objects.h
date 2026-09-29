@@ -1347,6 +1347,56 @@ struct drop_request_msg
 	}
 };
 
+/* SPAWN_REQUEST (0x48), client to host: the client's death sequence has
+ * ended and it asks where to respawn.  `request` counts the client's
+ * requests (1..255, 0 skipped) so that a late answer to an earlier one
+ * is told apart.
+ */
+struct spawn_request_msg
+{
+	static constexpr std::size_t SIZE{1};
+	std::uint8_t request{};
+	void write(std::span<std::uint8_t, SIZE> buf) const
+	{
+		buf[0] = request;
+	}
+	[[nodiscard]]
+	static std::optional<spawn_request_msg> read(const std::span<const std::uint8_t> buf)
+	{
+		if (buf.size() != SIZE || buf[0] == 0)
+			return std::nullopt;
+		return spawn_request_msg{buf[0]};
+	}
+};
+
+/* SPAWN_SITE (0x49), host to one client: where it spawns.  `request` is
+ * the request answered, or SPAWN_REQUEST_JOIN for the first spawn of a
+ * join in progress (sent ahead of LEVEL_GO, unasked); `site` indexes the
+ * level's player start positions, SPAWN_SITE_NONE if the host has none to
+ * offer (the client chooses itself).
+ */
+constexpr std::uint8_t SPAWN_REQUEST_JOIN{0};
+constexpr std::uint8_t SPAWN_SITE_NONE{0xff};
+
+struct spawn_site_msg
+{
+	static constexpr std::size_t SIZE{2};
+	std::uint8_t request{};
+	std::uint8_t site{SPAWN_SITE_NONE};
+	void write(std::span<std::uint8_t, SIZE> buf) const
+	{
+		buf[0] = request;
+		buf[1] = site;
+	}
+	[[nodiscard]]
+	static std::optional<spawn_site_msg> read(const std::span<const std::uint8_t> buf)
+	{
+		if (buf.size() != SIZE)
+			return std::nullopt;
+		return spawn_site_msg{buf[0], buf[1]};
+	}
+};
+
 /* The host's decision on a pickup request, from what it knows about the
  * object and the requester.  Kept separate from the game so that the
  * order of the checks is tested.

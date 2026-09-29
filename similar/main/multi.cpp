@@ -3322,6 +3322,8 @@ void multi_prep_level_objects(const d_powerup_info_array &Powerup_info, const d_
 	MultiLevelInv_InitializeCount();
 	/* Every machine gives the level's powerups the same net ids. */
 	net_objects_level_start();
+	/* Spawn assignments and reservations belong to the old level. */
+	net_spawn_level_start();
 }
 
 void multi_prep_level_player(void)

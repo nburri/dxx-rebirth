@@ -3496,6 +3496,8 @@ void handle_client_ready(peer &p)
 		vmplayerptr(slot)->connected = player_connection_status::playing;
 	Netgame.players[slot].connected = player_connection_status::playing;
 	Netgame.players[slot].LastPacketTime = S.now;
+	/* Deathmatch: the site of its first spawn, ahead of LEVEL_GO. */
+	net_spawn_host_join(slot);
 	{
 		std::array<uint8_t, LEVEL_GO_SIZE> buf;
 		writer w{buf.data()};
@@ -4108,6 +4110,16 @@ void handle_reliable(peer &p, const session_msg type, const std::span<const uint
 	if (is_object_message(type))
 	{
 		receive_object_message(p, type, payload);
+		return;
+	}
+	/* Host-assigned spawns (net_spawn.cpp): a request only from a client
+	 * in the game; an answer also while this client still waits for
+	 * LEVEL_GO (the site of its join in progress comes just before it).
+	 */
+	if (type == session_msg::spawn_request || type == session_msg::spawn_site)
+	{
+		if (multi_i_am_master() ? peer_sends_game_data(p) : legacy_processing_allowed())
+			net_spawn_receive(slot, static_cast<uint8_t>(type), payload);
 		return;
 	}
 	if (multi_i_am_master())

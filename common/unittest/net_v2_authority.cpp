@@ -682,6 +682,25 @@ void test_wire()
 		CHECK(r && r->powerup_id == 3 && r->count == 0xdeadbeef);
 		CHECK(!drop_request_msg::read(std::span<const std::uint8_t>(b).first(4)));
 	}
+	{
+		std::array<std::uint8_t, spawn_request_msg::SIZE> b;
+		spawn_request_msg{17}.write(b);
+		const auto r{spawn_request_msg::read(b)};
+		CHECK(r && r->request == 17);
+		b[0] = 0;	/* 0 names a join in progress, never a request */
+		CHECK(!spawn_request_msg::read(b));
+		CHECK(!spawn_request_msg::read(std::span<const std::uint8_t>(b).first(0)));
+	}
+	{
+		std::array<std::uint8_t, spawn_site_msg::SIZE> b;
+		spawn_site_msg{SPAWN_REQUEST_JOIN, 5}.write(b);
+		const auto r{spawn_site_msg::read(b)};
+		CHECK(r && r->request == SPAWN_REQUEST_JOIN && r->site == 5);
+		spawn_site_msg{200, SPAWN_SITE_NONE}.write(b);
+		const auto n{spawn_site_msg::read(b)};
+		CHECK(n && n->request == 200 && n->site == SPAWN_SITE_NONE);
+		CHECK(!spawn_site_msg::read(std::span<const std::uint8_t>(b).first(1)));
+	}
 }
 
 /* A model of a game: one host and clients, each with its own copy of the

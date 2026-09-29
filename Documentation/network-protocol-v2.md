@@ -1277,7 +1277,9 @@ sequence has ended (`DoPlayerDead` path). The host chooses the spawn point
 `invul_time` fix (from `InvulAppear`), position 12, quaternion 8, then the
 client places its ship there and becomes alive; everyone else un-ghosts the
 ship (`multi_do_reappear` semantics). Granted spawn items come in the following
-`INVENTORY`.
+`INVENTORY`. Until stage 4 the client asks with `SPAWN_REQUEST` and the host
+answers with `SPAWN_SITE` (§8, "Host-assigned spawns"); the host's choice
+already counts the sites it assigned in the last 2.5 s as taken.
 
 ### 6.6 Position history and rewind
 
@@ -1449,7 +1451,8 @@ Message type numbering: session 0x01–0x1F (§4), `INVENTORY` 0x20,
 `BOSS_ACTION` 0x42, `STOLEN_ITEMS` 0x43, `BUDDY_STATE` 0x44, `SAVE_GAME` 0x45,
 `RESTORE_GAME` 0x46, `ESCAPED` 0x1E, `LEVEL_STATUS` 0x1D, `LEVEL_END` 0x1F.
 Stage 3 adds `OBJ_SETTLE` 0x47 and does not use `OBJ_AMMO` 0x23 or
-`DROP_FLAG_REQUEST` 0x3C (§8, "Stage 3 as implemented").
+`DROP_FLAG_REQUEST` 0x3C (§8, "Stage 3 as implemented"). Protocol 105 adds
+`SPAWN_REQUEST` 0x48 and `SPAWN_SITE` 0x49 (§8, "Host-assigned spawns").
 The table lives in `net_v2.h` as a `for_each_net_v2_message(VALUE)` macro
 with `(NAME, id, min_len, max_len, allowed_sender)` so the length and
 direction checks of §3.7 are table-driven like v1's `command_length`.
@@ -2358,6 +2361,65 @@ Differences from §6.1–§6.4 and decisions:
   real objects and the feel (the round trip before a pickup shows, the
   hidden object, the effects and messages), the settle correction, the
   mines of a death, and CTF/hoard rounds.
+
+#### Host-assigned spawns (ahead of stage 4, protocol 105)
+
+- **Problem.** Every machine chose its own respawn site
+  (`choose_spawn`, `gameseq.cpp`): it ranked the sites by the distance to
+  the nearest other ship *as it saw them* — remote ships delayed by the
+  interpolation, a ship that had just respawned not there yet — and knew
+  nothing of the site another machine had chosen a moment earlier. Two
+  players (or a player and one of the host's bots, which chose on the
+  host with their own RNG) who respawned within a few hundred
+  milliseconds of each other could take the same site, or two sites
+  next to each other.
+- **Now.** In a network deathmatch the host chooses every spawn
+  (`assign_spawn`): its own respawn, its bots' (`choose_bot_spawn`) and,
+  on request, each client's. The ranking is the original one
+  (`Netgame.SecludedSpawns` + 1 farthest sites, the draw with the
+  300-unit check, `common/main/spawn_site.h`), from the host's view: the
+  humans at their newest snapshot (`net_interp_newest_live_position`),
+  not at the interpolated place. The host remembers every site it
+  assigned for 2.5 s (`spawn_reservations`, long enough for the ship to
+  show up in its view): a reserved site counts as a ship standing there
+  for the distances of the other sites, and is left out while a free
+  site remains (bots: the free sites among those they can fly out of).
+  So requests in the same frame get distinct sites while there are
+  enough; with more players than sites the next one goes to the site
+  farthest from the ships and the other reserved sites. Reservations are
+  forgotten at level start.
+- **Messages.** `SPAWN_REQUEST` (0x48, reliable, client → host, 1 byte):
+  `request` u8, the client's counter (1–255, 0 skipped). `SPAWN_SITE`
+  (0x49, reliable, host → that client, 2 bytes): `request` u8 (the request
+  answered, or 0 for a join in progress), `site` u8 (index into the level's
+  player start positions; 0xFF: none to offer, the client chooses itself).
+  A request is accepted only from a client in the game, an answer also
+  while the client waits for `LEVEL_GO`. `similar/main/net_spawn.cpp`.
+- **Respawn.** When the client's death sequence may end
+  (`dead_player_frame`, `Death_sequence_aborted`) it sends
+  `SPAWN_REQUEST` and waits for the answer; `DoPlayerDead` →
+  `choose_spawn` then takes the assigned site. The delay before the
+  respawn is unchanged but for this round trip. If no answer comes within
+  1 s (`SPAWN_ANSWER_TIMEOUT`; the channel is reliable, so only on a link
+  about to time out) the client chooses itself as before, from what it
+  sees, and a late answer is ignored (its `request` does not match).
+- **Join in progress.** The host assigns the joiner's first site when it
+  gets `CLIENT_READY` and sends `SPAWN_SITE` with `request` 0 just ahead
+  of `LEVEL_GO` (ordered on the reliable stream); the joiner's
+  `StartLevel(1)` takes it.
+- **Unchanged.** The level start (`LEVEL_START` gives each slot its
+  own start position, distinct by construction), single player, coop
+  (own start site) and demo playback (nothing is asked). `MULTI_REAPPEAR`
+  still announces the spawn. Stage 4's `WANT_RESPAWN` / `PLAYER_SPAWN`
+  (§6.5) replace both messages and keep the host's choice and its
+  reservations.
+- **Tested** by `test-spawn-site`: the reservations (hold time, expiry,
+  reset), reserved sites counted as ships and left out while a free
+  site remains, unreachable reserved sites ignored, many simultaneous
+  requests on random layouts (distinct sites while there are enough, for
+  every `SecludedSpawns`), more requests than sites (the site farthest
+  from ships and reserved sites); `test-net-v2-authority`: round trips and
+  malformed sizes of both messages.
 
 ### Stage 4 — Firing, hits, damage, kills, respawn with lag compensation
 

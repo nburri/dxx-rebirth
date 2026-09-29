@@ -71,6 +71,11 @@ enum class session_msg : std::uint8_t
 	pickup_deny = 0x26,
 	drop_request = 0x3b,
 	obj_settle = 0x47,
+	/* Host-assigned spawns (section 8, "Host-assigned spawns",
+	 * net_v2_objects.h).
+	 */
+	spawn_request = 0x48,
+	spawn_site = 0x49,
 	/* v1 `endlevel_h` payload (without the upid byte), host to client. */
 	legacy_endlevel_host = 0x7c,
 	/* v1 `endlevel_c` payload (without upid and player number), client to

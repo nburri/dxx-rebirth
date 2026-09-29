@@ -5589,6 +5589,7 @@ class DXXProgram(DXXCommon):
 'similar/main/multibot.cpp',
 'similar/main/net_interp.cpp',
 'similar/main/net_objects.cpp',
+'similar/main/net_spawn.cpp',
 ),
 		transform_target=_apply_target_name,
 	),

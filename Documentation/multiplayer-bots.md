@@ -230,6 +230,12 @@ the table above:
   which `test-spawn-site` checks against a verbatim copy of the old code.
   `choose_spawn` still reseeds and draws the global `d_rand` (as the human
   does); only bot *decisions* use the bot's own RNG (§3.4).
+  In a network deathmatch the host assigns every spawn, its bots' included
+  (`choose_bot_spawn` shares the host's reservations of `assign_spawn`:
+  a site assigned in the last 2.5 s, to a bot, the host or a client,
+  counts as a ship and is left out while a free open site remains), so a
+  bot and a human respawning at the same moment no longer take the same
+  site (network-protocol-v2.md §8, "Host-assigned spawns").
 - **Not moved** (human-only presentation, bots get their own in B1/B3):
   the afterburner sound state of `do_afterburner_stuff`, the fusion charge
   sound and palette flash in `FireLaser`, the headlight drain.
@@ -926,7 +932,9 @@ host). Then `multi_send_player_deres(deres_explode, bot)` first brings the
 host's copy of the bot's inventory up to date and sends it; the host drops
 the eggs from that copy (`net_objects_host_drop_player_eggs`), explodes the
 ship and makes it a ghost. After 1–2.5 s (the bot's RNG) it respawns with
-`choose_spawn` / `place_player`, `multi_make_ghost_player` (spawn grants),
+`choose_spawn` / `place_player` (the host's assignment with its
+reservations, as for every spawn in a network deathmatch),
+`multi_make_ghost_player` (spawn grants),
 the spawn invulnerability (which the bot code also expires) and
 `MULTI_REAPPEAR` as the bot. No respawn during the reactor countdown. A bot
 killed during the countdown (D2 marks it `died_in_mine` with the kill)

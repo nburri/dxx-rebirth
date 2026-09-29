@@ -179,8 +179,9 @@ static inline player_ship_color get_team_color(const team_number tnum)
  * counts).
  * 104: bots B2 (the PLAYER_LIST bot flag, Documentation/multiplayer-bots.md
  * section 2.2).
+ * 105: host-assigned spawns (SPAWN_REQUEST, SPAWN_SITE).
  */
-constexpr std::uint16_t MULTI_PROTO_VERSION{104};
+constexpr std::uint16_t MULTI_PROTO_VERSION{105};
 // PROTOCOL VARIABLES AND DEFINES - END
 
 /* The network tick rate (positions per second, and the pacing of every
@@ -1009,6 +1010,13 @@ void net_interp_snap_to_newest(playernum_t pnum);
  */
 [[nodiscard]]
 bool net_interp_newest_position(playernum_t pnum, vms_vector &pos, fix &speed);
+/* Where player `pnum`'s newest snapshot of its current life has its ship
+ * (not the place it died, which net_interp_newest_position keeps until
+ * the next life's first snapshot) and the segment it is in: the host's
+ * spawn ranking.  False if there is none.
+ */
+[[nodiscard]]
+bool net_interp_newest_live_position(playernum_t pnum, vms_vector &pos, segnum_t &segnum);
 /* object_move_one, for an object net_interp_drives: the object
  * collisions along the path a remote ship was moved this frame
  * (phys_sweep_objects).
@@ -1102,6 +1110,39 @@ void net_objects_send_all_inventories();
 [[nodiscard]]
 bool net_objects_active();
 
+/* Host-assigned spawns in a network deathmatch (similar/main/net_spawn.cpp,
+ * Documentation/network-protocol-v2.md section 8, "Host-assigned
+ * spawns"): the host chooses every spawn (assign_spawn, gameseq.h); a
+ * client asks for its respawn (SPAWN_REQUEST) and spawns where the answer
+ * (SPAWN_SITE) says, or chooses itself if no answer came within
+ * SPAWN_ANSWER_TIMEOUT.  Nothing here acts outside a network deathmatch.
+ */
+/* Level start, every machine (after multi_prep_level_objects): forget
+ * assignments and reservations.
+ */
+void net_spawn_level_start();
+/* The local player's death sequence may end (dead_player_frame): false
+ * while a client waits for the host's answer (the request goes out on
+ * the first call), true once the answer came, it timed out, or no answer
+ * is needed.
+ */
+[[nodiscard]]
+bool net_spawn_ready();
+/* choose_spawn on a client: the site the host assigned to the local
+ * player (for the respawn it asked for, or at its join in progress), if
+ * one came; it is used once.
+ */
+[[nodiscard]]
+std::optional<unsigned> net_spawn_take_assigned();
+/* A SPAWN_REQUEST or SPAWN_SITE (net_v2_session.h) from `from` (a
+ * client, on the host; the host, on a client).
+ */
+void net_spawn_receive(playernum_t from, uint8_t type, std::span<const uint8_t> payload);
+/* The host: player `pnum` enters the level in progress (CLIENT_READY);
+ * assign its first spawn and send it ahead of LEVEL_GO.
+ */
+void net_spawn_host_join(playernum_t pnum);
+
 }
 #endif
 
@@ -1143,6 +1184,12 @@ static inline void net_interp_sweep_driven(const d_robot_info_array &, vmobjptri
 
 static inline void net_interp_carry_flash(vcobjptridx_t, vcobjptridx_t)
 {
+}
+
+[[nodiscard]]
+static inline bool net_spawn_ready()
+{
+	return true;
 }
 
 }
