@@ -487,6 +487,16 @@ std::optional<uint32_t> pick_explore_goal(const nav_graph &graph, const uint32_t
  * `max_steps` segments are passed.  A dead end (no exit along the way)
  * ends the walk where it is.  Without a velocity: the last known place.
  * The cost is at most `max_steps` times a segment's six edges.
+ *
+ * The PR #47 review: a point between two places is not always inside the
+ * level (from a last known place at the inner edge of an L-junction, the
+ * straight line to the next centre crosses the wall; so may a line
+ * between two centres in a twisted corridor), and a goal inside a wall
+ * left the bot stuck against it.  `clear(seg, from, to)` says whether
+ * the line from `from` (in segment `seg`) to `to` is open; the final leg
+ * is checked (once per walk), and if it is not, the point falls back to
+ * a place known to be inside: the centre of the segment it lies nearer,
+ * or where the leg began (the last known place, or a centre).
  */
 constexpr double PREDICT_MIN_ALIGN{-0.25};
 constexpr unsigned PREDICT_MAX_STEPS{12};
@@ -501,9 +511,9 @@ struct pursuit_prediction
 	bool dead_end{};
 };
 
-template <typename Passable>
+template <typename Passable, typename Clear>
 [[nodiscard]]
-pursuit_prediction predict_pursuit(const nav_graph &graph, const uint32_t seg, const vec3 &pos, const vec3 &vel, const double travel, Passable &&passable, const unsigned max_steps = PREDICT_MAX_STEPS)
+pursuit_prediction predict_pursuit(const nav_graph &graph, const uint32_t seg, const vec3 &pos, const vec3 &vel, const double travel, Passable &&passable, Clear &&clear, const unsigned max_steps = PREDICT_MAX_STEPS)
 {
 	pursuit_prediction r{seg, pos, 0, false};
 	auto heading{normalized(vel)};
@@ -548,10 +558,13 @@ pursuit_prediction predict_pursuit(const nav_graph &graph, const uint32_t seg, c
 		}
 		if (best_len >= left)
 		{
-			r.point = at + best_dir * left;
 			/* The segment the point is nearer the centre of. */
-			r.segment = left > best_len / 2 ? *best : cur;
-			r.steps = k + (left > best_len / 2 ? 1 : 0);
+			const bool next{left > best_len / 2};
+			r.point = at + best_dir * left;
+			r.segment = next ? *best : cur;
+			r.steps = k + (next ? 1 : 0);
+			if (!clear(cur, at, r.point))
+				r.point = next ? graph.position(*best) : at;
 			return r;
 		}
 		left -= best_len;
@@ -566,6 +579,14 @@ pursuit_prediction predict_pursuit(const nav_graph &graph, const uint32_t seg, c
 		r.steps = k + 1;
 	}
 	return r;
+}
+
+/* Without a wall check (the graph alone). */
+template <typename Passable>
+[[nodiscard]]
+pursuit_prediction predict_pursuit(const nav_graph &graph, const uint32_t seg, const vec3 &pos, const vec3 &vel, const double travel, Passable &&passable, const unsigned max_steps = PREDICT_MAX_STEPS)
+{
+	return predict_pursuit(graph, seg, pos, vel, travel, passable, [](uint32_t, const vec3 &, const vec3 &) { return true; }, max_steps);
 }
 
 /* Section 9.5: a spawn site a bot can fly out of.  A level may start

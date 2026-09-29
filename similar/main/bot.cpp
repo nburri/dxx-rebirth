@@ -364,6 +364,12 @@ struct bot_state
 	std::optional<b::secondary> missile_fire;
 	unsigned missile_volley{};
 	std::optional<uint32_t> last_missile, last_heavy, last_mine;
+	/* Section 9.10 and the PR #47 review: the pending missile is the
+	 * homing shot round the corner of a pursuit (b::release_aim::corner),
+	 * and when the last such shot was chosen (b::HOMING_CORNER_INTERVAL).
+	 */
+	bool corner_shot{};
+	std::optional<uint32_t> last_corner_homing;
 	/* Section 9.8: the volley under way (b::volley_size): its missile
 	 * and the rounds still to go.
 	 */
@@ -462,11 +468,11 @@ struct bot_state
 		/* The bot's last hit on an enemy (bot_take_damage). */
 		uint8_t hit_who{0xff};
 		uint32_t hit_tick{};
-		/* Hysteresis: after a pursuit of `ended_who` ended, none again
-		 * until the bot has seen it after the memory tick `ended_seen`.
+		/* Hysteresis: after the bot gave up a pursuit, none again (nor
+		 * a hunt) until it has seen that target again
+		 * (b::pursuit_block).
 		 */
-		uint8_t ended_who{0xff};
-		uint32_t ended_seen{};
+		b::pursuit_block ended;
 		/* Predicted places reached without finding the target. */
 		unsigned advances{};
 		/* The predicted place (b::predict_pursuit), when planned. */
@@ -597,6 +603,8 @@ struct bot_state
 		last_missile.reset();
 		last_heavy.reset();
 		last_mine.reset();
+		corner_shot = false;
+		last_corner_homing.reset();
 		heavy_target = 0xff;
 		tactics = {};
 		clear_path();
@@ -1265,7 +1273,22 @@ void plan_path(bot_state &bs, const object &obj, const uint32_t goal_seg, const 
 		bs.points.push_back(B.graph.position(steps[i].node));
 		bs.point_edges.emplace_back(from, side);
 	}
-	if (B.path.complete && goal_pos)
+	/* The PR #47 review: the goal's place replaces the centre of its
+	 * segment only if a straight line reaches it from there (from the
+	 * ship, already in that segment): a place inside a wall (a
+	 * predicted one) left the bot pressing against the wall.
+	 */
+	if (B.path.complete && goal_pos && !line_clear(obj, bs.points.empty() ? obj.pos : to_fixvec(B.graph.position(goal_seg)), bs.points.empty() ? obj.segnum : static_cast<segnum_t>(goal_seg), to_fixvec(*goal_pos), 0, false))
+	{
+		if (bot_log_on())
+			con_printf(CON_VERBOSE, "bots: '%s' goal place in segment %u out of reach: its centre instead", static_cast<const char *>(bs.cfg.name), goal_seg);
+		if (bs.points.empty())
+		{
+			bs.points.push_back(B.graph.position(goal_seg));
+			bs.point_edges.emplace_back(start, b::NAV_NO_SIDE);
+		}
+	}
+	else if (B.path.complete && goal_pos)
 	{
 		if (bs.points.empty())
 		{
@@ -2029,8 +2052,7 @@ void end_pursuit(bot_state &bs, const b::pursuit_end why, const uint32_t tick)
 		return;
 	if (bot_log_on())
 		con_printf(CON_VERBOSE, "bots: '%s' ends the pursuit of P#%u: %s (after %.1f s, %u predicted places reached)", static_cast<const char *>(bs.cfg.name), p.who, b::name_of(why), tick_seconds(tick - p.started), p.advances);
-	p.ended_who = p.who;
-	p.ended_seen = p.who < MAX_PLAYERS && bs.memory[p.who].valid ? bs.memory[p.who].tick : tick;
+	p.ended.on_end(why, p.who, p.who < MAX_PLAYERS && bs.memory[p.who].valid ? bs.memory[p.who].tick : tick);
 	p.active = false;
 	p.who = 0xff;
 	p.peek = false;
@@ -2078,7 +2100,7 @@ void update_pursuit(bot_state &bs, const object &obj, const uint32_t tick, const
 	const auto &m{bs.memory[w]};
 	if (bs.visible_now[w] || !m.valid || p.engaged_who != w)
 		return;
-	if (p.ended_who == w && m.tick <= p.ended_seen)
+	if (p.ended.blocks(w, m.tick))
 		return;
 	const auto v{pursuit_view_of(bs, obj, w, tick, memory_ticks)};
 	const auto reason{b::pursuit_start(v)};
@@ -2106,8 +2128,13 @@ void predict_pursued(bot_state &bs, const object &obj, const uint32_t tick)
 	const auto &m{bs.memory[p.who]};
 	const auto flags{obj.ctype.player_info.powerup_flags};
 	const double travel{b::pursuit_travel(b::length(m.vel), tick_seconds(tick - m.tick), p.advances)};
+	/* The PR #47 review: the predicted point's leg checked against the
+	 * walls (one fvi call), else a place inside (b::predict_pursuit).
+	 */
 	const auto r{b::predict_pursuit(B.graph, m.segment, m.pos, m.vel, travel, [flags](const uint32_t from, const b::nav_edge &e) {
 		return edge_passable(from, e, flags);
+	}, [&obj](const uint32_t seg, const vec3 &from, const vec3 &to) {
+		return line_clear(obj, to_fixvec(from), static_cast<segnum_t>(seg), to_fixvec(to), 0, false);
 	})};
 	p.dead_end = r.dead_end;
 	if (r.segment == m.segment || bs.dist.cost(r.segment))
@@ -2366,11 +2393,11 @@ void think(bot_state &bs, object &obj, const uint32_t tick)
 			seek = b::seek_utility(bs.armed, st.engage_weight * bs.tactics.engage_weight);
 	}
 	/* Section 9.10: pursuing its unseen target; or done with it (a
-	 * pursuit that ended: persistence over, weak, an ambush) until it is
-	 * seen again: no hunt for it.
+	 * pursuit given up: persistence over, weak, an ambush, searched)
+	 * until it is seen again: no hunt for it.
 	 */
 	const bool pursuing{bs.pursuit.active && bs.target == bs.pursuit.who && !target_visible};
-	const bool given_up{bs.target && !target_visible && !bs.pursuit.active && bs.pursuit.ended_who == *bs.target && bs.memory[*bs.target].tick <= bs.pursuit.ended_seen};
+	const bool given_up{bs.target && !target_visible && !bs.pursuit.active && bs.pursuit.ended.blocks(*bs.target, bs.memory[*bs.target].tick)};
 	const b::goal_inputs gin{
 		.has_target = bs.target.has_value() && !given_up,
 		.target_visible = target_visible,
@@ -3212,6 +3239,27 @@ void plan_heavy(bot_state &bs, const object &obj, const uint32_t tick, b::missil
  * target, a wall near it, the corner it hides behind) and released when
  * the outcome along the nose is favourable.
  */
+/* Section 9.10 and the PR #47 review: the homing shot round the corner
+ * of a pursuit is pending (chosen as such, the pursuit of the target
+ * still under way).
+ */
+[[nodiscard]]
+bool corner_shot_pending(const bot_state &bs)
+{
+	return bs.corner_shot && bs.missile == b::secondary::homing && bs.pursuit.active && bs.pursuit.who < MAX_PLAYERS && bs.target == bs.pursuit.who && bs.memory[bs.pursuit.who].valid;
+}
+
+/* Its aim: the corner's exit (the peek's aim, b::corner_approach_point),
+ * the place the target was last seen plus b::CORNER_AIM_AHEAD along its
+ * way.
+ */
+[[nodiscard]]
+vec3 corner_exit(const bot_state &bs, const vec3 &pos)
+{
+	const auto &m{bs.memory[bs.pursuit.who]};
+	return b::corner_approach_point(pos, m.pos, m.vel, 0).aim;
+}
+
 void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept *const p)
 {
 	auto &Objects = LevelUniqueObjectState.Objects;
@@ -3378,6 +3426,7 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 		m.target_visible = target_visible;
 		m.shot_clear = target_visible && bs.shot_clear;
 		m.pursuing = bs.pursuit.active && bs.target == bs.pursuit.who;
+		m.since_corner_homing = seconds_since(bs.last_corner_homing);
 		m.invulnerable_left = invulnerable_left;
 		m.cloaked = res_cloaked;
 		m.since_missile = seconds_since(bs.last_missile);
@@ -3454,6 +3503,7 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 		 * choice (whose interval runs from the volley's last round).
 		 */
 		std::optional<b::secondary> chosen;
+		bs.corner_shot = false;
 		if (bs.volley_left && bs.volley_missile)
 		{
 			if (m.since_missile < b::VOLLEY_GAP)
@@ -3482,6 +3532,16 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 		{
 			chosen = b::choose_secondary(m);
 			bs.light_why = b::light_check(m, chosen);
+			/* The PR #47 review: the corner shot, one try per
+			 * b::HOMING_CORNER_INTERVAL.
+			 */
+			if (chosen == b::secondary::homing && b::homing_round_corner(m))
+			{
+				bs.corner_shot = true;
+				bs.last_corner_homing = tick;
+				if (bot_log_on())
+					con_printf(CON_VERBOSE, "bots: '%s' aims a homing missile round the corner at P#%u (last seen %.0f units away %.1f s ago)", static_cast<const char *>(bs.cfg.name), bs.pursuit.who, m.target_distance, m.target_seen_ago);
+			}
 		}
 		else
 			bs.light_why = b::light_verdict::chosen;
@@ -3509,15 +3569,25 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 	const bool heavy{role == b::missile_role::heavy || role == b::missile_role::shaker};
 	/* Section 9.6: a heavy missile aimed at a wall or a corner. */
 	const bool indirect{heavy && bs.heavy_aim && bs.heavy_aim->kind != b::aim_kind::direct};
+	b::release_aim aim_at{b::release_aim::target};
 	if (role != b::missile_role::mine)
 	{
-		/* The target: in sight, or a smart missile's seen a moment ago.
-		 * In sight, the line of fire must be clear for every missile,
-		 * the smart one too (no teammate, reactor or robot first).
+		/* The target: in sight, or a smart missile's seen a moment ago,
+		 * or (the PR #47 review) the corner's exit for the homing shot
+		 * round it (b::release_aim_of).  In sight, the line of fire
+		 * must be clear for every missile, the smart one too (no
+		 * teammate, reactor or robot first).
 		 */
-		if (!target_pos || (!target_visible && role != b::missile_role::smart && !indirect))
-			return;
-		if (target_visible && !bs.shot_clear && !indirect)
+		aim_at = b::release_aim_of({
+			.role = role,
+			.has_target_pos = target_pos.has_value(),
+			.target_visible = target_visible,
+			.shot_clear = bs.shot_clear,
+			.indirect = indirect,
+			.corner_shot = bs.corner_shot,
+			.pursuing = corner_shot_pending(bs),
+		});
+		if (aim_at == b::release_aim::hold)
 			return;
 	}
 	double err{0}, impact{1e9}, target_closing{0};
@@ -3578,8 +3648,10 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 	}
 	else if (role != b::missile_role::mine)
 	{
-		/* Section 9.10: peeking round a corner, at its exit. */
-		err = b::angle_between(frame.f, target_visible || (bs.pursuit.active && bs.pursuit.peek) ? bs.face_dir : *target_pos - pos);
+		/* Section 9.10: round a corner, at its exit (peeking, the bot
+		 * faces it).
+		 */
+		err = b::angle_between(frame.f, aim_at == b::release_aim::corner ? corner_exit(bs, pos) - pos : target_visible || (bs.pursuit.active && bs.pursuit.peek) ? bs.face_dir : *target_pos - pos);
 		/* Where it bursts: the wall along the nose, or the target on
 		 * the way.
 		 */
@@ -4019,6 +4091,17 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 				bs.face_rate = {};
 				wanted = duck_velocity(pos, bs.pursuit.peek_point, max_speed * BOT_PEEK_SPEED);
 			}
+		}
+		/* The PR #47 review: the homing shot round the corner pending,
+		 * the bot turns to the corner's exit (flying its path) for the
+		 * release.
+		 */
+		else if (corner_shot_pending(bs))
+		{
+			if (bs.turning.phase == b::turn_phase::boost)
+				bs.turning.reset();
+			bs.face_dir = b::normalized(corner_exit(bs, pos) - pos);
+			bs.face_rate = {};
 		}
 		/* Out of sight, no boost toward a remembered place. */
 		else if (bs.turning.phase == b::turn_phase::boost)

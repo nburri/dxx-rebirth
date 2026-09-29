@@ -1545,11 +1545,60 @@ void test_pursuit()
 	CHECK(choose_goal(g) == goal_kind::hunt);
 }
 
+/* The PR #47 review: only a pursuit given up blocks the next one (and
+ * the hunt) until the target is seen again; a brief sighting (a peek
+ * and a duck back) lets the pursuit start again.
+ */
+void test_pursuit_block()
+{
+	CHECK(pursuit_end_gives_up(pursuit_end::expired));
+	CHECK(pursuit_end_gives_up(pursuit_end::weak));
+	CHECK(pursuit_end_gives_up(pursuit_end::ambush));
+	CHECK(pursuit_end_gives_up(pursuit_end::searched));
+	CHECK(!pursuit_end_gives_up(pursuit_end::seen));
+	CHECK(!pursuit_end_gives_up(pursuit_end::lost));
+	CHECK(!pursuit_end_gives_up(pursuit_end::other_target));
+	CHECK(!pursuit_end_gives_up(pursuit_end::died));
+	pursuit_block b;
+	CHECK(!b.blocks(3, 0));
+	/* Given up at the sighting of tick 100: blocked until seen after. */
+	b.on_end(pursuit_end::expired, 3, 100);
+	CHECK(b.blocks(3, 100));
+	CHECK(!b.blocks(3, 101));
+	CHECK(!b.blocks(4, 100));
+	/* Peek and duck: seen at 120 (a new pursuit), which ends "seen
+	 * again" at that tick; ducked back, the memory stays at 120: the
+	 * pursuit may start again (before the review it was blocked).
+	 */
+	CHECK(!b.blocks(3, 120));
+	b.on_end(pursuit_end::seen, 3, 120);
+	CHECK(!b.blocks(3, 120));
+	/* The block lifted for that target, not for another given up. */
+	b.on_end(pursuit_end::weak, 5, 130);
+	b.on_end(pursuit_end::seen, 3, 131);
+	CHECK(b.blocks(5, 130));
+	/* Gone, died, another target: no block. */
+	for (const auto e : {pursuit_end::lost, pursuit_end::died, pursuit_end::other_target})
+	{
+		pursuit_block c;
+		c.on_end(e, 2, 50);
+		CHECK(!c.blocks(2, 50));
+	}
+	/* Searched (a dead end) and an ambush block. */
+	for (const auto e : {pursuit_end::searched, pursuit_end::ambush})
+	{
+		pursuit_block c;
+		c.on_end(e, 2, 50);
+		CHECK(c.blocks(2, 50));
+	}
+}
+
 }
 
 int main()
 {
 	test_pursuit();
+	test_pursuit_block();
 	test_log_tuning_goals();
 	test_high_value_grab();
 	test_powerup_phase();

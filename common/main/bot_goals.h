@@ -1142,6 +1142,59 @@ constexpr std::optional<pursuit_end> pursuit_stop(const pursuit_view &v, const d
 	return std::nullopt;
 }
 
+/* After a pursuit ends, the bot neither pursues nor hunts that target
+ * again until it has seen it after the end (no flying back to the
+ * corner, no flip-flop), but only if it gave up: persistence over, weak,
+ * an ambush, searched to a dead end.  The PR #47 review: every end
+ * blocked it, "seen again" too, so a target that showed itself for a
+ * moment (a peek) and ducked back was neither pursued nor hunted while
+ * it stayed the target (and so no seek either).  Seen again, gone, the
+ * bot dead, another target: no block (and one left for that target is
+ * lifted: it was seen since, or a new pursuit could not have started).
+ */
+[[nodiscard]]
+constexpr bool pursuit_end_gives_up(const pursuit_end e)
+{
+	switch (e)
+	{
+		case pursuit_end::expired:
+		case pursuit_end::weak:
+		case pursuit_end::ambush:
+		case pursuit_end::searched:
+			return true;
+		case pursuit_end::seen:
+		case pursuit_end::lost:
+		case pursuit_end::other_target:
+		case pursuit_end::died:
+			break;
+	}
+	return false;
+}
+
+struct pursuit_block
+{
+	/* The target given up, and the memory tick of its last sighting
+	 * then: blocked until it is seen after that.
+	 */
+	uint8_t who{0xff};
+	uint32_t seen{};
+	constexpr void on_end(const pursuit_end why, const uint8_t target, const uint32_t memory_tick)
+	{
+		if (pursuit_end_gives_up(why))
+		{
+			who = target;
+			seen = memory_tick;
+		}
+		else if (who == target)
+			who = 0xff;
+	}
+	[[nodiscard]]
+	constexpr bool blocks(const uint8_t target, const uint32_t memory_tick) const
+	{
+		return who == target && memory_tick <= seen;
+	}
+};
+
 /* How far along its way the target is predicted: its last known speed
  * (at least PURSUIT_MIN_SPEED: a target that stopped behind the corner
  * is just round it) over the time since it was seen plus

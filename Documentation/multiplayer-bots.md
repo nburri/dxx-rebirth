@@ -2656,9 +2656,12 @@ replaces):
 and ends when the target is seen again (it engages), is gone (dead,
 disconnected), another target takes over, the time is up, the bot is
 weak (without the start margin: the hysteresis) or sees an ambush, dies,
-or has searched (below).  After an end the bot does not pursue nor hunt
-that target again until it has seen it again (`ended_seen`): no flying
-back to the corner, no flip-flop.  While pursuing:
+or has searched (below).  After it gave up (persistence over, weak, an
+ambush, searched) the bot does not pursue nor hunt that target again
+until it has seen it again (`pursuit_block`): no flying back to the
+corner, no flip-flop.  Seen again, gone, died or another target block
+nothing (a target that peeks and ducks back is pursued again).  While
+pursuing:
 
 - the target scores at least `PURSUIT_TARGET_SCORE` 0.9 (times its
   range factor, not faded by the confidence): it stays the target
@@ -2702,8 +2705,9 @@ path.  Trainee and Rookie fly straight at it.  A smart missile already
 went round corners (`SMART_SEEN_WITHIN`: the target seen within 1 s); now from Ace a
 homing missile is fired at the corner's exit too (`homing_round_corner`:
 pursuing, seen within 2 s, 40-150 units from the corner; the missile
-cooldown and the release's blast check as usual; while peeking the
-release aims along the nose at the exit).
+cooldown and the release's blast check as usual; one try per
+`HOMING_CORNER_INTERVAL` 6 s; the bot turns to the exit and the release
+aims at it, `release_aim_of`).
 
 **The log** (`-verbose`): `pursues P#n round a corner: hits landed |
 target damaged | stronger (for 8.0 s; last seen ... units away ... s
@@ -2731,6 +2735,47 @@ backwards, without velocity, the step bound.  `test-bot-weapons`
 
 **Unchanged:** the protocol, the reaction time, the seek of section 9.9
 (no target), a hunt that is no pursuit (it still forgets on arrival).
+
+**The PR #47 review.**
+
+1. *The corner shot never fired.*  `choose_secondary` chose the homing
+   missile round the corner only with the target out of sight, but the
+   release (`missile_tick`) held every missile at an unseen target but
+   the smart one and a heavy one aimed at a wall: the shot was chosen,
+   held for `MISSILE_PENDING_SECONDS` and chosen again, for ever.  Now
+   the release's decision is `release_aim_of` (`bot_weapons.h`: hold, at
+   the target, or at the corner): a homing missile chosen as the corner
+   shot (`bs.corner_shot`) goes while the pursuit of that target is under
+   way, aimed at the corner's exit (the last known place plus
+   `CORNER_AIM_AHEAD` along the target's way, the peek's aim); pending,
+   the bot turns to the exit while flying its path.  A corner shot is
+   chosen at most once per `HOMING_CORNER_INTERVAL` 6 s (counted from the
+   choice: an empty corner, or an aim not reached, is not tried again at
+   once).  Logged: `aims a homing missile round the corner at P#n`.
+2. *A brief sighting dropped the target.*  Every end of a pursuit, "seen
+   again" too, recorded the block, so a target that showed itself for a
+   moment and ducked back (its memory tick that of the end) was neither
+   pursued nor hunted, while it stayed the target (no seek either).  Now
+   only giving up blocks (`pursuit_end_gives_up`, `pursuit_block` in
+   `bot_goals.h`); the engagement the sighting renews restarts the
+   pursuit.
+3. *A predicted place inside a wall.*  `predict_pursuit` interpolates on
+   the straight line from the last known place (or a centre) to the next
+   centre; from the inner side of an L-junction that line crosses the
+   wall, and the goal lay inside it (the bot pressed against the wall).
+   Now the final leg is checked (`clear`, one fvi ray per strategy tick)
+   and, if blocked, the point falls back to the centre of the segment it
+   lies nearer, or where the leg began.  `plan_path` also replaces the
+   goal segment's centre with the goal's place only if a ray reaches it
+   from that centre (from the ship when already in the segment); else the
+   centre is the goal (logged: `goal place in segment n out of reach`).
+
+Tests: `test-bot-weapons` `test_release_aim` (the release's decision, the
+corner shot chosen and released, the interval), `test-bot-goals`
+`test_pursuit_block` (which ends block, the peek and duck),
+`test-bot-nav` `test_pursuit_prediction_l_junction` (the L-junction: the
+point inside the wall without the check, the fallbacks with it, an open
+line unchanged).
 
 ---
 
