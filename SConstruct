@@ -5068,6 +5068,11 @@ class DXXArchive(DXXCommon):
 		RuntimeTest('test-net-score-carry', (
 			'common/unittest/net_score_carry.cpp',
 			)),
+		# Test of the game world time's pause count and of the demo
+		# write check (world_time_pause.h).
+		RuntimeTest('test-world-time-pause', (
+			'common/unittest/world_time_pause.cpp',
+			)),
 			)
 	del RuntimeTest
 
