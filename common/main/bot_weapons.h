@@ -1365,6 +1365,10 @@ struct missile_situation
 	/* It faces the bot (its nose within 30 degrees). */
 	bool target_facing{};
 	double target_seen_ago{1e9};
+	/* Section 9.10: the bot pursues the target round a corner (a homing
+	 * missile at the corner's exit: homing_round_corner).
+	 */
+	bool pursuing{};
 	/* The same target already had its heavy missile (HEAVY_PER_TARGET). */
 	bool heavy_used_on_target{};
 	/* Seconds since the last missile, heavy missile and mine. */
@@ -1554,6 +1558,26 @@ constexpr bool heavy_usable_soon(const missile_situation &m)
 	return false;
 }
 
+/* Section 9.10: pursuing a target that went round a corner a moment ago
+ * (HOMING_CORNER_SEEN_WITHIN), from Ace a homing missile goes at the
+ * corner's exit (the bot faces it: corner_approach_point) and finds the
+ * target behind it (the game's homing takes what it sees ahead), as
+ * the smart missile's children do.  At the distance of a homing shot
+ * (HOMING_MIN_DISTANCE to HOMING_CORNER_MAX_DISTANCE from the place it
+ * was last seen); the release checks the blast along the nose.
+ */
+constexpr double HOMING_CORNER_SEEN_WITHIN{2};
+constexpr double HOMING_CORNER_MAX_DISTANCE{150};
+
+[[nodiscard]]
+constexpr bool homing_round_corner(const missile_situation &m)
+{
+	return m.pursuing && m.has_target && !m.target_visible && !m.cloaked && m.smarts >= 3 &&
+		m.ammo[static_cast<unsigned>(secondary::homing)] > 0 && m.smarts >= min_smarts(secondary::homing) &&
+		m.target_seen_ago <= HOMING_CORNER_SEEN_WITHIN &&
+		m.target_distance >= HOMING_MIN_DISTANCE && m.target_distance <= HOMING_CORNER_MAX_DISTANCE;
+}
+
 /* Section 4.5 and 9.4: the secondary the bot wants to fire now, if any.
  * Whether it is released (the aim, the blast along the nose) is
  * missile_release's.
@@ -1596,6 +1620,9 @@ constexpr std::optional<secondary> choose_secondary(const missile_situation &m)
 	if (usable(secondary::smart) && d <= SMART_MAX_DISTANCE && d >= MISSILE_MIN_DISTANCE &&
 		(open_shot || (!m.target_visible && m.target_seen_ago <= SMART_SEEN_WITHIN)))
 		return secondary::smart;
+	/* Section 9.10: a homing missile round the corner of a pursuit. */
+	if (homing_round_corner(m))
+		return secondary::homing;
 	if (!open_shot || d < MISSILE_MIN_DISTANCE || d > MISSILE_MAX_DISTANCE)
 		return std::nullopt;
 	/* Flash: at a target that faces the bot. */

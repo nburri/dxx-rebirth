@@ -790,10 +790,74 @@ void test_explore_core_and_ring()
 	CHECK(!pick_explore_goal(level.g, centre, below, [](uint32_t) -> std::optional<double> { return std::nullopt; }, [](uint32_t) { return 0.0; }));
 }
 
+/* Section 9.10: where a pursued target probably is.  A corridor along +x
+ * (nodes 0-4, 20 units apart) that bends to +y at node 4 (nodes 5-7, a
+ * dead end), with a side branch at node 2 to -y (node 8).
+ */
+void test_pursuit_prediction()
+{
+	nav_graph g;
+	g.begin(9);
+	const std::array<vec3, 9> at{{{0, 0, 0}, {20, 0, 0}, {40, 0, 0}, {60, 0, 0}, {80, 0, 0}, {80, 20, 0}, {80, 40, 0}, {80, 60, 0}, {40, -20, 0}}};
+	for (uint32_t i = 0; i < at.size(); ++i)
+		g.set_position(i, at[i]);
+	const std::array<std::pair<uint32_t, uint32_t>, 8> links{{{0, 1}, {1, 2}, {2, 3}, {3, 4}, {4, 5}, {5, 6}, {6, 7}, {2, 8}}};
+	for (uint32_t n = 0; n < at.size(); ++n)
+		for (const auto &[x, y] : links)
+		{
+			if (x == n)
+				g.add_edge(n, {y, 0, 20.0f});
+			else if (y == n)
+				g.add_edge(n, {x, 0, 20.0f});
+		}
+	g.finish();
+	const auto all{[](uint32_t, const nav_edge &) { return true; }};
+	const vec3 fast{60, 0, 0};
+	/* Along the corridor, past the branch. */
+	auto r{predict_pursuit(g, 1, at[1], fast, 55, all)};
+	CHECK(r.segment == 4 && !r.dead_end);
+	CHECK(near(r.point.x, 75) && near(r.point.y, 0));
+	r = predict_pursuit(g, 1, at[1], fast, 45, all);
+	CHECK(r.segment == 3 && near(r.point.x, 65));
+	/* Round the bend: the exit the corridor takes. */
+	r = predict_pursuit(g, 1, at[1], fast, 100, all);
+	CHECK(r.segment == 6 && near(r.point.x, 80) && near(r.point.y, 40));
+	/* To the dead end, not back. */
+	r = predict_pursuit(g, 1, at[1], fast, 1000, all);
+	CHECK(r.segment == 7 && r.dead_end);
+	/* Heading -y at node 2: the branch. */
+	r = predict_pursuit(g, 2, at[2], {0, -50, 0}, 30, all);
+	CHECK(r.segment == 8 && r.dead_end);
+	/* A closed door (3 to 4): the way ends at node 3. */
+	const auto door{[](const uint32_t from, const nav_edge &e) { return !(from == 3 && e.to == 4); }};
+	r = predict_pursuit(g, 1, at[1], fast, 100, door);
+	CHECK(r.segment == 3 && r.dead_end);
+	/* Heading back (-x): to node 0, a dead end. */
+	r = predict_pursuit(g, 1, at[1], {-40, 0, 0}, 100, all);
+	CHECK(r.segment == 0 && r.dead_end);
+	/* No velocity: the last known place. */
+	r = predict_pursuit(g, 3, {61, 2, 0}, {}, 100, all);
+	CHECK(r.segment == 3 && r.point == (vec3{61, 2, 0}) && r.steps == 0);
+	/* The walk is bounded: a corridor of 40 nodes. */
+	nav_graph line;
+	line.begin(40);
+	for (uint32_t i = 0; i < 40; ++i)
+	{
+		line.set_position(i, {i * 20.0, 0, 0});
+		if (i)
+			line.add_edge(i, {i - 1, 0, 20.0f});
+		if (i + 1 < 40)
+			line.add_edge(i, {i + 1, 1, 20.0f});
+	}
+	line.finish();
+	r = predict_pursuit(line, 0, {0, 0, 0}, fast, 1e6, all);
+	CHECK(r.steps == PREDICT_MAX_STEPS && r.segment == PREDICT_MAX_STEPS && !r.dead_end);
+}
 }
 
 int main()
 {
+	test_pursuit_prediction();
 	test_grid_against_dijkstra();
 	test_random_graphs();
 	test_passable_and_extra_cost();

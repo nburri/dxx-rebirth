@@ -1342,10 +1342,214 @@ void test_log_tuning_goals()
 	}
 }
 
+bool close_to(const double a, const double b)
+{
+	return std::abs(a - b) <= 1e-9 * std::max(1.0, std::abs(b));
+}
+
+/* Section 9.10: pursuit.  The persistence by skill and style, the
+ * conditions to start (an engagement just broken off, hits landed, the
+ * target damaged, the bot stronger), the break-off (weak for the style,
+ * an obvious ambush) and its hysteresis, the prediction's distance, and
+ * the goal choice while pursuing (the hunt beats collections; only a
+ * very close high-value grab).
+ */
+void test_pursuit()
+{
+	/* Persistence: longer with the skill; Aggressive long, Cautious
+	 * short; never beyond the target memory it replaces.
+	 */
+	for (unsigned k = 0; k < BOT_SKILL_COUNT; ++k)
+	{
+		const auto skill{static_cast<bot_skill>(k)};
+		if (k)
+			CHECK(pursuit_seconds(skill, bot_style::balanced) > pursuit_seconds(static_cast<bot_skill>(k - 1), bot_style::balanced));
+		CHECK(pursuit_seconds(skill, bot_style::aggressive) > pursuit_seconds(skill, bot_style::balanced));
+		CHECK(pursuit_seconds(skill, bot_style::balanced) > pursuit_seconds(skill, bot_style::collector));
+		CHECK(pursuit_seconds(skill, bot_style::collector) > pursuit_seconds(skill, bot_style::cautious));
+		for (unsigned s = 0; s < BOT_STYLE_COUNT; ++s)
+		{
+			const auto style{static_cast<bot_style>(s)};
+			CHECK(pursuit_seconds(skill, style) * 1000 <= effective_memory_ms(skill_of(skill), style_of(style)) + 0.5);
+		}
+	}
+	CHECK(pursuit_seconds(bot_skill::insane, bot_style::aggressive) == 14);
+	CHECK(pursuit_seconds(bot_skill::insane, bot_style::balanced) == 8);
+	CHECK(pursuit_seconds(bot_skill::insane, bot_style::cautious) == 4);
+	CHECK(pursuit_seconds(bot_skill::trainee, bot_style::balanced) == 2);
+
+	/* The start: just engaged, a hit landed. */
+	pursuit_view v;
+	v.skill = bot_skill::insane;
+	v.since_engaged = 0.4;
+	v.since_hit = 1;
+	CHECK(pursuit_start(v) == pursuit_reason::hits);
+	/* Not after a pause: the engagement is over. */
+	v.since_engaged = PURSUIT_ENGAGED_WITHIN + 0.1;
+	CHECK(pursuit_start(v) == pursuit_reason::none);
+	v.since_engaged = 0.4;
+	/* No hit: the target damaged (low, or hurt in this engagement). */
+	v.since_hit = PURSUIT_HIT_WINDOW + 1;
+	CHECK(pursuit_start(v) == pursuit_reason::none);
+	v.target_shields = 40;
+	CHECK(pursuit_start(v) == pursuit_reason::damaged);
+	v.target_shields = 90;
+	v.damage_seen = 20;
+	CHECK(pursuit_start(v) == pursuit_reason::damaged);
+	v.damage_seen = 5;
+	/* Stronger: by the style's threshold. */
+	v.advantage = 1.3;
+	CHECK(pursuit_start(v) == pursuit_reason::stronger);
+	v.advantage = 1.1;
+	CHECK(pursuit_start(v) == pursuit_reason::none);
+	v.style = bot_style::aggressive;
+	v.retreat_shields = 20;
+	CHECK(pursuit_start(v) == pursuit_reason::stronger);
+	v.style = bot_style::cautious;
+	v.retreat_shields = 55;
+	v.advantage = 1.4;
+	CHECK(pursuit_start(v) == pursuit_reason::none);
+	v.advantage = 1.6;
+	CHECK(pursuit_start(v) == pursuit_reason::stronger);
+
+	/* Weak for its style: Balanced (retreat 35, margin 5) does not start
+	 * below 50 but goes on down to 40 (hysteresis); Cautious (retreat
+	 * 55, margin 20) not below 85, breaks off below 75, and when behind.
+	 */
+	pursuit_view w;
+	w.since_engaged = 0.2;
+	w.since_hit = 0.5;
+	w.shields = 45;
+	CHECK(pursuit_start(w) == pursuit_reason::none);
+	CHECK(!pursuit_stop(w, 1));
+	w.shields = 38;
+	CHECK(pursuit_stop(w, 1) == pursuit_end::weak);
+	w.shields = 55;
+	CHECK(pursuit_start(w) == pursuit_reason::hits);
+	w.style = bot_style::cautious;
+	w.retreat_shields = 55;
+	w.shields = 80;
+	CHECK(pursuit_start(w) == pursuit_reason::none);
+	CHECK(!pursuit_stop(w, 1));
+	w.shields = 70;
+	CHECK(pursuit_stop(w, 1) == pursuit_end::weak);
+	w.shields = 95;
+	w.advantage = 0.9;
+	CHECK(pursuit_stop(w, 1) == pursuit_end::weak);
+	w.invulnerable = true;
+	w.shields = 10;
+	CHECK(!pursuit_stop(w, 1));
+	/* Aggressive: at its retreat threshold only. */
+	w = {};
+	w.style = bot_style::aggressive;
+	w.retreat_shields = 20;
+	w.since_engaged = 0.2;
+	w.since_hit = 0.5;
+	w.shields = 32;
+	CHECK(pursuit_start(w) == pursuit_reason::hits);
+	w.shields = 21;
+	CHECK(!pursuit_stop(w, 1));
+
+	/* An obvious ambush for a weakened bot: the target holds a heavy
+	 * missile, or a stronger enemy is near where it went.  At full
+	 * shields and ahead, it goes on.
+	 */
+	pursuit_view a;
+	a.since_engaged = 0.2;
+	a.since_hit = 0.5;
+	a.shields = 45;
+	a.retreat_shields = 20;
+	a.style = bot_style::aggressive;
+	a.target_heavy = true;
+	CHECK(pursuit_ambush(a));
+	CHECK(pursuit_start(a) == pursuit_reason::none);
+	CHECK(pursuit_stop(a, 1) == pursuit_end::ambush);
+	a.shields = 100;
+	a.advantage = 1.2;
+	CHECK(!pursuit_ambush(a));
+	CHECK(pursuit_start(a) == pursuit_reason::hits);
+	a.target_heavy = false;
+	a.stronger_near = 1;
+	a.advantage = 0.8;
+	CHECK(pursuit_ambush(a));
+	a.invulnerable = true;
+	CHECK(!pursuit_ambush(a));
+
+	/* Persistence over. */
+	pursuit_view p;
+	p.skill = bot_skill::hotshot;
+	CHECK(!pursuit_stop(p, 4.4));
+	CHECK(pursuit_stop(p, 4.6) == pursuit_end::expired);
+	p.style = bot_style::aggressive;
+	p.retreat_shields = 20;
+	CHECK(!pursuit_stop(p, 7.8));
+	CHECK(pursuit_stop(p, 7.9) == pursuit_end::expired);
+
+	/* How far along its way the target is predicted. */
+	CHECK(close_to(pursuit_travel(0, 0, 0), PURSUIT_MIN_SPEED * PURSUIT_LEAD_SECONDS));
+	CHECK(close_to(pursuit_travel(80, 1, 0), 120));
+	CHECK(close_to(pursuit_travel(80, 10, 0), 80 * PURSUIT_PREDICT_SECONDS));
+	CHECK(close_to(pursuit_travel(80, 1, 1), 120 + PURSUIT_ADVANCE));
+	CHECK(close_to(pursuit_travel(200, 10, 3), PURSUIT_PREDICT_MAX));
+
+	/* The goal while pursuing.  The target (range factor 0.8) broke the
+	 * line of sight: before, its score halved (0.5 x confidence) and the
+	 * hunt (0.8) lost to a plain collection (1.5 x 60 / 160 = 0.56 ... a
+	 * shield pack of 1.2 value) or any grab; now it scores 0.9.
+	 */
+	goal_inputs g;
+	g.has_target = true;
+	g.target_visible = false;
+	g.threatened = true;
+	g.shields = 80;
+	g.collect = 1.2;
+	g.collect_path = 100;
+	g.current = goal_kind::engage;
+	g.target_score = 0.5 * 0.8;
+	CHECK(choose_goal(g) == goal_kind::collect);
+	target_candidate tc{.id = 1, .visible = false, .confidence = 0.95, .distance = 80, .pursued = true};
+	g.target_score = target_score(tc, 350);
+	CHECK(g.target_score > 0.7);
+	g.pursuing = true;
+	CHECK(choose_goal(g) == goal_kind::hunt);
+	CHECK(close_to(goal_utility(g)[goal_kind::collect], 1.2 * PURSUIT_COLLECT));
+	/* A grab: only a high-value one very close. */
+	g.grab = true;
+	g.grab_value = 1;
+	g.grab_path = 15;
+	CHECK(goal_utility(g).collect_from != collect_source::grab);
+	CHECK(choose_goal(g) == goal_kind::hunt);
+	g.grab_value = GRAB_HIGH_VALUE;
+	g.grab_path = PURSUIT_GRAB_PATH + 10;
+	CHECK(choose_goal(g) == goal_kind::hunt);
+	g.grab_path = PURSUIT_GRAB_PATH - 5;
+	CHECK(goal_utility(g).collect_from == collect_source::grab);
+	CHECK(choose_goal(g) == goal_kind::collect);
+	/* Without the pursuit that grab was a detour of 60 units too. */
+	g.grab_path = 50;
+	g.pursuing = false;
+	CHECK(goal_utility(g).collect_from == collect_source::grab);
+	/* In danger the retreat (and shields) still win. */
+	g.pursuing = true;
+	g.grab = false;
+	g.shields = 20;
+	CHECK(choose_goal(g) == goal_kind::retreat);
+	/* The hunt, once chosen, is kept against a slightly better
+	 * collection (the goal's hysteresis).
+	 */
+	g.shields = 80;
+	g.current = goal_kind::hunt;
+	const double hunt{goal_utility(g)[goal_kind::hunt]};
+	g.pursuing = false;
+	g.collect = hunt * 1.1 / g.collect_weight;
+	CHECK(choose_goal(g) == goal_kind::hunt);
+}
+
 }
 
 int main()
 {
+	test_pursuit();
 	test_log_tuning_goals();
 	test_high_value_grab();
 	test_powerup_phase();

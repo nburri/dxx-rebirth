@@ -740,6 +740,10 @@ struct goal_inputs
 	double engage_weight{1};
 	double collect_weight{1};
 	bool collector{};
+	/* Section 9.10: the bot pursues its (unseen) target: collections
+	 * are short detours (PURSUIT_COLLECT, PURSUIT_GRAB_PATH).
+	 */
+	bool pursuing{};
 	/* The goal of the last strategy tick (hysteresis). */
 	std::optional<goal_kind> current;
 };
@@ -922,6 +926,244 @@ constexpr double seek_utility(const armed_level a, const double engage_weight)
 	return 0;
 }
 
+/* Section 9.10: pursuit.  The exp-22 playtest: "bots do not chase a
+ * target.  A bot can land multiple hits and hiding behind a corner
+ * makes it forget about you."  After an engagement a bot pursues a
+ * target that breaks the line of sight: to where it predicts it
+ * (predict_pursuit, bot_nav.h: the last known place, along the last
+ * known velocity and on through the exits the target took), for a
+ * time that grows with the skill and the style's appetite.  The
+ * pursued target keeps its score (PURSUIT_TARGET_SCORE), the hunt is
+ * worth about the engagement, and collections are short detours.
+ *
+ * It starts when the target was in sight and engaged at most
+ * PURSUIT_ENGAGED_WITHIN before, and the bot landed a hit on it within
+ * PURSUIT_HIT_WINDOW, or the target is damaged (shields below
+ * PURSUIT_DAMAGED_SHIELDS, or PURSUIT_DAMAGE_SEEN lost in this
+ * engagement), or the bot is stronger (fight_advantage from
+ * pursuit_stronger_advantage) -- and it is neither weak for its style
+ * (pursuit_weak) nor flying into an obvious ambush (pursuit_ambush).
+ */
+constexpr double PURSUIT_ENGAGED_WITHIN{1.5};
+constexpr double PURSUIT_HIT_WINDOW{5};
+constexpr double PURSUIT_DAMAGED_SHIELDS{60};
+constexpr double PURSUIT_DAMAGE_SEEN{15};
+/* A pursuit does not start this close to its break-off (hysteresis). */
+constexpr double PURSUIT_START_MARGIN{10};
+/* Weakened (below these shields, or behind), a bot does not follow a
+ * target that holds a heavy missile, or one with a stronger enemy near
+ * where it went.
+ */
+constexpr double PURSUIT_AMBUSH_SHIELDS{50};
+/* In pursuit a collection (plain or the phase's) and refuelling count
+ * this much, and a grab is taken only when high-value and within
+ * PURSUIT_GRAB_PATH of path.
+ */
+constexpr double PURSUIT_COLLECT{0.35};
+constexpr double PURSUIT_GRAB_PATH{30};
+
+enum class pursuit_reason : uint8_t
+{
+	none,
+	hits,
+	damaged,
+	stronger,
+};
+
+enum class pursuit_end : uint8_t
+{
+	seen,
+	expired,
+	weak,
+	ambush,
+	lost,
+	searched,
+	other_target,
+	died,
+};
+
+[[nodiscard]]
+constexpr const char *name_of(const pursuit_reason r)
+{
+	switch (r)
+	{
+		case pursuit_reason::hits:
+			return "hits landed";
+		case pursuit_reason::damaged:
+			return "target damaged";
+		case pursuit_reason::stronger:
+			return "stronger";
+		case pursuit_reason::none:
+			break;
+	}
+	return "none";
+}
+
+[[nodiscard]]
+constexpr const char *name_of(const pursuit_end e)
+{
+	switch (e)
+	{
+		case pursuit_end::seen:
+			return "seen again";
+		case pursuit_end::expired:
+			return "persistence over";
+		case pursuit_end::weak:
+			return "weak, breaks off";
+		case pursuit_end::ambush:
+			return "ambush";
+		case pursuit_end::lost:
+			return "target gone";
+		case pursuit_end::searched:
+			return "searched, nobody";
+		case pursuit_end::other_target:
+			return "other target";
+		case pursuit_end::died:
+			break;
+	}
+	return "died";
+}
+
+/* How long a bot pursues (seconds): by skill (Trainee to Insane), times
+ * the style's (Balanced, Aggressive, Cautious, Collector).  Insane:
+ * Balanced 8, Aggressive 14, Cautious 4, Collector 4.8; Trainee
+ * Balanced 2.  At most the skill's target memory times the style's
+ * chase_memory (effective_memory_ms), which the pursuit replaces.
+ */
+[[nodiscard]]
+constexpr double pursuit_seconds(const bot_skill k, const bot_style s)
+{
+	constexpr std::array<double, BOT_SKILL_COUNT> by_skill{{2, 3, 4.5, 6, 8}};
+	constexpr std::array<double, BOT_STYLE_COUNT> by_style{{1, 1.75, 0.5, 0.6}};
+	const auto ki{static_cast<unsigned>(k)};
+	const auto si{static_cast<unsigned>(s)};
+	return by_skill[ki < BOT_SKILL_COUNT ? ki : 2] * by_style[si < BOT_STYLE_COUNT ? si : 0];
+}
+
+/* The fight advantage from which a bot pursues for being stronger. */
+[[nodiscard]]
+constexpr double pursuit_stronger_advantage(const bot_style s)
+{
+	constexpr std::array<double, BOT_STYLE_COUNT> by_style{{1.25, 1.0, 1.5, 1.4}};
+	const auto i{static_cast<unsigned>(s)};
+	return by_style[i < BOT_STYLE_COUNT ? i : 0];
+}
+
+/* The shields above its retreat threshold below which a bot breaks off
+ * a pursuit (Cautious early; Aggressive at the threshold).
+ */
+[[nodiscard]]
+constexpr double pursuit_break_margin(const bot_style s)
+{
+	constexpr std::array<double, BOT_STYLE_COUNT> by_style{{5, 0, 20, 10}};
+	const auto i{static_cast<unsigned>(s)};
+	return by_style[i < BOT_STYLE_COUNT ? i : 0];
+}
+
+struct pursuit_view
+{
+	bot_skill skill{bot_skill::hotshot};
+	bot_style style{bot_style::balanced};
+	/* Seconds since the target was last in sight while engaged. */
+	double since_engaged{1e9};
+	/* Seconds since the bot's last hit on it. */
+	double since_hit{1e9};
+	double target_shields{100};
+	/* Shields it lost in sight of the bot in this engagement. */
+	double damage_seen{};
+	/* fight_advantage of the bot over it. */
+	double advantage{1};
+	double shields{100};
+	/* The style's retreat threshold (style_retreat_shields). */
+	double retreat_shields{35};
+	bool invulnerable{};
+	/* Stronger enemies known near where the target went. */
+	unsigned stronger_near{};
+	/* It is known to hold a mega or an earthshaker. */
+	bool target_heavy{};
+};
+
+/* Too weak to go on (or to start: `margin` more): below the style's
+ * retreat threshold plus its break margin; Cautious also when behind.
+ */
+[[nodiscard]]
+constexpr bool pursuit_weak(const pursuit_view &v, const double margin = 0)
+{
+	if (v.invulnerable)
+		return false;
+	if (v.shields < v.retreat_shields + pursuit_break_margin(v.style) + margin)
+		return true;
+	return v.style == bot_style::cautious && v.advantage < 1;
+}
+
+/* An obvious ambush for a weakened bot: the target holds a heavy
+ * missile, or a stronger enemy is near where it went.
+ */
+[[nodiscard]]
+constexpr bool pursuit_ambush(const pursuit_view &v)
+{
+	if (v.invulnerable)
+		return false;
+	const bool weakened{v.shields < PURSUIT_AMBUSH_SHIELDS || v.advantage < 1};
+	return weakened && (v.target_heavy || v.stronger_near > 0);
+}
+
+/* Why the bot starts to pursue its target that just broke the line of
+ * sight (none: it does not).
+ */
+[[nodiscard]]
+constexpr pursuit_reason pursuit_start(const pursuit_view &v)
+{
+	if (v.since_engaged > PURSUIT_ENGAGED_WITHIN)
+		return pursuit_reason::none;
+	if (pursuit_weak(v, PURSUIT_START_MARGIN) || pursuit_ambush(v))
+		return pursuit_reason::none;
+	if (v.since_hit <= PURSUIT_HIT_WINDOW)
+		return pursuit_reason::hits;
+	if (v.target_shields < PURSUIT_DAMAGED_SHIELDS || v.damage_seen >= PURSUIT_DAMAGE_SEEN)
+		return pursuit_reason::damaged;
+	if (v.advantage >= pursuit_stronger_advantage(v.style))
+		return pursuit_reason::stronger;
+	return pursuit_reason::none;
+}
+
+/* Why a pursuit under way for `elapsed` seconds ends now, if it does
+ * (the sighting, the target's death and the arrivals are the caller's).
+ */
+[[nodiscard]]
+constexpr std::optional<pursuit_end> pursuit_stop(const pursuit_view &v, const double elapsed)
+{
+	if (elapsed > pursuit_seconds(v.skill, v.style))
+		return pursuit_end::expired;
+	if (pursuit_weak(v))
+		return pursuit_end::weak;
+	if (pursuit_ambush(v))
+		return pursuit_end::ambush;
+	return std::nullopt;
+}
+
+/* How far along its way the target is predicted: its last known speed
+ * (at least PURSUIT_MIN_SPEED: a target that stopped behind the corner
+ * is just round it) over the time since it was seen plus
+ * PURSUIT_LEAD_SECONDS, at most PURSUIT_PREDICT_SECONDS of it, plus
+ * PURSUIT_ADVANCE for each predicted place reached without finding it;
+ * at most PURSUIT_PREDICT_MAX.
+ */
+constexpr double PURSUIT_MIN_SPEED{30};
+constexpr double PURSUIT_LEAD_SECONDS{0.5};
+constexpr double PURSUIT_PREDICT_SECONDS{2.5};
+constexpr double PURSUIT_ADVANCE{60};
+constexpr double PURSUIT_PREDICT_MAX{240};
+/* Predicted places reached without finding the target: searched. */
+constexpr unsigned PURSUIT_MAX_ADVANCES{3};
+
+[[nodiscard]]
+constexpr double pursuit_travel(const double speed, const double since_seen, const unsigned advances)
+{
+	const double t{std::min(std::max(since_seen, 0.0) + PURSUIT_LEAD_SECONDS, PURSUIT_PREDICT_SECONDS)};
+	return std::min(std::max(speed, PURSUIT_MIN_SPEED) * t + advances * PURSUIT_ADVANCE, PURSUIT_PREDICT_MAX);
+}
+
 /* Threatened, weak and not invulnerable: the bot would retreat. */
 [[nodiscard]]
 constexpr bool in_danger(const goal_inputs &in)
@@ -950,7 +1192,12 @@ constexpr double grab_goal_utility(const goal_inputs &in, const double fight)
 	if (!grab_applies(in))
 		return 0;
 	const double base{grab_utility(in.grab_value)};
-	if (in_danger(in) || in.weak)
+	if (in_danger(in))
+		return base;
+	/* Section 9.10: pursuing, only a high-value powerup very close. */
+	if (in.pursuing)
+		return in.grab_value >= GRAB_HIGH_VALUE && in.grab_path <= PURSUIT_GRAB_PATH ? std::max(fight * GRAB_DETOUR_FACTOR, ROAM_UTILITY * 2) : 0;
+	if (in.weak)
 		return base;
 	/* No enemy to fight or seek: the grab of section 9.8.  Seeking is a
 	 * hunt: a detour.  With a target known the grab is a detour whether
@@ -999,6 +1246,12 @@ inline goal_utilities goal_utility(const goal_inputs &in)
 		collect = in.phase_collect;
 		r.collect_from = collect_source::phase;
 	}
+	/* Section 9.10: pursuing, collections are short detours (in danger
+	 * the shields are not).
+	 */
+	const bool pursuit_limits{in.pursuing && !in_danger(in)};
+	if (pursuit_limits)
+		collect *= PURSUIT_COLLECT;
 	if (const double grab{grab_goal_utility(in, std::max(at(goal_kind::engage), at(goal_kind::hunt)))}; grab > 0 && grab >= collect)
 	{
 		collect = grab;
@@ -1006,7 +1259,7 @@ inline goal_utilities goal_utility(const goal_inputs &in)
 	}
 	at(goal_kind::collect) = collect;
 	double refuel{in.refuel * in.collect_weight};
-	if (in.target_visible && !in.collector)
+	if ((in.target_visible && !in.collector) || pursuit_limits)
 		refuel *= COLLECT_UNDER_FIRE;
 	at(goal_kind::refuel) = refuel;
 	/* Section 4.7: below the style's threshold, a threatened bot strongly

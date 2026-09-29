@@ -675,14 +675,28 @@ struct target_candidate
 	bool damaged_me_recently{};
 	bool low_shields{};
 	bool bounty{};
+	/* Section 9.10: the target the bot pursues round a corner (out of
+	 * sight: it scores at least PURSUIT_TARGET_SCORE, not half its
+	 * fading confidence).
+	 */
+	bool pursued{};
 };
+
+/* Section 9.10: an unseen target under pursuit scores this (a visible
+ * one 1).  B1 scored every unseen target at half its confidence, so at
+ * the moment it broke the line of sight a target lost half its score:
+ * any other enemy in sight (1 times its range factor, at least 0.3)
+ * beat it, and its hunt was worth half the engagement (the exp-19 log:
+ * a hunt of median 1.0 against the grab's 4-6.5).
+ */
+constexpr double PURSUIT_TARGET_SCORE{0.9};
 
 [[nodiscard]]
 inline double target_score(const target_candidate &c, const double awareness_radius)
 {
 	if (c.excluded)
 		return 0;
-	double s{c.visible ? 1.0 : c.confidence * 0.5};
+	double s{c.visible ? 1.0 : c.pursued ? std::max(PURSUIT_TARGET_SCORE, c.confidence * 0.5) : c.confidence * 0.5};
 	if (s <= 0)
 		return 0;
 	const double close{awareness_radius * 0.2};
@@ -1205,6 +1219,68 @@ constexpr double REVERSE_TURN_CLEARANCE{25};
 constexpr bool reverse_turn_has_room(const double clearance)
 {
 	return clearance >= REVERSE_TURN_CLEARANCE;
+}
+
+/* Section 9.10, corner clearing: a bot that pursues a target round a
+ * corner does not fly straight to the place it lost it (into the line
+ * of fire of a target waiting behind the corner).  It "slices the pie":
+ * it flies to a point short of the corner (`keep`) and swung wide of it
+ * (`swing`, away from the side the target turned to), and faces the
+ * corner's exit (the corner plus CORNER_AIM_AHEAD along the target's
+ * way), so that the view round the corner opens from a distance, with
+ * the guns on it.  Nearer the corner than `keep`, or with no way known
+ * (no velocity), it goes on (the path).
+ */
+constexpr double CORNER_APPROACH_RANGE{110};
+constexpr double CORNER_AIM_AHEAD{25};
+constexpr double CORNER_SWING_SHARE{0.8};
+/* The peek ends when the point is reached or after this long. */
+constexpr double CORNER_PEEK_REACHED{8};
+constexpr double CORNER_PEEK_SECONDS{1.5};
+
+struct corner_approach
+{
+	/* Peek: fly to `point` facing `aim`; else go on along the path. */
+	bool peek{};
+	vec3 point;
+	vec3 aim;
+};
+
+/* The distance kept from the corner by style (Balanced, Aggressive,
+ * Cautious, Collector); from Hotshot (below: 0, straight at it, as a
+ * beginner does).
+ */
+[[nodiscard]]
+constexpr double corner_keep(const bot_skill k, const bot_style s)
+{
+	if (static_cast<unsigned>(k) < static_cast<unsigned>(bot_skill::hotshot))
+		return 0;
+	constexpr std::array<double, BOT_STYLE_COUNT> by_style{{22, 14, 32, 26}};
+	const auto i{static_cast<unsigned>(s)};
+	return by_style[i < BOT_STYLE_COUNT ? i : 0];
+}
+
+[[nodiscard]]
+inline corner_approach corner_approach_point(const vec3 &bot, const vec3 &corner, const vec3 &target_vel, const double keep, const double swing_share = CORNER_SWING_SHARE)
+{
+	corner_approach r;
+	r.point = corner;
+	const auto way{normalized(target_vel)};
+	r.aim = corner + way * CORNER_AIM_AHEAD;
+	const auto to{corner - bot};
+	const double d{length(to)};
+	if (keep <= 0 || way == vec3{} || d <= keep || d > CORNER_APPROACH_RANGE)
+		return r;
+	const auto dir{to * (1 / d)};
+	/* The side the target turned to, across the bot's approach. */
+	const auto across{way - dir * dot(way, dir)};
+	const double a{length(across)};
+	vec3 swing{};
+	if (a > 0.2)
+		swing = across * (-keep * swing_share / a);
+	r.peek = true;
+	r.point = corner - dir * keep + swing;
+	return r;
 }
 
 /* Section 9.5: a hit from an attacker the bot does not see (behind it,

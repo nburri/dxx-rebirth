@@ -979,10 +979,73 @@ void test_keep_moving_in_turn()
 	CHECK(std::abs(both.z - 10) < 1e-9);
 }
 
+/* Section 9.10: the pursued target keeps its score out of sight (not
+ * lost to any other enemy in sight), and the corner approach: short of
+ * the corner, swung wide of the side the target turned to, facing the
+ * corner's exit; from Hotshot, by style.
+ */
+void test_pursuit_target_and_corner()
+{
+	const double aw{350};
+	/* It broke the line of sight 100 units away; another enemy is in
+	 * sight 250 units away.
+	 */
+	target_candidate lost{.id = 1, .visible = false, .confidence = 0.9, .distance = 100};
+	target_candidate other{.id = 2, .visible = true, .distance = 250};
+	std::vector<target_candidate> c{lost, other};
+	CHECK(choose_target(c, uint8_t{1}, aw) == 2);
+	c[0].pursued = true;
+	CHECK(near(target_score(c[0], aw), PURSUIT_TARGET_SCORE * (1 - 0.7 * (100 - 70) / 280.0), 1e-12));
+	CHECK(choose_target(c, uint8_t{1}, aw) == 1);
+	/* An enemy close by that just hit the bot still takes over. */
+	c[1].distance = 40;
+	c[1].damaged_me_recently = true;
+	CHECK(choose_target(c, uint8_t{1}, aw) == 2);
+	/* Pursued, the score does not fade with the confidence. */
+	c[0].confidence = 0.05;
+	CHECK(target_score(c[0], aw) > 0.7);
+
+	/* The corner: the target went round it to +x; the bot comes along
+	 * +z, 80 units short.
+	 */
+	CHECK(corner_keep(bot_skill::trainee, bot_style::aggressive) == 0);
+	CHECK(corner_keep(bot_skill::rookie, bot_style::cautious) == 0);
+	const double keep{corner_keep(bot_skill::hotshot, bot_style::balanced)};
+	CHECK(keep > 0);
+	CHECK(corner_keep(bot_skill::insane, bot_style::aggressive) < keep);
+	CHECK(corner_keep(bot_skill::insane, bot_style::cautious) > keep);
+	const vec3 bot{0, 0, 0}, corner{0, 0, 80};
+	const auto a{corner_approach_point(bot, corner, {60, 0, 0}, keep)};
+	CHECK(a.peek);
+	/* Short of the corner (keep along the approach), swung to -x (away
+	 * from the side it turned to), facing the exit beyond the corner.
+	 */
+	CHECK(near(a.point.z, 80 - keep, 1e-9));
+	CHECK(near(a.point.x, -keep * CORNER_SWING_SHARE, 1e-9));
+	CHECK(distance(a.point, corner) > keep);
+	CHECK(near(a.aim.x, CORNER_AIM_AHEAD, 1e-9) && near(a.aim.z, 80, 1e-9));
+	/* From the peek point the exit is in front, off the approach line. */
+	const auto look{normalized(a.aim - a.point)};
+	CHECK(look.x > 0.5 && look.z > 0);
+	/* A target flying straight on: no swing. */
+	const auto s{corner_approach_point(bot, corner, {0, 0, 60}, keep)};
+	CHECK(s.peek && near(s.point.x, 0, 1e-9) && near(s.point.z, 80 - keep, 1e-9));
+	/* The share of the swing (the probes: full, half, none). */
+	const auto h{corner_approach_point(bot, corner, {60, 0, 0}, keep, 0)};
+	CHECK(h.peek && near(h.point.x, 0, 1e-9));
+	/* Close to the corner, too far from it, a beginner, no way known:
+	 * no peek, on along the path.
+	 */
+	CHECK(!corner_approach_point({0, 0, 80 - keep + 1}, corner, {60, 0, 0}, keep).peek);
+	CHECK(!corner_approach_point({0, 0, 80 - CORNER_APPROACH_RANGE - 1}, corner, {60, 0, 0}, keep).peek);
+	CHECK(!corner_approach_point(bot, corner, {60, 0, 0}, 0).peek);
+	CHECK(!corner_approach_point(bot, corner, {}, keep).peek);
+}
 }
 
 int main()
 {
+	test_pursuit_target_and_corner();
 	test_intercept();
 	test_aim_error();
 	test_aim_lead();

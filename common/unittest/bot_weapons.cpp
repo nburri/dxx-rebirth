@@ -1767,10 +1767,56 @@ void test_dump_blast()
 	}
 }
 
+/* Section 9.10: a homing missile round the corner of a pursuit (from
+ * Ace, the target seen a moment ago, at a homing distance).
+ */
+void test_homing_round_corner()
+{
+	missile_situation m;
+	m.ammo[static_cast<unsigned>(secondary::homing)] = 4;
+	m.smarts = 3;
+	m.has_target = true;
+	m.target_visible = false;
+	m.pursuing = true;
+	m.target_seen_ago = 1;
+	m.target_distance = 80;
+	CHECK(homing_round_corner(m));
+	CHECK(choose_secondary(m) == secondary::homing);
+	CHECK(light_check(m, choose_secondary(m)) == light_verdict::chosen);
+	/* Not pursuing: nothing to fire at unseen. */
+	m.pursuing = false;
+	CHECK(!choose_secondary(m));
+	m.pursuing = true;
+	/* Below Ace, too long ago, too close, too far, cloaked, in the
+	 * cooldown: no.
+	 */
+	m.smarts = 2;
+	CHECK(!choose_secondary(m));
+	m.smarts = 4;
+	m.target_seen_ago = HOMING_CORNER_SEEN_WITHIN + 0.5;
+	CHECK(!choose_secondary(m));
+	m.target_seen_ago = 0.5;
+	m.target_distance = HOMING_MIN_DISTANCE - 5;
+	CHECK(!choose_secondary(m));
+	m.target_distance = HOMING_CORNER_MAX_DISTANCE + 5;
+	CHECK(!choose_secondary(m));
+	m.target_distance = 80;
+	m.cloaked = true;
+	CHECK(!choose_secondary(m));
+	m.cloaked = false;
+	m.since_missile = 0.1;
+	CHECK(!choose_secondary(m));
+	m.since_missile = 1e9;
+	/* In sight it is the normal choice. */
+	m.target_visible = true;
+	m.shot_clear = true;
+	CHECK(!homing_round_corner(m));
+}
 }
 
 int main()
 {
+	test_homing_round_corner();
 	test_log_tuning_missiles();
 	test_volleys();
 	test_heavy_boldness();

@@ -2574,6 +2574,164 @@ the Insane pair and `volley_cone`.  New `test-segment-depths`.
 **Unchanged:** the protocol, clients, the human's firing, the death dump,
 the aim, the heavy missiles' release rules and cooldowns.
 
+### 9.10 After the v0.61-exp-22 playtest: pursuit round corners
+
+The playtest (two humans, four bots).  The user: "bots do not chase a
+target.  A bot can land multiple hits and hiding behind a corner makes
+it forget about you."  Files: `bot_brain.h` (the target's score, the
+corner approach), `bot_goals.h` (the pursuit's rules, the goal choice),
+`bot_nav.h` (the prediction), `bot_weapons.h` (a homing missile round
+the corner), `bot.cpp`.
+
+**Why** (the code before this section; the exp-19 log of section 9.9,
+2589 summary lines, for the numbers).
+
+1. *The score halves at the corner* (`target_score`, `bot_brain.h:685`
+   before: `visible ? 1 : confidence x 0.5`, the confidence falling
+   linearly to 0 over the memory time).  The moment a target broke the
+   line of sight its score halved, so its hunt (`bot_goals.h:981-985`,
+   2 x score x the weights, the engagement's formula) was worth half the
+   engagement and faded from there: in the log a hunt of median 1.0 one
+   second after the line broke, against a plain collection or a grab
+   (section 9.9: 4-6.5 before, a detour of 1.3 times the fight now).
+   While a target was known but out of sight the bots collected 359 s,
+   hunted 177 s and retreated 83 s.
+2. *Another enemy in sight takes over at once* (`choose_target`,
+   `bot.cpp:1977`): the unseen target's 0.5 x confidence x range, with
+   the hysteresis 1.2 at most 0.6, lost to any visible enemy (1 x its
+   range factor, 0.3-1).  Of the 34 times a target the bot engaged broke
+   the line of sight, 7 ended with another target.
+3. *Reaching the corner forgets the target* (`follow_path`,
+   `bot.cpp:2356`): a hunt arriving at the last known place cleared the
+   memory of the target.  That place is where the target was last seen:
+   the corner itself.  The bot flew to the corner, found nobody there
+   (the target had gone on round it) and forgot it; 12 of those 34
+   out-of-sight spells ended so, the target a median 38 units away.
+   Afterwards the seek of section 9.9 (`bot.cpp:2100`: armed, no target)
+   had nothing to seek either, the memory being cleared.
+4. *No way on*: the hunt went to the last known segment and place
+   (`bot.cpp:2201`), the velocity ignored; the seek likewise.
+5. *Not the cause*: the reaction delay (`bot.cpp:3562`, the percept a
+   reaction time late) costs a reaction time at each reappearance before
+   the bot engages, as for a human, but clears nothing; the memory stays
+   while out of sight (`perceive` updates it only in sight).
+
+In the log, one second after an engaged target broke the line of sight
+the bots hunted 24 times, collected 8, retreated 1; the spell out of
+sight lasted a median 2 s and ended with the target seen again 15
+times, forgotten 12, another target 7.
+
+**Pursuit** (`pursuit_start`, `pursuit_stop`, `pursuit_seconds`,
+`update_pursuit` in `bot.cpp`).  At each strategy tick, before the
+target choice, a bot whose target was in sight while it engaged (or
+hunted) it at most `PURSUIT_ENGAGED_WITHIN` 1.5 s ago and is now out of
+sight starts a pursuit if
+
+- it landed a hit on it within `PURSUIT_HIT_WINDOW` 5 s (a bot's hit
+  on a bot, recorded in `bot_take_damage`), or
+- the target is damaged: shields below `PURSUIT_DAMAGED_SHIELDS` 60, or
+  `PURSUIT_DAMAGE_SEEN` 15 lost since the engagement began (a human's
+  hits show as its shields), or
+- the bot is stronger: `fight_advantage` from 1.25 (Aggressive 1.0,
+  Cautious 1.5, Collector 1.4),
+
+and it is not weak for its style (`pursuit_weak`: shields below the
+retreat threshold plus the style's margin, Balanced 5, Aggressive 0,
+Cautious 20, Collector 10, plus `PURSUIT_START_MARGIN` 10 to start;
+Cautious also when behind), nor flying into an obvious ambush
+(`pursuit_ambush`: below 50 shields or behind, and the target is known
+to hold a mega or earthshaker, or a stronger enemy is known near where
+it went).  Invulnerable, neither applies.
+
+It lasts (seconds; `pursuit_seconds`, at most the target memory it
+replaces):
+
+| | Trainee | Rookie | Hotshot | Ace | Insane |
+|---|---|---|---|---|---|
+| Balanced | 2 | 3 | 4.5 | 6 | 8 |
+| Aggressive (x 1.75) | 3.5 | 5.25 | 7.9 | 10.5 | 14 |
+| Cautious (x 0.5) | 1 | 1.5 | 2.25 | 3 | 4 |
+| Collector (x 0.6) | 1.2 | 1.8 | 2.7 | 3.6 | 4.8 |
+
+and ends when the target is seen again (it engages), is gone (dead,
+disconnected), another target takes over, the time is up, the bot is
+weak (without the start margin: the hysteresis) or sees an ambush, dies,
+or has searched (below).  After an end the bot does not pursue nor hunt
+that target again until it has seen it again (`ended_seen`): no flying
+back to the corner, no flip-flop.  While pursuing:
+
+- the target scores at least `PURSUIT_TARGET_SCORE` 0.9 (times its
+  range factor, not faded by the confidence): it stays the target
+  against a far enemy in sight, not against a close one that just hit
+  the bot, and its hunt is worth about the engagement;
+- a collection (plain, the phase's) and refuelling count
+  `PURSUIT_COLLECT` 0.35, and a grab is taken only when high-value and
+  within `PURSUIT_GRAB_PATH` 30 units of path (then 1.3 times the
+  hunt); in danger (retreat) the shields are taken as before;
+- the goal is where the target probably is now (`predict_pursuit`,
+  `bot_nav.h`): from its last known place, a walk through the segment
+  graph along its last known velocity, at each segment the passable
+  exit whose centre lies best along the way (at least -0.25: a bending
+  corridor is followed, never back to a segment passed), the way turning
+  half toward each exit taken, for `pursuit_travel` units (its speed, at
+  least 30 units/s, over the time since it was seen plus 0.5 s, at most
+  2.5 s of it, plus 60 units per predicted place already reached, at
+  most 240), at most `PREDICT_MAX_STEPS` 12 segments (72 edges at most
+  per strategy tick); a place out of the bot's reach (the path costs of
+  the tick) falls back to the last known one.  The path is planned again
+  when the predicted segment changes, at most every half second (as the
+  hunt), and each A* keeps its node limit;
+- reaching a predicted place without finding the target, the bot goes
+  on to the next (further along the way), up to `PURSUIT_MAX_ADVANCES`
+  3 places or a dead end: searched, the target forgotten (the old
+  arrival rule, now only then).
+
+**Corner clearing** (`corner_approach_point`, `corner_keep`,
+`plan_corner`).  From Hotshot, within `CORNER_APPROACH_RANGE` 110 units
+of the corner (the last known place), once per pursuit, the bot "slices
+the pie": it flies (at 0.7 of its top speed) to a point `keep` short of
+the corner along its approach (Balanced 22, Aggressive 14, Cautious 32,
+Collector 26 units) and swung 0.8 `keep` to the outside of the turn
+(away from the side the target went to), facing the corner's exit (the
+corner plus 25 units along the target's way): the view round the corner
+opens from a distance, the guns on it, and the target coming back round
+is in the field of view.  The point must be reachable in a straight line
+(`line_clear` with the ship's radius: the full swing, half, none; at
+most three probes, once).  The peek ends there or after 1.5 s; then the
+path.  Trainee and Rookie fly straight at it.  A smart missile already
+went round corners (`SMART_SEEN_WITHIN`: the target seen within 1 s); now from Ace a
+homing missile is fired at the corner's exit too (`homing_round_corner`:
+pursuing, seen within 2 s, 40-150 units from the corner; the missile
+cooldown and the release's blast check as usual; while peeking the
+release aims along the nose at the exit).
+
+**The log** (`-verbose`): `pursues P#n round a corner: hits landed |
+target damaged | stronger (for 8.0 s; last seen ... units away ... s
+ago at ... units/s; shields ... against ..., advantage ...)`, `ends the
+pursuit of P#n: seen again | persistence over | weak, breaks off |
+ambush | target gone | searched, nobody | other target | died (after
+... s, n predicted places reached)`, `clears the corner where P#n went:
+peeks from 22 units, swing 18`, and ` pursuit` in the summary line's
+goal brackets.
+
+**Tests.**  `test-bot-goals` `test_pursuit`: the persistence table
+(monotonic by skill, Aggressive > Balanced > Collector > Cautious,
+within the memory), each start condition and its absence, the break-off
+by style with its hysteresis, the ambush, the expiry, the predicted
+distance, and the goal choice while pursuing (the hunt over a plain
+collection that beat it before, the grab limit, the retreat, the goal's
+hysteresis).  `test-bot-brain` `test_pursuit_target_and_corner`: the
+pursued target kept against a far visible enemy, not against a close
+attacker, and the corner approach (short, swung to the outside, the aim
+at the exit, no peek close by, far away, for a beginner or without a
+way).  `test-bot-nav` `test_pursuit_prediction`: along a corridor past
+a branch, round a bend, to a dead end, into a branch, a closed door,
+backwards, without velocity, the step bound.  `test-bot-weapons`
+`test_homing_round_corner`.
+
+**Unchanged:** the protocol, the reaction time, the seek of section 9.9
+(no target), a hunt that is no pursuit (it still forgets on arrival).
+
 ---
 
 ## 10. Risks
