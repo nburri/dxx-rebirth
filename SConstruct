@@ -5084,6 +5084,18 @@ class DXXArchive(DXXCommon):
 			'common/unittest/window_close.cpp',
 			'common/arch/sdl/window.cpp',
 			)),
+		# Test of the movement recording format: record round trips, the
+		# chunks, a file cut short or damaged, the tick schedule
+		# (movement_record_format.h, movement_record_reader.h).
+		RuntimeTest('test-movement-record', (
+			'common/unittest/movement_record.cpp',
+			)),
+		# Not a test: the dump tool of the movement recordings
+		# (Documentation/movement-recording.md), a standalone program
+		# built with the same switch as the plain tests.
+		RuntimeTest('movrec-dump', (
+			'common/tools/movrec_dump.cpp',
+			)),
 			)
 	del RuntimeTest
 
@@ -5453,6 +5465,7 @@ class DXXProgram(DXXCommon):
 'similar/main/mglobal.cpp',
 'similar/main/mission.cpp',
 'similar/main/morph.cpp',
+'similar/main/movement_record.cpp',
 'similar/main/newdemo.cpp',
 'similar/main/newmenu.cpp',
 'similar/main/object.cpp',

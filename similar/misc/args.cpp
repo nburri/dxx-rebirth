@@ -252,6 +252,12 @@ static void ReadCmdArgs(Inilist &ini, Arglist &&Args)
 			GameArg.SysNoMovies 		= 1;
 		else if (!d_stricmp(p, "-autodemo"))
 			CGameArg.SysAutoDemo = true;
+		else if (!d_stricmp(p, "-recordmoves"))
+			CGameArg.SysRecordMoves = true;
+		else if (!d_stricmp(p, "-recordmoves-bots"))
+			CGameArg.SysRecordMovesBots = true;
+		else if (!d_stricmp(p, "-recordmoves-rate"))
+			CGameArg.SysRecordMovesRate = static_cast<uint8_t>(std::clamp<long>(arg_integer(pp, end), 10, 60));
 
 	// Control Options
 

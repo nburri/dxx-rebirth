@@ -72,6 +72,8 @@
 #include "weapon.h"
 #include "console.h"
 #include "byteutil.h"
+#include "kconfig.h"
+#include "controls.h"
 
 #include "compiler-range_for.h"
 #include "d_enumerate.h"
@@ -1756,6 +1758,11 @@ void set_input_for_host(peer &p)
 #if DXX_BUILD_DESCENT == 2
 	if (+(player_info.powerup_flags & player_flag::headlight_on))
 		in.flags |= flag_bit(input_flag::headlight);
+	/* Section 5.3 bit 1: the afterburner pushes this tick (the host's
+	 * movement recording reads it, Documentation/movement-recording.md).
+	 */
+	if (Controls.state.afterburner && +(player_info.powerup_flags & player_flag::afterburner) && Afterburner_charge > 0 && Player_dead_state == player_dead_state::no)
+		in.flags |= flag_bit(input_flag::afterburner);
 #endif
 	in.pose = pose_of(plrobj);
 	in.weapon = static_cast<uint8_t>((underlying_value(player_info.Primary_weapon.get_active()) & 0x0f) | ((underlying_value(player_info.Secondary_weapon.get_active()) & 0x0f) << 4));
@@ -4931,6 +4938,16 @@ void host_end_level()
 bool host_slot_has_peer(const playernum_t slot)
 {
 	return slot < MAX_PLAYERS && S.peers[slot].ph != peer::phase::none;
+}
+
+int host_input_afterburner(const playernum_t slot)
+{
+	if (slot >= MAX_PLAYERS || slot == Player_num)
+		return -1;
+	const auto &st{S.inputs[slot]};
+	if (!st.valid)
+		return -1;
+	return st.input.has_flag(input_flag::afterburner) ? 1 : 0;
 }
 
 void host_remove_player(const playernum_t slot, const kick_player_reason why)

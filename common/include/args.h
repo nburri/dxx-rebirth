@@ -136,6 +136,14 @@ struct CArg : prohibit_void_ptr<>
 	uint16_t MplUdpMyPort;
 	/* -bots N: the initial number of bots in the host setup menu. */
 	uint8_t MplBots;
+	/* -recordmoves: record how the players move
+	 * (Documentation/movement-recording.md); -recordmoves-rate N the
+	 * samples per second (10-60, 0 = 30); -recordmoves-bots also records
+	 * the bots.
+	 */
+	bool SysRecordMoves;
+	bool SysRecordMovesBots;
+	uint8_t SysRecordMovesRate;
 #if DXX_USE_TRACKER
 	uint16_t MplTrackerPort;
 	std::string MplTrackerAddr;
