@@ -122,6 +122,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "partial_range.h"
 #include "segiter.h"
 #include "frame_probe.h"
+#include "palette_flash.h"
 #include <cinttypes>
 #if DXX_USE_UDP
 #include "net_udp.h"
@@ -1184,9 +1185,6 @@ static void do_afterburner_stuff(object_array &Objects)
 }
 #endif
 
-//	Amount to diminish guns towards normal, per second.
-#define	DIMINISH_RATE 16 // gots to be a power of 2, else change the code in diminish_palette_towards_normal
-
  //adds to rgb values for palette flash
 void PALETTE_FLASH_ADD(const int _dr, const int _dg, const int _db)
 {
@@ -1208,25 +1206,6 @@ void PALETTE_FLASH_ADD(const int _dr, const int _dg, const int _db)
 
 }
 
-namespace {
-
-static void diminish_palette_color_toward_zero(int& palette_color_add, const int& dec_amount)
-{
-	if (palette_color_add > 0 ) {
-		if (palette_color_add < dec_amount)
-			palette_color_add = 0;
-		else
-			palette_color_add -= dec_amount;
-	} else if (palette_color_add < 0 ) {
-		if (palette_color_add > -dec_amount )
-			palette_color_add = 0;
-		else
-			palette_color_add += dec_amount;
-	}
-}
-
-}
-
 namespace dsx {
 
 namespace {
@@ -1235,65 +1214,39 @@ namespace {
 //	Diminish palette effects towards normal.
 static void diminish_palette_towards_normal(void)
 {
-	int dec_amount{0};
 	float brightness_correction = 1-(static_cast<float>(gr_palette_get_gamma())/64); // to compensate for brightness setting of the game
 
-	// Diminish at DIMINISH_RATE units/second.
-	if (FrameTime < (F1_0/DIMINISH_RATE))
-	{
-		static fix diminish_timer = 0;
-		diminish_timer += FrameTime;
-		if (diminish_timer >= (F1_0/DIMINISH_RATE))
-		{
-			diminish_timer -= (F1_0/DIMINISH_RATE);
-			dec_amount = 1;
-		}
-	}
-	else
-	{
-		dec_amount = f2i(FrameTime*DIMINISH_RATE); // one second = DIMINISH_RATE counts
-		if (dec_amount == 0)
-			dec_amount++; // make sure we decrement by something
-	}
-
+	/* The curve of the palette effects and of the flash missile's
+	 * whiteout is in palette_flash_frame (palette_flash.h), which
+	 * explains what it restores.  Before, on the frames where the ring
+	 * timestamp did not force the hold, a 26 Hz timer decided on which
+	 * frames the whiteout held, and it faded on all others, so that path
+	 * depended on the frame rate.
+	 */
+	static fix diminish_remainder;
 #if DXX_BUILD_DESCENT == 2
 	if (Flash_effect) {
-		int force_do{0};
-		static fix Flash_step_up_timer = 0;
-
 		// Part of hack system to force update of palette after exiting a menu.
 		if (Time_flash_last_played) {
-			force_do = 1;
 			PaletteRedAdd ^= 1; // Very Tricky! In gr_palette_step_up, if all stepups same as last time, won't do anything!
 		}
 
-		if (Time_flash_last_played + F1_0/8 < GameTime64) {
+		/* The ringing of the flash.  The original also rang if the last
+		 * ring is in the future: GameTime64 restarts at zero on each
+		 * level, and without that test the flash stayed silent in a later
+		 * level until GameTime64 passed the time of the last ring of an
+		 * earlier level.
+		 */
+		if (Time_flash_last_played + F1_0/8 < GameTime64 || Time_flash_last_played > GameTime64) {
 			Time_flash_last_played = {GameTime64};
 			digi_play_sample( sound_effect::SOUND_CLOAK_OFF, Flash_effect/4);
 		}
-
-		Flash_effect -= FrameTime;
-		Flash_step_up_timer += FrameTime;
-		if (Flash_effect < 0)
-			Flash_effect = 0;
-
-		if (force_do || (Flash_step_up_timer >= F1_0/26)) // originally time interval based on (d_rand() > 4096)
-		{
-			Flash_step_up_timer -= (F1_0/26);
-			if ( (Newdemo_state==ND_STATE_RECORDING) && (PaletteRedAdd || PaletteGreenAdd || PaletteBlueAdd) )
-				newdemo_record_palette_effect(PaletteRedAdd, PaletteGreenAdd, PaletteBlueAdd);
-
-			gr_palette_step_up( PaletteRedAdd*brightness_correction, PaletteGreenAdd*brightness_correction, PaletteBlueAdd*brightness_correction );
-
-			return;
-		}
-
 	}
+	fix &flash_effect{Flash_effect};
+#else
+	fix flash_effect{0};
 #endif
-
-	diminish_palette_color_toward_zero(PaletteRedAdd, dec_amount);
-	diminish_palette_color_toward_zero(PaletteGreenAdd, dec_amount);
-	diminish_palette_color_toward_zero(PaletteBlueAdd, dec_amount);
+	palette_flash_frame(palette_flash_curve{PaletteRedAdd, PaletteGreenAdd, PaletteBlueAdd, flash_effect, diminish_remainder}, FrameTime);
 
 	if ( (Newdemo_state==ND_STATE_RECORDING) && (PaletteRedAdd || PaletteGreenAdd || PaletteBlueAdd) )
 		newdemo_record_palette_effect(PaletteRedAdd, PaletteGreenAdd, PaletteBlueAdd);
