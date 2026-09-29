@@ -516,7 +516,8 @@ public:
  * is held in bursts of FIRE_BURST_MIN_S to FIRE_BURST_MAX_S and released
  * between them for as long as makes the duty on average.  A duty of 1
  * holds it always and draws no random numbers (Hotshot and better play
- * exactly as before).
+ * exactly as before).  Every life (reset) starts with a burst, not a
+ * pause.
  */
 constexpr double FIRE_BURST_MIN_S{0.5};
 constexpr double FIRE_BURST_MAX_S{1.1};
@@ -524,6 +525,8 @@ constexpr double FIRE_BURST_MAX_S{1.1};
 class fire_burst
 {
 	bool m_on{true};
+	/* The first burst was drawn (since the reset, at a duty below 1). */
+	bool m_started{};
 	uint32_t m_left{};
 public:
 	void reset()
@@ -536,7 +539,15 @@ public:
 		if (!(duty < 1))
 		{
 			m_on = true;
+			m_started = false;
 			m_left = 0;
+			return;
+		}
+		if (!m_started)
+		{
+			m_started = true;
+			m_on = true;
+			m_left = static_cast<uint32_t>(rng.uniform(FIRE_BURST_MIN_S, FIRE_BURST_MAX_S) * BOT_TICK_RATE + 0.5);
 			return;
 		}
 		if (m_left)

@@ -111,7 +111,8 @@ controls, pilot state, memory and path. Nothing about bots goes into `player`,
   for each bot with the bot as originator). After stage 3 it arrives in
   `SNAPSHOT_INVENTORY`, one part per player, which covers bots automatically.
 - **Humans replace bots**: with the option on (default), a `JOIN_REQUEST`
-  that finds the game full removes the most recently added bot first. The
+  that finds the game full removes the most recently added bot first
+  (before a disconnected human's slot is reused). The
   removal is broadcast as `PLAYER_LEFT(quit)`, the same as a quitting player.
   The human then gets that slot.
 - **Removal**: the host treats a removed bot like a player who sent `LEAVE`
@@ -1998,7 +1999,8 @@ row (`test_skill_monotonic`):
 Trainee is meant to lose to a new player: slow and imprecise, no lead,
 no strafe, no dodge, no missiles, no afterburner, no map knowledge, a
 narrow view, and a trigger that pauses between bursts (0.5–1.1 s
-bursts, pauses making 55 % duty; new in B2, `fire_burst`). Insane is
+bursts, pauses making 55 % duty; every life starts with a burst; new
+in B2, `fire_burst`). Insane is
 hard but no aimbot: 140 ms reaction (the tactics layer still aims at
 where it saw the target 140 ms ago), a 1° aim error and a 3° fire
 cone, and a dodge chance of 0.85 at most (0.95 with Cautious). No
@@ -2051,14 +2053,17 @@ the host setup menu closes (with the other netgame settings) and read
 when it opens: `BotCount`, `BotDefault=skill,style`, `BotReplace`,
 `Bot<i>=name,skill,style,team`. The pure part (`bot_profile.h`) writes
 the lines and parses them; the three numbers of a bot line are read from
-the right, so a name may hold a comma; a bad line is ignored (the bot
-then gets the defaults and the next built-in name), the count is bounded
+the right, so a name may hold a comma; a bad or missing line below the
+count is ignored (the bot then gets the file's `BotDefault` skill and
+style, in whatever order the lines come, and the next built-in name),
+the count is bounded
 to 7, lines beyond the count are dropped, names are cut to 8 characters,
 unknown keys stay the profile reader's. A profile of an older build has no
 bot lines and leaves the setup as it was (no bots, or `-bots N`); the
 `-bots N` switch still sets the count of the first setup of the session.
-`test_profile` round-trips mixed setups and all combinations and checks
-the bad values and the line length (under the reader's 50).
+`test_profile` round-trips mixed setups, all combinations and a profile
+with gaps, and checks the bad values and the line length (under the
+reader's 50).
 
 **The `BOT` marker (§2.2, decision 2).** Bit 7 of each slot's `connected`
 byte in `PLAYER_LIST` marks a bot (network-protocol-v2 §4.5); the
@@ -2072,25 +2077,36 @@ after the name on the score screen (`kmatrix`; before it when the column
 has no room), and `, Bot` after a bot's name tag in the view. The session reset clears the flags.
 
 **Humans replace bots (§2.3, decision 3).** `decide_admission` takes the
-host's option. A joiner who finds the game full (no free slot, no
-disconnected one below the limit) replaces the most recently added bot
+host's option. A joiner who finds the game full (no free slot below the
+limit, no departed bot's slot) replaces the most recently added bot
 still playing (`bot_to_replace`: the highest order of addition, below
 the player limit): the host removes it as a player who quits
 (`bots_remove_for_human`: a tumbling bot explodes first, else the host's
 copy of its inventory is brought up to date; `multi_disconnect_player`
 drops its eggs, makes the ship a ghost, prints "has left the game" and
 sends `PLAYER_LEFT(quit)`), then admits the human into the slot as a new
-player (scores zeroed by `new_player`; in team games the slot's team). A
-closed game stays closed. A bot's slot is never rejoined by callsign: a
-human with a departed bot's name is a new player (the slot is reused as
-any disconnected one, without the bot's scores); one with a playing
-bot's name replaces that bot (option on) or is refused as a duplicate
-(option off). *Decision:* a replaced bot stays out for the rest of the
+player (scores zeroed by `new_player`; in team games the slot's team).
+A bot leaves before a disconnected human's slot is handed out, so a
+human who dropped can rejoin their slot while bots play; with the option
+off (or no bot playing) the slot of the human disconnected the longest
+is taken, as before. A closed game stays closed. A bot's slot is never
+rejoined by callsign: a human with a departed bot's name is a new player
+(the slot is reused as a free one, without the bot's scores); one with a
+playing bot's name replaces that bot only when the game is full and the
+option is on, and is otherwise refused as a duplicate (so that cycling
+names cannot strip bots from a game with room). A slot handed to a new
+player (a replaced bot's, a departed player's or a free one) is marked
+until that player's `CLIENT_READY` (`S.awaits_entry`): a client that
+restarts during its join comes back by callsign as a rejoin, and
+`admission_is_new` still admits it as new (scores reset by the snapshot
+and `new_player`, "joined" rather than "rejoined"), so it never inherits
+the bot's or the departed player's score. *Decision:* a replaced bot stays out for the rest of the
 game, even if a slot frees up (simplest, and no bot pops back in while
 humans come and go); the setup keeps it, so the next game has it again.
 `test_admission_with_bots` covers the order, the option, the closed game,
-free and disconnected slots first, the departed bot's name, the playing
-bot's name and the limit.
+free and departed-bot slots first, bots before disconnected humans, the
+departed bot's name, the playing bot's name (full game or not) and the
+limit; `test_admission_is_new` the restart during a join.
 
 **Unchanged:** non-bot games and human play (only the protocol number
 changed; a human's `connected` byte is the same), clients' behaviour

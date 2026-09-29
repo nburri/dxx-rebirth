@@ -291,12 +291,26 @@ void test_admission_with_bots()
 		const auto d{decide_admission(slots, 6, false, true)};
 		CHECK(d.result == admission_result::accept_new && d.slot == 5);
 	}
-	/* A disconnected human's slot is taken before any bot leaves. */
+	/* A bot leaves before a disconnected human's slot is handed out: the
+	 * human may come back to it.
+	 */
 	slots[1].connected = false;
 	{
 		const auto d{decide_admission(slots, 5, false, true)};
+		CHECK(d.result == admission_result::accept_replace_bot && d.slot == 3);
+	}
+	/* The option off: the disconnected human's slot, as before. */
+	{
+		const auto d{decide_admission(slots, 5, false, false)};
 		CHECK(d.result == admission_result::accept_new && d.slot == 1);
 	}
+	/* The human returns to its slot while the bots play. */
+	slots[1].callsign_matches = true;
+	{
+		const auto d{decide_admission(slots, 5, false, true)};
+		CHECK(d.result == admission_result::accept_rejoin && d.slot == 1);
+	}
+	slots[1].callsign_matches = false;
 	slots[1].connected = true;
 	/* After the last bot left (disconnected, still listed as a bot), its
 	 * slot is the free one: the next bot is not removed.
@@ -319,15 +333,25 @@ void test_admission_with_bots()
 	CHECK(decide_admission(slots, 5, true, true).result == admission_result::deny_closed);
 	slots[3].callsign_matches = false;
 	slots[3].connected = true;
-	/* A playing bot with the joiner's name: replaced (option on), or a
-	 * duplicate (option off).
+	/* A playing bot with the joiner's name, the game full: that bot is
+	 * replaced (option on), or the name is a duplicate (option off).
 	 */
 	slots[2].callsign_matches = true;
 	{
-		const auto d{decide_admission(slots, 8, false, true)};
+		const auto d{decide_admission(slots, 5, false, true)};
 		CHECK(d.result == admission_result::accept_replace_bot && d.slot == 2);
 	}
-	CHECK(decide_admission(slots, 8, false, false).result == admission_result::deny_duplicate_callsign);
+	CHECK(decide_admission(slots, 5, false, false).result == admission_result::deny_duplicate_callsign);
+	/* With room in the game the name is a duplicate: cycling names must
+	 * not strip bots.  A free slot, or a departed bot's slot, is room.
+	 */
+	{
+		const auto d{decide_admission(slots, 8, false, true)};
+		CHECK(d.result == admission_result::deny_duplicate_callsign && d.slot == 2);
+	}
+	slots[4].connected = false;
+	CHECK(decide_admission(slots, 5, false, true).result == admission_result::deny_duplicate_callsign);
+	slots[4].connected = true;
 	slots[2].callsign_matches = false;
 	/* Bots at or above the limit (a lowered limit) are not replaced. */
 	CHECK(!bot_to_replace(slots, 2).has_value());
@@ -336,6 +360,43 @@ void test_admission_with_bots()
 	std::vector<slot_view> humans(4, slot_view{.occupied = true, .connected = true});
 	CHECK(!bot_to_replace(humans, 4).has_value());
 	CHECK(decide_admission(humans, 4, false, true).result == admission_result::deny_full);
+}
+
+/* A slot handed to a new player stays new until its CLIENT_READY: a
+ * restarted client's rejoin by callsign does not inherit the score of the
+ * bot (or departed player) that held the slot.
+ */
+void test_admission_is_new()
+{
+	CHECK(admission_is_new(admission_result::accept_new, false));
+	CHECK(admission_is_new(admission_result::accept_replace_bot, false));
+	CHECK(!admission_is_new(admission_result::accept_rejoin, false));
+	CHECK(!admission_is_new(admission_result::accept_replace, false));
+	CHECK(admission_is_new(admission_result::accept_rejoin, true));
+	CHECK(admission_is_new(admission_result::accept_replace, true));
+	CHECK(!admission_is_new(admission_result::deny_full, true));
+	CHECK(!admission_is_new(admission_result::deny_duplicate_callsign, true));
+	/* The scenario: a human replaces the bot in slot 3, then restarts
+	 * during its join.  The slot now carries the human's callsign and is
+	 * disconnected: the admission is a rejoin, made new by the mark.
+	 */
+	std::vector<slot_view> slots(4);
+	slots[0] = {.occupied = true, .connected = true};
+	slots[1] = {.occupied = true, .connected = true};
+	slots[2] = {.occupied = true, .connected = true, .bot = true, .bot_order = 1};
+	slots[3] = {.occupied = true, .connected = true, .bot = true, .bot_order = 2};
+	auto d{decide_admission(slots, 4, false, true)};
+	CHECK(d.result == admission_result::accept_replace_bot && d.slot == 3);
+	bool awaits_entry{admission_is_new(d.result, false)};
+	slots[3] = {.occupied = true, .connected = false, .callsign_matches = true};
+	d = decide_admission(slots, 4, false, true);
+	CHECK(d.result == admission_result::accept_rejoin && d.slot == 3);
+	CHECK(admission_is_new(d.result, awaits_entry));
+	/* After its CLIENT_READY the mark is gone: a later drop and return is
+	 * a real rejoin.
+	 */
+	awaits_entry = false;
+	CHECK(!admission_is_new(d.result, awaits_entry));
 }
 
 /* Section 4.5: the PLAYER_LIST bot flag in the `connected` byte. */
@@ -591,6 +652,7 @@ int main()
 	test_message_layouts();
 	test_admission();
 	test_admission_with_bots();
+	test_admission_is_new();
 	test_player_list_bot_flag();
 	test_lobby_slot();
 	test_player_count_including();

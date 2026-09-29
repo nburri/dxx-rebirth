@@ -310,6 +310,27 @@ void test_fire_burst()
 		CHECK(longest <= static_cast<unsigned>(1.2 * BOT_TICK_RATE));
 		CHECK(longest > 0);
 	}
+	/* Every life starts firing: at least FIRE_BURST_MIN_S on, from a
+	 * fresh state and after a reset in the middle of a pause.
+	 */
+	for (const std::uint32_t seed : {1u, 5u, 9u, 23u})
+	{
+		bot_rng rng{seed};
+		fire_burst b;
+		const auto duty{skill_of(bot_skill::trainee).fire_duty};
+		const auto check_opening{[&] {
+			for (unsigned i = 0; i < static_cast<unsigned>(FIRE_BURST_MIN_S * BOT_TICK_RATE); ++i)
+			{
+				b.update(rng, duty);
+				CHECK(b.on());
+			}
+		}};
+		check_opening();
+		while (b.on())
+			b.update(rng, duty);
+		b.reset();
+		check_opening();
+	}
 }
 
 bot_profile sample_profile()
@@ -410,8 +431,12 @@ void test_profile()
 		CHECK(p.default_skill == bot_skill::hotshot);
 		CHECK(p.default_style == bot_style::aggressive);
 		CHECK(p.replace);
-		CHECK(p.bots[0] == profile_entry{});
-		CHECK(p.bots[1] == profile_entry{});
+		/* The rejected lines: the file's default skill and style. */
+		const profile_entry fallback{.skill = bot_skill::hotshot, .style = bot_style::aggressive};
+		CHECK(p.bots[0] == fallback);
+		CHECK(p.bots[1] == fallback);
+		CHECK(p.bots[5] == fallback);
+		CHECK(p.bots[6] == fallback);
 		CHECK(std::string_view{p.bots[2].name.data()} == "gamma");
 		CHECK(p.bots[2].skill == bot_skill::insane && p.bots[2].style == bot_style::collector && p.bots[2].team == bot_team::red);
 		CHECK(std::string_view{p.bots[3].name.data()} == "averyver");
@@ -427,6 +452,38 @@ void test_profile()
 		const auto p{r.result()};
 		CHECK(p.count == 2);
 		CHECK(p.bots[2] == profile_entry{});
+	}
+	/* Gaps: the missing lines of a written profile take its BotDefault,
+	 * not the built-in default, even when BotDefault comes last.
+	 */
+	{
+		auto src{sample_profile()};
+		src.count = 5;
+		std::strcpy(src.bots[3].name.data(), "omega");
+		src.bots[3].skill = bot_skill::insane;
+		std::array<profile_line, 3 + BOT_PROFILE_MAX_BOTS> lines;
+		const auto n{format_profile(src, lines)};
+		CHECK(n == 8);
+		profile_reader r;
+		/* Bot1 and Bot4 lost; BotDefault read after the bot lines. */
+		for (const std::size_t i : {0u, 2u, 3u, 5u, 6u, 1u})
+		{
+			const std::string_view line{lines[i].data()};
+			const auto eq{line.find('=')};
+			CHECK(r.parse(line.substr(0, eq), line.substr(eq + 1)));
+		}
+		const auto p{r.result()};
+		CHECK(p.count == 5);
+		CHECK(p.default_skill == bot_skill::ace && p.default_style == bot_style::cautious);
+		const profile_entry fallback{.skill = bot_skill::ace, .style = bot_style::cautious};
+		CHECK(p.bots[0] == src.bots[0]);
+		CHECK(p.bots[1] == fallback);
+		CHECK(p.bots[2] == src.bots[2]);
+		CHECK(p.bots[3] == src.bots[3]);
+		CHECK(p.bots[4] == fallback);
+		CHECK(p.bots[5] == profile_entry{});
+		/* Written again, the gaps are whole lines. */
+		CHECK(round_trip(p, false) == p);
 	}
 	/* A bot line with no count line: the count stays 0 (the game keeps
 	 * no bots rather than guessing).

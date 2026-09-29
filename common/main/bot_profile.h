@@ -131,6 +131,8 @@ inline std::optional<std::string_view> pop_field(std::string_view &v)
 class profile_reader
 {
 	bot_profile m_profile;
+	/* Bot line `i` was read and accepted. */
+	std::array<bool, BOT_PROFILE_MAX_BOTS> m_read{};
 	bool m_seen{};
 public:
 	/* Line `key`=`value`: true if it is a bot key (taken, or ignored as
@@ -192,6 +194,7 @@ public:
 		const auto len{std::min(v.size(), BOT_PROFILE_NAME_LEN)};
 		std::ranges::copy(v.substr(0, len), e.name.begin());
 		m_profile.bots[*index] = e;
+		m_read[*index] = true;
 		return true;
 	}
 	/* The file had bot lines. */
@@ -200,13 +203,22 @@ public:
 	{
 		return m_seen;
 	}
-	/* The setup read; the lines beyond the count are dropped. */
+	/* The setup read; the lines beyond the count are dropped.  A bot
+	 * below the count whose line is missing or bad gets the file's
+	 * default skill and style (whatever order the lines came in) and the
+	 * next built-in name.
+	 */
 	[[nodiscard]]
 	bot_profile result() const
 	{
 		auto p{m_profile};
-		for (std::size_t i = p.count; i < p.bots.size(); ++i)
-			p.bots[i] = {};
+		for (std::size_t i = 0; i < p.bots.size(); ++i)
+		{
+			if (i >= p.count)
+				p.bots[i] = {};
+			else if (!m_read[i])
+				p.bots[i] = {.skill = p.default_skill, .style = p.default_style};
+		}
 		return p;
 	}
 };

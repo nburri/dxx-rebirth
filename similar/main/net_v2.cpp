@@ -657,6 +657,13 @@ struct session_state
 	/* Client: the token the host assigned. */
 	uint32_t my_token{};
 	per_player_array<peer> peers{};
+	/* Host: the slot was handed to a new player who has not entered the
+	 * game yet (no CLIENT_READY).  Kept across the peer's connection, so
+	 * that a client restarting during its join, which comes back by
+	 * callsign as a rejoin, is still admitted as new
+	 * (net_v2::admission_is_new).
+	 */
+	per_player_array<bool> awaits_entry{};
 	/* Stage 2 (section 5).  Host: the newest INPUT per player and the
 	 * session's tick counter (section 2.3).  Client: the sequence of its
 	 * INPUT chunks and the newest bundle header applied.
@@ -2999,6 +3006,7 @@ void vacate_slot(const playernum_t slot)
 	Netgame.players[slot].protocol.udp.addr = {};
 	vmplayerptr(slot)->connected = player_connection_status::disconnected;
 	vmplayerptr(slot)->callsign = {};
+	S.awaits_entry[slot] = false;
 	while (N_players > 1 && vcplayerptr(N_players - 1)->connected == player_connection_status::disconnected && !Netgame.players[N_players - 1].callsign[0u] && S.peers[N_players - 1].ph == peer::phase::none)
 		--N_players;
 	Netgame.numplayers = N_players;
@@ -3162,7 +3170,7 @@ void welcome_player(const ::dcx::net_v2::join_request &req, const callsign_t &ca
 		deny_join(from, req.client_nonce, kick_player_reason::full);
 		return;
 	}
-	bool is_new{false};
+	const bool is_new{decision.slot < MAX_PLAYERS && ::dcx::net_v2::admission_is_new(decision.result, S.awaits_entry[static_cast<playernum_t>(decision.slot)])};
 	switch (decision.result)
 	{
 		case admission_result::deny_closed:
@@ -3186,6 +3194,9 @@ void welcome_player(const ::dcx::net_v2::join_request &req, const callsign_t &ca
 				const playernum_t slot{static_cast<playernum_t>(decision.slot)};
 				if (slot == 0 || slot >= MAX_PLAYERS)
 					return;
+				/* Restarted during its own join: still a new player. */
+				if (is_new)
+					break;
 				if (Newdemo_state == ND_STATE_RECORDING)
 					newdemo_record_multi_reconnect(slot);
 				digi_play_sample(sound_effect::SOUND_HUD_MESSAGE, F1_0);
@@ -3195,7 +3206,6 @@ void welcome_player(const ::dcx::net_v2::join_request &req, const callsign_t &ca
 			}
 			break;
 		case admission_result::accept_new:
-			is_new = true;
 			break;
 		case admission_result::accept_replace_bot:
 			/* Bots section 2.3: the bot leaves (its eggs, PLAYER_LEFT)
@@ -3207,7 +3217,6 @@ void welcome_player(const ::dcx::net_v2::join_request &req, const callsign_t &ca
 				deny_join(from, req.client_nonce, kick_player_reason::full);
 				return;
 			}
-			is_new = true;
 			break;
 	}
 	const playernum_t slot{static_cast<playernum_t>(decision.slot)};
@@ -3219,6 +3228,7 @@ void welcome_player(const ::dcx::net_v2::join_request &req, const callsign_t &ca
 		auto &obj = *LevelUniqueObjectState.Objects.vmptr(vcplayerptr(slot)->objnum);
 		obj.ctype.player_info.KillGoalCount = 0;
 	}
+	S.awaits_entry[slot] = is_new;
 	accept_peer(slot, req, callsign, rank, from, peer::phase::joining, is_new);
 	auto &p = S.peers[slot];
 	send_game_settings(p);
@@ -3472,6 +3482,7 @@ void handle_client_ready(peer &p)
 		 * level it was late for) must not reset its score again.
 		 */
 		p.is_new = false;
+		S.awaits_entry[slot] = false;
 		new_player(slot, Netgame.players[slot].callsign, Netgame.players[slot].rank);
 		std::array<uint8_t, PLAYER_JOINED_SIZE> buf;
 		writer w{buf.data()};
@@ -4633,6 +4644,7 @@ void session_reset()
 	bots_session_reset();
 	for (auto &p : S.peers)
 		drop_peer(p);
+	S.awaits_entry = {};
 	S.session_id = 0;
 	S.my_token = 0;
 	S.inputs = {};
