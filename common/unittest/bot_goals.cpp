@@ -1184,12 +1184,36 @@ void test_log_tuning_goals()
 		calm.armed = armed_level::heavy;
 		CHECK(goal_utility(calm)[goal_kind::collect] == GRAB_HIGH_UTILITY);
 	}
-	/* The enemy known, out of sight: unarmed, the grab of section 9.8;
-	 * armed, a detour only (it hunts).
+	/* The enemy known, out of sight: a detour only (it hunts), unarmed
+	 * (a gun, no missiles) or armed.
 	 */
 	in.target_visible = false;
 	in.target_score = 0.4;
-	CHECK(choose_goal(in) == goal_kind::collect);
+	CHECK(choose_goal(in) == goal_kind::hunt);
+	CHECK(goal_utility(in)[goal_kind::collect] == 0);
+	/* PR #41 review: with a decent gun, no missiles, the mega 120 units
+	 * away and the target's visibility flickering (5 Hz), the choice
+	 * stays: neither leg gives the grab its full utility.
+	 */
+	{
+		goal_inputs f{in};
+		for (unsigned i{0}; i != 10; ++i)
+		{
+			f.target_visible = i % 2 == 0;
+			const goal_kind g{choose_goal(f)};
+			CHECK(g != goal_kind::collect);
+			CHECK(goal_utility(f)[goal_kind::collect] == 0);
+			f.current = g;
+		}
+		/* Within the detour's reach, the grab both ways. */
+		f.grab_path = 50;
+		for (unsigned i{0}; i != 10; ++i)
+		{
+			f.target_visible = i % 2 == 0;
+			CHECK(choose_goal(f) == goal_kind::collect);
+			f.current = goal_kind::collect;
+		}
+	}
 	in.armed = armed_level::light;
 	CHECK(choose_goal(in) == goal_kind::hunt);
 	in.grab_path = 40;
@@ -1300,6 +1324,12 @@ void test_log_tuning_goals()
 		c.armed = armed_level::heavy;
 		CHECK(choose_goal(c) == goal_kind::engage);
 	}
+	/* PR #41 review: a place sought is done once reached, or when no
+	 * path to it is found (not planned for again every tick).
+	 */
+	CHECK(seek_place_done(SEEK_ARRIVED, true));
+	CHECK(!seek_place_done(SEEK_ARRIVED + 1, true));
+	CHECK(seek_place_done(SEEK_ARRIVED + 100, false));
 	/* The phase's upgrade is reported as the collection's source. */
 	{
 		goal_inputs p;

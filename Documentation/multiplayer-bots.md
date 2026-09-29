@@ -2409,9 +2409,9 @@ skip_count=..., and no segment found at depth 23`, and 6 times
 `multi.cpp:914: BUG: object ... has type 12, expected 4`.
 
 **(1) Grabs are detours in a fight** (`grab_goal_utility`,
-`grab_is_detour`).  With an enemy in sight, or known while the bot is
-armed (below), or while it seeks one, a bot that is not weak
-(`weak_armament`) takes a powerup only as a short detour:
+`grab_is_detour`).  With an enemy known (in sight or not, armed or
+not), or while it seeks one, a bot that is not weak (`weak_armament`)
+takes a powerup only as a short detour:
 `GRAB_DETOUR_PATH` 25 units of path for any, `GRAB_DETOUR_HIGH_PATH` 60
 for a high-value one (`GRAB_HIGH_VALUE`: the big missiles, a better gun,
 quad, super laser, cloak, invulnerability, the afterburner, shields it
@@ -2420,7 +2420,12 @@ needs), a Collector 1.5 times further.  The detour is worth
 the fight's hysteresis 1.2, so it is taken and kept).  Beyond, the grab
 is worth nothing and the fight goes on.  Without an enemy (and nothing
 to seek), weak, or in danger (shields, invulnerability) the grab keeps
-its utility of section 9.8.  `goal_utility` now says which part made the
+its utility of section 9.8.  (A first version exempted an unarmed bot
+whose target was out of sight: for a bot with a decent gun, fewer than
+three light missiles and no heavy one, the grab then jumped between its
+full utility and 0 as the target's visibility flickered, and the goal
+flipped at the strategy rate with a new plan each time; PR #41 review.)
+`goal_utility` now says which part made the
 collect goal (`collect_source`: plain, phase, grab), and `think` goes
 where that part says (before, a grab that applied but had lost to the
 plain collection still redirected the bot).
@@ -2443,7 +2448,9 @@ last saw an enemy, up to three times its memory time ago (Insane
 Balanced 30 s, Aggressive 60 s), as a hunt without a target: worth 1
 (heavy) or 0.8 (light) times the style's engage weight.  Within 50 units
 of the place it has searched it (nobody there) and takes the next
-freshest one; a grab on the way is a detour of the seek.  The log says
+freshest one; a place it finds no path to it gives up at once
+(`seek_place_done`), rather than picking it again, with an A* search,
+every strategy tick until the memory window expired; a grab on the way is a detour of the seek.  The log says
 ` seek` in the goal's brackets.
 
 **(5) The Collector fights** (`COLLECTOR_UNDER_FIRE` 0.75).  Section 4.7

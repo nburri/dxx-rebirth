@@ -858,17 +858,16 @@ constexpr double grab_rank(const double value, const double path_cost)
  * engagement (1.4-2.0 in the log), so with an enemy in sight 74 units
  * away (the median) a bot left the fight for a powerup up to 85 units
  * away in 383 of the 1004 seconds it had one in sight; bots collected
- * 66 % of the time.  Now with an enemy in sight (or known while the bot
- * is armed, armed_of), a bot that is not weak (weak_armament) takes a
- * powerup only as a short detour: GRAB_DETOUR_PATH of path for any, 
+ * 66 % of the time.  Now with an enemy known (in sight or not), a bot
+ * that is not weak (weak_armament) takes a powerup only as a short detour: GRAB_DETOUR_PATH of path for any,
  * GRAB_DETOUR_HIGH_PATH for a high-value one (GRAB_HIGH_VALUE: the big
  * missiles, a better gun, quad, cloak, invulnerability, shields it
  * needs), a Collector GRAB_DETOUR_COLLECTOR times further; then the grab
  * is worth GRAB_DETOUR_FACTOR times the fight (it flies there shooting,
  * and the hysteresis of the fight, 1.2, does not keep it from the
- * detour).  Else the fight goes on.  Without an enemy (or unarmed with
- * one out of sight), weak, or in danger (shields, invulnerability), the
- * grab keeps its utility of section 9.8.
+ * detour).  Else the fight goes on.  Without an enemy, weak, or in
+ * danger (shields, invulnerability), the grab keeps its utility of
+ * section 9.8.
  */
 constexpr double GRAB_DETOUR_PATH{25};
 constexpr double GRAB_DETOUR_HIGH_PATH{60};
@@ -895,6 +894,18 @@ constexpr bool grab_is_detour(const double value, const double path_cost, const 
  */
 constexpr double SEEK_MEMORY_SCALE{3};
 constexpr double SEEK_ARRIVED{50};
+
+/* Section 9.9: whether the bot is done with a place it seeks: arrived
+ * (within SEEK_ARRIVED; nobody there), or no path to it was found (PR
+ * #41 review: else the bot picked it again every strategy tick, with an
+ * A* search each, until the memory window expired).  A new sighting of
+ * the enemy makes a new place.
+ */
+[[nodiscard]]
+constexpr bool seek_place_done(const double distance, const bool path_found)
+{
+	return distance <= SEEK_ARRIVED || !path_found;
+}
 
 [[nodiscard]]
 constexpr double seek_utility(const armed_level a, const double engage_weight)
@@ -941,12 +952,14 @@ constexpr double grab_goal_utility(const goal_inputs &in, const double fight)
 	const double base{grab_utility(in.grab_value)};
 	if (in_danger(in) || in.weak)
 		return base;
-	/* No enemy to fight or seek, or unarmed with the enemy out of
-	 * sight: the grab of section 9.8.  Seeking is a hunt: a detour.
+	/* No enemy to fight or seek: the grab of section 9.8.  Seeking is a
+	 * hunt: a detour.  With a target known the grab is a detour whether
+	 * or not the target is in sight (and armed or not: not weak, the bot
+	 * has a gun to fight with); an exemption for a target out of sight
+	 * made the grab flip between its full utility and 0 as the
+	 * visibility flickered (PR #41 review).
 	 */
 	if (!in.has_target && !(in.seek > 0))
-		return base;
-	if (in.has_target && !in.target_visible && in.armed == armed_level::none)
 		return base;
 	if (!grab_is_detour(in.grab_value, in.grab_path, in.collector))
 		return 0;

@@ -2108,7 +2108,7 @@ void think(bot_state &bs, object &obj, const uint32_t tick)
 				continue;
 			if (bs.seek_done[i] == m.tick + 1)
 				continue;
-			if (b::distance(pos, m.pos) <= b::SEEK_ARRIVED)
+			if (b::seek_place_done(b::distance(pos, m.pos), true))
 			{
 				/* Searched: nobody there. */
 				bs.seek_done[i] = m.tick + 1;
@@ -2201,7 +2201,15 @@ void think(bot_state &bs, object &obj, const uint32_t tick)
 			const auto &m{bs.memory[bs.target ? *bs.target : *bs.seek_who]};
 			const bool moved{bs.goal != bot_goal::hunt || bs.goal_seg != m.segment};
 			if (replan_due || (moved && tick - bs.last_plan_tick >= BOT_HUNT_REPLAN_TICKS))
+			{
 				set_goal(bs, obj, bot_goal::hunt, m.segment, m.pos, tick);
+				/* Section 9.9: a place sought without a path to it is
+				 * given up (b::seek_place_done), not planned for again
+				 * every strategy tick.
+				 */
+				if (!bs.target && bs.seek_who && b::seek_place_done(b::distance(pos, m.pos), !bs.points.empty()))
+					bs.seek_done[*bs.seek_who] = m.tick + 1;
+			}
 			return;
 		}
 		case b::goal_kind::collect:
