@@ -116,6 +116,10 @@ constexpr unsigned BOT_HUNT_REPLAN_TICKS{b::BOT_TICK_RATE / 2};
  */
 constexpr double BOT_DODGE_SCAN{150};
 constexpr double BOT_DODGE_HORIZON{0.7};
+/* Section 9.8: the incoming damage (the death dump) is judged below
+ * these shields.
+ */
+constexpr unsigned BOT_DUMP_SCAN_SHIELDS{45};
 constexpr unsigned BOT_DODGE_TICKS{b::ticks_from_ms(350)};
 /* Section 4.3: a wall beyond the steer point is a bend only while the
  * velocity points within this angle of the steer point.
@@ -354,6 +358,24 @@ struct bot_state
 	std::optional<b::secondary> missile_fire;
 	unsigned missile_volley{};
 	std::optional<uint32_t> last_missile, last_heavy, last_mine;
+	/* Section 9.8: the volley under way (b::volley_size): its missile
+	 * and the rounds still to go.
+	 */
+	std::optional<b::secondary> volley_missile;
+	unsigned volley_left{};
+	/* Section 9.8, the death dump: this life's roll, whether it is under
+	 * way, the damage of the enemy shots coming at the bot (perceive).
+	 */
+	double dump_roll{1};
+	bool dumping{};
+	double incoming_damage{};
+	/* Section 9.8: turning round to a target behind. */
+	b::turn_round_state turning;
+	/* Section 9.8: the power-up phase at the last strategy tick (the
+	 * log).
+	 */
+	bool powerup_phase{};
+	unsigned third_parties{};
 	uint8_t heavy_target{0xff};
 	/* Section 4.7: cloak and invulnerability (b::tactics_for), from the
 	 * last strategy tick.
@@ -511,6 +533,14 @@ struct bot_state
 		missile.reset();
 		missile_fire.reset();
 		missile_volley = 0;
+		volley_missile.reset();
+		volley_left = 0;
+		dump_roll = rng.uniform();
+		dumping = false;
+		incoming_damage = 0;
+		turning.reset();
+		powerup_phase = false;
+		third_parties = 0;
 		last_missile.reset();
 		last_heavy.reset();
 		last_mine.reset();
@@ -557,6 +587,11 @@ struct bots_state
 	std::vector<uint32_t> repair_centres;
 	/* Section 9.5: the spawn sites a ship can fly out of (b::spawn_site_open). */
 	per_player_array<bool> site_open{};
+	/* Section 9.8: the weapon powerups at the level's start, and whether
+	 * that is too few for its players (b::weapon_poor_level).
+	 */
+	unsigned weapon_powerups{};
+	bool weapon_poor{};
 	ship_limits limits;
 	/* The controls passed to apply_pilot_controls. */
 	control_info controls{};
@@ -1479,6 +1514,38 @@ void perceive(bot_state &bs, const object &obj, const uint32_t tick)
 			break;
 		}
 	}
+	/* Section 9.8, the death dump: the damage of the enemy shots on a
+	 * course that meets the bot within the dodge's horizon (a hurt bot
+	 * only: the scan is not free).
+	 */
+	bs.incoming_damage = 0;
+	if (obj.shields <= i2f(BOT_DUMP_SCAN_SHIELDS))
+	{
+		const double radius{obj.size / 65536.0 + 2};
+		const auto own_objnum{vcplayerptr(bs.pid)->objnum};
+		const bool coop = +(Game_mode & GM_MULTI_COOP);
+		const bool friendly_fire{!Netgame.NoFriendlyFire};
+		for (const object &o : Objects.vcptr)
+		{
+			if (o.type != object_type::OBJ_WEAPON)
+				continue;
+			const auto &li{o.ctype.laser_info};
+			if (li.parent_type != object_type::OBJ_PLAYER || li.parent_num == own_objnum)
+				continue;
+			const auto &parent{*Objects.vcptr(li.parent_num)};
+			const bool from_partner{parent.type == object_type::OBJ_PLAYER && laser_parent_is_matching_signature(li, parent) && (coop || same_team(bs.pid, get_player_id(parent)))};
+			if (!b::shot_worth_dodging(false, from_partner, friendly_fire))
+				continue;
+			const auto rel{to_vec(o.pos) - pos};
+			if (b::length(rel) > BOT_DODGE_SCAN)
+				continue;
+			const auto &wi{Weapon_info[get_weapon_id(o)]};
+			const bool homing_at_me{wi.homing_flag && li.track_goal == own_objnum};
+			if (!b::dodge_direction(rel, to_vec(o.mtype.phys_info.velocity) - to_vec(obj.mtype.phys_info.velocity), BOT_DODGE_HORIZON, b::dodge_radius(radius, homing_at_me), frame.r))
+				continue;
+			bs.incoming_damage += wi.strength[GameUniqueState.Difficulty_level] / 65536.0;
+		}
+	}
 	/* Section 9.6: who holds a heavy missile. */
 	notice_heavy_holders(bs, obj, tick);
 	/* The host's copy of the bot's inventory, and the clients' (the
@@ -1661,6 +1728,11 @@ struct goal_place
 	bool shields{};
 	/* A much stronger armament (b::BIG_UPGRADE_RATIO). */
 	bool upgrade{};
+	/* Section 9.8: its value (b::item_value), and whether it is
+	 * invulnerability.
+	 */
+	double value{};
+	bool invulnerability{};
 };
 
 /* Section 4.7: the best powerup to collect, by value (its need) over the
@@ -1730,8 +1802,41 @@ goal_place best_grab(const bot_state &bs, const object &obj, const b::resource_v
 		if (score > best_score)
 		{
 			best_score = score;
-			best = {b::collect_utility(value, path), path, k.segment, k.pos, k.key, k.signature, desc.kind == b::item::shield, true};
+			best = {b::collect_utility(value, path), path, k.segment, k.pos, k.key, k.signature, desc.kind == b::item::shield, true, value, desc.kind == b::item::invulnerability};
 		}
+	}
+	return best;
+}
+
+/* Section 9.8: the best weapon upgrade the bot knows and can reach, for
+ * the power-up phase (b::PHASE_MIN_UPGRADE within b::PHASE_MAX_PATH):
+ * the laser levels, super laser, quad and the guns that make its
+ * armament stronger.
+ */
+[[nodiscard]]
+goal_place best_upgrade(const bot_state &bs, const b::resource_view &res, const uint32_t tick)
+{
+	goal_place best;
+	for (const auto &k : bs.powerups.items())
+	{
+		if (tick < k.ignore_until)
+			continue;
+		const auto type{static_cast<powerup_type_t>(k.type)};
+		const auto desc{item_of(type)};
+		if (!b::is_weapon_item(desc.kind) || b::upgrade_ratio(desc, res.weapons) < b::PHASE_MIN_UPGRADE)
+			continue;
+		const auto cost{bs.dist.cost(k.segment)};
+		if (!cost)
+			continue;
+		const double path{*cost + b::distance(B.graph.position(k.segment), k.pos)};
+		if (path > b::PHASE_MAX_PATH)
+			continue;
+		if (!net_objects_bot_can_use(bs.pid, type, k.count))
+			continue;
+		const double value{b::item_value(desc, res)};
+		const double u{b::collect_utility(value, path)};
+		if (u > best.utility)
+			best = {u, path, k.segment, k.pos, k.key, k.signature, false, true, value, false};
 	}
 	return best;
 }
@@ -1912,6 +2017,63 @@ void think(bot_state &bs, object &obj, const uint32_t tick)
 			advantage = b::fight_advantage(res.shields, b::armament_score(res.weapons), t.shields / 65536.0, b::armament_score(weapons_of(t.ctype.player_info)));
 	}
 	bs.retreat_shields = b::style_retreat_shields(st, advantage);
+	/* Section 9.8: the early-life power-up phase (weak, a weapon upgrade
+	 * known, the level not poor in weapons, not attacked at close
+	 * range, the target not as weak and alone), and the stronger third
+	 * parties nearby.
+	 */
+	double phase_engage{1}, phase_collect{0};
+	std::optional<goal_place> phase_upgrade;
+	{
+		std::array<uint8_t, b::BOT_SECONDARY_COUNT> ammo{};
+		for (unsigned i = 0; i < b::BOT_SECONDARY_COUNT && i < MAX_SECONDARY_WEAPONS; ++i)
+			ammo[i] = obj.ctype.player_info.secondary_ammo[static_cast<secondary_weapon_index>(i)];
+		const double own_arms{b::armament_score(res.weapons)};
+		bool target_weak{false}, target_alone{true};
+		unsigned stronger{0};
+		for (playernum_t i = 0; i < N_players && i < MAX_PLAYERS; ++i)
+		{
+			if (i == bs.pid || !bs.memory[i].valid || same_team(bs.pid, i))
+				continue;
+			const auto &t{*Objects.vcptr(vcplayerptr(i)->objnum)};
+			if (t.type != object_type::OBJ_PLAYER)
+				continue;
+			const auto &tpi{t.ctype.player_info};
+			const auto tw{weapons_of(tpi)};
+			if (bs.target && i == *bs.target)
+			{
+				std::array<uint8_t, b::BOT_SECONDARY_COUNT> tammo{};
+				for (unsigned k = 0; k < b::BOT_SECONDARY_COUNT && k < MAX_SECONDARY_WEAPONS; ++k)
+					tammo[k] = tpi.secondary_ammo[static_cast<secondary_weapon_index>(k)];
+				target_weak = b::weak_armament(tw, tammo);
+				continue;
+			}
+			/* Seen or heard of lately, near the bot. */
+			if (tick - bs.memory[i].tick > memory_ticks || b::distance(pos, bs.memory[i].pos) > b::THIRD_PARTY_DISTANCE)
+				continue;
+			target_alone = false;
+			if (b::fight_advantage(t.shields / 65536.0, b::armament_score(tw), res.shields, own_arms) > b::THIRD_PARTY_STRONGER)
+				++stronger;
+		}
+		bs.third_parties = stronger;
+		const bool attacked_close{attacked && bs.memory[bs.last_attacker].valid && b::distance(pos, bs.memory[bs.last_attacker].pos) <= b::PHASE_CLOSE_ATTACK};
+		const auto up{best_upgrade(bs, res, tick)};
+		bs.powerup_phase = b::in_powerup_phase({
+			.weak = b::weak_armament(res.weapons, ammo),
+			.upgrade_known = up.key != 0xffff,
+			.weapon_poor_level = B.weapon_poor,
+			.attacked_close = attacked_close,
+			.target_weak = target_weak,
+			.target_alone = target_alone,
+			.invulnerable = res.invulnerable,
+		});
+		if (bs.powerup_phase)
+		{
+			phase_engage = b::powerup_phase_engage(bs.cfg.style);
+			phase_collect = up.utility * b::powerup_phase_collect(bs.cfg.style) * bs.tactics.collect_weight;
+			phase_upgrade = up;
+		}
+	}
 	const b::goal_inputs gin{
 		.has_target = bs.target.has_value(),
 		.target_visible = target_visible,
@@ -1924,6 +2086,11 @@ void think(bot_state &bs, object &obj, const uint32_t tick)
 		.collect_upgrade = collect.upgrade,
 		.grab = grab.key != 0xffff,
 		.grab_shields = grab.shields,
+		.grab_value = grab.value,
+		.grab_invulnerability = grab.invulnerability,
+		.phase_engage = phase_engage,
+		.phase_collect = phase_collect,
+		.third_party = b::third_party_factor(bs.cfg.style, bs.third_parties),
 		.refuel = centre.utility,
 		.retreat_shields = bs.retreat_shields,
 		.engage_weight = st.engage_weight * b::style_engage_factor(st, advantage) * bs.tactics.engage_weight,
@@ -1936,6 +2103,11 @@ void think(bot_state &bs, object &obj, const uint32_t tick)
 	bs.grabbing = goal == b::goal_kind::collect && b::grab_applies(gin);
 	if (bs.grabbing)
 		collect = grab;
+	/* Section 9.8: the phase's upgrade, when it is what made collecting
+	 * win.
+	 */
+	else if (goal == b::goal_kind::collect && phase_upgrade && phase_collect >= b::goal_utility(gin)[b::goal_kind::collect])
+		collect = *phase_upgrade;
 	/* The log: the goal's utility against the best other. */
 	{
 		const auto u{b::goal_utility(gin)};
@@ -2156,6 +2328,7 @@ void decide_afterburner(bot_state &bs, object &obj, const vec3 &wanted, const ui
 		.retreating = bs.goal == bot_goal::retreat,
 		.dodging = dodging,
 		.long_straight = long_straight,
+		.turn_boost = bs.turning.phase == b::turn_phase::boost,
 		.aligned = aligned,
 		.burning = bs.burning,
 	})};
@@ -2498,7 +2671,7 @@ void plan_heavy(bot_state &bs, const object &obj, const uint32_t tick, b::missil
 	const auto t{bs.target ? *bs.target : 0xffu};
 	const bool may{bs.target && target_pos && (target_visible || m.target_seen_ago <= b::CORNER_SEEN_WITHIN) &&
 		m.smarts >= b::min_smarts(b::secondary::mega) &&
-		m.since_missile >= b::missile_interval(m.smarts) && m.since_heavy >= b::HEAVY_INTERVAL &&
+		m.since_missile >= b::missile_interval(m.smarts) && m.since_heavy >= b::heavy_interval(m.smarts) &&
 		!m.cloaked && !m.heavy_used_on_target};
 	if (!may)
 		bs.heavy_planned = false;
@@ -2673,6 +2846,62 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 		target_pos = p->pos;
 	else if (bs.target && bs.memory[*bs.target].valid)
 		target_pos = bs.memory[*bs.target].pos;
+	/* Section 9.8, the death dump: about to die (shields very low under
+	 * fire, or a lethal hit coming), the bot fires its missiles and
+	 * drops its mines as fast as the game lets it, most valuable first
+	 * (b::death_dump_order), each only with its blast clear of the bot.
+	 */
+	{
+		std::array<uint8_t, b::BOT_SECONDARY_COUNT> ammo{};
+		bool has_ammo{false};
+		for (unsigned i = 0; i < b::BOT_SECONDARY_COUNT && i < MAX_SECONDARY_WEAPONS; ++i)
+		{
+			ammo[i] = pi.secondary_ammo[static_cast<secondary_weapon_index>(i)];
+			const auto s{static_cast<b::secondary>(i)};
+			if (ammo[i] && sk.weapon_smarts >= b::min_smarts(s))
+				has_ammo = true;
+		}
+		const bool dump{b::death_dump_wanted({
+			.shields = obj.shields / 65536.0,
+			.since_hit = bs.last_attacker < MAX_PLAYERS ? (tick - bs.attacked_tick) / static_cast<double>(b::BOT_TICK_RATE) : 1e9,
+			.incoming_damage = bs.incoming_damage,
+			.invulnerable = has_flag(pi, player_flag::invulnerable) && !pi.FakingInvul,
+			.has_ammo = has_ammo,
+			.roll = bs.dump_roll,
+		}, bs.skill_level, bs.cfg.style)};
+		if (dump != bs.dumping && bot_log_on())
+			con_printf(CON_VERBOSE, "bots: '%s' %s (shields %.0f, incoming %.0f)", static_cast<const char *>(bs.cfg.name), dump ? "dumps its missiles: about to die" : "stops the dump", obj.shields / 65536.0, bs.incoming_damage);
+		bs.dumping = dump;
+		if (dump)
+		{
+			std::optional<double> wall;
+			const auto blast_ok{[&](const b::secondary s) {
+				if (!wall)
+					wall = wall_distance(obj, frame.f, 400);
+				double impact{*wall};
+				if (target_visible && target_pos && b::angle_between(frame.f, *target_pos - pos) < b::radians(20))
+					impact = std::min({impact, b::distance(pos, *target_pos), bs.shot_first_hit});
+				return b::blast_safe(b::role_of(s), impact, missile_data_of(game_secondary(s)), invulnerable_left, b::dot(vel, frame.f));
+			}};
+			if (const auto s{b::death_dump_choice(ammo, sk.weapon_smarts, blast_ok)})
+			{
+				const auto w{game_secondary(*s)};
+				bs.missile.reset();
+				bs.heavy_aim.reset();
+				bs.volley_left = 0;
+				bs.volley_missile.reset();
+				bs.missile_fire = *s;
+				bs.missile_volley = std::max<unsigned>(1, Weapon_info[Secondary_weapon_to_weapon_info[w]].fire_count);
+				if (b::role_of(*s) == b::missile_role::mine)
+					bs.last_mine = tick;
+				else
+					bs.last_missile = tick;
+				if (bot_log_on())
+					con_printf(CON_VERBOSE, "bots: '%s' dumps %s (%u left)", static_cast<const char *>(bs.cfg.name), secondary_names[static_cast<unsigned>(*s)], ammo[static_cast<unsigned>(*s)] - 1u);
+			}
+			return;
+		}
+	}
 	if (!bs.missile)
 	{
 		b::missile_situation m;
@@ -2698,7 +2927,7 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 			const auto t{*bs.target};
 			const auto &mem{bs.memory[t]};
 			m.target_seen_ago = mem.valid ? (tick - mem.tick) / static_cast<double>(b::BOT_TICK_RATE) : 1e9;
-			m.heavy_used_on_target = bs.heavy_target == t && m.since_heavy < b::HEAVY_PER_TARGET;
+			m.heavy_used_on_target = bs.heavy_target == t && m.since_heavy < b::heavy_per_target(sk.weapon_smarts);
 			if (target_pos)
 			{
 				const auto to{*target_pos - pos};
@@ -2760,7 +2989,36 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 				bs.heavy_planned && c.best ? ", best " : "", bs.heavy_planned && c.best ? b::name_of(c.best->kind) : "");
 		}
 		bs.heavy_why = verdict;
-		const auto chosen{b::choose_secondary(m)};
+		/* Section 9.8: the next round of a volley under way, else the
+		 * choice (whose interval runs from the volley's last round).
+		 */
+		std::optional<b::secondary> chosen;
+		if (bs.volley_left && bs.volley_missile)
+		{
+			if (m.since_missile < b::VOLLEY_GAP)
+				return;
+			const auto vs{*bs.volley_missile};
+			if (b::volley_continues({
+				.s = vs,
+				.smarts = m.smarts,
+				.style = bs.cfg.style,
+				.ammo = m.ammo[static_cast<unsigned>(vs)],
+				.target_visible = m.target_visible,
+				.shot_clear = m.shot_clear,
+				.target_distance = m.target_distance,
+				.target_lateral_speed = m.target_lateral_speed,
+				.target_seen_ago = m.target_seen_ago,
+				.cloaked = m.cloaked,
+			}, bs.volley_left, m.since_missile))
+				chosen = vs;
+			else
+			{
+				bs.volley_left = 0;
+				bs.volley_missile.reset();
+			}
+		}
+		if (!chosen)
+			chosen = b::choose_secondary(m);
 		if (!chosen)
 			return;
 		bs.missile = chosen;
@@ -2883,6 +3141,43 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 	else
 	{
 		bs.last_missile = tick;
+		/* Section 9.8: a round of the volley under way, or the first of
+		 * a new one (b::volley_size: 1 is a single shot).
+		 */
+		if (!heavy)
+		{
+			if (bs.volley_left && bs.volley_missile == s)
+				--bs.volley_left;
+			else
+			{
+				double lateral{0};
+				const double distance{target_pos ? b::distance(pos, *target_pos) : 0};
+				if (target_pos && bs.target)
+				{
+					const auto los{b::normalized(*target_pos - pos)};
+					const auto rel_vel{bs.memory[*bs.target].vel - vel};
+					lateral = b::length(rel_vel - los * b::dot(rel_vel, los));
+				}
+				const unsigned n{b::volley_size({
+					.s = s,
+					.smarts = sk.weapon_smarts,
+					.style = bs.cfg.style,
+					.ammo = pi.secondary_ammo[w],
+					.target_visible = target_visible,
+					.shot_clear = bs.shot_clear,
+					.target_distance = distance,
+					.target_lateral_speed = lateral,
+					.target_seen_ago = bs.target && bs.memory[*bs.target].valid ? (tick - bs.memory[*bs.target].tick) / static_cast<double>(b::BOT_TICK_RATE) : 1e9,
+					.cloaked = res_cloaked,
+				})};
+				bs.volley_missile = s;
+				bs.volley_left = n > 1 ? n - 1 : 0;
+				if (n > 1 && bot_log_on())
+					con_printf(CON_VERBOSE, "bots: '%s' fires a volley of %u %s at P#%u, %.0f units", static_cast<const char *>(bs.cfg.name), n, secondary_names[static_cast<unsigned>(s)], bs.target ? *bs.target : 0xffu, distance);
+			}
+			if (!bs.volley_left)
+				bs.volley_missile.reset();
+		}
 		if (heavy)
 		{
 			bs.last_heavy = tick;
@@ -3004,15 +3299,16 @@ void log_summary(const bot_state &bs, const object &obj, const uint32_t tick)
 		std::snprintf(powerup, sizeof(powerup), "-");
 	char arm[160];
 	describe_armament(pi, arm, sizeof(arm));
-	con_printf(CON_VERBOSE, "bots: '%s' goal=%s %.2f (next %s %.2f, collect %.2f%s) tgt=%s | %s [%s] | sh=%.0f en=%.0f | pu=%s | heavy=%s min=%.0f keep=%.0f risk=%.2f/%.1f%s%s",
+	con_printf(CON_VERBOSE, "bots: '%s' goal=%s %.2f (next %s %.2f, collect %.2f%s%s%s) tgt=%s | %s [%s] | sh=%.0f en=%.0f | pu=%s | heavy=%s min=%.0f keep=%.0f risk=%.2f/%.1f%s%s%s%s",
 		static_cast<const char *>(bs.cfg.name),
-		goal_name(bs.chosen), bs.chosen_u, goal_name(bs.runner_up), bs.runner_up_u, bs.collect_u, bs.grabbing ? " grab" : "",
+		goal_name(bs.chosen), bs.chosen_u, goal_name(bs.runner_up), bs.runner_up_u, bs.collect_u, bs.grabbing ? " grab" : "", bs.powerup_phase ? " phase" : "", bs.third_parties ? " 3rd-party" : "",
 		target,
 		primary_name(underlying_value(pi.Primary_weapon.get_active())), arm,
 		obj.shields / 65536.0, pi.energy / 65536.0,
 		powerup,
 		b::name_of(bs.heavy_why), bs.heavy_min, bs.standoff,
-		bs.risk.self_budget, bs.risk.trade, bs.hugging ? " hug" : "", bs.duck_point && tick < bs.duck_until ? " duck" : "");
+		bs.risk.self_budget, bs.risk.trade, bs.hugging ? " hug" : "", bs.duck_point && tick < bs.duck_until ? " duck" : "",
+		bs.dumping ? " dump" : "", bs.turning.phase == b::turn_phase::reversing ? " reverse-turn" : bs.turning.phase == b::turn_phase::boost ? " boost" : "");
 }
 
 /* Section 9.6: toward the duck point, slowing to a hold on it. */
@@ -3129,7 +3425,8 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 		 * heavy shot, facing it (it comes round the corner, or the
 		 * corner is hit).
 		 */
-		switch (b::engaged_movement(bs.shot_clear, path_goal, bs.duck_point && tick < bs.duck_until))
+		const auto move_mode{b::engaged_movement(bs.shot_clear, path_goal, bs.duck_point && tick < bs.duck_until)};
+		switch (move_mode)
 		{
 			case b::engaged_move::combat:
 			{
@@ -3163,8 +3460,20 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 				break;
 		}
 		const double err{b::angle_between(frame.f, bs.face_dir)};
-		/* Section 9.5: turning far round, the bot keeps moving. */
-		wanted = b::keep_moving_in_turn(wanted, err, to, vel, frame.r * static_cast<double>(bs.heading_pref), max_speed);
+		/* Section 9.8: a target behind: momentum away from it while
+		 * the nose comes round (forward thrust becoming reverse), then
+		 * a boost toward it.  Only while the bot moves freely (not on
+		 * its path, ducking, hugging or clear of its own blast).
+		 */
+		const bool free_move{move_mode != b::engaged_move::path && move_mode != b::engaged_move::duck && !bs.hugging && !(tick < bs.blast_hold_until)};
+		const auto turn{free_move ? bs.turning.update(err, tick, dist, range_lo) : b::turn_phase::none};
+		if (!free_move)
+			bs.turning.reset();
+		if (turn != b::turn_phase::none)
+			wanted = b::turn_round_velocity(turn, wanted, to, vel, frame.r * static_cast<double>(bs.heading_pref), max_speed);
+		else
+			/* Section 9.5: turning far round, the bot keeps moving. */
+			wanted = b::keep_moving_in_turn(wanted, err, to, vel, frame.r * static_cast<double>(bs.heading_pref), max_speed);
 		/* Section 4.5: beyond the mid band, no shot that hits less than
 		 * one time in ten.
 		 */
@@ -3196,8 +3505,20 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 			const auto to{bs.memory[bs.turn_to].pos - pos};
 			bs.face_dir = b::normalized(to);
 			bs.face_rate = {};
-			wanted = b::keep_moving_in_turn(wanted, b::angle_between(frame.f, bs.face_dir), to, vel, frame.r * static_cast<double>(bs.heading_pref), max_speed);
+			const double err{b::angle_between(frame.f, bs.face_dir)};
+			/* Section 9.8: turning round to the attacker, momentum away
+			 * from it (not on a path it must follow).
+			 */
+			const bool path_goal{bs.goal == bot_goal::collect || bs.goal == bot_goal::retreat || bs.goal == bot_goal::refuel};
+			const auto turn{path_goal ? b::turn_phase::none : bs.turning.update(err, tick, b::length(to), range_lo)};
+			if (turn == b::turn_phase::reversing)
+				wanted = b::turn_round_velocity(turn, wanted, to, vel, frame.r * static_cast<double>(bs.heading_pref), max_speed);
+			else
+				wanted = b::keep_moving_in_turn(wanted, err, to, vel, frame.r * static_cast<double>(bs.heading_pref), max_speed);
 		}
+		/* Out of sight, no boost toward a remembered place. */
+		else if (bs.turning.phase == b::turn_phase::boost)
+			bs.turning.reset();
 		/* Section 9.6: a heavy missile for the corner the target hides
 		 * behind: the bot holds (or keeps ducking) and turns to it.
 		 */
@@ -3728,6 +4049,23 @@ void bots_level_start()
 	build_nav_graph();
 	compute_limits();
 	judge_spawn_sites();
+	/* Section 9.8: the level's supply of weapons against its players
+	 * (a weapon-poor level: the bots fight with what they have).
+	 */
+	{
+		auto &Objects = LevelUniqueObjectState.Objects;
+		unsigned weapons{0};
+		for (const object &o : Objects.vcptr)
+			if (o.type == object_type::OBJ_POWERUP && b::is_weapon_item(item_of(get_powerup_id(o)).kind))
+				++weapons;
+		unsigned players{0};
+		for (playernum_t i = 0; i < N_players && i < MAX_PLAYERS; ++i)
+			if (vcplayerptr(i)->connected == player_connection_status::playing)
+				++players;
+		B.weapon_powerups = weapons;
+		B.weapon_poor = b::weapon_poor_level(weapons, players);
+		con_printf(CON_VERBOSE, "bots: level has %u weapon powerups for %u players%s", weapons, players, B.weapon_poor ? ": weapon-poor, the bots fight with what they have" : "");
+	}
 	B.tick = ::dcx::net_interp::tick_accumulator{b::BOT_TICK_RATE};
 	B.tick.reset(GameTime64);
 	B.last_time = GameTime64;
@@ -3803,6 +4141,10 @@ void bots_frame(const d_robot_info_array &Robot_info)
 		if (!o)
 			continue;
 		auto &bs{*o};
+		/* Section 9.8: the host's own displays read the slot's flag too;
+		 * a bot the host flies is marked whatever cleared it.
+		 */
+		set_player_is_bot(bs.pid, true);
 		const auto connected{vcplayerptr(bs.pid)->connected};
 		if (connected != player_connection_status::playing)
 		{

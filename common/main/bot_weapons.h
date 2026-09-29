@@ -118,11 +118,15 @@ constexpr unsigned min_smarts(const secondary s)
 
 /* Seconds between two missiles, and between two mines, by weapon smarts
  * (a Rookie fires one now and then, an Insane bot whenever it may).
+ * Section 9.8: between two volleys of the light missiles (volley_size);
+ * the rounds of a volley follow at VOLLEY_GAP.  Ace 1.8 and Insane 1.2
+ * before (the exp-16 playtest: "even at Insane, bots are still too
+ * careful firing rockets").
  */
 [[nodiscard]]
 constexpr double missile_interval(const unsigned smarts)
 {
-	constexpr std::array<double, 5> by_smarts{{1e9, 4.0, 2.5, 1.8, 1.2}};
+	constexpr std::array<double, 5> by_smarts{{1e9, 4.0, 2.5, 1.5, 1.0}};
 	return by_smarts[std::min<std::size_t>(smarts, by_smarts.size() - 1)];
 }
 
@@ -186,10 +190,26 @@ constexpr double MINE_TEAMMATE_DISTANCE{150};
  */
 constexpr double CLOAKED_MISSILE_DISTANCE{100};
 /* A heavy missile (mega, earthshaker) at most once per this many
- * seconds; and once per target until it changes or this passes.
+ * seconds; and once per target until it changes or this passes (the
+ * Hotshot values; section 9.8: heavy_interval and heavy_per_target by
+ * weapon smarts, Ace and Insane bolder).
  */
 constexpr double HEAVY_INTERVAL{5};
 constexpr double HEAVY_PER_TARGET{10};
+
+[[nodiscard]]
+constexpr double heavy_interval(const unsigned smarts)
+{
+	constexpr std::array<double, 5> by_smarts{{1e9, 1e9, HEAVY_INTERVAL, 4.0, 3.0}};
+	return by_smarts[std::min<std::size_t>(smarts, by_smarts.size() - 1)];
+}
+
+[[nodiscard]]
+constexpr double heavy_per_target(const unsigned smarts)
+{
+	constexpr std::array<double, 5> by_smarts{{1e9, 1e9, HEAVY_PER_TARGET, 8.0, 6.0}};
+	return by_smarts[std::min<std::size_t>(smarts, by_smarts.size() - 1)];
+}
 /* A target crossing faster than this dodges a slow heavy missile that
  * does not home; below Ace (weapon smarts 3) the bot waits for a slower
  * moment.  A homing one (the data's homing_flag) turns after it.
@@ -417,13 +437,18 @@ constexpr risk_profile risk_profile_of(const bot_skill k, const bot_style s)
 		{{0.02, 8.0, 0.15, 1.2, 0.00, 0.90, 3}},	/* cautious: the strict rule, with the uncertainty */
 		{{0.06, 4.0, 0.25, 1.1, 0.10, 0.75, 5}},	/* collector */
 	}};
-	/* By skill: scales of the budget, the trade and the hug. */
+	/* By skill: scales of the budget, the trade and the hug.  Section
+	 * 9.8: Ace and Insane clearly bolder than Hotshot (B2: 1.25, 0.9 and
+	 * 1.5, 0.8; the trade of an aggressive Insane bot stays above 1); the
+	 * point blank and lethal rules (judge_blast) hold for
+	 * every profile, so no scale makes a suicide acceptable.
+	 */
 	constexpr std::array<std::array<double, 3>, BOT_SKILL_COUNT> by_skill{{
 		{{0.3, 1.3, 0.0}},
 		{{0.6, 1.15, 0.3}},
 		{{1.0, 1.0, 1.0}},
-		{{1.25, 0.9, 1.15}},
-		{{1.5, 0.8, 1.3}},
+		{{1.5, 0.85, 1.2}},
+		{{1.9, 0.75, 1.35}},
 	}};
 	const auto si{static_cast<unsigned>(s) < BOT_STYLE_COUNT ? static_cast<unsigned>(s) : 0u};
 	const auto ki{static_cast<unsigned>(k) < BOT_SKILL_COUNT ? static_cast<unsigned>(k) : static_cast<unsigned>(BOT_DEFAULT_SKILL)};
@@ -1371,7 +1396,7 @@ constexpr heavy_verdict heavy_check(const missile_situation &m, const secondary 
 		return heavy_verdict::skill;
 	if (!m.has_target)
 		return heavy_verdict::no_target;
-	if (m.since_missile < missile_interval(m.smarts) || m.since_heavy < HEAVY_INTERVAL)
+	if (m.since_missile < missile_interval(m.smarts) || m.since_heavy < heavy_interval(m.smarts))
 		return heavy_verdict::cooldown;
 	/* Section 9.6: a favourable aim at a wall or a corner needs no clear
 	 * line to the target (a hidden one seen lately).
@@ -1479,7 +1504,7 @@ constexpr bool heavy_usable_soon(const missile_situation &m)
 	{
 		if (!m.ammo[static_cast<unsigned>(s)] || m.smarts < min_smarts(s))
 			continue;
-		const double wait{std::max(missile_interval(m.smarts) - m.since_missile, HEAVY_INTERVAL - m.since_heavy)};
+		const double wait{std::max(missile_interval(m.smarts) - m.since_missile, heavy_interval(m.smarts) - m.since_heavy)};
 		if (wait <= HEAVY_SOON_SECONDS)
 			return true;
 	}
@@ -1587,6 +1612,211 @@ constexpr bool missile_release(const secondary s, const double aim_error, const 
 	if (r == missile_role::mine)
 		return true;
 	return aim_error <= missile_cone(r, fire_cone, md.homing) && blast_safe(r, impact_distance, md, invulnerable_left, closing_speed, target_closing);
+}
+
+/* Section 9.8: volleys.  "A single homing has no impact.  A fleet of 3-5
+ * of them make an opponent run."  The light missiles (concussion,
+ * homing, mercury) go in volleys at a good target, smart missiles in
+ * bursts at a target behind cover (or, from Ace, in sight at mid
+ * range), the heavy ones (mega, earthshaker) one at a time as before.
+ * The rounds of a volley follow each other at VOLLEY_GAP (the game's own
+ * refire limit, the weapon's fire_wait, holds as for a human:
+ * allowed_to_fire_missile); missile_interval separates two volleys.
+ */
+constexpr double VOLLEY_GAP{0.1};
+constexpr unsigned VOLLEY_MAX{5};
+/* A good target for a volley of straight missiles: near enough that a
+ * crossing target does not simply fly out of the stream.
+ */
+constexpr double VOLLEY_STRAIGHT_MAX_DISTANCE{130};
+constexpr double VOLLEY_STRAIGHT_MAX_LATERAL{40};
+constexpr double VOLLEY_HOMING_MAX_DISTANCE{170};
+constexpr double SMART_BURST_MIN_DISTANCE{40};
+
+struct volley_view
+{
+	secondary s{secondary::concussion};
+	unsigned smarts{2};
+	bot_style style{bot_style::balanced};
+	/* Rounds of `s` left. */
+	unsigned ammo{};
+	bool target_visible{};
+	bool shot_clear{};
+	double target_distance{};
+	double target_lateral_speed{};
+	double target_seen_ago{1e9};
+	bool cloaked{};
+};
+
+/* The rounds of the volley that starts with `v.s` now (1: a single
+ * shot).  By weapon smarts (Rookie 1, Hotshot 2, Ace 3, Insane 4 light
+ * missiles), Aggressive one more, Cautious one fewer; never more than
+ * the bot holds.
+ */
+[[nodiscard]]
+constexpr unsigned volley_size(const volley_view &v)
+{
+	if (!v.ammo)
+		return 0;
+	const auto r{role_of(v.s)};
+	int n{1};
+	const int style_step{v.style == bot_style::aggressive ? 1 : v.style == bot_style::cautious ? -1 : 0};
+	switch (r)
+	{
+		case missile_role::straight:
+		case missile_role::homing:
+		{
+			if (!v.target_visible || !v.shot_clear || v.cloaked)
+				break;
+			const bool good{r == missile_role::homing
+				? v.target_distance >= HOMING_MIN_DISTANCE && v.target_distance <= VOLLEY_HOMING_MAX_DISTANCE
+				: v.target_distance >= MISSILE_MIN_DISTANCE && v.target_distance <= VOLLEY_STRAIGHT_MAX_DISTANCE && v.target_lateral_speed <= VOLLEY_STRAIGHT_MAX_LATERAL};
+			if (!good)
+				break;
+			constexpr std::array<int, 5> by_smarts{{1, 1, 2, 3, 4}};
+			n = by_smarts[std::min<std::size_t>(v.smarts, by_smarts.size() - 1)] + style_step;
+			break;
+		}
+		case missile_role::smart:
+		{
+			/* Behind cover (its children find it round the corner),
+			 * or from Ace in sight at mid range.
+			 */
+			const bool cover{!v.target_visible && v.target_seen_ago <= SMART_SEEN_WITHIN};
+			const bool in_sight{v.target_visible && v.shot_clear && v.smarts >= 3 && v.target_distance >= SMART_BURST_MIN_DISTANCE && v.target_distance <= SMART_MAX_DISTANCE};
+			if (!(cover || in_sight) || v.cloaked)
+				break;
+			constexpr std::array<int, 5> by_smarts{{1, 1, 2, 2, 3}};
+			n = std::min(by_smarts[std::min<std::size_t>(v.smarts, by_smarts.size() - 1)] + style_step, 3);
+			break;
+		}
+		default:
+			/* Heavy missiles one at a time; flash, mines: one. */
+			break;
+	}
+	return static_cast<unsigned>(std::clamp<int>(n, 1, std::min<int>(static_cast<int>(VOLLEY_MAX), static_cast<int>(v.ammo))));
+}
+
+/* The next round of a volley under way goes now: rounds left, the
+ * missile held, the gap passed, and the target still one the volley's
+ * rule accepts (a straight or homing volley needs the target in sight
+ * and a clear line; a smart burst one seen a moment ago).
+ */
+[[nodiscard]]
+constexpr bool volley_continues(const volley_view &v, const unsigned rounds_left, const double since_missile)
+{
+	if (!rounds_left || !v.ammo || since_missile < VOLLEY_GAP || v.cloaked)
+		return false;
+	switch (role_of(v.s))
+	{
+		case missile_role::straight:
+		case missile_role::homing:
+			return v.target_visible && v.shot_clear && v.target_distance >= MISSILE_MIN_DISTANCE && v.target_distance <= MISSILE_MAX_DISTANCE;
+		case missile_role::smart:
+			return (v.target_visible && v.shot_clear) || v.target_seen_ago <= SMART_SEEN_WITHIN;
+		default:
+			return false;
+	}
+}
+
+/* Section 9.8: the death dump.  "We tend to push the rocket fire button
+ * when we are about to die... to not give the player who killed you all
+ * your inventory."  A bot about to die (its shields very low while it is
+ * under fire, or more damage coming at it than it has shields) fires its
+ * missiles and drops its mines as fast as the game lets it, most
+ * valuable first.  The shots go through the normal firing as the bot,
+ * one at a time as the game's refire limit allows; a missile only with
+ * its blast clear of the bot (blast_safe along the nose), so a bot never
+ * kills itself to deny the kill.  Higher skill does it more
+ * reliably (a roll drawn once per life).
+ */
+struct death_dump_view
+{
+	double shields{100};
+	/* Seconds since an enemy last hit the bot. */
+	double since_hit{1e9};
+	/* Damage of the enemy shots on a course that meets the bot within
+	 * the next moment (the dodge's scan).
+	 */
+	double incoming_damage{};
+	bool invulnerable{};
+	/* Any secondary the bot may fire held. */
+	bool has_ammo{};
+	/* This life's roll, uniform in [0, 1). */
+	double roll{1};
+};
+
+/* Under fire: hit within this many seconds. */
+constexpr double DEATH_DUMP_UNDER_FIRE{1.2};
+
+[[nodiscard]]
+constexpr double death_dump_shields(const bot_skill k, const bot_style s)
+{
+	constexpr std::array<double, BOT_SKILL_COUNT> by_skill{{0, 10, 14, 17, 20}};
+	const auto ki{static_cast<unsigned>(k) < BOT_SKILL_COUNT ? static_cast<unsigned>(k) : static_cast<unsigned>(BOT_DEFAULT_SKILL)};
+	if (!by_skill[ki])
+		return 0;
+	/* A collector minds its inventory most, an aggressive bot fights to
+	 * the last.
+	 */
+	return by_skill[ki] + (s == bot_style::collector ? 4 : s == bot_style::cautious ? 3 : s == bot_style::aggressive ? -2 : 0);
+}
+
+[[nodiscard]]
+constexpr double death_dump_reliability(const bot_skill k, const bot_style s)
+{
+	constexpr std::array<double, BOT_SKILL_COUNT> by_skill{{0, 0.25, 0.6, 0.85, 0.97}};
+	const auto ki{static_cast<unsigned>(k) < BOT_SKILL_COUNT ? static_cast<unsigned>(k) : static_cast<unsigned>(BOT_DEFAULT_SKILL)};
+	if (!by_skill[ki])
+		return 0;
+	return std::min(1.0, by_skill[ki] + (s == bot_style::collector ? 0.1 : 0));
+}
+
+[[nodiscard]]
+constexpr bool death_dump_wanted(const death_dump_view &v, const bot_skill k, const bot_style s)
+{
+	if (v.invulnerable || !v.has_ammo || !(v.shields > 0))
+		return false;
+	if (!(v.roll < death_dump_reliability(k, s)))
+		return false;
+	const bool low_under_fire{v.shields <= death_dump_shields(k, s) && v.since_hit <= DEATH_DUMP_UNDER_FIRE};
+	/* A lethal hit on its way, to a bot already hurt (at most twice
+	 * its threshold: a full-shield bot is not one shot from death).
+	 */
+	const bool lethal_incoming{v.incoming_damage >= v.shields && v.shields <= 2 * death_dump_shields(k, s)};
+	return low_under_fire || lethal_incoming;
+}
+
+/* The dump's order: what the killer would value most first. */
+inline constexpr std::array<secondary, 9> death_dump_order{{
+	secondary::earthshaker,
+	secondary::mega,
+	secondary::smart,
+	secondary::smart_mine,
+	secondary::homing,
+	secondary::mercury,
+	secondary::proximity,
+	secondary::concussion,
+	secondary::flash,
+}};
+
+/* The secondary to dump now: the first of death_dump_order held that the
+ * skill uses and that may go (`blast_ok`: a missile's blast along the
+ * nose clear of the bot, blast_safe; a mine always).
+ */
+template <typename BlastOk>
+[[nodiscard]]
+constexpr std::optional<secondary> death_dump_choice(const std::array<uint8_t, BOT_SECONDARY_COUNT> &ammo, const unsigned smarts, BlastOk &&blast_ok)
+{
+	for (const auto s : death_dump_order)
+	{
+		if (!ammo[static_cast<unsigned>(s)] || smarts < min_smarts(s))
+			continue;
+		if (role_of(s) != missile_role::mine && !blast_ok(s))
+			continue;
+		return s;
+	}
+	return std::nullopt;
 }
 
 /* Section 9.5: the fusion cannon, charged by the bot's own trigger as

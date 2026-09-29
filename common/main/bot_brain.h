@@ -1085,6 +1085,115 @@ inline vec3 keep_moving_in_turn(const vec3 &wanted, const double face_error, con
 	return wanted + across * need;
 }
 
+/* Section 9.8: turning round to a target behind, as a human does it.
+ * "During the turn I switch from flying forward to flying backwards (and
+ * usually after the turn I boost forward towards the new target)."  The
+ * bot keeps (or takes) its momentum away from the target while it turns:
+ * it wants to fly away from it, so the thrust that holds that velocity
+ * is forward while the nose points away and becomes reverse as the nose
+ * comes round (velocity_command works in the world; the ship's axes
+ * turn under it), with a little of the slide across the line of sight
+ * so that it is not a still target on the line.  Once it faces the
+ * target (REVERSE_TURN_FACING) it boosts forward toward it for
+ * TURN_BOOST_TICKS (with the afterburner from Hotshot), unless the
+ * target is already inside the near edge of its fight band.  It starts
+ * only for a target more than REVERSE_TURN_START off the nose; below
+ * that keep_moving_in_turn's slide applies.
+ */
+constexpr double REVERSE_TURN_START{1.92};	// 110 degrees
+constexpr double REVERSE_TURN_FACING{0.45};	// 26 degrees
+constexpr double REVERSE_TURN_SPEED{0.8};
+constexpr double REVERSE_TURN_ACROSS{0.4};
+constexpr unsigned REVERSE_TURN_MAX_TICKS{ticks_from_ms(2500)};
+constexpr unsigned TURN_BOOST_TICKS{ticks_from_ms(800)};
+constexpr double TURN_BOOST_MARGIN{15};
+
+enum class turn_phase : uint8_t
+{
+	none,
+	reversing,
+	boost,
+};
+
+struct turn_round_state
+{
+	turn_phase phase{turn_phase::none};
+	uint32_t since{};
+	uint32_t until{};
+	void reset()
+	{
+		*this = {};
+	}
+	/* `face_error`: the nose off the target (radians); `distance` to it;
+	 * `near_edge`: the near edge of the fight band (no boost inside it).
+	 */
+	turn_phase update(const double face_error, const uint32_t tick, const double distance, const double near_edge)
+	{
+		switch (phase)
+		{
+			case turn_phase::none:
+				if (face_error > REVERSE_TURN_START)
+				{
+					phase = turn_phase::reversing;
+					since = tick;
+				}
+				break;
+			case turn_phase::reversing:
+				if (face_error <= REVERSE_TURN_FACING)
+				{
+					if (distance > near_edge + TURN_BOOST_MARGIN)
+					{
+						phase = turn_phase::boost;
+						until = tick + TURN_BOOST_TICKS;
+					}
+					else
+						phase = turn_phase::none;
+				}
+				else if (tick - since > REVERSE_TURN_MAX_TICKS)
+					phase = turn_phase::none;
+				break;
+			case turn_phase::boost:
+				if (tick >= until || face_error > TURN_MOVE_ANGLE || distance <= near_edge)
+					phase = turn_phase::none;
+				/* A new target behind: turn round again. */
+				if (face_error > REVERSE_TURN_START)
+				{
+					phase = turn_phase::reversing;
+					since = tick;
+				}
+				break;
+		}
+		return phase;
+	}
+};
+
+/* The velocity the bot wants in each phase (`wanted` outside them). */
+[[nodiscard]]
+inline vec3 turn_round_velocity(const turn_phase phase, const vec3 &wanted, const vec3 &to_target, const vec3 &vel, const vec3 &lateral_hint, const double max_speed)
+{
+	const auto los{normalized(to_target)};
+	if (los == vec3{} || max_speed <= 0)
+		return wanted;
+	switch (phase)
+	{
+		case turn_phase::none:
+			break;
+		case turn_phase::reversing:
+		{
+			auto across{vel - los * dot(vel, los)};
+			if (length(across) < 5)
+				across = lateral_hint - los * dot(lateral_hint, los);
+			across = normalized(across);
+			const auto dir{normalized(-los + across * REVERSE_TURN_ACROSS)};
+			const double speed{std::max(REVERSE_TURN_SPEED * max_speed, dot(wanted, -los))};
+			return dir * std::min(speed, max_speed);
+		}
+		case turn_phase::boost:
+			return los * max_speed;
+	}
+	return wanted;
+}
+
 /* Section 9.5: a hit from an attacker the bot does not see (behind it,
  * outside its field of view).  B1-B4 learnt the attacker's place from the
  * hit and turned to it after the reaction time, the target choice (5 Hz)

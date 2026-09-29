@@ -470,16 +470,22 @@ constexpr double upgrade_value(const double ratio)
  */
 constexpr double SHIELD_URGENT_NEED{0.5};
 
+/* Section 9.8: the big missiles are worth a detour ("I've seen several
+ * bots fly close by a mega missile and not take a minor detour"): smart
+ * 2, mega 2.5, earthshaker 3 (before: 1.5, 1.5, 2), which makes them
+ * high-value grabs (GRAB_HIGH_VALUE).
+ */
 [[nodiscard]]
 constexpr double secondary_value(const uint8_t index)
 {
 	switch (static_cast<secondary>(index))
 	{
 		case secondary::smart:
-		case secondary::mega:
-			return 1.5;
-		case secondary::earthshaker:
 			return 2;
+		case secondary::mega:
+			return 2.5;
+		case secondary::earthshaker:
+			return 3;
 		case secondary::proximity:
 		case secondary::smart_mine:
 			return 0.8;
@@ -537,7 +543,7 @@ constexpr double item_value(const item_desc &d, const resource_view &r)
 		case item::secondary:
 			return secondary_value(d.secondary);
 		case item::afterburner:
-			return 2;
+			return r.afterburner ? 0 : 2;
 		case item::converter:
 			return 0.8;
 		case item::ammo_rack:
@@ -553,12 +559,31 @@ constexpr double item_value(const item_desc &d, const resource_view &r)
 /* Section 9.5: whether the item is worth a detour while an enemy is in
  * sight (goal_inputs::collect_upgrade).
  */
+/* Section 9.8: what a human takes on the way even in a fight: the big
+ * missiles, invulnerability, cloak, the afterburner, quad and super
+ * lasers and better guns (item_value from this up).
+ */
+constexpr double GRAB_HIGH_VALUE{2};
+
 [[nodiscard]]
 constexpr bool collect_in_fight(const item_desc &d, const resource_view &r)
 {
 	if (d.kind == item::shield)
 		return shield_need(r.shields) >= SHIELD_URGENT_NEED;
-	return upgrade_ratio(d, r.weapons) >= BIG_UPGRADE_RATIO;
+	if (upgrade_ratio(d, r.weapons) >= BIG_UPGRADE_RATIO)
+		return true;
+	switch (d.kind)
+	{
+		case item::secondary:
+		case item::cloak:
+		case item::invulnerability:
+		case item::afterburner:
+		case item::quad:
+		case item::super_laser:
+			return item_value(d, r) >= GRAB_HIGH_VALUE;
+		default:
+			return false;
+	}
 }
 
 /* Section 4.7: the collection score, value x need / path distance (the
@@ -618,6 +643,22 @@ struct goal_inputs
 	 */
 	bool grab{};
 	bool grab_shields{};
+	/* Section 9.8: the grab's value (grab_utility), and whether it is
+	 * invulnerability (taken in danger too, as shields).
+	 */
+	double grab_value{0.75};
+	bool grab_invulnerability{};
+	/* Section 9.8: the early-life power-up phase (in_powerup_phase):
+	 * the engage weight's factor, and the best known weapon upgrade's
+	 * collection utility with the phase's weight (taken as the collect
+	 * goal when better, not reduced in sight of an enemy).
+	 */
+	double phase_engage{1};
+	double phase_collect{};
+	/* Section 9.8: stronger enemies other than the target nearby
+	 * (third_party_factor): the engage weight's factor.
+	 */
+	double third_party{1};
 	/* The best fuel or repair centre (collect_utility of the need). */
 	double refuel{};
 	/* The style (section 5.2). */
@@ -668,11 +709,28 @@ constexpr double GRAB_RADIUS{45};
 constexpr double GRAB_PATH{70};
 constexpr double GRAB_MIN_VALUE{0.75};
 constexpr double GRAB_UTILITY{4};
+/* Section 9.8: a high-value powerup (GRAB_HIGH_VALUE: mega, earthshaker,
+ * smart, a better gun, quad, super laser, invulnerability, cloak, the
+ * afterburner) is a detour from further, and beats a fight: an
+ * aggressive bot that was just shot engages at up to 2 x 1.5 x 1.5 x
+ * the hysteresis 1.2 = 5.4, above GRAB_UTILITY.
+ */
+constexpr double GRAB_HIGH_RADIUS{85};
+constexpr double GRAB_HIGH_PATH{130};
+constexpr double GRAB_HIGH_UTILITY{6.5};
 
 [[nodiscard]]
 constexpr bool grab_worthwhile(const double value, const double straight_distance, const double path_cost)
 {
+	if (value >= GRAB_HIGH_VALUE)
+		return straight_distance <= GRAB_HIGH_RADIUS && path_cost <= GRAB_HIGH_PATH;
 	return value >= GRAB_MIN_VALUE && straight_distance <= GRAB_RADIUS && path_cost <= GRAB_PATH;
+}
+
+[[nodiscard]]
+constexpr double grab_utility(const double value)
+{
+	return value >= GRAB_HIGH_VALUE ? GRAB_HIGH_UTILITY : GRAB_UTILITY;
 }
 
 /* Threatened, weak and not invulnerable: the bot would retreat. */
@@ -685,7 +743,7 @@ constexpr bool in_danger(const goal_inputs &in)
 [[nodiscard]]
 constexpr bool grab_applies(const goal_inputs &in)
 {
-	return in.grab && (!in_danger(in) || in.grab_shields);
+	return in.grab && (!in_danger(in) || in.grab_shields || in.grab_invulnerability);
 }
 
 [[nodiscard]]
@@ -699,17 +757,20 @@ inline goal_utilities goal_utility(const goal_inputs &in)
 	at(goal_kind::roam) = ROAM_UTILITY;
 	if (in.has_target)
 	{
+		const double engage{2 * in.target_score * in.engage_weight * in.phase_engage * in.third_party};
 		if (in.target_visible)
-			at(goal_kind::engage) = 2 * in.target_score * in.engage_weight;
+			at(goal_kind::engage) = engage;
 		else
-			at(goal_kind::hunt) = 2 * in.target_score * in.engage_weight;
+			at(goal_kind::hunt) = engage;
 	}
 	const bool under_fire{in.target_visible && !in.collector};
 	double collect{in.collect * in.collect_weight};
 	if (under_fire && in.collect_path > GRAB_DISTANCE)
 		collect *= in.collect_upgrade ? COLLECT_UPGRADE_UNDER_FIRE : COLLECT_UNDER_FIRE;
+	/* Section 9.8: in the power-up phase, the weapon upgrade. */
+	collect = std::max(collect, in.phase_collect);
 	if (grab_applies(in))
-		collect = std::max(collect, GRAB_UTILITY);
+		collect = std::max(collect, grab_utility(in.grab_value));
 	at(goal_kind::collect) = collect;
 	double refuel{in.refuel * in.collect_weight};
 	if (under_fire)
@@ -744,6 +805,149 @@ inline goal_kind choose_goal(const goal_inputs &in)
 		}
 	}
 	return best;
+}
+
+/* Section 9.8: the early-life power-up phase.  "Bots are happy to engage
+ * in 1:1 dogfights with both players only having a low level laser.  In
+ * a multiplayer game this usually ends with a third player with
+ * superior weapons swooping in...  usually it is better to first avoid
+ * fights and pick up proper powerups before trying to get kills
+ * (warning: some levels have very few weapon powerups; in these,
+ * fighting with laser 1 is still required)."
+ *
+ * A weak bot (a low laser, no strong secondaries) that knows a weapon
+ * upgrade it can reach prefers collecting to fighting, unless it is
+ * attacked at close range, or its target is as weak and alone, or the
+ * level has too few weapon powerups for its players (then it fights with
+ * what it has).  The style sets how strongly (Collector most,
+ * Aggressive least).
+ */
+/* The armament (armament_score) below which a bot is weak: the laser
+ * levels 1-3 without quad (1, 1.25, 1.5), level 1 with quad (1.3).
+ */
+constexpr double WEAK_ARMAMENT{1.55};
+/* Strong secondaries: any smart missile, mega or earthshaker, or this
+ * many homing and mercury missiles, or this many light missiles.
+ */
+constexpr unsigned STRONG_HOMING_COUNT{4};
+constexpr unsigned STRONG_LIGHT_COUNT{8};
+/* A weapon upgrade for the phase: at least this ratio (upgrade_ratio;
+ * the laser from level 1 to 2 is 1.25), within this path.
+ */
+constexpr double PHASE_MIN_UPGRADE{1.2};
+constexpr double PHASE_MAX_PATH{600};
+/* Attacked from nearer than this, the bot fights back. */
+constexpr double PHASE_CLOSE_ATTACK{70};
+/* Another enemy within this of the bot: the target is not alone (and a
+ * third party, third_party_factor).
+ */
+constexpr double THIRD_PARTY_DISTANCE{200};
+
+[[nodiscard]]
+constexpr bool strong_secondaries(const std::array<uint8_t, BOT_SECONDARY_COUNT> &ammo)
+{
+	const auto n{[&](const secondary s) -> unsigned {
+		return ammo[static_cast<unsigned>(s)];
+	}};
+	if (n(secondary::smart) || n(secondary::mega) || n(secondary::earthshaker))
+		return true;
+	if (n(secondary::homing) + n(secondary::mercury) >= STRONG_HOMING_COUNT)
+		return true;
+	return n(secondary::homing) + n(secondary::mercury) + n(secondary::concussion) >= STRONG_LIGHT_COUNT;
+}
+
+[[nodiscard]]
+constexpr bool weak_armament(const weapon_view &w, const std::array<uint8_t, BOT_SECONDARY_COUNT> &ammo)
+{
+	return armament_score(w) < WEAK_ARMAMENT && !strong_secondaries(ammo);
+}
+
+/* The powerups that count as weapons for the level's supply: the laser
+ * levels, super laser, quad and the guns.
+ */
+[[nodiscard]]
+constexpr bool is_weapon_item(const item kind)
+{
+	return kind == item::laser || kind == item::super_laser || kind == item::quad || kind == item::primary;
+}
+
+/* A level is poor in weapons when it has fewer weapon powerups at its
+ * start than half its players (rounded up), or fewer than two.
+ */
+[[nodiscard]]
+constexpr bool weapon_poor_level(const unsigned weapon_powerups, const unsigned players)
+{
+	return weapon_powerups < 2 || 2 * weapon_powerups < players;
+}
+
+struct powerup_phase_view
+{
+	/* weak_armament. */
+	bool weak{};
+	/* A reachable weapon upgrade the bot knows (PHASE_MIN_UPGRADE,
+	 * PHASE_MAX_PATH).
+	 */
+	bool upgrade_known{};
+	bool weapon_poor_level{};
+	/* An enemy hit the bot in the last seconds from within
+	 * PHASE_CLOSE_ATTACK.
+	 */
+	bool attacked_close{};
+	/* The target is weak too, and no other enemy is known within
+	 * THIRD_PARTY_DISTANCE.
+	 */
+	bool target_weak{};
+	bool target_alone{};
+	/* Invulnerable: no reason to wait. */
+	bool invulnerable{};
+};
+
+[[nodiscard]]
+constexpr bool in_powerup_phase(const powerup_phase_view &v)
+{
+	if (!v.weak || !v.upgrade_known || v.weapon_poor_level || v.attacked_close || v.invulnerable)
+		return false;
+	return !(v.target_weak && v.target_alone);
+}
+
+/* In the phase: the engage weight's factor and the weight of the best
+ * weapon upgrade's collection utility, by style.
+ */
+[[nodiscard]]
+constexpr double powerup_phase_engage(const bot_style s)
+{
+	constexpr std::array<double, BOT_STYLE_COUNT> by_style{{0.55, 0.8, 0.45, 0.3}};
+	const auto i{static_cast<unsigned>(s)};
+	return by_style[i < BOT_STYLE_COUNT ? i : 0];
+}
+
+[[nodiscard]]
+constexpr double powerup_phase_collect(const bot_style s)
+{
+	constexpr std::array<double, BOT_STYLE_COUNT> by_style{{1.3, 1.0, 1.4, 1.7}};
+	const auto i{static_cast<unsigned>(s)};
+	return by_style[i < BOT_STYLE_COUNT ? i : 0];
+}
+
+/* Section 9.8, third parties: other enemies than the target within
+ * THIRD_PARTY_DISTANCE that are stronger than the bot (their advantage
+ * over it above THIRD_PARTY_STRONGER) make a dogfight a bad idea: the
+ * engage weight falls by the style's factor for the first, and half as
+ * much again for each further one.
+ */
+constexpr double THIRD_PARTY_STRONGER{1.25};
+
+[[nodiscard]]
+constexpr double third_party_factor(const bot_style s, const unsigned stronger_nearby)
+{
+	if (!stronger_nearby)
+		return 1;
+	constexpr std::array<double, BOT_STYLE_COUNT> by_style{{0.65, 0.85, 0.5, 0.5}};
+	const auto i{static_cast<unsigned>(s)};
+	double f{by_style[i < BOT_STYLE_COUNT ? i : 0]};
+	for (unsigned k = 1; k < stronger_nearby && k < 4; ++k)
+		f *= 0.5 + 0.5 * f;
+	return f;
 }
 
 /* The refuel value of a fuel centre (energy) or a repair centre
@@ -1000,6 +1204,10 @@ struct afterburner_view
 	bool retreating{};
 	bool dodging{};
 	bool long_straight{};
+	/* Section 9.8: the boost toward the target after a turn round
+	 * (turn_round_state), from Hotshot (afterburner_use::retreat).
+	 */
+	bool turn_boost{};
 	/* The wanted velocity lies within the burn cone of the nose. */
 	bool aligned{};
 	/* Burning now. */
@@ -1021,6 +1229,7 @@ constexpr bool want_afterburner(const afterburner_view &v)
 		v.chasing_far ||
 		(v.retreating && level >= static_cast<unsigned>(afterburner_use::retreat)) ||
 		(v.dodging && level >= static_cast<unsigned>(afterburner_use::dodge)) ||
+		(v.turn_boost && level >= static_cast<unsigned>(afterburner_use::retreat)) ||
 		(v.long_straight && level >= static_cast<unsigned>(afterburner_use::roam))
 	};
 	if (!reason)

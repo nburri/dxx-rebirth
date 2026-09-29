@@ -1325,10 +1325,270 @@ void test_heavy_knowledge_and_modes()
 	CHECK(!want_hug(v, aggressive));
 }
 
+/* Section 9.8: volleys of the light missiles, bursts of smart missiles,
+ * the heavy ones one at a time.
+ */
+void test_volleys()
+{
+	const auto view{[](const secondary s, const unsigned smarts, const bot_style st, const unsigned ammo, const double d) {
+		return volley_view{
+			.s = s,
+			.smarts = smarts,
+			.style = st,
+			.ammo = ammo,
+			.target_visible = true,
+			.shot_clear = true,
+			.target_distance = d,
+			.target_lateral_speed = 10,
+			.target_seen_ago = 0,
+		};
+	}};
+	/* Homing at a good target: Rookie 1, Hotshot 2, Ace 3, Insane 4. */
+	for (unsigned smarts = 1; smarts <= 4; ++smarts)
+		CHECK(volley_size(view(secondary::homing, smarts, bot_style::balanced, 10, 80)) == std::max(1u, smarts));
+	/* "A fleet of 3-5 of them make an opponent run." */
+	CHECK(volley_size(view(secondary::homing, 4, bot_style::aggressive, 10, 80)) == 5);
+	CHECK(volley_size(view(secondary::concussion, 3, bot_style::balanced, 10, 80)) == 3);
+	CHECK(volley_size(view(secondary::mercury, 4, bot_style::balanced, 10, 80)) == 4);
+	CHECK(volley_size(view(secondary::homing, 2, bot_style::cautious, 10, 80)) == 1);
+	/* Never more than it holds. */
+	CHECK(volley_size(view(secondary::homing, 4, bot_style::aggressive, 2, 80)) == 2);
+	CHECK(volley_size(view(secondary::homing, 4, bot_style::aggressive, 0, 80)) == 0);
+	/* Not a good target: one. */
+	CHECK(volley_size(view(secondary::concussion, 4, bot_style::balanced, 10, 170)) == 1);
+	{
+		auto v{view(secondary::concussion, 4, bot_style::balanced, 10, 80)};
+		v.target_lateral_speed = 60;
+		CHECK(volley_size(v) == 1);
+		/* A homing volley follows a crosser. */
+		v.s = secondary::homing;
+		CHECK(volley_size(v) == 4);
+		v.shot_clear = false;
+		CHECK(volley_size(v) == 1);
+		v.shot_clear = true;
+		v.cloaked = true;
+		CHECK(volley_size(v) == 1);
+	}
+	/* Smart missiles: a burst at a target behind cover (seen a moment
+	 * ago), from Ace also at one in sight at mid range.
+	 */
+	{
+		auto v{view(secondary::smart, 2, bot_style::balanced, 5, 80)};
+		CHECK(volley_size(v) == 1);
+		v.smarts = 3;
+		CHECK(volley_size(v) == 2);
+		v.target_visible = false;
+		v.target_seen_ago = 0.5;
+		v.smarts = 2;
+		CHECK(volley_size(v) == 2);
+		v.smarts = 4;
+		CHECK(volley_size(v) == 3);
+		v.style = bot_style::aggressive;
+		CHECK(volley_size(v) == 3);
+		v.target_seen_ago = 3;
+		CHECK(volley_size(v) == 1);
+	}
+	/* The heavy ones, flash and mines: one at a time. */
+	for (const auto s : {secondary::mega, secondary::earthshaker, secondary::flash, secondary::proximity, secondary::smart_mine})
+		CHECK(volley_size(view(s, 4, bot_style::aggressive, 10, 120)) == 1);
+	/* The rounds follow while the target stays good, after the gap. */
+	{
+		const auto v{view(secondary::homing, 4, bot_style::balanced, 5, 80)};
+		CHECK(volley_continues(v, 3, VOLLEY_GAP));
+		CHECK(!volley_continues(v, 3, VOLLEY_GAP / 2));
+		CHECK(!volley_continues(v, 0, 1));
+		auto lost{v};
+		lost.target_visible = false;
+		CHECK(!volley_continues(lost, 3, 1));
+		auto empty{v};
+		empty.ammo = 0;
+		CHECK(!volley_continues(empty, 3, 1));
+		auto smart{view(secondary::smart, 4, bot_style::balanced, 5, 80)};
+		smart.target_visible = false;
+		smart.target_seen_ago = 0.4;
+		CHECK(volley_continues(smart, 2, 1));
+		CHECK(!volley_continues(view(secondary::mega, 4, bot_style::balanced, 5, 80), 2, 1));
+	}
+	/* The fire rate stays within the weapon's refire limit: the rounds
+	 * go when both the volley's gap and the game's fire_wait allow
+	 * (allowed_to_fire_missile), the next volley a missile_interval after
+	 * the last round.  A model of an Insane bot with 10 homing missiles
+	 * and a fire_wait of 0.25 s, at 60 ticks a second.
+	 */
+	{
+		constexpr double fire_wait{0.25};
+		constexpr double dt{1.0 / 60};
+		unsigned ammo{10}, left{0};
+		double last{-1e9}, next_allowed{0};
+		std::vector<double> shots;
+		for (double t = 0; t < 6 && ammo; t += dt)
+		{
+			auto v{view(secondary::homing, 4, bot_style::balanced, ammo, 80)};
+			bool go{false};
+			if (left)
+			{
+				if (volley_continues(v, left, t - last))
+					go = true;
+				else if (!(t - last < VOLLEY_GAP))
+					left = 0;
+			}
+			if (!go && !left && t - last >= missile_interval(4))
+				go = true;
+			if (!go || t < next_allowed)
+				continue;
+			if (left)
+				--left;
+			else
+				left = volley_size(v) - 1;
+			shots.push_back(t);
+			last = t;
+			next_allowed = t + fire_wait;
+			--ammo;
+		}
+		CHECK(shots.size() == 10);
+		for (std::size_t i = 1; i < shots.size(); ++i)
+			CHECK(shots[i] - shots[i - 1] >= fire_wait - 1e-9);
+		/* Volleys of four: the fifth round waits the interval. */
+		CHECK(shots[3] - shots[0] < 4 * fire_wait);
+		CHECK(shots[4] - shots[3] >= missile_interval(4) - 1e-9);
+	}
+}
+
+/* Section 9.8: Ace and Insane are clearly bolder with the heavy missiles
+ * than Hotshot, within the no-suicide rules.
+ */
+void test_heavy_boldness()
+{
+	for (const auto st : {bot_style::balanced, bot_style::aggressive, bot_style::cautious, bot_style::collector})
+	{
+		const auto h{risk_profile_of(bot_skill::hotshot, st)}, a{risk_profile_of(bot_skill::ace, st)}, i{risk_profile_of(bot_skill::insane, st)};
+		CHECK(a.self_budget >= 1.4 * h.self_budget && i.self_budget >= 1.8 * h.self_budget);
+		CHECK(a.trade <= 0.9 * h.trade && i.trade <= 0.8 * h.trade);
+		CHECK(a.self_chance >= h.self_chance && i.self_chance >= a.self_chance);
+	}
+	/* The aggressive Insane bot still wants more damage to the target
+	 * than to itself.
+	 */
+	CHECK(risk_profile_of(bot_skill::insane, bot_style::aggressive).trade > 1);
+	/* Heavy missiles more often at the higher skills. */
+	CHECK(heavy_interval(2) == HEAVY_INTERVAL && heavy_per_target(2) == HEAVY_PER_TARGET);
+	CHECK(heavy_interval(3) < heavy_interval(2) && heavy_interval(4) < heavy_interval(3));
+	CHECK(heavy_per_target(3) < heavy_per_target(2) && heavy_per_target(4) < heavy_per_target(3));
+	CHECK(missile_interval(4) <= 1.0 && missile_interval(3) <= 1.5);
+	/* A shot at the edge of its blast: an Insane balanced bot takes it, a
+	 * Hotshot balanced one does not.
+	 */
+	const auto md{[] {
+		auto m{blast(40)};
+		m.damage = 150;
+		return m;
+	}()};
+	blast_outcome o;
+	o.impact = 80;
+	o.burst_distance = 80;
+	o.target_damage = 60;
+	o.self_damage = 15;
+	o.self_chance = 0.3;
+	const auto sc{still_scene({0, 0, 0}, {80, 0, 0})};
+	CHECK(judge_blast(o, sc, md, risk_profile_of(bot_skill::hotshot, bot_style::balanced)) == risk_verdict::over_budget);
+	CHECK(judge_blast(o, sc, md, risk_profile_of(bot_skill::insane, bot_style::balanced)) == risk_verdict::fire);
+	CHECK(judge_blast(o, sc, md, risk_profile_of(bot_skill::ace, bot_style::aggressive)) == risk_verdict::fire);
+	/* Never at point blank, never a lethal blast, whatever the skill. */
+	auto close{o};
+	close.impact = close.burst_distance = 20;
+	auto lethal{o};
+	lethal.self_nominal = sc.shields;
+	for (const auto k : {bot_skill::hotshot, bot_skill::ace, bot_skill::insane})
+		for (const auto st : {bot_style::balanced, bot_style::aggressive})
+		{
+			CHECK(judge_blast(close, sc, md, risk_profile_of(k, st)) == risk_verdict::point_blank);
+			CHECK(judge_blast(lethal, sc, md, risk_profile_of(k, st)) == risk_verdict::lethal);
+		}
+}
+
+/* Section 9.8: the death dump. */
+void test_death_dump()
+{
+	const death_dump_view hurt{
+		.shields = 12,
+		.since_hit = 0.4,
+		.incoming_damage = 0,
+		.invulnerable = false,
+		.has_ammo = true,
+		.roll = 0.5,
+	};
+	CHECK(death_dump_wanted(hurt, bot_skill::insane, bot_style::balanced));
+	CHECK(death_dump_wanted(hurt, bot_skill::hotshot, bot_style::balanced));
+	/* Trainee never. */
+	CHECK(!death_dump_wanted(hurt, bot_skill::trainee, bot_style::balanced));
+	/* Not under fire, or not low: no dump. */
+	{
+		auto v{hurt};
+		v.since_hit = 3;
+		CHECK(!death_dump_wanted(v, bot_skill::insane, bot_style::balanced));
+		v = hurt;
+		v.shields = 40;
+		CHECK(!death_dump_wanted(v, bot_skill::insane, bot_style::balanced));
+		v = hurt;
+		v.invulnerable = true;
+		CHECK(!death_dump_wanted(v, bot_skill::insane, bot_style::balanced));
+		v = hurt;
+		v.has_ammo = false;
+		CHECK(!death_dump_wanted(v, bot_skill::insane, bot_style::balanced));
+	}
+	/* A lethal hit on its way: dump, even before the threshold. */
+	{
+		auto v{hurt};
+		v.shields = 30;
+		v.since_hit = 5;
+		CHECK(!death_dump_wanted(v, bot_skill::insane, bot_style::balanced));
+		v.incoming_damage = 32;
+		CHECK(death_dump_wanted(v, bot_skill::insane, bot_style::balanced));
+		/* A full-shield bot is not about to die. */
+		v.shields = 100;
+		v.incoming_damage = 120;
+		CHECK(!death_dump_wanted(v, bot_skill::insane, bot_style::balanced));
+	}
+	/* Higher skill does it more reliably, with more shields left. */
+	for (unsigned k = 1; k < BOT_SKILL_COUNT; ++k)
+		for (const auto st : {bot_style::balanced, bot_style::aggressive, bot_style::cautious, bot_style::collector})
+		{
+			const auto a{static_cast<bot_skill>(k - 1)}, b{static_cast<bot_skill>(k)};
+			CHECK(death_dump_reliability(b, st) > death_dump_reliability(a, st));
+			CHECK(death_dump_shields(b, st) > death_dump_shields(a, st));
+		}
+	CHECK(death_dump_reliability(bot_skill::insane, bot_style::balanced) >= 0.95);
+	{
+		auto v{hurt};
+		v.roll = 0.7;
+		CHECK(!death_dump_wanted(v, bot_skill::hotshot, bot_style::balanced));
+		CHECK(death_dump_wanted(v, bot_skill::ace, bot_style::balanced));
+	}
+	/* The order: the most valuable first; a missile only with its blast
+	 * clear of the bot, a mine always; only what the skill uses.
+	 */
+	std::array<uint8_t, BOT_SECONDARY_COUNT> ammo{};
+	ammo[idx(secondary::earthshaker)] = 1;
+	ammo[idx(secondary::homing)] = 3;
+	ammo[idx(secondary::proximity)] = 4;
+	const auto all_ok{[](secondary) { return true; }};
+	const auto none_ok{[](secondary) { return false; }};
+	CHECK(death_dump_choice(ammo, 4, all_ok) == secondary::earthshaker);
+	CHECK(death_dump_choice(ammo, 4, none_ok) == secondary::proximity);
+	CHECK(death_dump_choice(ammo, 4, [](const secondary s) { return s != secondary::earthshaker; }) == secondary::homing);
+	CHECK(death_dump_choice(ammo, 1, all_ok) == secondary::homing);
+	ammo = {};
+	ammo[idx(secondary::guided)] = 2;
+	CHECK(!death_dump_choice(ammo, 4, all_ok));
+}
+
 }
 
 int main()
 {
+	test_volleys();
+	test_heavy_boldness();
+	test_death_dump();
 	test_risk_profiles();
 	test_expected_outcome();
 	test_shaker_children();

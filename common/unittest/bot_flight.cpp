@@ -641,6 +641,159 @@ void test_turn_round()
 	CHECK(small.pitch == small_b1.pitch && small.heading == small_b1.heading);
 }
 
+/* Section 9.8: turning round the way a human does: momentum away from
+ * the target while the nose comes round (forward thrust becomes
+ * reverse), then a boost toward it once the bot faces it.
+ */
+struct reverse_turn_result
+{
+	double face_time{-1};
+	double min_speed{1e9};
+	/* The least speed away from the target while reversing (after the
+	 * first 0.2 s), the ship's own forward speed when the turn is done
+	 * (negative: flying backwards), its best speed toward the target in
+	 * the boost.
+	 */
+	double min_away{1e9};
+	double forward_at_turn_end{0};
+	double toward_in_boost{-1e9};
+	bool reversed{}, boosted{};
+	unsigned phase_changes{};
+};
+
+reverse_turn_result reverse_turn(const vec3 &target_local, const double fps, const double near_edge = 35)
+{
+	const auto lim{ship_limits()};
+	const double cap{skill_of(bot_skill::hotshot).turn_cap};
+	const fix ft{to_fix(1 / fps)};
+	ship s;
+	s.vel = {0, 0, 40};
+	const auto target_pos{normalized(target_local) * 80};
+	int pref{1};
+	ticker tk;
+	turn_round_state tr;
+	uint32_t tick{0};
+	vec3 face{0, 0, 1}, move;
+	double t{0};
+	auto last_phase{turn_phase::none};
+	reverse_turn_result r;
+	while (t < 4)
+	{
+		for (unsigned n{tk.advance(ft)}; n; --n)
+		{
+			++tick;
+			const auto to{target_pos - s.pos};
+			face = normalized(to);
+			const double err{angle_between(s.orient.f, face)};
+			const auto phase{tr.update(err, tick, length(to), near_edge)};
+			if (phase != last_phase)
+			{
+				++r.phase_changes;
+				if (last_phase == turn_phase::reversing)
+					r.forward_at_turn_end = dot(s.vel, s.orient.f);
+				last_phase = phase;
+			}
+			r.reversed = r.reversed || phase == turn_phase::reversing;
+			r.boosted = r.boosted || phase == turn_phase::boost;
+			const auto wanted{phase != turn_phase::none
+				? turn_round_velocity(phase, {}, to, s.vel, s.orient.r * static_cast<double>(pref), lim.max_speed)
+				: keep_moving_in_turn({}, err, to, s.vel, s.orient.r * static_cast<double>(pref), lim.max_speed)};
+			move = velocity_command(wanted, s.vel, lim.max_speed);
+		}
+		const auto c{steer(s, face, {}, move, lim, cap, pref)};
+		s.step(c, ft);
+		t += ft / 65536.0;
+		const auto to{target_pos - s.pos};
+		const auto los{normalized(to)};
+		const double err{angle_between(s.orient.f, los)};
+		if (t > 0.3 && err > TURN_MOVE_ANGLE)
+			r.min_speed = std::min(r.min_speed, length(s.vel));
+		if (t > 0.2 && tr.phase == turn_phase::reversing)
+			r.min_away = std::min(r.min_away, dot(s.vel, -los));
+		if (r.face_time < 0 && err < radians(5))
+			r.face_time = t;
+		if (tr.phase == turn_phase::boost)
+			r.toward_in_boost = std::max(r.toward_in_boost, dot(s.vel, los));
+	}
+	return r;
+}
+
+void test_reverse_turn()
+{
+	const auto lim{ship_limits()};
+	/* The state machine: behind starts it, facing ends the turn in the
+	 * boost (a target beyond the band's near edge) or in nothing (a
+	 * target inside it); the boost ends on time, and a target behind
+	 * again starts another turn.
+	 */
+	{
+		turn_round_state tr;
+		CHECK(tr.update(radians(90), 1, 100, 35) == turn_phase::none);
+		CHECK(tr.update(radians(150), 2, 100, 35) == turn_phase::reversing);
+		CHECK(tr.update(radians(60), 30, 100, 35) == turn_phase::reversing);
+		CHECK(tr.update(radians(20), 60, 100, 35) == turn_phase::boost);
+		CHECK(tr.update(radians(5), 60 + TURN_BOOST_TICKS - 1, 80, 35) == turn_phase::boost);
+		CHECK(tr.update(radians(5), 60 + TURN_BOOST_TICKS, 80, 35) == turn_phase::none);
+		CHECK(tr.update(radians(170), 200, 80, 35) == turn_phase::reversing);
+		CHECK(tr.update(radians(20), 230, 40, 35) == turn_phase::none);
+		/* A turn that never ends gives up. */
+		CHECK(tr.update(radians(170), 300, 80, 35) == turn_phase::reversing);
+		CHECK(tr.update(radians(120), 300 + REVERSE_TURN_MAX_TICKS + 1, 80, 35) == turn_phase::none);
+		/* The boost stops at the near edge. */
+		tr.reset();
+		tr.update(radians(170), 1, 100, 35);
+		CHECK(tr.update(radians(10), 20, 100, 35) == turn_phase::boost);
+		CHECK(tr.update(radians(10), 21, 35, 35) == turn_phase::none);
+	}
+	/* The velocities: away from the target (and a little across) while
+	 * reversing, full speed at it in the boost.
+	 */
+	{
+		const vec3 to{0, 0, -80};
+		const auto rev{turn_round_velocity(turn_phase::reversing, {}, to, {0, 0, 40}, {1, 0, 0}, lim.max_speed)};
+		CHECK(rev.z > 0.85 * REVERSE_TURN_SPEED * lim.max_speed);
+		CHECK(std::abs(rev.x) > 0);
+		CHECK(length(rev) <= lim.max_speed + 1e-9);
+		const auto boost{turn_round_velocity(turn_phase::boost, {}, to, {0, 0, 40}, {1, 0, 0}, lim.max_speed)};
+		CHECK(boost.z < -0.99 * lim.max_speed);
+		const vec3 keep{1, 2, 3};
+		CHECK(turn_round_velocity(turn_phase::none, keep, to, {}, {1, 0, 0}, lim.max_speed) == keep);
+	}
+	/* In the flight model, at every frame rate: straight behind, behind
+	 * and above, behind and below.
+	 */
+	for (const vec3 target_local : {vec3{0.001, 0, -1}, vec3{0, 0.45, -1}, vec3{0.05, -0.2, -1}})
+	{
+		for (const double fps : frame_rates)
+		{
+			const auto rev{reverse_turn(target_local, fps)};
+			const auto slide{turn_round(target_local, true, true, fps)};
+			std::printf("test-bot-flight: reverse turn (%.2f %.2f %.2f) at %.0f fps: faces in %.2f s (sliding %.2f s), least speed %.1f, least away %.1f, forward speed at the turn's end %.1f, toward it in the boost %.1f\n", target_local.x, target_local.y, target_local.z, fps, rev.face_time, slide.time, rev.min_speed, rev.min_away, rev.forward_at_turn_end, rev.toward_in_boost);
+			CHECK(rev.reversed && rev.boosted);
+			CHECK(rev.face_time > 0);
+			/* The turn itself is as fast as the slide's. */
+			CHECK(rev.face_time < slide.time * 1.05 + 0.02);
+			/* Never slow, and always flying away from the target while
+			 * the nose comes round.
+			 */
+			CHECK(rev.min_speed > lim.max_speed * 0.5);
+			CHECK(rev.min_away > 20);
+			/* Facing it, the ship flies backwards ("I switch from flying
+			 * forward to flying backwards"), then boosts at it.
+			 */
+			CHECK(rev.forward_at_turn_end < -30);
+			CHECK(rev.toward_in_boost > 25);
+			const auto ref{reverse_turn(target_local, 60)};
+			CHECK(std::abs(rev.face_time - ref.face_time) < 0.12);
+		}
+	}
+	/* A target already close (inside the band's near edge): no boost. */
+	{
+		const auto rev{reverse_turn({0.001, 0, -1}, 60, 200)};
+		CHECK(rev.reversed && !rev.boosted);
+	}
+}
+
 }
 
 int main()
@@ -652,6 +805,7 @@ int main()
 	test_waypoints();
 	test_combat_movement();
 	test_turn_round();
+	test_reverse_turn();
 	std::puts("test-bot-flight: all checks passed");
 	return 0;
 }

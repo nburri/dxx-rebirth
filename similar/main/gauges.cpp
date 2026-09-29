@@ -3592,19 +3592,30 @@ static void hud_show_kill_list(fvcobjptr &vcobjptr, grs_canvas &canvas, const ga
 		}
 		else
 			name = vcplayerptr(player_num)->callsign;	// Note link to above if!!
+		/* Documentation/multiplayer-bots.md section 9.8: a bot's line
+		 * always says so, after the name (cut to leave it room).
+		 */
+		const bool marked{::dcx::bot::kill_list_marks_bot(player_is_bot(player_num), Show_kill_list == show_kill_list_mode::team_kills)};
+		const auto marker_room{::dcx::bot::kill_list_marker_room(marked, marked ? gr_get_string_size(game_font, ::dcx::bot::BOT_KILL_LIST_MARKER).width : 0)};
 		auto [sw, sh] = gr_get_string_size(game_font, static_cast<const char *>(name));
 		{
 			const auto b = x1 - x0 - fspacx2;
-			if (sw > b)
-				for (char *e = &name.buffer()[strlen(name)];;)
+			if (sw + marker_room > b)
+				for (char *e = &name.buffer()[strlen(name)]; e != &name.buffer()[0];)
 				{
 					 *--e = 0;
 					 sw = gr_get_string_size(game_font, name).width;
-					 if (!(sw > b))
+					 if (!(sw + marker_room > b))
 						 break;
 				}
 		}
 		gr_string(canvas, game_font, x0, y, name, sw, sh);
+		if (marked)
+		{
+			gr_set_fontcolor(canvas, BM_XRGB(24, 24, 24), -1);
+			gr_string(canvas, game_font, x0 + static_cast<int>(sw), y, ::dcx::bot::BOT_KILL_LIST_MARKER);
+			gr_set_fontcolor(canvas, fontcolor, -1);
+		}
 
 		auto &player_info = vcobjptr(p.objnum)->ctype.player_info;
 		if (Show_kill_list == show_kill_list_mode::efficiency)
