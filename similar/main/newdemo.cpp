@@ -86,6 +86,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "d_construct.h"
 #include "d_levelstate.h"
 #include "partial_range.h"
+#include "world_time_pause.h"
 #include <utility>
 
 #define ND_EVENT_EOF				0	// EOF
@@ -315,7 +316,7 @@ namespace {
 
 static int _newdemo_write(const void *buffer, int elsize, int nelem )
 {
-	int num_written, total_size;
+	int total_size;
 
 	if (unlikely(nd_record_v_no_space))
 		return -1;
@@ -324,13 +325,22 @@ static int _newdemo_write(const void *buffer, int elsize, int nelem )
 	nd_record_v_framebytes_written += total_size;
 	Newdemo_num_written += total_size;
 	Assert(outfile);
-	num_written = (PHYSFS_writeBytes)(outfile, buffer, elsize * nelem);
+	const auto bytes_written{(PHYSFS_writeBytes)(outfile, buffer, total_size)};
 
-	if (likely(num_written == nelem))
-		return num_written;
+	if (likely(::dcx::demo_write_complete(bytes_written, elsize, nelem)))
+		return nelem;
 
+	/* Do not stop the recording here: every demo write runs inside a
+	 * pause_game_world_time, and newdemo_stop_recording opens a
+	 * blocking menu.  In a multiplayer game, the game window resumes
+	 * the time when that menu closes, so the pause would be released
+	 * twice (world_time_pause.h), and while the menu is open, the game
+	 * window processes no frames, so the network is not served.  The
+	 * game window stops the recording at its next input event
+	 * (newdemo_record_stop_if_failed); until then, all writes return
+	 * early.
+	 */
 	nd_record_v_no_space=2;
-	newdemo_stop_recording();
 	return -1;
 }
 
@@ -1151,12 +1161,10 @@ void newdemo_record_start_demo()
 void newdemo_record_start_frame(fix frame_time )
 {
 	if (nd_record_v_no_space)
-	{
-		// Shouldn't happen - we should have stopped demo recording,
-		// in which case this function shouldn't have been called in the first place
-		Int3();
+		/* A write failed; the game window stops the recording at its
+		 * next input event (newdemo_record_stop_if_failed).
+		 */
 		return;
-	}
 
 	// Make demo recording waste a bit less space.
 	// First check if if at least REC_DELAY has passed since last recorded frame. If yes, record frame and set nd_record_v_recordframe true.
@@ -3942,6 +3950,14 @@ window_event_result newdemo_playback_one_frame()
 	return result;
 }
 
+bool newdemo_record_stop_if_failed()
+{
+	if (Newdemo_state != ND_STATE_RECORDING || !nd_record_v_no_space)
+		return false;
+	newdemo_stop_recording();
+	return true;
+}
+
 void newdemo_start_recording()
 {
 	Newdemo_num_written = 0;
@@ -4363,6 +4379,7 @@ int newdemo_swap_endian(const char *filename)
 	}
 
 	Newdemo_num_written = 0;
+	nd_record_v_no_space = 0;
 	nd_playback_v_bad_read = 0;
 	swap_endian = 1;
 	nd_playback_v_at_eof = 0;
