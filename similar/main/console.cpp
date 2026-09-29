@@ -40,6 +40,10 @@
 #include <windows.h>
 #endif
 
+#ifdef _WIN32
+void d_set_exception_report_directory(const char *utf8_directory);
+#endif
+
 namespace dcx {
 
 namespace {
@@ -458,6 +462,15 @@ window_event_result console_window::event_handler(const d_event &event)
 
 }
 
+/* gamelog.txt is buffered (1 MB): write out what is pending, so that
+ * the log survives a crash that follows.
+ */
+void con_flush_gamelog()
+{
+	if (const auto fp = gamelog_fp.get())
+		PHYSFS_flush(fp);
+}
+
 void con_init(void)
 {
 	con_buffer = {};
@@ -465,6 +478,12 @@ void con_init(void)
 		gamelog_fp.reset(PHYSFS_openWrite("gamelog.txt"));
 	else
 		gamelog_fp = PHYSFSX_openWriteBuffered("gamelog.txt").first;
+#ifdef _WIN32
+	/* A crash report (common/arch/win32/except.cpp) goes next to the
+	 * log.
+	 */
+	::d_set_exception_report_directory(PHYSFS_getWriteDir());
+#endif
 
 	cli_init();
 	cmd_init();
