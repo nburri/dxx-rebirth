@@ -32,14 +32,47 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "fwd-segment.h"
 #include "3d.h"
 #include "d_array.h"
+#include <cstdint>
 
 #define MIN_LIGHT_DIST  (F1_0*4)
 
 namespace dcx {
 
+/* The dynamic light of one segment, per corner (segment_relative_vertnum).
+ * Valid only if `generation` is the current lighting pass.
+ */
+struct segment_dynamic_light
+{
+	uint32_t generation;
+	per_segment_relative_vertnum_array<g3s_lrgb> corners;
+};
+
 struct d_level_unique_light_state
 {
-	per_vertex_array<g3s_lrgb> Dynamic_light;
+	/* The light of objects (shots, fireballs, flares, the ship's glow,
+	 * muzzle flashes) is stored per segment corner, not per vertex: two
+	 * segments on either side of a solid wall or a closed door share the
+	 * wall's vertices, and light stored per vertex would reach the faces
+	 * of both.  apply_light writes only the corners of the segments the
+	 * light reaches (light_reach.h).
+	 */
+	per_segment_array<segment_dynamic_light> Segment_dynamic_light;
+	/* The current lighting pass; entries of Segment_dynamic_light from
+	 * earlier passes hold no light.
+	 */
+	uint32_t Segment_dynamic_light_generation{1};
+	/* Headlights only, per vertex (they keep Descent's rule, see
+	 * apply_light).  Cleared for the rendered vertices at every pass.
+	 */
+	per_vertex_array<g3s_lrgb> Headlight_dynamic_light;
+	/* The corner light of `segnum` from the current pass, or nullptr if
+	 * no light reached it.
+	 */
+	const per_segment_relative_vertnum_array<g3s_lrgb> *get_segment_dynamic_light(const segnum_t segnum) const
+	{
+		auto &l{Segment_dynamic_light[segnum]};
+		return l.generation == Segment_dynamic_light_generation ? &l.corners : nullptr;
+	}
 };
 
 }
