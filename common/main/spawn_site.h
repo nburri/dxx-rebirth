@@ -69,24 +69,40 @@ auto pick_spawn_site(const std::span<const Site> sites, const unsigned usable, c
 }
 
 /* The sites assigned recently, each until a time (any clock; the game
- * uses timer_query).  `N` is the number of sites (MAX_PLAYERS).
+ * uses timer_query), and to whom.  `N` is the number of sites
+ * (MAX_PLAYERS).
  */
 template <std::size_t N>
 class spawn_reservations
 {
 	std::array<std::int64_t, N> until{};
+	std::array<unsigned, N> owner{};
 	std::array<bool, N> held{};
 public:
+	/* No owner: a reservation release() never drops. */
+	static constexpr unsigned no_owner{~0u};
 	void reset()
 	{
 		held.fill(false);
 	}
-	void reserve(const unsigned site, const std::int64_t now, const std::int64_t duration)
+	void reserve(const unsigned site, const std::int64_t now, const std::int64_t duration, const unsigned for_owner = no_owner)
 	{
 		if (site >= N)
 			return;
 		until[site] = now + duration;
+		owner[site] = for_owner;
 		held[site] = true;
+	}
+	/* Drop the reservations of `for_owner`: it asks again, so it no
+	 * longer goes to (or already left) the site it was given.
+	 */
+	void release(const unsigned for_owner)
+	{
+		if (for_owner == no_owner)
+			return;
+		for (std::size_t i = 0; i < N; ++i)
+			if (owner[i] == for_owner)
+				held[i] = false;
 	}
 	[[nodiscard]]
 	bool reserved(const unsigned site, const std::int64_t now) const

@@ -446,7 +446,7 @@ bool net_interp_newest_position(const playernum_t pnum, vms_vector &pos, fix &sp
 	return true;
 }
 
-bool net_interp_newest_live_position(const playernum_t pnum, vms_vector &pos)
+bool net_interp_newest_live_position(const playernum_t pnum, vms_vector &pos, segnum_t &segnum)
 {
 	if (pnum >= MAX_PLAYERS)
 		return false;
@@ -454,7 +454,14 @@ bool net_interp_newest_live_position(const playernum_t pnum, vms_vector &pos)
 	if (ring.empty())
 		return false;
 	const auto &s{ring.newest()};
+	if (!segment_valid(s.segment))
+		return false;
 	pos = {s.pos.x, s.pos.y, s.pos.z};
+	/* The segment the position is in (the snapshot's own, or next to
+	 * it); the snapshot's if none is found, as write_pose does.
+	 */
+	const auto seg{find_segment_near(pos, segnum_t{s.segment})};
+	segnum = seg == segment_none ? segnum_t{s.segment} : seg;
 	return true;
 }
 

@@ -2338,11 +2338,15 @@ public:
 				if (objp->type != object_type::OBJ_PLAYER)
 					continue;
 				vms_vector pos{objp->pos};
+				segnum_t segnum{objp->segnum};
 #if DXX_USE_MULTIPLAYER
-				if (reservations_now && i != Player_num && !net_interp_newest_live_position(i, pos))
+				if (reservations_now && i != Player_num && !net_interp_newest_live_position(i, pos, segnum))
+				{
 					pos = objp->pos;
+					segnum = objp->segnum;
+				}
 #endif
-				const auto dist = find_connected_distance(pos, candidate_segp.absolute_sibling(objp->segnum), candidate.pos, candidate_segp, -1, wall_is_doorway_mask::None);
+				const auto dist = find_connected_distance(pos, candidate_segp.absolute_sibling(segnum), candidate.pos, candidate_segp, -1, wall_is_doorway_mask::None);
 				if (dist >= 0 && closest_dist > dist)
 					closest_dist = dist;
 			}
@@ -2389,16 +2393,17 @@ public:
 };
 
 /* The draw of a spawn site among `locations`; on the host of a network
- * deathmatch the site is then taken for SPAWN_RESERVATION_TIME.
+ * deathmatch the site is then taken for SPAWN_RESERVATION_TIME, for
+ * player `pnum`.
  */
 template <typename Draw>
-spawn_choice draw_spawn(const respawn_locations &locations, const fix64 *const reservations_now, Draw &&draw)
+spawn_choice draw_spawn(const respawn_locations &locations, const playernum_t pnum, const fix64 *const reservations_now, Draw &&draw)
 {
 	if (!locations.get_usable_sites())
 		return {spawn_choice::kind::none, 0};
 	const auto site{pick_spawn_site(locations.get_sites(), locations.get_usable_sites(), i2f(15*20), MAX_PLAYERS * 2, std::forward<Draw>(draw))};
 	if (reservations_now)
-		Spawn_reservations.reserve(static_cast<unsigned>(site), *reservations_now, SPAWN_RESERVATION_TIME);
+		Spawn_reservations.reserve(static_cast<unsigned>(site), *reservations_now, SPAWN_RESERVATION_TIME, pnum);
 	return {spawn_choice::kind::site, static_cast<unsigned>(site)};
 }
 
@@ -2414,9 +2419,13 @@ spawn_choice assign_spawn(fvmobjptr &vmobjptr, const playernum_t pnum)
 	if (!host_assigns_spawns())
 		return {spawn_choice::kind::none, 0};
 	const fix64 now{timer_query()};
+	/* A new request: the site this player was given before is no
+	 * longer where it goes.
+	 */
+	Spawn_reservations.release(pnum);
 	const respawn_locations locations(vmobjptr, vcsegptridx, pnum, nullptr, &now);
 	d_srand(static_cast<fix>(timer_update()));
-	return draw_spawn(locations, &now, d_rand);
+	return draw_spawn(locations, pnum, &now, d_rand);
 }
 
 spawn_choice choose_spawn(fvmobjptr &vmobjptr, const playernum_t pnum, const int random_flag)
@@ -2442,7 +2451,7 @@ spawn_choice choose_spawn(fvmobjptr &vmobjptr, const playernum_t pnum, const int
 		if (!locations.get_usable_sites())
 			return {spawn_choice::kind::none, 0};
 		d_srand(static_cast<fix>(timer_update()));
-		return draw_spawn(locations, nullptr, d_rand);
+		return draw_spawn(locations, pnum, nullptr, d_rand);
 	}
 	else
 		// If deathmatch and not random, positions were already determined by sync packet
@@ -2458,12 +2467,14 @@ spawn_choice choose_bot_spawn(fvmobjptr &vmobjptr, const playernum_t pnum, const
 	 */
 	const fix64 now{timer_query()};
 	const auto reservations_now{host_assigns_spawns() ? &now : nullptr};
+	if (reservations_now)
+		Spawn_reservations.release(pnum);
 	const respawn_locations locations(vmobjptr, vcsegptridx, pnum, &site_open, reservations_now);
 	/* The bot's own draws (xorshift32 from its seed): the game's d_rand
 	 * is neither reseeded nor advanced.
 	 */
 	uint32_t state{seed ? seed : 0x9e3779b9u};
-	return draw_spawn(locations, reservations_now, [&state]() {
+	return draw_spawn(locations, pnum, reservations_now, [&state]() {
 		state ^= state << 13;
 		state ^= state >> 17;
 		state ^= state << 5;

@@ -1012,11 +1012,11 @@ void net_interp_snap_to_newest(playernum_t pnum);
 bool net_interp_newest_position(playernum_t pnum, vms_vector &pos, fix &speed);
 /* Where player `pnum`'s newest snapshot of its current life has its ship
  * (not the place it died, which net_interp_newest_position keeps until
- * the next life's first snapshot): the host's spawn ranking.  False if
- * there is none.
+ * the next life's first snapshot) and the segment it is in: the host's
+ * spawn ranking.  False if there is none.
  */
 [[nodiscard]]
-bool net_interp_newest_live_position(playernum_t pnum, vms_vector &pos);
+bool net_interp_newest_live_position(playernum_t pnum, vms_vector &pos, segnum_t &segnum);
 /* object_move_one, for an object net_interp_drives: the object
  * collisions along the path a remote ship was moved this frame
  * (phys_sweep_objects).

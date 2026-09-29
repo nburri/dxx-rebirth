@@ -238,6 +238,16 @@ void test_reservations()
 	r.reserve(MAX_PLAYERS, 1000, hold);	// ignored
 	r.reset();
 	CHECK(!r.reserved(2, 1000));
+	/* An owner's reservations go when it asks again; others' stay. */
+	r.reserve(1, 1000, hold, 4);
+	r.reserve(2, 1000, hold, 5);
+	r.reserve(3, 1000, hold);
+	r.release(4);
+	CHECK(!r.reserved(1, 1000));
+	CHECK(r.reserved(2, 1000));
+	CHECK(r.reserved(3, 1000));
+	r.release(spawn_reservations<MAX_PLAYERS>::no_owner);
+	CHECK(r.reserved(3, 1000));
 }
 
 void test_reserved_sites_count_as_ships()
