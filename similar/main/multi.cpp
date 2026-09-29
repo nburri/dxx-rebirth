@@ -845,7 +845,10 @@ static void multi_compute_kill(const d_robot_info_array &Robot_info, const imobj
 		return;
 	}
 
-	killed_pnum = get_player_id(killed);
+	/* Override macro, call only the getter: the type (a player or its
+	 * ghost) is checked above.
+	 */
+	killed_pnum = (get_player_id)(killed);
 
 	Assert (killed_pnum < N_players);
 
@@ -911,7 +914,14 @@ static void multi_compute_kill(const d_robot_info_array &Robot_info, const imobj
 		return;
 	}
 
-	killer_pnum = get_player_id(killer);
+	/* A ghost killer is a player whose shot (a missile in flight, a mine)
+	 * killed after its owner died: the kill is that player's, as for a
+	 * human's post-death kill.  The ghost is the player's own object
+	 * (multi_make_player_ghost), so its player_info is the player's.
+	 * Override macro, call only the getter: get_player_id warns on
+	 * anything but OBJ_PLAYER, and the type is checked above.
+	 */
+	killer_pnum = (get_player_id)(killer);
 
 	kill_name_storage killer_buf;
 	const auto killer_name = prepare_kill_name(vcplayerptr, Game_mode, Netgame, killer_pnum, killer_buf);
@@ -993,7 +1003,7 @@ static void multi_compute_kill(const d_robot_info_array &Robot_info, const imobj
 					
 					/* If the target died, the new one is set! */
 					if( killed_pnum == Bounty_target )
-						multi_new_bounty_target_with_sound(killer_pnum, vcplayerptr(get_player_id(killer))->callsign);
+						multi_new_bounty_target_with_sound(killer_pnum, vcplayerptr(killer_pnum)->callsign);
 				}
 			}
 			else

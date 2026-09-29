@@ -130,6 +130,24 @@ constexpr double missile_interval(const unsigned smarts)
 	return by_smarts[std::min<std::size_t>(smarts, by_smarts.size() - 1)];
 }
 
+/* Section 9.9: the style's scale of missile_interval (the exp-19
+ * playtest: "do not use missiles aggressive enough, even on insane"):
+ * Aggressive 0.75, Cautious 1.2.
+ */
+[[nodiscard]]
+constexpr double missile_interval_scale(const bot_style s)
+{
+	switch (s)
+	{
+		case bot_style::aggressive:
+			return 0.75;
+		case bot_style::cautious:
+			return 1.2;
+		default:
+			return 1;
+	}
+}
+
 [[nodiscard]]
 constexpr double mine_interval(const unsigned smarts)
 {
@@ -441,14 +459,16 @@ constexpr risk_profile risk_profile_of(const bot_skill k, const bot_style s)
 	 * 9.8: Ace and Insane clearly bolder than Hotshot (B2: 1.25, 0.9 and
 	 * 1.5, 0.8; the trade of an aggressive Insane bot stays above 1); the
 	 * point blank and lethal rules (judge_blast) hold for
-	 * every profile, so no scale makes a suicide acceptable.
+	 * every profile, so no scale makes a suicide acceptable.  Section
+	 * 9.9: Insane 2.2 and 0.7 (9.8: 1.9, 0.75; an aggressive Insane
+	 * bot's trade 1.05, still above 1).
 	 */
 	constexpr std::array<std::array<double, 3>, BOT_SKILL_COUNT> by_skill{{
 		{{0.3, 1.3, 0.0}},
 		{{0.6, 1.15, 0.3}},
 		{{1.0, 1.0, 1.0}},
 		{{1.5, 0.85, 1.2}},
-		{{1.9, 0.75, 1.35}},
+		{{2.2, 0.7, 1.35}},
 	}};
 	const auto si{static_cast<unsigned>(s) < BOT_STYLE_COUNT ? static_cast<unsigned>(s) : 0u};
 	const auto ki{static_cast<unsigned>(k) < BOT_SKILL_COUNT ? static_cast<unsigned>(k) : static_cast<unsigned>(BOT_DEFAULT_SKILL)};
@@ -1328,6 +1348,12 @@ struct missile_situation
 	unsigned smarts{2};
 	/* Section 9.7: the style's scale of the time between two mines. */
 	double mine_interval_scale{1};
+	/* Section 9.9: the style's scale of the time between two missiles
+	 * (missile_interval_scale), and the self-damage the bot accepts (its
+	 * risk budget times its shields: heavy_min_distance).
+	 */
+	double missile_interval_scale{1};
+	double accepted_damage{};
 	/* The target. */
 	bool has_target{};
 	bool target_visible{};
@@ -1375,14 +1401,25 @@ struct missile_situation
 
 
 /* The least distance at which heavy missile `s` may be fired, by its
- * range and its blast (without invulnerability).
+ * range and its blast (without invulnerability).  Section 9.9: with the
+ * self-damage the bot accepts (`accepted_damage`, its risk budget times
+ * its shields), where the blast's nominal damage falls to that, at most
+ * HEAVY_ACCEPT_SHARE of the radius nearer.  The exp-19 log (the real
+ * data: mega and earthshaker blast 80, damage 199 and 220) had 74-130
+ * units (1 and 1.2 radii plus the margin, times the standoff scale),
+ * beyond the fight's 35-95; an aggressive Insane bot (budget 0.66 x 100
+ * shields) now needs 66 units for a mega, 79 for an earthshaker.  The
+ * release is still the expected outcome's (judge_blast).
  */
+constexpr double HEAVY_ACCEPT_SHARE{0.4};
+
 [[nodiscard]]
-constexpr double heavy_min_distance(const secondary s, const missile_data &md)
+constexpr double heavy_min_distance(const secondary s, const missile_data &md, const double accepted_damage = 0)
 {
 	const auto r{role_of(s)};
 	const double range_min{r == missile_role::shaker ? SHAKER_MIN_DISTANCE : HEAVY_MIN_DISTANCE};
-	return std::max(range_min, blast_factor(r) * std::max(md.blast_radius, 0.0) + BLAST_MARGIN);
+	const double share{md.damage > 0 ? std::clamp(accepted_damage / md.damage, 0.0, HEAVY_ACCEPT_SHARE) : 0.0};
+	return std::max(range_min, blast_factor(r) * std::max(md.blast_radius, 0.0) * (1 - share) + BLAST_MARGIN);
 }
 
 /* The rules of one heavy missile (mega or earthshaker) now. */
@@ -1396,7 +1433,7 @@ constexpr heavy_verdict heavy_check(const missile_situation &m, const secondary 
 		return heavy_verdict::skill;
 	if (!m.has_target)
 		return heavy_verdict::no_target;
-	if (m.since_missile < missile_interval(m.smarts) || m.since_heavy < heavy_interval(m.smarts))
+	if (m.since_missile < missile_interval(m.smarts) * m.missile_interval_scale || m.since_heavy < heavy_interval(m.smarts))
 		return heavy_verdict::cooldown;
 	/* Section 9.6: a favourable aim at a wall or a corner needs no clear
 	 * line to the target (a hidden one seen lately).
@@ -1407,7 +1444,13 @@ constexpr heavy_verdict heavy_check(const missile_situation &m, const secondary 
 		return heavy_verdict::not_visible;
 	if (!m.shot_clear && !indirect)
 		return heavy_verdict::no_clear_shot;
-	if (m.cloaked)
+	/* Section 9.9: cloaked, from Ace a heavy missile at a target as near
+	 * as the light ones may be (CLOAKED_MISSILE_DISTANCE: the launch
+	 * shows where the bot is, but a close target has little time to
+	 * use that; 64 of the exp-19 log's seconds with a heavy missile
+	 * were "cloaked").
+	 */
+	if (m.cloaked && (m.smarts < 3 || m.target_distance > CLOAKED_MISSILE_DISTANCE))
 		return heavy_verdict::cloaked;
 	if (m.heavy_used_on_target)
 		return heavy_verdict::used_on_target;
@@ -1480,7 +1523,7 @@ constexpr double heavy_standoff(const missile_situation &m)
 				continue;
 		}
 		{
-			const double d{heavy_min_distance(s, m.data[static_cast<unsigned>(s)]) * m.standoff_scale + 8};
+			const double d{heavy_min_distance(s, m.data[static_cast<unsigned>(s)], m.accepted_damage) * m.standoff_scale + 8};
 			if (!best || d < best)
 				best = d;
 		}
@@ -1504,7 +1547,7 @@ constexpr bool heavy_usable_soon(const missile_situation &m)
 	{
 		if (!m.ammo[static_cast<unsigned>(s)] || m.smarts < min_smarts(s))
 			continue;
-		const double wait{std::max(missile_interval(m.smarts) - m.since_missile, heavy_interval(m.smarts) - m.since_heavy)};
+		const double wait{std::max(missile_interval(m.smarts) * m.missile_interval_scale - m.since_missile, heavy_interval(m.smarts) - m.since_heavy)};
 		if (wait <= HEAVY_SOON_SECONDS)
 			return true;
 	}
@@ -1532,7 +1575,7 @@ constexpr std::optional<secondary> choose_secondary(const missile_situation &m)
 		if (usable(secondary::proximity))
 			return secondary::proximity;
 	}
-	if (!m.has_target || m.since_missile < missile_interval(m.smarts))
+	if (!m.has_target || m.since_missile < missile_interval(m.smarts) * m.missile_interval_scale)
 		return std::nullopt;
 	const double d{m.target_distance};
 	if (m.cloaked && d > CLOAKED_MISSILE_DISTANCE)
@@ -1571,6 +1614,76 @@ constexpr std::optional<secondary> choose_secondary(const missile_situation &m)
 	if (usable(secondary::homing) && d >= HOMING_MIN_DISTANCE)
 		return secondary::homing;
 	return std::nullopt;
+}
+
+/* Section 9.9: why a light missile (concussion, homing, mercury; smart
+ * and flash count as light here) is or is not fired now, for the log
+ * (-verbose): the first rule of choose_secondary that fails, or, for a
+ * missile chosen, the release (bot.cpp: aiming, nose-blast), or fired.
+ * The exp-19 log had no light verdict, so what held the volleys back
+ * could not be read from it.
+ */
+enum class light_verdict : uint8_t
+{
+	none_owned,
+	no_target,
+	cooldown,
+	not_visible,
+	no_clear_shot,
+	too_close,
+	too_far,
+	cloaked,
+	heavy,
+	chosen,
+	aiming,
+	nose_blast,
+	fired,
+};
+
+inline constexpr std::array<const char *, 13> light_verdict_names{{
+	"none-owned", "no-target", "cooldown", "not-visible", "no-clear-shot", "too-close", "too-far", "cloaked", "heavy", "chosen", "aiming", "nose-blast", "fired",
+}};
+
+[[nodiscard]]
+constexpr const char *name_of(const light_verdict v)
+{
+	const auto i{static_cast<unsigned>(v)};
+	return i < light_verdict_names.size() ? light_verdict_names[i] : "?";
+}
+
+/* The verdict of choose_secondary on the light missiles (`chosen`: the
+ * secondary it chose, if any).
+ */
+[[nodiscard]]
+constexpr light_verdict light_check(const missile_situation &m, const std::optional<secondary> chosen)
+{
+	if (chosen)
+	{
+		const auto r{role_of(*chosen)};
+		if (r == missile_role::heavy || r == missile_role::shaker)
+			return light_verdict::heavy;
+		if (r != missile_role::mine)
+			return light_verdict::chosen;
+	}
+	bool owned{false};
+	for (const auto s : {secondary::concussion, secondary::homing, secondary::mercury, secondary::smart, secondary::flash})
+		if (m.ammo[static_cast<unsigned>(s)] && m.smarts >= min_smarts(s))
+			owned = true;
+	if (!owned)
+		return light_verdict::none_owned;
+	if (!m.has_target)
+		return light_verdict::no_target;
+	if (m.since_missile < missile_interval(m.smarts) * m.missile_interval_scale)
+		return light_verdict::cooldown;
+	if (m.cloaked && m.target_distance > CLOAKED_MISSILE_DISTANCE)
+		return light_verdict::cloaked;
+	if (!m.target_visible)
+		return light_verdict::not_visible;
+	if (!m.shot_clear)
+		return light_verdict::no_clear_shot;
+	if (m.target_distance < MISSILE_MIN_DISTANCE || (m.target_distance < HOMING_MIN_DISTANCE && !m.ammo[static_cast<unsigned>(secondary::concussion)] && !m.ammo[static_cast<unsigned>(secondary::mercury)] && !m.ammo[static_cast<unsigned>(secondary::flash)]))
+		return light_verdict::too_close;
+	return light_verdict::too_far;
 }
 
 /* The cone within which a chosen missile is released: the homing ones
@@ -1633,6 +1746,44 @@ constexpr double VOLLEY_STRAIGHT_MAX_LATERAL{40};
 constexpr double VOLLEY_HOMING_MAX_DISTANCE{170};
 constexpr double SMART_BURST_MIN_DISTANCE{40};
 
+/* Section 9.9: the exp-19 log had 88 volleys in ten minutes for five
+ * bots (one per bot every 30 s) on a level full of missiles.  From Ace
+ * a good target reaches further and crosses faster (the values above
+ * are Hotshot's and below): straight missiles to 150 units (Insane 160)
+ * at up to 50 units/s across (Insane 60), homing ones to 200 units; and
+ * an Insane bot fires a pair at any other target in sight with a clear
+ * line in the missiles' range (below: one).
+ */
+[[nodiscard]]
+constexpr double volley_straight_max_distance(const unsigned smarts)
+{
+	return smarts >= 4 ? 160 : smarts >= 3 ? 150 : VOLLEY_STRAIGHT_MAX_DISTANCE;
+}
+
+[[nodiscard]]
+constexpr double volley_straight_max_lateral(const unsigned smarts)
+{
+	return smarts >= 4 ? 60 : smarts >= 3 ? 50 : VOLLEY_STRAIGHT_MAX_LATERAL;
+}
+
+[[nodiscard]]
+constexpr double volley_homing_max_distance(const unsigned smarts)
+{
+	return smarts >= 3 ? 200 : VOLLEY_HOMING_MAX_DISTANCE;
+}
+
+/* Section 9.9: the rounds after the first of a straight volley go
+ * within this wider cone (twice the skill's, at least 6 degrees): the
+ * stream spreads round the target, which is what makes it run.  The
+ * first round keeps the skill's cone.
+ */
+[[nodiscard]]
+constexpr double volley_cone(const double fire_cone)
+{
+	constexpr double pi{3.14159265358979323846};
+	return std::max(2 * fire_cone, 6 * pi / 180);
+}
+
 struct volley_view
 {
 	secondary s{secondary::concussion};
@@ -1669,10 +1820,15 @@ constexpr unsigned volley_size(const volley_view &v)
 			if (!v.target_visible || !v.shot_clear || v.cloaked)
 				break;
 			const bool good{r == missile_role::homing
-				? v.target_distance >= HOMING_MIN_DISTANCE && v.target_distance <= VOLLEY_HOMING_MAX_DISTANCE
-				: v.target_distance >= MISSILE_MIN_DISTANCE && v.target_distance <= VOLLEY_STRAIGHT_MAX_DISTANCE && v.target_lateral_speed <= VOLLEY_STRAIGHT_MAX_LATERAL};
+				? v.target_distance >= HOMING_MIN_DISTANCE && v.target_distance <= volley_homing_max_distance(v.smarts)
+				: v.target_distance >= MISSILE_MIN_DISTANCE && v.target_distance <= volley_straight_max_distance(v.smarts) && v.target_lateral_speed <= volley_straight_max_lateral(v.smarts)};
 			if (!good)
+			{
+				/* Section 9.9: an Insane bot's pair. */
+				if (v.smarts >= 4 && v.target_distance >= MISSILE_MIN_DISTANCE && v.target_distance <= MISSILE_MAX_DISTANCE)
+					n = 2;
 				break;
+			}
 			constexpr std::array<int, 5> by_smarts{{1, 1, 2, 3, 4}};
 			n = by_smarts[std::min<std::size_t>(v.smarts, by_smarts.size() - 1)] + style_step;
 			break;

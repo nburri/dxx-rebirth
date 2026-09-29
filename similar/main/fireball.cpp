@@ -61,6 +61,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "gameseg.h"
 #include "automap.h"
 #include "byteutil.h"
+#include "segment_depths.h"
 
 #include "compiler-range_for.h"
 #include "digi.h"
@@ -155,7 +156,78 @@ struct connected_segment_raw_distances
 		 * specific distance computed, and are only known to be too far
 		 * away.
 		 */
-		void visit_segment(vcsegidx_t current_segment_idx, segment_distance_count_type current_depth) const;
+		/* The traversal (visit_segment_depths, segment_depths.h). */
+		using segment_index = vcsegidx_t;
+		std::optional<uint8_t> depth_of(const segment_index i) const
+		{
+			const auto d{depth_by_segment[i]};
+			if (d == biased_distance::indeterminate)
+				return std::nullopt;
+			return get_distance_from_biased_distance(d);
+		}
+		bool excluded(const segment_index i) const
+		{
+			/* Every caller wants to exclude the control-center segment
+			 * from the set of choices.  It is assigned a depth value
+			 * that prevents it being selected, and the traversal stops
+			 * there.  Stopping there prevents exploring segments beyond
+			 * the control-center.  If there is a path around the
+			 * control-center, that path can be used to reach those
+			 * segments instead.  This will lead to a slightly higher
+			 * than accurate distance value for those segments, but the
+			 * original Descent implementation had a random walk that
+			 * could wander about and assign high values to any segment
+			 * it reached.  By refusing to traverse through the control
+			 * center, this implementation avoids selecting areas that
+			 * are only reachable by flying through the control center.
+			 */
+			return vcsegptr(i)->special == segment_special::controlcen;
+		}
+		void exclude(const segment_index i) const
+		{
+			depth_by_segment[i] = get_biased_distance_from_distance(0);
+		}
+		void record(const segment_index i, const uint8_t depth) const
+		{
+			depth_by_segment[i] = get_biased_distance_from_distance(depth);
+		}
+		/* Segments closer than minimum_supported_max_depth or farther
+		 * than maximum_supported_max_depth will not be analyzed later,
+		 * so no count is maintained for them.
+		 */
+		void count(const uint8_t depth, const int delta) const
+		{
+			if (!count_segments_at_depth.valid_index(depth))
+				return;
+			auto &c{count_segments_at_depth[depth]};
+			if (delta > 0)
+				++ c;
+			else
+				-- c;
+		}
+		uint8_t max_depth_of() const
+		{
+			return max_depth;
+		}
+		template <typename F>
+			void for_each_passable_child(const segment_index i, F &&f) const
+			{
+				const shared_segment &seg{*vcsegptr(i)};
+				for (const auto &&[child_segnum, side] : zip(seg.children, seg.sides))
+				{
+					if (!IS_CHILD(child_segnum))
+						continue;
+					if (const auto wall_num{side.wall_num}; wall_num != wall_none)
+					{
+						auto &w{*vcwallptr(wall_num)};
+						if (w.type == WALL_CLOSED)
+							continue;
+						if (w.type == WALL_DOOR && +(w.flags & wall_flag::door_locked))
+							continue;
+					}
+					f(child_segnum);
+				}
+			}
 	};
 	/* Initialize all depths to 0.  These will be updated as the
 	 * constructor traverses the level.  Counts are only maintained for
@@ -241,7 +313,7 @@ void init_exploding_walls()
 
 connected_segment_raw_distances::connected_segment_raw_distances(fvcsegptr &vcsegptr, fvcwallptr &vcwallptr, segment_distance_count_type max_depth, vcsegidx_t current_segment_idx)
 {
-	builder{vcsegptr, vcwallptr, max_depth, count_segments_at_depth, depth_by_segment}.visit_segment(current_segment_idx, 0u);
+	visit_segment_depths(builder{vcsegptr, vcwallptr, max_depth, count_segments_at_depth, depth_by_segment}, current_segment_idx, 0u);
 }
 
 std::optional<segnum_t> connected_segment_raw_distances::scan_segment_depths(const unsigned desired_depth, std::minstd_rand &mrd) const
@@ -278,74 +350,6 @@ std::optional<segnum_t> connected_segment_raw_distances::scan_segment_depths(con
 	 */
 	con_printf(CON_URGENT, DXX_STRINGIZE_FL(__FILE__, __LINE__, "error: count=%u, skip_count=%u, and no segment found at depth %u"), count_segments_at_desired_depth, initial_skip_count, desired_depth);
 	return std::nullopt;
-}
-
-void connected_segment_raw_distances::builder::visit_segment(const vcsegidx_t current_segment_idx, const segment_distance_count_type current_depth) const
-{
-	auto &biased_depth{depth_by_segment[current_segment_idx]};
-	if (biased_depth != biased_distance::indeterminate)
-	{
-		const auto d{get_distance_from_biased_distance(biased_depth)};
-		if (d <= current_depth)
-			/* This segment was already found through some other
-			 * route.  Leave that result in place.
-			 */
-			return;
-		/* If this segment was previously found at a greater depth, and
-		 * the current step found a shorter path to that segment, then
-		 * reduce the count of segments at the greater depth, since the
-		 * recorded depth of this segment will be changed.
-		 */
-		if (count_segments_at_depth.valid_index(d))
-			-- count_segments_at_depth[d];
-	}
-	biased_depth = get_biased_distance_from_distance(current_depth);
-	if (current_depth >= max_depth)
-		return;
-	const shared_segment &seg{*vcsegptr(current_segment_idx)};
-	if (seg.special == segment_special::controlcen)
-	{
-		/* Every caller wants to exclude the control-center segment from
-		 * the set of choices.  If the segment is encountered here,
-		 * assign it a depth value that prevents it being selected, and
-		 * stop.  Stopping here prevents exploring segments beyond the
-		 * control-center.  If there is a path around the
-		 * control-center, that path can be used to reach those segments
-		 * instead.  This will lead to a slightly higher than accurate
-		 * distance value for those segments, but the original Descent
-		 * implementation had a random walk that could wander about and
-		 * assign high values to any segment it reached.  By refusing to
-		 * traverse through the control center, this implementation
-		 * avoids selecting areas that are only reachable by flying
-		 * through the control center.
-		 */
-		biased_depth = get_biased_distance_from_distance(0);
-		return;
-	}
-	/* Segments closer than minimum_supported_max_depth or farther than
-	 * maximum_supported_max_depth will not be analyzed later, so no
-	 * count is maintained for them.
-	 *
-	 * This increment is deferred until after the control-center check,
-	 * so that it does not need to be undone when the control-center is
-	 * found.
-	 */
-	if (count_segments_at_depth.valid_index(current_depth))
-		++ count_segments_at_depth[current_depth];
-	for (const auto &&[child_segnum, side] : zip(seg.children, seg.sides))
-	{
-		if (!IS_CHILD(child_segnum))
-			continue;
-		if (const auto wall_num{side.wall_num}; wall_num != wall_none)
-		{
-			auto &w{*vcwallptr(wall_num)};
-			if (w.type == WALL_CLOSED)
-				continue;
-			if (w.type == WALL_DOOR && +(w.flags & wall_flag::door_locked))
-				continue;
-		}
-		visit_segment(child_segnum, current_depth + 1);
-	}
 }
 
 }

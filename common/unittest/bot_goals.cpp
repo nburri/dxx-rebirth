@@ -22,6 +22,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <initializer_list>
+#include <string_view>
 
 #include "bot_goals.h"
 
@@ -552,6 +553,7 @@ void test_pickup_scenarios()
 		in.grab = grab_worthwhile(item_value(d, r), distance_to, distance_to);
 		in.grab_value = item_value(d, r);
 		in.grab_shields = d.kind == item::shield;
+		in.grab_path = distance_to;
 		in.current = goal_kind::engage;
 		return in;
 	}};
@@ -574,16 +576,26 @@ void test_pickup_scenarios()
 	in.grab = true;
 	CHECK(choose_goal(in) == goal_kind::collect);
 	/* Section 9.8: a high-value grab reaches 85 units (the old radius:
-	 * 45); beyond it the fight goes on.
+	 * 45); beyond it the fight goes on.  Section 9.9: in a fight (not
+	 * weak) only as a detour of GRAB_DETOUR_HIGH_PATH; weak, as before.
 	 */
 	CHECK(choose_goal(fight_with(shaker, spawn, 60)) == goal_kind::collect);
-	CHECK(choose_goal(fight_with(shaker, spawn, 80)) == goal_kind::collect);
+	CHECK(choose_goal(fight_with(shaker, spawn, 80)) == goal_kind::engage);
 	CHECK(choose_goal(fight_with(shaker, spawn, 100)) == goal_kind::engage);
+	{
+		auto w{fight_with(shaker, spawn, 80)};
+		w.weak = true;
+		CHECK(choose_goal(w) == goal_kind::collect);
+		w = fight_with(shaker, spawn, 100);
+		w.weak = true;
+		CHECK(choose_goal(w) == goal_kind::engage);
+	}
 	/* A concussion pack 30 units away: grabbed; energy at full energy:
 	 * not worth it.
 	 */
 	const item_desc concussion{item::secondary, primary::laser, static_cast<uint8_t>(secondary::concussion)};
-	CHECK(choose_goal(fight_with(concussion, spawn, 30)) == goal_kind::collect);
+	CHECK(choose_goal(fight_with(concussion, spawn, 20)) == goal_kind::collect);
+	CHECK(choose_goal(fight_with(concussion, spawn, 30)) == goal_kind::engage);
 	CHECK(choose_goal(fight_with({item::energy}, spawn, 10)) == goal_kind::engage);
 	CHECK(choose_goal(fight_with({item::shield}, spawn, 10)) == goal_kind::engage);
 	/* Energy it needs is grabbed. */
@@ -599,7 +611,8 @@ void test_pickup_scenarios()
 	vulcan.weapons.vulcan_ammo = 1000;
 	CHECK(upgrade_ratio(plasma, vulcan.weapons) < BIG_UPGRADE_RATIO);
 	CHECK(choose_goal(fight_with(plasma, vulcan, 100)) == goal_kind::engage);
-	CHECK(choose_goal(fight_with(plasma, vulcan, 80)) == goal_kind::collect);
+	CHECK(choose_goal(fight_with(plasma, vulcan, 80)) == goal_kind::engage);
+	CHECK(choose_goal(fight_with(plasma, vulcan, 55)) == goal_kind::collect);
 	CHECK(choose_goal(fight_with(plasma, vulcan, 30)) == goal_kind::collect);
 	/* Shields: at 50 a shield powerup is worth a detour in a fight (0.8,
 	 * not 0.35); close by it is grabbed.
@@ -951,9 +964,14 @@ void test_high_value_grab()
 	in.current = goal_kind::engage;
 	in.grab = true;
 	in.grab_value = v_mega;
+	in.grab_path = 50;
 	CHECK(choose_goal(in) == goal_kind::collect);
 	in.grab_value = v_conc;
 	CHECK(choose_goal(in) == goal_kind::engage);
+	/* Section 9.9: on its way (a short detour) the pack too. */
+	in.grab_path = 20;
+	CHECK(choose_goal(in) == goal_kind::collect);
+	in.grab_path = 50;
 	/* In danger it retreats, but invulnerability is taken. */
 	in.shields = 10;
 	in.target_score = 0.8;
@@ -1100,10 +1118,235 @@ void test_powerup_phase()
 	}
 }
 
+/* Section 9.9: after the exp-19 playtest ("while alive the bots are
+ * more hesitant"; "bots still do not properly react to powerups in
+ * their vicinity"): grabs only as detours in a fight, the nearest
+ * reasonable powerup first, armed bots fight and seek fights.
+ */
+void test_log_tuning_goals()
+{
+	const double v_mega{item_value({item::secondary, primary::laser, static_cast<uint8_t>(secondary::mega)}, resource_view{})};
+	const double v_conc{item_value({item::secondary, primary::laser, static_cast<uint8_t>(secondary::concussion)}, resource_view{})};
+	/* The log's typical fight: an Insane balanced bot, an enemy in sight
+	 * 74 units away (engage 2.0), a mega within the grab's radius.
+	 */
+	goal_inputs in;
+	in.has_target = in.target_visible = in.threatened = true;
+	in.target_score = 1;
+	in.current = goal_kind::engage;
+	in.grab = true;
+	in.grab_value = v_mega;
+	in.grab_path = 80;
+	/* Section 9.8 left the fight for it (6.5 against 2.4); now not. */
+	CHECK(goal_utility(in)[goal_kind::engage] == 2);
+	CHECK(choose_goal(in) == goal_kind::engage);
+	CHECK(goal_utility(in)[goal_kind::collect] == 0);
+	/* A detour: taken, worth a bit more than the fight. */
+	in.grab_path = 50;
+	CHECK(choose_goal(in) == goal_kind::collect);
+	{
+		const auto u{goal_utility(in)};
+		CHECK(u.collect_from == collect_source::grab);
+		CHECK(std::abs(u[goal_kind::collect] - GRAB_DETOUR_FACTOR * 2) < 1e-9);
+		/* Kept against the fight's hysteresis, and once collecting. */
+		CHECK(u[goal_kind::collect] > GOAL_HYSTERESIS * u[goal_kind::engage]);
+	}
+	in.current = goal_kind::collect;
+	CHECK(choose_goal(in) == goal_kind::collect);
+	in.current = goal_kind::engage;
+	/* A concussion pack: only right on the way. */
+	in.grab_value = v_conc;
+	CHECK(choose_goal(in) == goal_kind::engage);
+	in.grab_path = 30;
+	CHECK(choose_goal(in) == goal_kind::engage);
+	in.grab_path = 20;
+	CHECK(choose_goal(in) == goal_kind::collect);
+	/* A Collector goes further for it. */
+	in.grab_path = 35;
+	in.collector = true;
+	CHECK(choose_goal(in) == goal_kind::collect);
+	in.grab_path = 45;
+	CHECK(choose_goal(in) == goal_kind::engage);
+	in.collector = false;
+	/* Weak (it needs weapons): the grab of section 9.8. */
+	in.grab_value = v_mega;
+	in.grab_path = 120;
+	in.weak = true;
+	CHECK(choose_goal(in) == goal_kind::collect);
+	CHECK(goal_utility(in)[goal_kind::collect] == GRAB_HIGH_UTILITY);
+	in.weak = false;
+	/* No enemy: the grab of section 9.8. */
+	{
+		goal_inputs calm;
+		calm.grab = true;
+		calm.grab_value = v_mega;
+		calm.grab_path = 120;
+		calm.armed = armed_level::heavy;
+		CHECK(goal_utility(calm)[goal_kind::collect] == GRAB_HIGH_UTILITY);
+	}
+	/* The enemy known, out of sight: a detour only (it hunts), unarmed
+	 * (a gun, no missiles) or armed.
+	 */
+	in.target_visible = false;
+	in.target_score = 0.4;
+	CHECK(choose_goal(in) == goal_kind::hunt);
+	CHECK(goal_utility(in)[goal_kind::collect] == 0);
+	/* PR #41 review: with a decent gun, no missiles, the mega 120 units
+	 * away and the target's visibility flickering (5 Hz), the choice
+	 * stays: neither leg gives the grab its full utility.
+	 */
+	{
+		goal_inputs f{in};
+		for (unsigned i{0}; i != 10; ++i)
+		{
+			f.target_visible = i % 2 == 0;
+			const goal_kind g{choose_goal(f)};
+			CHECK(g != goal_kind::collect);
+			CHECK(goal_utility(f)[goal_kind::collect] == 0);
+			f.current = g;
+		}
+		/* Within the detour's reach, the grab both ways. */
+		f.grab_path = 50;
+		for (unsigned i{0}; i != 10; ++i)
+		{
+			f.target_visible = i % 2 == 0;
+			CHECK(choose_goal(f) == goal_kind::collect);
+			f.current = goal_kind::collect;
+		}
+	}
+	in.armed = armed_level::light;
+	CHECK(choose_goal(in) == goal_kind::hunt);
+	in.grab_path = 40;
+	CHECK(choose_goal(in) == goal_kind::collect);
+	CHECK(goal_utility(in)[goal_kind::collect] > goal_utility(in)[goal_kind::hunt]);
+	/* The nearest reasonable powerup first: the log's smart missile 14
+	 * units away before a quad 45 away (value 3.6); a mega 80 units away
+	 * after a concussion pack at 20.
+	 */
+	CHECK(grab_rank(2, 14) > grab_rank(3.6, 45));
+	CHECK(grab_rank(1, 20) > grab_rank(2.5, 80));
+	CHECK(grab_rank(3.6, 30) > grab_rank(2, 30));
+	/* What the bot holds: heavy (smart, mega, earthshaker) from Hotshot,
+	 * light (3 concussion, homing, mercury) from Rookie.
+	 */
+	{
+		std::array<uint8_t, BOT_SECONDARY_COUNT> ammo{};
+		CHECK(armed_of(ammo, 4) == armed_level::none);
+		ammo[static_cast<unsigned>(secondary::concussion)] = 2;
+		CHECK(armed_of(ammo, 4) == armed_level::none);
+		ammo[static_cast<unsigned>(secondary::homing)] = 1;
+		CHECK(armed_of(ammo, 4) == armed_level::light);
+		CHECK(armed_of(ammo, 0) == armed_level::none);
+		ammo[static_cast<unsigned>(secondary::mega)] = 1;
+		CHECK(armed_of(ammo, 2) == armed_level::heavy);
+		CHECK(armed_of(ammo, 1) == armed_level::light);
+		ammo = {};
+		ammo[static_cast<unsigned>(secondary::guided)] = 4;
+		ammo[static_cast<unsigned>(secondary::flash)] = 4;
+		CHECK(armed_of(ammo, 4) == armed_level::none);
+		CHECK(std::string_view{name_of(armed_level::heavy)} == "heavy");
+	}
+	/* Armed: the fight counts more, a plain collection less (not a big
+	 * upgrade, not weak).
+	 */
+	{
+		goal_inputs a;
+		a.has_target = a.target_visible = a.threatened = true;
+		a.target_score = 0.8;
+		a.collect = 2;
+		a.collect_path = 30;
+		const auto u0{goal_utility(a)};
+		a.armed = armed_level::heavy;
+		const auto u1{goal_utility(a)};
+		CHECK(std::abs(u1[goal_kind::engage] - 1.5 * u0[goal_kind::engage]) < 1e-9);
+		CHECK(std::abs(u1[goal_kind::collect] - ARMED_COLLECT * u0[goal_kind::collect]) < 1e-9);
+		CHECK(choose_goal(a) == goal_kind::engage);
+		a.armed = armed_level::none;
+		CHECK(choose_goal(a) == goal_kind::collect);
+		a.armed = armed_level::light;
+		a.collect_upgrade = true;
+		CHECK(goal_utility(a)[goal_kind::collect] == u0[goal_kind::collect]);
+	}
+	/* No target, armed: it seeks the last enemy seen, above a plain
+	 * collection (the log's median 0.78) and roaming, below a grab.
+	 */
+	{
+		goal_inputs s;
+		s.collect = 0.78;
+		s.collect_path = 150;
+		CHECK(choose_goal(s) == goal_kind::collect);
+		s.armed = armed_level::light;
+		s.seek = seek_utility(s.armed, 1);
+		CHECK(choose_goal(s) == goal_kind::hunt);
+		s.armed = armed_level::heavy;
+		s.seek = seek_utility(s.armed, 1);
+		CHECK(choose_goal(s) == goal_kind::hunt);
+		CHECK(seek_utility(armed_level::heavy, 1) > seek_utility(armed_level::light, 1));
+		CHECK(seek_utility(armed_level::none, 1.5) == 0);
+		CHECK(seek_utility(armed_level::light, 0.7) > ROAM_UTILITY);
+		/* A grab while seeking: a detour, as while hunting. */
+		s.grab = true;
+		s.grab_value = v_conc;
+		s.grab_path = 40;
+		CHECK(choose_goal(s) == goal_kind::hunt);
+		s.grab_path = 20;
+		CHECK(choose_goal(s) == goal_kind::collect);
+		s.grab_value = v_mega;
+		s.grab_path = 55;
+		CHECK(choose_goal(s) == goal_kind::collect);
+		/* Nothing to seek: the grab of section 9.8. */
+		s.seek = 0;
+		s.grab_path = 120;
+		CHECK(goal_utility(s)[goal_kind::collect] == GRAB_HIGH_UTILITY);
+		/* A known target replaces the seek. */
+		s.grab = false;
+		s.has_target = true;
+		s.target_score = 0.1;
+		CHECK(std::abs(goal_utility(s)[goal_kind::hunt] - 2 * 0.1 * 1.5) < 1e-9);
+	}
+	/* A Collector in sight of an enemy: its collection counts less
+	 * (section 4.7: not at all), so an even fight goes on for a small
+	 * prize.
+	 */
+	{
+		goal_inputs c;
+		c.has_target = c.target_visible = c.threatened = true;
+		c.target_score = 0.9;
+		c.engage_weight = style_of(bot_style::collector).engage_weight;
+		c.collect_weight = style_of(bot_style::collector).collect_weight;
+		c.collector = true;
+		c.collect = 0.8;
+		c.collect_path = 80;
+		CHECK(std::abs(goal_utility(c)[goal_kind::collect] - 0.8 * 1.8 * COLLECTOR_UNDER_FIRE) < 1e-9);
+		CHECK(choose_goal(c) == goal_kind::engage);
+		c.collect = 2;
+		CHECK(choose_goal(c) == goal_kind::collect);
+		c.armed = armed_level::heavy;
+		CHECK(choose_goal(c) == goal_kind::engage);
+	}
+	/* PR #41 review: a place sought is done once reached, or when no
+	 * path to it is found (not planned for again every tick).
+	 */
+	CHECK(seek_place_done(SEEK_ARRIVED, true));
+	CHECK(!seek_place_done(SEEK_ARRIVED + 1, true));
+	CHECK(seek_place_done(SEEK_ARRIVED + 100, false));
+	/* The phase's upgrade is reported as the collection's source. */
+	{
+		goal_inputs p;
+		p.collect = 0.5;
+		p.collect_path = 100;
+		p.phase_collect = 1.2;
+		CHECK(goal_utility(p).collect_from == collect_source::phase);
+		p.phase_collect = 0.1;
+		CHECK(goal_utility(p).collect_from == collect_source::plain);
+	}
+}
+
 }
 
 int main()
 {
+	test_log_tuning_goals();
 	test_high_value_grab();
 	test_powerup_phase();
 	test_bands();

@@ -5020,6 +5020,11 @@ class DXXArchive(DXXCommon):
 		RuntimeTest('test-spawn-site', (
 			'common/unittest/spawn_site.cpp',
 			)),
+		# Test of the segment depths the network powerup drop and the
+		# thief's recreation draw from (segment_depths.h, fireball.cpp).
+		RuntimeTest('test-segment-depths', (
+			'common/unittest/segment_depths.cpp',
+			)),
 		# Test of the bots' navigation: A*, string pulling, stuck
 		# recovery (bot_nav.h, Documentation/multiplayer-bots.md).
 		RuntimeTest('test-bot-nav', (
