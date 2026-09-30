@@ -69,6 +69,14 @@ enum class session_msg : std::uint8_t
 	pickup_request = 0x24,
 	pickup_grant = 0x25,
 	pickup_deny = 0x26,
+	/* Stage 4, firing, hits, damage, kills, respawn (section 6.5,
+	 * net_v2_combat.h).
+	 */
+	fire = 0x27,
+	weapon_hit = 0x28,
+	damage = 0x29,
+	player_killed = 0x2a,
+	player_spawn = 0x2b,
 	drop_request = 0x3b,
 	obj_settle = 0x47,
 	/* Host-assigned spawns (section 8, "Host-assigned spawns",

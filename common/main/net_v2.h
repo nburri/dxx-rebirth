@@ -47,11 +47,12 @@ constexpr net_clock net_milliseconds(const net_clock ms)
 /* Section 3.1.  The value of MULTI_PROTO_VERSION (multi.h): 100 for
  * stage 1, bumped by one per stage that changes the wire format (101:
  * stage 2, 102: stage 3, 103: stage 3 review fixes, 104: the PLAYER_LIST
- * bot flag, 105: host-assigned spawns, SPAWN_REQUEST and SPAWN_SITE);
+ * bot flag, 105: host-assigned spawns, SPAWN_REQUEST and SPAWN_SITE,
+ * 106: stage 4);
  * named differently so that the two never shadow each other in a
  * translation unit that sees both.
  */
-constexpr std::uint16_t NET_V2_PROTO_VERSION{105};
+constexpr std::uint16_t NET_V2_PROTO_VERSION{106};
 constexpr std::size_t NET_V2_HEADER_SIZE{34};
 constexpr std::size_t NET_V2_MAX_PACKET{1200};
 constexpr std::size_t NET_V2_ACK_BITS{64};

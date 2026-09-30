@@ -528,12 +528,20 @@ constexpr void apply_drop(inventory &inv, const inventory_rules &r, const pickup
 class inventory_mirror
 {
 public:
-	static constexpr std::size_t MAX_PENDING{32};
+	/* Grants and damage (stage 4) in flight: a vulcan cannon alone hits
+	 * twenty times per second.
+	 */
+	static constexpr std::size_t MAX_PENDING{128};
 	struct pending_grant
 	{
 		std::uint16_t seq{};
 		pickup_desc desc{};
 		pickup_outcome outcome{};
+		/* Stage 4: not a grant but damage the host applied (DAMAGE),
+		 * which the player takes off its shields and counts as it counts
+		 * a grant.
+		 */
+		std::int32_t damage{};
 	};
 	/* A new session for the player (level start, join): the client's
 	 * count and life start at 0 as well.
@@ -616,9 +624,25 @@ public:
 			std::copy(pending_.begin() + 1, pending_.end(), pending_.begin());
 			--pending_count_;
 		}
-		pending_[pending_count_++] = {seq, d, o};
+		pending_[pending_count_++] = {seq, d, o, 0};
 		apply_pickup(current_, r, d, o);
 		return seq;
+	}
+	/* Damage the host applied to this player (stage 4, DAMAGE): numbered
+	 * like a grant, so that a report sent before the damage arrived does
+	 * not give the shields back.  Returns the shields left.
+	 */
+	std::int32_t on_damage(const std::int32_t amount)
+	{
+		const std::uint16_t seq{++issued_};
+		if (pending_count_ == MAX_PENDING)
+		{
+			std::copy(pending_.begin() + 1, pending_.end(), pending_.begin());
+			--pending_count_;
+		}
+		pending_[pending_count_++] = {seq, {}, {}, amount};
+		current_.shields -= amount;
+		return current_.shields;
 	}
 	/* The player dropped an item (DROP_REQUEST): its report sent after
 	 * the drop says the same, and a report sent before it arrived before
@@ -641,7 +665,12 @@ public:
 		pending_count_ = kept;
 		current_ = base_;
 		for (std::size_t i = 0; i < pending_count_; ++i)
-			apply_pickup(current_, r, pending_[i].desc, pending_[i].outcome);
+		{
+			if (const auto damage{pending_[i].damage})
+				current_.shields -= damage;
+			else
+				apply_pickup(current_, r, pending_[i].desc, pending_[i].outcome);
+		}
 	}
 private:
 	inventory base_{};
