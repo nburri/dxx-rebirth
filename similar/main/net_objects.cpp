@@ -1648,6 +1648,58 @@ void net_objects_send_all_inventories()
 	}
 }
 
+fix net_objects_host_damage(const playernum_t pnum, const fix amount)
+{
+	if (pnum >= MAX_PLAYERS)
+		return 0;
+	auto &mirror{A.mirrors[pnum]};
+	const fix shields{mirror.on_damage(amount)};
+	auto &Objects{LevelUniqueObjectState.Objects};
+	Objects.vmptr(vcplayerptr(pnum)->objnum)->shields = shields;
+	return shields;
+}
+
+void net_objects_own_damage(const fix amount)
+{
+	/* Counted like a grant: the host's copy is the report plus what came
+	 * after it.
+	 */
+	++A.applied_grants;
+	if (Player_dead_state != player_dead_state::no || ConsoleObject->type != object_type::OBJ_PLAYER)
+		return;
+	ConsoleObject->shields -= amount;
+}
+
+bool net_objects_host_has_report(const playernum_t pnum)
+{
+	return pnum < MAX_PLAYERS && !A.dropped[pnum] && A.mirrors[pnum].has_report();
+}
+
+bool net_objects_host_owns_weapon(const playernum_t pnum, const uint8_t weapon)
+{
+	if (pnum >= MAX_PLAYERS)
+		return false;
+	const auto &inv{A.mirrors[pnum].current()};
+	if (weapon == FLARE_ADJUST)
+		return true;
+	if (weapon >= MISSILE_ADJUST)
+	{
+		const unsigned i = weapon - MISSILE_ADJUST;
+		return i < MAX_SECONDARY_WEAPONS && inv.secondary[i] > 0;
+	}
+	if (weapon >= MAX_PRIMARY_WEAPONS)
+		return false;
+	const auto w{primary_weapon_index{weapon}};
+	if (w == primary_weapon_index::laser)
+		return true;
+#if DXX_BUILD_DESCENT == 2
+	/* The super laser is fired as the laser. */
+	if (w == primary_weapon_index::super_laser)
+		return true;
+#endif
+	return (inv.primary_flags & HAS_PRIMARY_FLAG(w)) != 0;
+}
+
 }
 
 #endif

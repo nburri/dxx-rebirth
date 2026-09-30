@@ -204,7 +204,7 @@ inline constexpr std::array<std::array<double, BOT_RANGE_BANDS>, 10> primary_tab
 
 /* Omega fires only from an eighth of its charge, or with some charge
  * and no energy at all (do_omega_stuff); a shot without that is deleted
- * on the host, while the clients, told of it by MULTI_FIRE, draw a full
+ * on the host, while the clients, told of it by FIRE, draw a full
  * discharge: a bot neither chooses nor fires it then (section 9.5).
  */
 [[nodiscard]]

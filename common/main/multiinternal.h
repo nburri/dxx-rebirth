@@ -25,10 +25,6 @@
 
 #ifdef DXX_BUILD_DESCENT
 #define for_each_multiplayer_command(VALUE)	\
-	VALUE(MULTI_REAPPEAR              , 4)	\
-	VALUE(MULTI_FIRE                  , 17)	\
-	VALUE(MULTI_FIRE_TRACK            , 22)	/* + objnum of a guided missile, or 0xffff */	\
-	VALUE(MULTI_FIRE_BOMB             , 19)	\
 	VALUE(MULTI_REMOVE_OBJECT         , 4)	\
 	VALUE(MULTI_MESSAGE               , 37)	/* (MAX_MESSAGE_LENGTH = 40) */	\
 	VALUE(MULTI_QUIT                  , 2)	\
@@ -41,7 +37,7 @@
 	VALUE(MULTI_CONTROLCEN_FIRE      , 16)	\
 	VALUE(MULTI_DECLOAK              , 2)	\
 	VALUE(MULTI_ROBOT_POSITION       , 5 + quaternionpos::packed_size::value)	\
-	VALUE(MULTI_PLAYER_DERES         , 5)	/* stage 3: the inventory and the eggs are the host's; + the mines to arm */	\
+	VALUE(MULTI_PLAYER_DERES         , 7)	/* stage 3: the inventory and the eggs are the host's; + the mines to arm; stage 4: + their first id */	\
 	VALUE(MULTI_DOOR_OPEN            , DXX_MP_SIZE_DOOR_OPEN)	\
 	VALUE(MULTI_ROBOT_EXPLODE        , 7)	\
 	VALUE(MULTI_ROBOT_RELEASE        , 5)	\
@@ -62,8 +58,6 @@
 	VALUE(MULTI_DO_BOUNTY            , 2)	\
 	VALUE(MULTI_TYPING_STATE         , 3)	\
 	VALUE(MULTI_GMODE_UPDATE         , 3)	\
-	VALUE(MULTI_KILL_HOST            , 7)	\
-	VALUE(MULTI_KILL_CLIENT          , 5)	\
 	VALUE(MULTI_RANK                 , 3)	\
 	D2X_MP_COMMANDS(VALUE)	\
 

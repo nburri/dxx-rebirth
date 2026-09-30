@@ -39,6 +39,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "u_mem.h"
 #include "strutil.h"
 #include "game.h"
+#include "net_v2_combat.h"
 #include "multi.h"
 #include "bot.h"
 #include "movement_record.h"
@@ -825,8 +826,13 @@ static void net_destroy_controlcen(object_array &Objects, const d_robot_info_arr
 	net_destroy_controlcen_object(Robot_info, obj_find_first_of_type(Objects.vmptridx, object_type::OBJ_CNTRLCEN));
 }
 
-static void multi_compute_kill(const d_robot_info_array &Robot_info, const imobjptridx_t killer, object &killed)
+/* The kill of `killed`, by `killer_kind` (a net_v2 attacker_kind) and, for
+ * a player, the player `killer_pnum` (protocol v2 stage 4: the host
+ * decides, PLAYER_KILLED tells everyone).
+ */
+static void multi_compute_kill(const d_robot_info_array &Robot_info, const uint8_t killer_kind, const playernum_t killer_pnum, object &killed)
 {
+	using ::dcx::net_v2::attacker_kind;
 #if DXX_BUILD_DESCENT == 2
 	auto &LevelUniqueControlCenterState = LevelUniqueObjectState.ControlCenterState;
 #endif
@@ -835,9 +841,10 @@ static void multi_compute_kill(const d_robot_info_array &Robot_info, const imobj
 	// Figure out the results of a network kills and add it to the
 	// appropriate player's tally.
 
-	playernum_t killed_pnum, killer_pnum;
-
-	// Both object numbers are localized already!
+	playernum_t killed_pnum;
+	const auto kind{static_cast<attacker_kind>(killer_kind)};
+	const bool by_player{kind == attacker_kind::player && killer_pnum < N_players && killer_pnum < MAX_PLAYERS};
+	const object *const killer{by_player ? &*vmobjptr(vcplayerptr(killer_pnum)->objnum) : nullptr};
 
 	const auto killed_type{killed.type};
 	if ((killed_type != object_type::OBJ_PLAYER) && (killed_type != object_type::OBJ_GHOST))
@@ -852,7 +859,7 @@ static void multi_compute_kill(const d_robot_info_array &Robot_info, const imobj
 	killed_pnum = (get_player_id)(killed);
 
 	Assert (killed_pnum < N_players);
-	movement_record_kill(killed, killer == object_none ? nullptr : static_cast<const object *>(killer));
+	movement_record_kill(killed, killer);
 
 	kill_name_storage killed_buf;
 	const auto killed_name = prepare_kill_name(vcplayerptr, Game_mode, Netgame, killed_pnum, killed_buf);
@@ -867,10 +874,9 @@ static void multi_compute_kill(const d_robot_info_array &Robot_info, const imobj
 		vmplayerptr(killed_pnum)->connected = player_connection_status::died_in_mine;
 #endif
 
-	if (killer == object_none)
+	if (kind == attacker_kind::none || (kind == attacker_kind::player && !killer))
 		return;
-	const auto killer_type = killer->type;
-	if (killer_type == object_type::OBJ_CNTRLCEN)
+	if (kind == attacker_kind::reactor)
 	{
 		if (+(Game_mode & GM_TEAM))
 			-- team_kills[multi_get_team_from_player(Netgame, killed_pnum)];
@@ -891,10 +897,10 @@ static void multi_compute_kill(const d_robot_info_array &Robot_info, const imobj
 		return;
 	}
 
-	else if ((killer_type != object_type::OBJ_PLAYER) && (killer_type != object_type::OBJ_GHOST))
+	else if (kind != attacker_kind::player)
 	{
 #if DXX_BUILD_DESCENT == 2
-		if (killer_type == object_type::OBJ_WEAPON && get_weapon_id(killer) == weapon_id_type::PMINE_ID)
+		if (kind == attacker_kind::mine)
 		{
 			if (killed_pnum == Player_num)
 				HUD_init_message_literal(HM_MULTI, "You were killed by a mine!");
@@ -916,15 +922,12 @@ static void multi_compute_kill(const d_robot_info_array &Robot_info, const imobj
 		return;
 	}
 
-	/* A ghost killer is a player whose shot (a missile in flight, a mine)
-	 * killed after its owner died: the kill is that player's, as for a
-	 * human's post-death kill.  The ghost is the player's own object
+	/* A killer that is a ghost is a player whose shot (a missile in
+	 * flight, a mine) killed after its owner died: the kill is that
+	 * player's.  The ghost is the player's own object
 	 * (multi_make_player_ghost), so its player_info is the player's.
-	 * Override macro, call only the getter: get_player_id warns on
-	 * anything but OBJ_PLAYER, and the type is checked above.
 	 */
-	killer_pnum = (get_player_id)(killer);
-
+	auto &killer_info{vmobjptr(vcplayerptr(killer_pnum)->objnum)->ctype.player_info};
 	kill_name_storage killer_buf;
 	const auto killer_name = prepare_kill_name(vcplayerptr, Game_mode, Netgame, killer_pnum, killer_buf);
 
@@ -991,8 +994,8 @@ static void multi_compute_kill(const d_robot_info_array &Robot_info, const imobj
 			if (is_team_game)
 			{
 				team_kills[killer_team] += adjust;
-				killer->ctype.player_info.net_kills_total += adjust;
-				killer->ctype.player_info.KillGoalCount += adjust;
+				killer_info.net_kills_total += adjust;
+				killer_info.KillGoalCount += adjust;
 			}
 			else if (+(Game_mode & GM_BOUNTY))
 			{
@@ -1000,8 +1003,8 @@ static void multi_compute_kill(const d_robot_info_array &Robot_info, const imobj
 				if( killed_pnum == Bounty_target || killer_pnum == Bounty_target )
 				{
 					/* Increment kill counts */
-					++ killer->ctype.player_info.net_kills_total;
-					++ killer->ctype.player_info.KillGoalCount;
+					++ killer_info.net_kills_total;
+					++ killer_info.KillGoalCount;
 					
 					/* If the target died, the new one is set! */
 					if( killed_pnum == Bounty_target )
@@ -1010,8 +1013,8 @@ static void multi_compute_kill(const d_robot_info_array &Robot_info, const imobj
 			}
 			else
 			{
-				++ killer->ctype.player_info.net_kills_total;
-				++ killer->ctype.player_info.KillGoalCount;
+				++ killer_info.net_kills_total;
+				++ killer_info.KillGoalCount;
 			}
 			
 			if (Newdemo_state == ND_STATE_RECORDING)
@@ -1047,7 +1050,7 @@ static void multi_compute_kill(const d_robot_info_array &Robot_info, const imobj
 		const auto TheGoal = Netgame.KillGoal * 5;
 		if ((+(Game_mode & GM_TEAM)
 				? team_kills[multi_get_team_from_player(Netgame, killer_pnum)]
-				: killer->ctype.player_info.KillGoalCount
+				: killer_info.KillGoalCount
 			) >= TheGoal)
 		{
 			if (killer_pnum==Player_num)
@@ -1064,7 +1067,7 @@ static void multi_compute_kill(const d_robot_info_array &Robot_info, const imobj
 		}
 	}
 
-	con_printf(CON_VERBOSE, "net: kill: P#%u by P#%u: kills %i, deaths %i; P#%u kills %i", killed_pnum, killer_pnum, killed.ctype.player_info.net_kills_total, killed.ctype.player_info.net_killed_total, killer_pnum, killer->ctype.player_info.net_kills_total);
+	con_printf(CON_VERBOSE, "net: kill: P#%u by P#%u: kills %i, deaths %i; P#%u kills %i", killed_pnum, killer_pnum, killed.ctype.player_info.net_kills_total, killed.ctype.player_info.net_killed_total, killer_pnum, killer_info.net_kills_total);
 	multi_sort_kill_list();
 	multi_show_player_list();
 #if DXX_BUILD_DESCENT == 2
@@ -1073,6 +1076,14 @@ static void multi_compute_kill(const d_robot_info_array &Robot_info, const imobj
 #endif
 }
 
+}
+
+void multi_player_killed(const playernum_t victim, const uint8_t killer_kind, const playernum_t killer)
+{
+	if (victim >= N_players || victim >= MAX_PLAYERS)
+		return;
+	auto &Objects = LevelUniqueObjectState.Objects;
+	multi_compute_kill(LevelSharedRobotInfoState.Robot_info, killer_kind, killer, *Objects.vmptr(vcplayerptr(victim)->objnum));
 }
 
 }
@@ -1102,6 +1113,10 @@ window_event_result multi_do_frame()
 	 * sent on change instead of three times per second.
 	 */
 	net_objects_frame();
+	/* Stage 4: the host's history of its own ships, a client's own
+	 * damage reports.
+	 */
+	net_combat_frame();
 	if (Network_status == network_state::playing)
 	{
 		// Repopulate the level if necessary
@@ -1664,16 +1679,15 @@ namespace {
 static per_player_array<uint8_t> Guided_generation{};
 #endif
 
-static void multi_do_fire(fvmobjptridx &vmobjptridx, const playernum_t pnum, const multiplayer_rspan<multiplayer_command_t::MULTI_FIRE> buf, const icobjidx_t Network_laser_track, const std::optional<uint16_t> remote_objnum)
+}
+
+void multi_do_fire(const playernum_t pnum, const uint8_t untrusted_raw_weapon, const uint8_t level, const uint8_t flags, const vms_vector &shot_orientation, const icobjidx_t Network_laser_track)
 {
+	auto &Objects = LevelUniqueObjectState.Objects;
+	auto &vmobjptridx = Objects.vmptridx;
 	// Act out the actual shooting
-	const uint8_t untrusted_raw_weapon = buf[2];
-
-	const auto flags{buf[4]};
-
-	const auto shot_orientation = multi_get_vector(buf.subspan<5, 12>());
-
-	Assert (pnum < N_players);
+	if (pnum >= N_players)
+		return;
 
 	const auto &&obj = vmobjptridx(vcplayerptr(pnum)->objnum);
 	if (obj->type == object_type::OBJ_GHOST)
@@ -1696,9 +1710,7 @@ static void multi_do_fire(fvmobjptridx &vmobjptridx, const playernum_t pnum, con
 		if (weapon == secondary_weapon_index::guided && pnum < Guided_generation.size())
 			Guided_generation[pnum] = static_cast<uint8_t>((flags >> 1) & 0x7f);
 #endif
-		const auto &&objnum = Laser_player_fire(LevelSharedRobotInfoState.Robot_info, obj, weapon_id, weapon_gun, weapon_sound_flag::audible, shot_orientation, Network_laser_track);
-		if (remote_objnum)
-			map_objnum_local_to_remote(objnum, *remote_objnum, pnum);
+		Laser_player_fire(LevelSharedRobotInfoState.Robot_info, obj, weapon_id, weapon_gun, weapon_sound_flag::audible, shot_orientation, Network_laser_track);
 	}
 	else if (const uint8_t untrusted_weapon = untrusted_raw_weapon; untrusted_weapon < MAX_PRIMARY_WEAPONS)
 	{
@@ -1715,9 +1727,11 @@ static void multi_do_fire(fvmobjptridx &vmobjptridx, const playernum_t pnum, con
 				powerup_flags &= ~player_flag::quad_lasers;
 		}
 
-		do_laser_firing(obj, weapon, laser_level{buf[3]}, flags, shot_orientation, Network_laser_track);
+		do_laser_firing(obj, weapon, laser_level{level}, flags, shot_orientation, Network_laser_track);
 	}
 }
+
+namespace {
 
 static void multi_do_message(const playernum_t pnum, const multiplayer_rspan<multiplayer_command_t::MULTI_MESSAGE> cbuf)
 {
@@ -1764,34 +1778,22 @@ static void multi_do_message(const playernum_t pnum, const multiplayer_rspan<mul
 	multi_sending_message[pnum] = msgsend_state::none;
 }
 
-static void multi_do_reappear(const playernum_t pnum, const multiplayer_rspan<multiplayer_command_t::MULTI_REAPPEAR> buf)
+}
+
+void multi_player_spawned(const playernum_t pnum)
 {
 	auto &Objects = LevelUniqueObjectState.Objects;
-	auto &vcobjptr = Objects.vcptr;
-	const objnum_t objnum{GET_INTEL_SHORT(&buf[2])};
-
-	const auto &&uobj = vcobjptr.check_untrusted(objnum);
-	if (!uobj)
+	if (pnum >= N_players || pnum == Player_num)
 		return;
-	auto &obj = **uobj;
+	auto &obj = *Objects.vcptr(vcplayerptr(pnum)->objnum);
 	if (obj.type != object_type::OBJ_PLAYER && obj.type != object_type::OBJ_GHOST)
-	{
-		con_printf(CON_URGENT, "%s:%u: BUG: object %hu has type %u, expected %u or %u", __FILE__, __LINE__, objnum, obj.type, object_type::OBJ_PLAYER, object_type::OBJ_GHOST);
 		return;
-	}
-	/* Override macro, call only the getter.
-	 *
-	 * This message is overloaded to be used on both players and ghosts,
-	 * so the standard check cannot be used.  Instead, the correct check
-	 * is open-coded above.
-	 */
-	if (pnum != (get_player_id)(obj))
-		return;
-
 	multi_make_ghost_player(pnum);
 	create_player_appearance_effect(Vclip, obj);
 	net_objects_player_reappeared(pnum);
 }
+
+namespace {
 
 static void multi_do_player_deres(const d_robot_info_array &Robot_info, object_array &Objects, const playernum_t pnum, const multiplayer_rspan<multiplayer_command_t::MULTI_PLAYER_DERES> buf)
 {
@@ -1827,6 +1829,10 @@ static void multi_do_player_deres(const d_robot_info_array &Robot_info, object_a
 #endif
 		secondary_ammo[secondary_weapon_index::proximity] = buf[4];
 	}
+	/* Stage 4: the ids of the mines, which the dying player's machine
+	 * reports the hits of.
+	 */
+	net_combat_expect_mines(pnum, GET_INTEL_SHORT(&buf[5]));
 	drop_player_armed_bombs(objp);
 	net_objects_host_drop_player_eggs(pnum);
 
@@ -1847,68 +1853,6 @@ static void multi_do_player_deres(const d_robot_info_array &Robot_info, object_a
 	player_info.powerup_flags &= ~player_flag::has_team_flag;
 #endif
 	DXX_MAKE_VAR_UNDEFINED(player_info.cloak_time);
-}
-
-/*
- * Process can compute a kill. If I am a Client this might be my own one (see multi_send_kill()) but with more specific data so I can compute my kill correctly.
- */
-static void multi_do_kill_host(object_array &Objects, const playernum_t pnum, const multiplayer_rspan<multiplayer_command_t::MULTI_KILL_HOST> buf)
-{
-	int count{1};
-
-	if (multi_i_am_master())
-		return;
-	/* Only the host sends MULTI_KILL_HOST, both for its own deaths and to
-	 * relay a client's MULTI_KILL_CLIENT.  In the relayed case the sender is
-	 * the host, not the player who died, so take the victim from the
-	 * message.
-	 */
-	if (pnum != multi_who_is_master())
-		return;
-	const playernum_t killed_pnum{buf[1]};
-	if (killed_pnum >= N_players)
-		return;
-	const auto killed = vcplayerptr(killed_pnum)->objnum;
-	count += 1;
-	objnum_t killer{GET_INTEL_SHORT(&buf[count])};
-	if (killer > 0)
-		killer = objnum_remote_to_local(killer, buf[count+2]);
-	Netgame.team_vector = buf[5];
-	Bounty_target = buf[6];
-
-	multi_compute_kill(LevelSharedRobotInfoState.Robot_info, Objects.imptridx(killer), Objects.vmptridx(killed));
-}
-
-static void multi_do_kill_client(object_array &Objects, const playernum_t pnum, const multiplayer_rspan<multiplayer_command_t::MULTI_KILL_CLIENT> buf)
-{
-	if (!multi_i_am_master())
-		return;
-	int count{1};
-	// I am host, I know what's going on so take this packet, add game_mode related info which might be necessary for kill computation and send it to everyone so they can compute their kills correctly
-	{
-		multi_command<multiplayer_command_t::MULTI_KILL_HOST> multibuf;
-		std::memcpy(std::next(multibuf.data()), std::next(buf.data()), 4);
-		/* Clients take the killed player from byte 1.  Use the sender,
-		 * which is what the host counts below, not the number the client
-		 * wrote.
-		 */
-		multibuf[1] = pnum;
-		multibuf[5] = Netgame.team_vector;
-		multibuf[6] = Bounty_target;
-		
-		multi_send_data(multibuf, multiplayer_data_priority::_2);
-	}
-
-	const auto killed = vcplayerptr(pnum)->objnum;
-	count += 1;
-	objnum_t killer{GET_INTEL_SHORT(&buf[count])};
-	if (killer > 0)
-		killer = objnum_remote_to_local(killer, buf[count+2]);
-
-	multi_compute_kill(LevelSharedRobotInfoState.Robot_info, Objects.imptridx(killer), Objects.vmptridx(killed));
-
-	if (+(Game_mode & GM_BOUNTY)) // update in case if needed... we could attach this to this packet but... meh...
-		multi_send_bounty();
 }
 
 //      Changed by MK on 10/20/94 to send NULL as object to net_destroy_controlcen if it got -1
@@ -2497,7 +2441,7 @@ uint8_t multi_guided_generation(const playernum_t pnum)
 }
 #endif
 
-void multi_send_fire(const vms_matrix &orient, int laser_gun, const laser_level level, int laser_flags, objnum_t laser_track, const imobjptridx_t is_bomb_objnum, const playernum_t pnum)
+void multi_send_fire(int laser_gun, const laser_level level, int laser_flags, objnum_t laser_track, const playernum_t pnum)
 {
 #if DXX_BUILD_DESCENT == 2
 	/* A guided missile: bits 1-7 of the flags are its generation (only
@@ -2510,6 +2454,12 @@ void multi_send_fire(const vms_matrix &orient, int laser_gun, const laser_level 
 		laser_flags = (laser_flags & 1) | (gen << 1);
 	}
 #endif
+	/* Protocol v2 stage 4: FIRE, with the shooter's origin, time, seed
+	 * and the ids of the weapons it created (net_combat.cpp).  First,
+	 * while the shot's numbering is still the one just made.
+	 */
+	net_combat_send_fire(pnum, static_cast<uint8_t>(laser_gun), static_cast<uint8_t>(level), static_cast<uint8_t>(laser_flags), laser_track);
+
 	static fix64 last_fireup_time = 0;
 
 	// provoke positional update if possible (20 times per second max. matches vulcan, the fastest firing weapon)
@@ -2518,59 +2468,6 @@ void multi_send_fire(const vms_matrix &orient, int laser_gun, const laser_level 
 		multi::dispatch->do_protocol_frame(1, 0);
 		last_fireup_time = timer_query();
 	}
-
-	union mb {
-		multi_command<multiplayer_command_t::MULTI_FIRE_BOMB> multibomb;
-		multi_command<multiplayer_command_t::MULTI_FIRE_TRACK> multitrack;
-		multi_command<multiplayer_command_t::MULTI_FIRE> multifire;
-		mb() {}
-	} multibuf;
-	/* A tracked weapon that also names its object (a guided missile with
-	 * a target) goes as MULTI_FIRE_TRACK with the object number appended.
-	 */
-	if (laser_track != object_none)
-		new(&multibuf.multitrack) multi_command<multiplayer_command_t::MULTI_FIRE_TRACK>();
-	else if (is_bomb_objnum != object_none)
-		new(&multibuf.multibomb) multi_command<multiplayer_command_t::MULTI_FIRE_BOMB>();
-	else
-		new(&multibuf.multifire) multi_command<multiplayer_command_t::MULTI_FIRE>();
-	multibuf.multifire[1] = static_cast<char>(pnum);
-	multibuf.multifire[2] = static_cast<char>(laser_gun);
-	multibuf.multifire[3] = static_cast<uint8_t>(level);
-	multibuf.multifire[4] = static_cast<char>(laser_flags);
-
-	multi_put_vector(&multibuf.multifire[5], orient.fvec);
-
-	/*
-	 * If we fire a bomb, it's persistent. Let others know of it's objnum so host can track it's behaviour over clients (host-authority functions, D2 chaff ability).
-	 * If we fire a tracking projectile, we should others let know about what we track but we have to pay attention that it is mapped correctly.
-	 * If we fire something else, we make the packet as small as possible.
-	 * A guided missile (D2) is sent like a bomb, with its object number,
-	 * because the v2 state bundle names it by that number.
-	 */
-	if (laser_track != object_none)
-	{
-		const auto &&[remote_owner, remote_laser_track] = objnum_local_to_remote(laser_track);
-		PUT_INTEL_SHORT(&multibuf.multitrack[17], remote_laser_track);
-		multibuf.multitrack[19] = remote_owner;
-		if (is_bomb_objnum != object_none)
-		{
-			map_objnum_local_to_local(is_bomb_objnum, pnum);
-			PUT_INTEL_SHORT(&multibuf.multitrack[20], is_bomb_objnum.operator objnum_t());
-		}
-		else
-			PUT_INTEL_SHORT(&multibuf.multitrack[20], uint16_t{0xffff});
-		multi_send_data(multibuf.multitrack, multiplayer_data_priority::_1, pnum);
-	}
-	else if (is_bomb_objnum != object_none)
-	{
-		/* pnum is the originator: this player, or a bot flown here. */
-		map_objnum_local_to_local(is_bomb_objnum, pnum);
-		PUT_INTEL_SHORT(&multibuf.multibomb[17], is_bomb_objnum.operator objnum_t());
-		multi_send_data(multibuf.multibomb, multiplayer_data_priority::_1, pnum);
-	}
-	else
-		multi_send_data(multibuf.multifire, multiplayer_data_priority::_1, pnum);
 }
 
 void multi_send_destroy_controlcen(const objnum_t objnum, const playernum_t player)
@@ -2676,6 +2573,10 @@ void multi_send_player_deres(deres_type_t type, const playernum_t pnum)
 	multibuf[3] = 0;
 #endif
 	multibuf[4] = player_info.secondary_ammo[secondary_weapon_index::proximity];
+	/* Stage 4: the ids of the mines this machine arms next
+	 * (drop_player_armed_bombs), which it reports the hits of.
+	 */
+	PUT_INTEL_SHORT(&multibuf[5], net_combat_reserve_mine_ids(pnum));
 	multi_send_data(multibuf, multiplayer_data_priority::_2, pnum);
 	if (local_player)
 		net_objects_own_deres();
@@ -2735,78 +2636,7 @@ void multi_host_teams_changed()
 
 }
 
-void multi_send_reappear(const playernum_t pnum)
-{
-	auto &plr = *vcplayerptr(pnum);
-	multi_command<multiplayer_command_t::MULTI_REAPPEAR> multibuf;
-	multibuf[1] = static_cast<char>(pnum);
-	PUT_INTEL_SHORT(&multibuf[2], plr.objnum);
-
-	multi_send_data(multibuf, multiplayer_data_priority::_2, pnum);
-	::dsx::net_objects_player_reappeared(pnum);
-}
-
 namespace dsx {
-
-/* 
- * I was killed. If I am host, send this info to everyone and compute kill. If I am just a Client I'll only send the kill but not compute it for me. I (Client) will wait for Host to send me my kill back together with updated game_mode related variables which are important for me to compute consistent kill.
- * `objnum` is the ship that died: the local player's, or on the host, a
- * ship the host flies itself (then the host path below is taken).
- */
-void multi_send_kill(const vmobjptridx_t objnum)
-{
-	auto &Objects = LevelUniqueObjectState.Objects;
-	auto &imobjptridx = Objects.imptridx;
-	// I died, tell the world.
-	const auto pnum{get_player_id(objnum)};
-	Assert(pnum == Player_num || multi_i_am_master());
-	const auto killer_objnum = objnum->ctype.player_info.killer_objnum;
-
-	// do it with variable since INTEL_SHORT won't work on return val from function.
-	const auto &&[remote_owner, remote_objnum] = killer_objnum != object_none
-		? objnum_local_to_remote(killer_objnum)
-		: owned_remote_objnum{static_cast<int8_t>(-1), static_cast<uint16_t>(0xffff)};
-	const auto local_is_host = multi_i_am_master();
-	union mb {
-		multi_command<multiplayer_command_t::MULTI_KILL_CLIENT> c;
-		multi_command<multiplayer_command_t::MULTI_KILL_HOST> h;
-		mb() {}
-	};
-	mb multibuf;
-	if (local_is_host)
-	{
-		new(&multibuf.h) multi_command<multiplayer_command_t::MULTI_KILL_HOST>();
-		multibuf.h[5] = Netgame.team_vector;
-		multibuf.h[6] = Bounty_target;
-	}
-	else
-	{
-		new(&multibuf.c) multi_command<multiplayer_command_t::MULTI_KILL_CLIENT>();
-	}
-	/* The player who died.  Clients read it from MULTI_KILL_HOST, because
-	 * the host also relays other players' deaths in that message.
-	 */
-	multibuf.h[1] = pnum;
-	multibuf.h[4] = remote_owner;
-	PUT_INTEL_SHORT(&multibuf.h[2], remote_objnum);
-	// I am host - I know what's going on so attach game_mode related info which might be vital for correct kill computation
-	if (local_is_host)
-	{
-		multi_compute_kill(LevelSharedRobotInfoState.Robot_info, imobjptridx(killer_objnum), objnum);
-		/* From the host, whoever died: clients take MULTI_KILL_HOST only
-		 * from the host (multi_do_kill_host), and read the victim from
-		 * byte 1.
-		 */
-		multi_send_data(multibuf.h, multiplayer_data_priority::_2, Player_num);
-	}
-	else
-		multi_send_data_direct(multibuf.c, multi_who_is_master(), 2); // I am just a client so I'll only send my kill but not compute it, yet. I'll get response from host so I can compute it correctly
-
-	multi_strip_robots(pnum);
-
-	if (+(Game_mode & GM_BOUNTY) && multi_i_am_master()) // update in case if needed... we could attach this to this packet but... meh...
-		multi_send_bounty();
-}
 
 void multi_send_remobj(const vmobjidx_t objnum)
 {
@@ -3380,6 +3210,8 @@ void multi_prep_level_objects(const d_powerup_info_array &Powerup_info, const d_
 	net_objects_level_start();
 	/* Spawn assignments and reservations belong to the old level. */
 	net_spawn_level_start();
+	/* Shots, ids and the host's histories too (stage 4). */
+	net_combat_level_start();
 }
 
 void multi_prep_level_player(void)
@@ -5452,22 +5284,6 @@ static void multi_process_data(const d_level_shared_robot_info_state &LevelShare
 	auto &vmwallptr = Walls.vmptr;
 	switch (type)
 	{
-		case multiplayer_command_t::MULTI_REAPPEAR:
-			multi_do_reappear(pnum, multi_subspan_first<multiplayer_command_t::MULTI_REAPPEAR>(data));
-			break;
-		case multiplayer_command_t::MULTI_FIRE:
-		case multiplayer_command_t::MULTI_FIRE_TRACK:
-		case multiplayer_command_t::MULTI_FIRE_BOMB:
-			multi_do_fire(vmobjptridx, pnum, multi_subspan_first<multiplayer_command_t::MULTI_FIRE>(data),
-							type == multiplayer_command_t::MULTI_FIRE_TRACK
-							? objnum_remote_to_local(GET_INTEL_SHORT(&data[17]), data[19])
-							: object_none,
-							type == multiplayer_command_t::MULTI_FIRE_BOMB
-							? std::optional(GET_INTEL_SHORT(&data[17]))
-							: (type == multiplayer_command_t::MULTI_FIRE_TRACK && GET_INTEL_SHORT(&data[20]) != 0xffff)
-								? std::optional(GET_INTEL_SHORT(&data[20]))
-								: std::nullopt);
-			break;
 		case multiplayer_command_t::MULTI_REMOVE_OBJECT:
 			multi_do_remobj(vmobjptr, multi_subspan_first<multiplayer_command_t::MULTI_REMOVE_OBJECT>(data));
 			break;
@@ -5615,12 +5431,6 @@ static void multi_process_data(const d_level_shared_robot_info_state &LevelShare
 			break;
 		case multiplayer_command_t::MULTI_GMODE_UPDATE:
 			multi_do_gmode_update(multi_subspan_first<multiplayer_command_t::MULTI_GMODE_UPDATE>(data));
-			break;
-		case multiplayer_command_t::MULTI_KILL_HOST:
-			multi_do_kill_host(Objects, pnum, multi_subspan_first<multiplayer_command_t::MULTI_KILL_HOST>(data));
-			break;
-		case multiplayer_command_t::MULTI_KILL_CLIENT:
-			multi_do_kill_client(Objects, pnum, multi_subspan_first<multiplayer_command_t::MULTI_KILL_CLIENT>(data));
 			break;
 	}
 }

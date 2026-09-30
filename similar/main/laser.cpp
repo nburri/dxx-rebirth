@@ -514,6 +514,7 @@ static bool create_omega_blobs(d_level_unique_object_state &LevelUniqueObjectSta
 				break;
 
 			last_created_objnum = objp;
+			net_combat_weapon_created(objp, parent_objp);
 
 			objp->lifeleft = OMEGA_BASE_TIME+(d_rand()/8); // add little randomness so the lighting effect becomes a little more interesting
 			objp->mtype.phys_info.velocity = vec_to_goal;
@@ -640,7 +641,7 @@ static void do_omega_stuff(fvmsegptridx &vmsegptridx, const vmobjptridx_t parent
 	player_info *pl_info{};
 	/* The charge is the shooter's own where it is flown: the local
 	 * player, or on the host a bot (bot.cpp recharges it with
-	 * omega_charge_frame).  Elsewhere the shot arrived by MULTI_FIRE.
+	 * omega_charge_frame).  Elsewhere the shot arrived by FIRE.
 	 */
 	if (parent_objp->type == object_type::OBJ_PLAYER && (get_player_id(parent_objp) == Player_num || bot_is_local(get_player_id(parent_objp))))
 	{
@@ -765,6 +766,10 @@ imobjptridx_t Laser_create_new(const vms_vector &direction, const vms_vector &po
 	{
 		return object_none;
 	}
+	/* Protocol v2 stage 4: the weapon's id (the shot's, or its parent
+	 * weapon's).
+	 */
+	net_combat_weapon_created(obj, parent);
 	const auto &weapon_info = Weapon_info[weapon_type];
 
 #if DXX_BUILD_DESCENT == 2
@@ -1517,7 +1522,7 @@ static imobjptridx_t Laser_player_fire_spread_delay(const d_robot_info_array &Ro
 	if (Weapon_info[laser_type].homing_flag) {
 		/* The shooter flown on this machine (the local player, or on the
 		 * host a bot) picks what its missile homes on; for the others
-		 * the target came with their MULTI_FIRE.
+		 * the target came with their FIRE.
 		 */
 		if (obj == ConsoleObject || (obj->type == object_type::OBJ_PLAYER && bot_is_local(get_player_id(obj))))
 		{
@@ -1561,9 +1566,14 @@ void Flare_create(const vmobjptridx_t obj)
 	if (energy > 0)
 #endif
 	{
+		if (+(Game_mode & GM_MULTI))
+			net_combat_begin_fire(plrobj);
 		const auto &&flare = Laser_player_fire(LevelSharedRobotInfoState.Robot_info, obj, weapon_id_type::FLARE_ID, player_gun_number::center, weapon_sound_flag::audible, plrobj.orient.fvec, object_none);
 		if (flare == object_none)
+		{
+			net_combat_abort_fire();
 			return;
+		}
 		const fix next_energy{
 			energy > energy_usage
 			? energy - energy_usage
@@ -1576,7 +1586,7 @@ void Flare_create(const vmobjptridx_t obj)
 #endif
 
 		if (+(Game_mode & GM_MULTI))
-			multi_send_fire(plrobj.orient, FLARE_ADJUST, laser_level::_1	/* unused */, 0, object_none, object_none, Player_num);
+			multi_send_fire(FLARE_ADJUST, laser_level::_1	/* unused */, 0, object_none, Player_num);
 	}
 
 }
@@ -1964,6 +1974,22 @@ void do_laser_firing_player(pilot &p, const vmobjptridx_t plrobjidx)
 //	or other players) often enough for things like the vulcan cannon.
 int do_laser_firing(vmobjptridx_t objp, const primary_weapon_index weapon_num, const laser_level level, unsigned flags, vms_vector shot_orientation, const icobjidx_t Network_laser_track)
 {
+	/* The shooter flown here (the local player, or on the host a bot):
+	 * its shot is numbered and seeded for FIRE (protocol v2 stage 4); a
+	 * shot that fails is not sent.
+	 */
+	const bool local_shooter{+(Game_mode & GM_MULTI) && (objp == get_local_player().objnum || (objp->type == object_type::OBJ_PLAYER && bot_is_local(get_player_id(objp))))};
+	struct fire_scope_guard
+	{
+		bool open;
+		~fire_scope_guard()
+		{
+			if (open)
+				net_combat_abort_fire();
+		}
+	} scope{local_shooter};
+	if (local_shooter)
+		net_combat_begin_fire(objp);
 	switch (weapon_num) {
 		case primary_weapon_index::laser: {
 			weapon_id_type weapon_type;
@@ -2117,12 +2143,10 @@ int do_laser_firing(vmobjptridx_t objp, const primary_weapon_index weapon_num, c
 
 	// Set values to be recognized during comunication phase, if we are the
 	//  one shooting: the local player, or on the host a bot it flies.
-	if (+(Game_mode & GM_MULTI))
+	if (local_shooter)
 	{
-		if (objp == get_local_player().objnum)
-			multi_send_fire(objp->orient, underlying_value(weapon_num), level, flags, Network_laser_track, object_none, Player_num);
-		else if (objp->type == object_type::OBJ_PLAYER && bot_is_local(get_player_id(objp)))
-			multi_send_fire(objp->orient, underlying_value(weapon_num), level, flags, Network_laser_track, object_none, get_player_id(objp));
+		scope.open = false;
+		multi_send_fire(underlying_value(weapon_num), level, flags, Network_laser_track, get_player_id(objp));
 	}
 	return 1;
 }
@@ -2375,12 +2399,17 @@ void do_missile_firing(pilot &p, const secondary_weapon_index weapon, const vmob
 			? static_cast<player_gun_number>(static_cast<uint8_t>(base_weapon_gun) + (gun_flag = (Missile_gun & 1)))
 			: base_weapon_gun
 		};
+		if (+(Game_mode & GM_MULTI))
+			net_combat_begin_fire(plrobj);
 		const auto &&objnum = Laser_player_fire(LevelSharedRobotInfoState.Robot_info, plrobjidx, weapon_index, weapon_gun, weapon_sound_flag::audible, plrobj.orient.fvec, object_none);
 		if (objnum == object_none)
+		{
 			/* If the missile was not created, return early.  Do not charge for
 			 * it, and do not report it to other players.
 			 */
+			net_combat_abort_fire();
 			return;
+		}
 		movement_record_fire(plrobj, true, underlying_value(weapon), 0);
 		/* Toggle between the left and right missile guns.
 		 */
@@ -2419,17 +2448,10 @@ void do_missile_firing(pilot &p, const secondary_weapon_index weapon, const vmob
 		if (+(Game_mode & GM_MULTI))
 		{
 			const object &obj = *objnum;
-			/* Bombs, and in D2 guided missiles, go with their object
-			 * number, so that the receivers map it to their copy: the
-			 * state bundle names a guided missile by its owner's object
-			 * number.
+			/* FIRE carries the ids of the weapons: the state bundle names
+			 * a guided missile by its id.
 			 */
-			const bool send_objnum{static_cast<bool>(weapon_index_is_player_bomb(weapon))
-#if DXX_BUILD_DESCENT == 2
-				|| weapon == secondary_weapon_index::guided
-#endif
-			};
-			multi_send_fire(plrobj.orient, underlying_value(weapon) + MISSILE_ADJUST, laser_level::_1	/* unused */, gun_flag, obj.ctype.laser_info.track_goal, send_objnum ? objnum : object_none, get_player_id(plrobj));
+			multi_send_fire(underlying_value(weapon) + MISSILE_ADJUST, laser_level::_1	/* unused */, gun_flag, obj.ctype.laser_info.track_goal, get_player_id(plrobj));
 		}
 
 		// don't autoselect if dropping prox and prox not current weapon

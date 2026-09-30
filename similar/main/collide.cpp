@@ -2063,6 +2063,10 @@ void drop_player_armed_bombs(const vmobjptridx_t playerobj)
 	if (+(Game_mode & GM_MULTI))
 		d_srand(5483L);
 #if DXX_BUILD_DESCENT == 2
+	/* The mines get the ids MULTI_PLAYER_DERES carried (protocol v2 stage
+	 * 4): their owner's machine reports what they hit.
+	 */
+	net_combat_begin_mines(playerobj);
 	auto &secondary_ammo = playerobj->ctype.player_info.secondary_ammo;
 	//	If the player had smart mines, maybe arm one of them.
 	const auto drop_armed_bomb = [&](uint8_t mines, weapon_id_type id) {
@@ -2089,6 +2093,7 @@ void drop_player_armed_bombs(const vmobjptridx_t playerobj)
 	//	If the player had proximity bombs, maybe arm one of them.
 	if (+(Game_mode & GM_MULTI))
 		drop_armed_bomb(secondary_ammo[secondary_weapon_index::proximity], weapon_id_type::PROXIMITY_ID);
+	net_combat_end_mines();
 #endif
 }
 
@@ -2282,6 +2287,11 @@ void apply_damage_to_player(object &playerobj, const icobjptridx_t killer, const
 #if DXX_BUILD_DESCENT == 2
 	auto &BuddyState = LevelUniqueObjectState.BuddyState;
 #endif
+	/* A network game (protocol v2 stage 4): the machine that flies the
+	 * ship reports its damage, the host applies it (net_combat.cpp).
+	 */
+	if (net_combat_damage_player(playerobj, killer, damage, possibly_friendly == apply_damage_player::always))
+		return;
 	/* A bot's ship on the host (Documentation/multiplayer-bots.md
 	 * section 7.1: the victim's machine decides, and the host flies the
 	 * bot).
@@ -2411,7 +2421,11 @@ static void collide_player_and_weapon(const d_robot_info_array &Robot_info, cons
 //		if (weapon->id == SMART_HOMING_ID)
 //			damage /= 4;
 
-		apply_damage_to_player(playerobj, killer, damage, apply_damage_player::check_for_friendly);
+		/* A network game: the shooter's machine reports the hit, the host
+		 * decides (protocol v2 stage 4).
+		 */
+		if (!net_combat_weapon_hit_player(playerobj, weapon, collision_point, damage))
+			apply_damage_to_player(playerobj, killer, damage, apply_damage_player::check_for_friendly);
 	}
 
 	//	Robots become aware of you if you get hit.

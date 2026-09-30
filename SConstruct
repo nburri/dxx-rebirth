@@ -5015,6 +5015,13 @@ class DXXArchive(DXXCommon):
 		RuntimeTest('test-net-v2-authority', (
 			'common/unittest/net_v2_authority.cpp',
 			)),
+		# Test of the combat rules of stage 4: position history and
+		# rewind, hit judgement, damage and kill rules, rate limits, INPUT
+		# validation, catch-up, and a simulated host with clients
+		# (net_v2_combat.h).
+		RuntimeTest('test-net-v2-combat', (
+			'common/unittest/net_v2_combat.cpp',
+			)),
 		# Test of the deathmatch spawn site choice (spawn_site.h) against
 		# the code it was extracted from.
 		RuntimeTest('test-spawn-site', (
@@ -5620,6 +5627,7 @@ class DXXProgram(DXXCommon):
 'similar/main/multi.cpp',
 'similar/main/multibot.cpp',
 'similar/main/net_interp.cpp',
+'similar/main/net_combat.cpp',
 'similar/main/net_objects.cpp',
 'similar/main/net_spawn.cpp',
 ),

@@ -821,7 +821,7 @@ struct own_life
 		dropped = true;
 		life = static_cast<std::uint8_t>(life + 1);
 	}
-	/* The player reappeared (MULTI_REAPPEAR). */
+	/* The player reappeared (PLAYER_SPAWN). */
 	void on_reappear()
 	{
 		dropped = false;

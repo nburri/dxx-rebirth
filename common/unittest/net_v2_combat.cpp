@@ -462,7 +462,9 @@ void test_kills()
 
 void test_rates()
 {
-	/* Section 3.6: 64 per second, a burst of 128. */
+	/* Section 3.6: NET_V2_COMBAT_RATE per second, a burst of
+	 * NET_V2_COMBAT_BURST.
+	 */
 	{
 		token_bucket b{NET_V2_COMBAT_RATE, NET_V2_COMBAT_BURST};
 		net_clock now{net_seconds(10)};
@@ -471,7 +473,7 @@ void test_rates()
 		for (unsigned i = 0; i < 1000; ++i)
 			taken += b.take(now);
 		CHECK(taken == NET_V2_COMBAT_BURST);
-		/* One second later, 64 more. */
+		/* One second later, a second's worth more. */
 		now += net_seconds(1);
 		taken = 0;
 		for (unsigned i = 0; i < 1000; ++i)
@@ -484,7 +486,7 @@ void test_rates()
 			now += net_seconds(1) / 25;
 			CHECK(b.take(now));
 		}
-		/* A flood of 1000 per second gets 64 per second. */
+		/* A flood of 1000 per second gets the rate. */
 		b.reset(now);
 		taken = 0;
 		for (unsigned i = 0; i < 10000; ++i)
@@ -492,7 +494,10 @@ void test_rates()
 			now += net_seconds(1) / 1000;
 			taken += b.take(now);
 		}
-		CHECK(taken >= NET_V2_COMBAT_BURST + 630 && taken <= NET_V2_COMBAT_BURST + 650);
+		/* (A step of 1/1000 s is 65 time units, not 65.536: about 1 %
+		 * less time passes.)
+		 */
+		CHECK(taken >= NET_V2_COMBAT_BURST + 10 * NET_V2_COMBAT_RATE * 98 / 100 && taken <= NET_V2_COMBAT_BURST + 10 * NET_V2_COMBAT_RATE + 10);
 	}
 	/* A weapon at its own rate, at any frame rate: never refused. */
 	const net_clock wait{net_seconds(1) / 20};
@@ -889,6 +894,7 @@ void test_wire()
 		m.kind = hit_kind::splash;
 		m.target = 7;
 		m.target_time = 0x80000001;
+		m.cause = attacker_kind::robot;
 		m.point = {1, -2, 3};
 		m.segment = 17;
 		m.damage = -1;
@@ -897,7 +903,10 @@ void test_wire()
 		m.write(buf);
 		const auto r{weapon_hit_msg::read(buf)};
 		CHECK(r->netid == m.netid && r->weapon_id == 29 && r->kind == hit_kind::splash && r->target == 7);
-		CHECK(r->target_time == 0x80000001 && r->point == m.point && r->segment == 17 && r->damage == -1);
+		CHECK(r->target_time == 0x80000001 && r->point == m.point && r->segment == 17 && r->damage == -1 && r->cause == attacker_kind::robot);
+		buf[5] = static_cast<std::uint8_t>(attacker_kind::none) + 1;
+		CHECK(!weapon_hit_msg::read(buf));
+		buf[5] = 0;
 		buf[3] = NET_V2_HIT_KINDS;
 		CHECK(!weapon_hit_msg::read(buf));
 		buf[3] = 0;

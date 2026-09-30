@@ -45,6 +45,7 @@
 #include "net_interp.h"
 #include "net_v2_game.h"
 #include "pilot.h"
+#include "multibot.h"
 #include "multi.h"
 #include "object.h"
 #include "player.h"
@@ -4224,7 +4225,7 @@ void give_spawn_invulnerability(object &obj)
 }
 
 /* A new ship for the bot: spawn grants, invulnerability, weapon, and
- * the announcement (MULTI_REAPPEAR as the bot, then its inventory).
+ * the announcement (PLAYER_SPAWN as the bot, then its inventory).
  */
 void new_ship(bot_state &bs, object &obj)
 {
@@ -4234,12 +4235,12 @@ void new_ship(bot_state &bs, object &obj)
 	choose_weapon(bs, obj, std::nullopt);
 	bs.reset_for_life(B.tick.tick());
 	create_player_appearance_effect(Vclip, obj);
-	multi_send_reappear(bs.pid);
+	net_combat_send_spawn(bs.pid);
 	net_objects_host_own_ship_inventory(bs.pid, true);
 }
 
-/* Section 4.8, step 1: the kill (MULTI_KILL_HOST with the bot in byte
- * 1, from the host) and the tumble.
+/* Section 4.8, step 1: the tumble (the kill was announced by the host's
+ * PLAYER_KILLED when the damage was applied).
  */
 void start_death(bot_state &bs, object &obj)
 {
@@ -4253,8 +4254,10 @@ void start_death(bot_state &bs, object &obj)
 	bs.fire = false;
 	obj.mtype.phys_info.thrust = {};
 	obj.mtype.phys_info.rotthrust = {};
-	auto &Objects = LevelUniqueObjectState.Objects;
-	multi_send_kill(Objects.vmptridx(&obj));
+	/* The kill itself was the host's combat decision (PLAYER_KILLED,
+	 * net_combat.cpp); the bot's robots are released, as a human's are.
+	 */
+	multi_strip_robots(bs.pid);
 }
 
 /* Section 4.8, step 2: the explosion.  The deres goes out as the bot's,
@@ -4812,7 +4815,7 @@ void bots_fire()
 		}
 #endif
 		/* Stage B4: the missile or mine the brain released, as the
-		 * human fires one (do_missile_firing: MULTI_FIRE as the bot);
+		 * human fires one (do_missile_firing: FIRE as the bot);
 		 * a volley's further rounds follow frame by frame, as the
 		 * human's Global_missile_firing_count does.
 		 */
@@ -4834,7 +4837,7 @@ void bots_fire()
 		/* Section 9.5: the fusion cannon, as FireLaser charges the
 		 * human's: 2 energy to start, then 1 a second, the charge in the
 		 * ship's Fusion_charge (the shot's damage grows with it); the
-		 * shot goes through do_laser_firing_player (MULTI_FIRE with the
+		 * shot goes through do_laser_firing_player (FIRE with the
 		 * charge, as the human's).  The warm-up is heard on the host.
 		 */
 		{

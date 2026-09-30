@@ -465,7 +465,7 @@ namespace dsx {
 /* Player `pnum` (the local player, or on the host a bot) fired: FIRE
  * (protocol v2 stage 4) for the weapons it just created.
  */
-void multi_send_fire(const vms_matrix &orient, int laser_gun, laser_level, int laser_flags, objnum_t laser_track, imobjptridx_t is_bomb_objnum, playernum_t pnum);
+void multi_send_fire(int laser_gun, laser_level, int laser_flags, objnum_t laser_track, playernum_t pnum);
 /* A FIRE of player `pnum` arrived: act out the shot from its ship. */
 void multi_do_fire(playernum_t pnum, uint8_t weapon, uint8_t level, uint8_t flags, const vms_vector &shot_orientation, icobjidx_t Network_laser_track);
 /* Player `victim` was killed (PLAYER_KILLED, or on the host the kill it
@@ -1199,13 +1199,15 @@ bool net_interp_host_clock(int64_t &host_time);
 
 /* Firing, hits, damage, kills and respawn in a network game
  * (similar/main/net_combat.cpp, Documentation/network-protocol-v2.md
- * sections 5.5, 6.5, 6.6 and "Stage 4 as implemented").  Every machine
+ * sections 6.5, 6.6 and "Stage 4 as implemented").  Every machine
  * simulates every projectile, but only its shooter's machine reports
  * what it hits (WEAPON_HIT, with the time the target was shown at); the
  * host checks the report against its history of the target's positions
  * and applies the damage (DAMAGE), decides the kills (PLAYER_KILLED) and
- * keeps the scores.  The host's own shots and its bots' are judged where
- * the host shows the target.  Nothing here acts outside a network game.
+ * keeps the scores.  The host's own shots and its bots' hit where the
+ * host shows the target.  Damage without a player's weapon (walls, lava,
+ * bumps, robots) is reported by the machine that flies the ship.
+ * Nothing here acts outside a network game.
  */
 [[nodiscard]]
 bool net_combat_active();
@@ -1218,13 +1220,17 @@ void net_combat_frame();
 /* A stage 4 message (net_v2_session.h ids 0x27-0x2b) from `from`. */
 void net_combat_receive(playernum_t from, uint8_t type, std::span<const uint8_t> payload);
 /* A weapon object was created with `parent` (Laser_create_new, the omega
- * blobs): it waits for its shot's id, or takes its parent weapon's.
+ * blobs): it takes the next id of the shot being fired, or its parent
+ * weapon's.
  */
 void net_combat_weapon_created(vcobjptridx_t weapon, vcobjptridx_t parent);
 /* The ship `shooter`, flown on this machine, is about to fire: the
- * shot's random values come from a seed that travels with FIRE.
+ * shot's random values come from a seed that travels with FIRE, and the
+ * weapons it creates are numbered.  net_combat_send_fire ends it, or
+ * net_combat_abort_fire if nothing was fired.
  */
 void net_combat_begin_fire(const object_base &shooter);
+void net_combat_abort_fire();
 /* multi_send_fire: FIRE for the weapons player `pnum` just created. */
 void net_combat_send_fire(playernum_t pnum, uint8_t weapon, uint8_t level, uint8_t flags, objnum_t track);
 /* collide_player_and_weapon: `weapon` touched the ship `playerobj` for
@@ -1239,17 +1245,13 @@ bool net_combat_weapon_hit_player(vmobjptridx_t playerobj, vcobjptridx_t weapon,
  */
 [[nodiscard]]
 bool net_combat_splash_player(vmobjptridx_t playerobj, icobjptridx_t origin, icobjptridx_t killer, fix damage, const object_base &fireball);
-/* apply_damage_to_player: any other damage (a wall, lava, a bump).  True
- * in a network game: a client reports its own, the host applies it.
+/* apply_damage_to_player: any other damage (a wall, lava, a bump, a
+ * robot).  True in a network game: the machine flying the ship reports
+ * it (a client) or applies it (the host).
  */
 [[nodiscard]]
 bool net_combat_damage_player(object &playerobj, icobjptridx_t killer, fix damage, bool always);
-/* collide_player_and_player in a network game: whether this collision
- * damages the two ships now (only on the host, once per tick per pair).
- */
-[[nodiscard]]
-bool net_combat_bump_damages(const object_base &player1, const object_base &player2);
-/* The local player's death sequence starts. */
+/* The local player's death sequence starts (the kill was the host's). */
 void net_combat_local_death_started();
 /* Player `pnum` (the local player, or on the host a bot) has a new ship:
  * PLAYER_SPAWN.
@@ -1265,20 +1267,20 @@ bool net_combat_host_player_alive(playernum_t pnum);
  */
 void net_combat_host_position(playernum_t pnum, int64_t time, const vms_vector &pos, segnum_t segnum);
 /* The mines a dying player arms (MULTI_PLAYER_DERES carries the first of
- * their ids): reserve the ids on the dying player's machine; expect them
- * elsewhere; drop_player_armed_bombs then gives them to the mines.
+ * their ids): reserve the ids on the dying player's machine, expect them
+ * elsewhere; drop_player_armed_bombs gives them to the mines it creates
+ * between net_combat_begin_mines and net_combat_end_mines.
  */
 [[nodiscard]]
 uint16_t net_combat_reserve_mine_ids(playernum_t pnum);
 void net_combat_expect_mines(playernum_t pnum, uint16_t first);
-void net_combat_tag_mines(vcobjptridx_t playerobj);
+void net_combat_begin_mines(vcobjptridx_t playerobj);
+void net_combat_end_mines();
 /* The id of a projectile (0xffff: none), and the local copy of one. */
 [[nodiscard]]
 uint16_t net_combat_netid_of(vcobjptridx_t weapon);
 [[nodiscard]]
-objnum_t net_combat_object_of(uint16_t netid);
-/* A join in progress: a weapon of the snapshot and its id. */
-void net_combat_snapshot_bind(vcobjptridx_t weapon, uint16_t netid);
+imobjptridx_t net_combat_object_of(uint16_t netid);
 
 }
 #endif
@@ -1337,6 +1339,10 @@ static inline void net_combat_begin_fire(const object_base &)
 {
 }
 
+static inline void net_combat_abort_fire()
+{
+}
+
 [[nodiscard]]
 static inline bool net_combat_weapon_hit_player(vmobjptridx_t, vcobjptridx_t, const vms_vector &, fix)
 {
@@ -1359,7 +1365,11 @@ static inline void net_combat_local_death_started()
 {
 }
 
-static inline void net_combat_tag_mines(vcobjptridx_t)
+static inline void net_combat_begin_mines(vcobjptridx_t)
+{
+}
+
+static inline void net_combat_end_mines()
 {
 }
 

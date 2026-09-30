@@ -33,7 +33,7 @@ void movement_record_end_session();
  * `weapon` is the primary or secondary weapon index.
  */
 void movement_record_fire(const object &shooter, bool secondary, unsigned weapon, unsigned flags);
-/* A remote player's shot as MULTI_FIRE carries it (raw weapon byte). */
+/* A remote player's shot as FIRE carries it (raw weapon byte). */
 void movement_record_fire_remote(const object &shooter, uint8_t raw_weapon, unsigned flags);
 /* The weapon `weapon` hit the player ship `victim` for `damage`. */
 void movement_record_hit(const object &victim, const object &weapon, fix damage);

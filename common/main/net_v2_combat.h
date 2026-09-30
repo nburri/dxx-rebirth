@@ -93,10 +93,11 @@ constexpr net_clock NET_V2_CATCH_UP_STEP{net_seconds(1) / 60};
  */
 constexpr net_clock NET_V2_FIRE_BURST{net_milliseconds(250)};
 /* Section 3.6: FIRE and WEAPON_HIT from one client, per second, and the
- * burst.
+ * burst.  The omega cannon fires twenty times a second, and a target near
+ * its chain of blobs may be hit by several of them per shot.
  */
-constexpr unsigned NET_V2_COMBAT_RATE{64};
-constexpr unsigned NET_V2_COMBAT_BURST{128};
+constexpr unsigned NET_V2_COMBAT_RATE{160};
+constexpr unsigned NET_V2_COMBAT_BURST{320};
 
 /* Section 5.5. */
 constexpr std::int64_t NET_V2_MAX_SHIP_SPEED{150 * NET_V2_UNIT};
@@ -365,8 +366,12 @@ struct shot_record
 	std::uint8_t child_weapon_id{0xff};
 	net_clock fire_time{};
 	net_vec origin;
-	/* The fastest anything of this shot flies (fix per second). */
+	/* The fastest anything of this shot flies (fix per second), and how
+	 * far from the origin it may be at once (the omega cannon's blobs are
+	 * laid along its whole range when it fires).
+	 */
 	std::int64_t max_speed{};
+	std::int64_t reach{};
 	/* No report after this long. */
 	net_clock lifetime{};
 	/* The damage multiplier of the host's copy (a fusion charge). */
@@ -449,7 +454,7 @@ inline hit_verdict judge_shot(const shot_record *const shot, const std::uint8_t 
 		return hit_verdict::too_early;
 	if (shot->total >= shot->total_limit || shot->hits[target] >= shot->per_target_limit)
 		return hit_verdict::consumed;
-	if (net_distance(point, shot->origin) > net_travel(shot->max_speed, now - shot->fire_time) + NET_V2_REACH_SLACK)
+	if (net_distance(point, shot->origin) > net_travel(shot->max_speed, now - shot->fire_time) + shot->reach + NET_V2_REACH_SLACK)
 		return hit_verdict::out_of_reach;
 	return hit_verdict::accept;
 }
@@ -1130,7 +1135,12 @@ struct fire_msg
 	}
 };
 
-/* WEAPON_HIT (0x28): shooter to host (section 6.5). */
+/* WEAPON_HIT (0x28): shooter to host (section 6.5).  For `self` (the
+ * sender's own damage without a weapon of a player: a wall, lava, a
+ * bump, a robot's shot), `target` is the player the damage is credited to
+ * (the sender itself, or the other ship of a bump) and `cause` what did
+ * it; `netid` is NETID_NONE.
+ */
 struct weapon_hit_msg
 {
 	static constexpr std::size_t SIZE{28};
@@ -1140,6 +1150,7 @@ struct weapon_hit_msg
 	std::uint8_t weapon_id{};
 	hit_kind kind{};
 	std::uint8_t target{};
+	attacker_kind cause{attacker_kind::player};
 	/* The host time the target was shown at on the shooter's screen
 	 * when it was hit.
 	 */
@@ -1156,7 +1167,7 @@ struct weapon_hit_msg
 		c.u8(weapon_id);
 		c.u8(static_cast<std::uint8_t>(kind));
 		c.u8(target);
-		c.u8(0);
+		c.u8(static_cast<std::uint8_t>(cause));
 		c.u32(target_time);
 		detail::put_vec(c, point);
 		c.u16(segment);
@@ -1173,14 +1184,15 @@ struct weapon_hit_msg
 		m.weapon_id = c.r8();
 		const auto kind{c.r8()};
 		m.target = c.r8();
-		(void)c.r8();
+		const auto cause{c.r8()};
 		m.target_time = c.r32();
 		m.point = detail::get_vec(c);
 		m.segment = c.r16();
 		m.damage = c.ri32();
-		if (kind >= NET_V2_HIT_KINDS || m.target >= NET_V2_MAX_PLAYERS)
+		if (kind >= NET_V2_HIT_KINDS || m.target >= NET_V2_MAX_PLAYERS || cause > static_cast<std::uint8_t>(attacker_kind::none))
 			return std::nullopt;
 		m.kind = static_cast<hit_kind>(kind);
+		m.cause = static_cast<attacker_kind>(cause);
 		return m;
 	}
 };

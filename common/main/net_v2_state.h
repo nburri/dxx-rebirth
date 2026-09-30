@@ -195,10 +195,9 @@ struct player_record
 	constexpr bool operator==(const player_record &) const = default;
 };
 
-/* Section 5.2, guided missile record.  `id` is the owner's object number
- * of the missile in stage 2 (the network object ids of section 6.1 come
- * with stage 3); a receiver maps it to its copy of the missile, which
- * was fired with that number (MULTI_FIRE_BOMB or MULTI_FIRE_TRACK).
+/* Section 5.2, guided missile record.  `id` is the missile's net id
+ * (stage 4: the id its FIRE gave it; the owner's object number in stage
+ * 2); a receiver maps it to its copy of the missile.
  * The record's time is the owner's player record time (both come from the
  * same INPUT).  `gen` (stage 2, appended to the 31 bytes of section 5.2)
  * is the owner's count of guided missiles fired, modulo
