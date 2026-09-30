@@ -1,7 +1,8 @@
-# Movement recording (player styles for bots, step 1)
+# Movement recording (player styles for bots, steps 1 and 2)
 
-Status: step 1 (recording) implemented on branch `movement-recording`
-(based on `experimental-netcode`). Steps 2 and 3 are planned below.
+Status: step 1 (recording) and step 2 (the analysis tool and the bot style
+profile format, section 8) are implemented on `experimental-netcode`.
+Step 3 (bots that load a profile) is planned in section 8.6.
 
 ## 1. Goal
 
@@ -13,10 +14,11 @@ do, dodge and retreat like them. That takes three steps:
 1. **Record** (this document, implemented): the game writes, for every human
    player, how the ship moves, what the pilot does with the controls, and the
    fight situation it happens in, at a fixed rate, plus events.
-2. **Analyse** (offline tool, planned): read many recordings of a player and
-   reduce them to a small set of movement statistics.
-3. **Profiles** (in game, planned): turn those statistics into bot style
-   parameters, selectable in the bot setup as "<player> style".
+2. **Analyse** (offline tool `movrec-analyse`, section 8, implemented): read
+   many recordings of a player, reduce them to a movement profile, and
+   propose the bot parameters that fit it as a `.botstyle` text file.
+3. **Profiles** (in game, planned): load those files, selectable in the bot
+   setup as "<player> style".
 
 The recording is designed so that step 2 needs nothing but the files and the
 reader library (`common/main/movement_record_reader.h`), and so that the
@@ -80,8 +82,8 @@ and then one `sample` per recorded player:
 | attacked mask | players whose shots hit this ship in the last 2 s | |
 | aimed-at mask | enemy players now within 15° of their nose pointing at this ship, within 800 units, with a line of sight | |
 | enemy | the nearest enemy (player; or robot in single player, coop and robot games) with a line of sight; if none has one, the nearest: kind, number, line of sight, in my 30° cone, me in its 30° cone, cloaked | |
-| enemy relative position | enemy minus me, world frame | 1/16 unit |
-| enemy relative velocity | enemy minus me, world frame | 1/64 unit/s |
+| enemy relative position | enemy minus me, world frame; beyond 2048 units the whole vector is scaled down to fit, keeping its direction, and the context says so (`rel_pos_scaled`) | 1/16 unit |
+| enemy relative velocity | enemy minus me, world frame; scaled likewise beyond 512 units/s (`rel_vel_scaled`) | 1/64 unit/s |
 | controls (optional) | forward, sideways, vertical thrust; pitch, heading, bank: 1.0 = full deflection, forward up to 2.0 with the afterburner | 1/60 |
 
 **Controls.** The controls are the thrust and rotational thrust the ship was
@@ -90,14 +92,18 @@ ship's maximum; they are *exact for every ship flown on the recording
 machine* (the local player, and the host's bots) and include keyboard, mouse
 and joystick alike. For ships flown elsewhere (the clients, on the host) the
 network does not carry controls; their samples have no controls field, and
-step 2 estimates them from the motion (§8.1). A client that records itself
+step 2 estimates them from the motion (§8.3). A client that records itself
 (`-recordmoves` on the client) records its own controls exactly.
 
 **Afterburner.** Exact for ships flown here (the forward thrust exceeds 1);
 for clients the host reads bit 1 of the client's `INPUT` chunk (§5.3 of the
-protocol), which clients of this version now set while the afterburner
-pushes. `afterburner known` is clear when neither source is available (an
-older client).
+protocol), which clients since v0.61-exp-25 set while the afterburner
+pushes. Older clients always send 0 there, which would read as "never
+burns"; so a client's afterburner is `known` only from the first time its
+bit was 1 (a per-player note in the recorder, without a protocol change).
+Before that, and for a client that never burns, `afterburner known` is
+clear, and the analysis estimates the afterburner from the thrust (section
+8.3).
 
 **Shields and energy** are exact for ships flown here (`vitals exact`). Until
 stage 4 of the network protocol (host-side damage) the host's copy of a
@@ -109,8 +115,8 @@ Written when they happen, each with its game time in milliseconds:
 
 | Event | pid | other | kind | id | value | flags |
 |---|---|---|---|---|---|---|
-| `fire` | shooter | | 0 primary, 1 secondary | weapon index | | weapon flags (quad, spread toggle, helix) |
-| `hit` | victim | attacker player or 255 | attacker kind: 1 player, 2 robot, 3 other | weapon id (`Weapon_info` index) | damage, 1/256 shield | bit 0: this machine applies the damage |
+| `fire` | shooter | | 0 primary, 1 secondary | weapon index | | primary: weapon flags (quad, spread toggle, helix); secondary: 0 |
+| `hit` | victim | attacker player or 255 | attacker kind: 1 player, 2 robot, 3 other | weapon id (`Weapon_info` index; 255: the blast of no weapon) | damage, 1/256 shield | bit 0: this machine applies the damage; bit 1: splash damage |
 | `kill` | victim | killer player or 255 | killer kind | | | |
 | `death` | player | | | | segment | |
 | `respawn` | player | | | | segment | |
@@ -120,11 +126,32 @@ Written when they happen, each with its game time in milliseconds:
 
 Sources: `fire` from `do_laser_firing_player` and `do_missile_firing` (the
 local player and bots) and from `MULTI_FIRE` (remote players; flares are not
-recorded); `hit` from `collide_player_and_weapon` on the recording machine
-(direct hits; splash damage of missiles and mines is not a separate event);
+recorded; a missile's `MULTI_FIRE` flags are its gun and a guided missile's
+generation, which mean nothing to the analysis, so missiles are recorded
+with flags 0 from both sources); `hit` from `collide_player_and_weapon`
+(direct hits) and from the blast in `object_create_explosion_with_damage`
+(splash damage of `explode_badass_weapon`: mega, smart, earthshaker, mines,
+and of a ship or robot that blows up; flag bit 1, with the attacker, the
+weapon that exploded and the damage after the distance falloff) on the
+recording machine; a player's own blast is recorded with itself as the
+attacker but does not count as "attacked by" in the samples;
 `kill` from `multi_compute_kill` (network games); `death`, `respawn` and
 `weapon` from the change between two samples; `pickup` from `do_powerup`
 (local player) and from the host's pickup grants (clients).
+
+**A slot that changes hands.** When another player (another callsign, a bot
+in place of a human, or a player who left and came back) takes a slot, the
+recorder forgets what it knew of the slot: whether the ship lived, its
+weapons, who hit it and whom it hit. The newcomer's first sample therefore
+gives no `respawn` or `weapon` event and no "attacked by" of the player
+before.
+
+**Session clock.** In a network game a `sync` record at every level start
+and once per second links the file's time to the host's clock (the host's
+own on the host, the client's estimate of it on a client, the same clock the
+interpolation uses) and names the network session (`session_id`). With it,
+recordings of one game made on several machines can be put on one time line
+(section 8.2).
 
 `level` and `player` records describe the context: a `level` record at the
 start of every level (number, name, mission, segment count, game mode) and a
@@ -133,7 +160,14 @@ callsign, team or flags (connected, bot, flown here, recorded) change.
 
 ## 4. File format
 
-All integers little-endian. Version 1.
+All integers little-endian. Version 1, minor 1. The minor counts additions
+that an older reader skips without harm (new record types, new flag bits,
+fields appended to the header); the version changes only when old fields
+change. Minor 0 is the first release (v0.61-exp-25); minor 1 adds the
+`minor` field itself, the `sync` record, splash hits (`hit` flag bit 1), the
+scaled relative vectors (context bits 6 and 7) and the rules of section 3
+for the afterburner, missile flags and slots. A minor 0 file reads as
+before (its header has no `minor` field: 0).
 
 ```
 file    = header chunk*
@@ -143,6 +177,7 @@ header  = magic "DXXMOVES" (8)
           start_time i64 (Unix seconds) | game_mode u32 | local_player u8
           program str8 | mission str8 | level_name str8 | level_num i8
           player_count u8, player_count × { pid u8, flags u8, team u8, callsign str8 }
+          minor u16 (absent in minor 0)
           crc32 u32 (of all header bytes before it)
 chunk   = magic "MRCK" (u32 0x4b43524d) | sequence u32 | payload_size u32 | crc32 u32 (of payload)
           payload: whole records, at most 32752 bytes
@@ -159,6 +194,7 @@ Record payloads (sizes without the 2 byte record header):
 | 3 `tick` (8) | tick u32 (counts from 0 at the session start at `tick_rate`), time_ms u32 (game time since the session start) |
 | 4 `sample` (54, 60 with controls) | pid u8, flags u8, flags2 u8, segment u16, position 3 × i24, quaternion 4 × i16, velocity 3 × i16, rotvel 3 × i16, weapons u8, shields u8, energy u8, attacked u8, aimed_at u8, context u8, enemy_id u16, enemy_rel_pos 3 × i16, enemy_rel_vel 3 × i16, [controls 6 × i8] |
 | 5–12 events (11) | time_ms u32, pid u8, other u8, kind u8, id u8, value u16, flags u8 |
+| 13 `sync` (17, minor 1) | time_ms u32, session_id u32 (0: no network session), host_ms i64 (the host's clock at `time_ms`, milliseconds), flags u8 (1 the clock is known, 2 this machine is the host) |
 
 The bit assignments are in `common/main/movement_record_format.h`
 (`sample_flag`, `sample_flag2`, `context_flag`, ...), which is the normative
@@ -166,8 +202,10 @@ definition.
 
 **Compatibility rules.** A reader skips record types it does not know (by the
 size byte) and ignores bytes after the fields it knows in a record, so a
-later version may add record types and append fields to records. A change of
-the meaning or order of existing fields increments `version`.
+later version may add record types and append fields to records and to the
+header (before its CRC; `header_size` says where that is), and increments
+`minor`. A change of the meaning or order of existing fields increments
+`version`.
 
 **Robustness.** Records are collected in a chunk in memory and written as one
 unit with its CRC once per second of game time (or when the 32 KiB chunk is
@@ -179,7 +217,7 @@ magic; missing chunks show as gaps in the sequence numbers. A file closed by
 the game ends with an `end` record.
 
 **Size.** About 62 bytes per player sample with controls, 56 without, plus
-10 bytes per tick and 13 per event. At the default 30 Hz that is
+10 bytes per tick, 13 per event and 19 per second for the `sync` record. At the default 30 Hz that is
 **about 1.1 MB per recorded player per 10 minutes** (a 2 player game: about
 2.3 MB per 10 minutes; 4 players: about 4.5 MB; 60 Hz doubles it). The
 recording stops at 64 MiB per file (an `end` record with reason 1 and a
@@ -200,7 +238,7 @@ run for ships whose nose points at the player. One file write per second.
 
 - `read_recording(bytes, callback)`: the header, then every record in file
   order as a `std::variant<level_record, player_record, tick_record, sample,
-  event_record>`; returns the header and the file's health (`read_stats`:
+  event_record, sync_record>`; returns the header and the file's health (`read_stats`:
   good and damaged chunks, gaps, unknown and malformed records, cut short,
   closed).
 - `to_units(sample)`: game units, the ship's axes, the velocity and the
@@ -219,8 +257,9 @@ Without options it prints the header, the file's health, the levels, and per
 player: time alive, mean speed, share of time reversing / strafing /
 climbing, afterburner share, turning hard and the share of that with reverse
 thrust (players with controls), enemy in sight and mean distance, under
-attack, aimed at, shots, hits dealt and taken with damage, kills, deaths,
-suicides, respawns, pickups, weapon switches. `--csv DIR` writes
+attack, aimed at, shots, hits dealt and taken with damage (and how many of
+them splash), kills, deaths, suicides, respawns, pickups, weapon switches;
+for a network game the session id and the number of `sync` records. `--csv DIR` writes
 `DIR/<file>-p<N>-<callsign>.csv` (one row per sample, in game units and in
 the ship's frame) and `DIR/<file>-events.csv`, ready for a spreadsheet,
 Python or R. `--records` prints every record.
@@ -232,8 +271,9 @@ played, and how they flew; nothing else (no chat, no addresses, no system
 data). It is written only on a machine where `-recordmoves` is set, and it
 never leaves that machine by itself. A host that records should tell the
 players (for example in the game name or the chat). Anyone can be left out
-of an analysis with `movrec-dump --player`, and a recording can simply be
-deleted.
+of an analysis (`movrec-dump --player`, `movrec-analyse --player`), and a
+recording can simply be deleted. A `.botstyle` profile holds a callsign and
+numbers about how that player flies; ask before passing one on.
 
 ## 7. Sending recordings
 
@@ -242,57 +282,259 @@ attach them to the playtest issue or pull request. Files cut short by a crash
 are still useful; there is no need to repair them. Mention which callsign is
 you, which machine was the host, and the game mode.
 
-## 8. Steps 2 and 3 (planned)
+## 8. Step 2: analysis and bot style profiles
 
-### 8.1 Step 2: analysis tool
+### 8.1 The tool
 
-A second program next to `movrec-dump` (`movrec-analyse`), built on the
-reader library, reads any number of recordings, groups the samples by
-callsign (all files, all levels) and writes one profile per player as a small
-text file (`<callsign>.botstyle`, key = value). Statistics, each over the
-samples in the matching situation:
+`movrec-analyse` (a separate program like `movrec-dump`, not part of the
+game) reads any number of recordings and prints, per player, a report and a
+proposed bot style:
 
-- **Strafing**: share of time with |sideways velocity or thrust| above a
-  threshold while an enemy is in sight; mean duration of a strafe direction
-  (sign changes of the sideways component); vertical share (up/down against
-  left/right). Maps to the bots' `strafe`, `strafe_min_ms`/`strafe_max_ms`,
-  `strafe_vertical`, `strafe_speed`.
-- **Reverse thrust during turns**: when the heading/pitch rate is high, the
-  distribution of the forward thrust (or forward velocity); "turns backing
-  off" against "turns pushing in".
-- **Afterburner**: share of time, and when: chasing (enemy ahead, distance
-  growing), fleeing (enemy behind, low shields), crossing the level (no enemy
-  in sight). Maps to `burn_chase_distance` and new burn triggers.
-- **Preferred fight distance**: distribution of the distance to the enemy in
-  sight while firing, per weapon class. Maps to `range_scale`.
-- **Dodging**: after an enemy fires (fire events of the enemy in sight, or
-  `aimed at` set), the lateral acceleration in the next 0.5 s against the
-  baseline. Maps to `dodge_prob`/`dodge_bonus`.
-- **Retreat**: shields at which the player turns away from an enemy in sight
-  (closing speed negative, enemy leaves the forward cone) and how long.
-  Maps to `retreat_shields`, `outgunned_retreat`, `chase_memory`.
-- **Aggression**: engage share (time closing in with an enemy in sight),
-  chase duration after losing sight, pickups while enemies are near. Maps to
-  `engage_weight`, `collect_weight`.
+```
+scons sdl2=1 d1x=0 d2x=1 register_runtime_test_plain_link_targets=1 movrec-analyse
+build/common/movrec-analyse [--out DIR] [--player CALLSIGN]... [--bots]
+                            [--skill NAME] [--min-seconds N] FILE...
+```
 
-For samples without controls (clients recorded on the host) the analysis
-estimates them from the motion: the ship physics is known (`Player_ship`:
-mass, drag, maximum thrust and rotational thrust; `do_physics_sim`), so the
-thrust between two samples is `mass × (Δv/Δt + drag term × v)` in the ship's
-frame, and the rotational thrust likewise from the rotational velocity.
-Recordings of ships flown on the recording machine carry both the exact
-controls and the motion, and are the test set for this estimator.
+| Option | Meaning |
+|---|---|
+| `--out DIR` | Write `DIR/<callsign>.botstyle` (the profile) and `DIR/<callsign>.report.txt` per player. Without it the profile is printed after the report. |
+| `--player CALLSIGN` | Only this player (may be repeated). |
+| `--bots` | Also the recorded bots (`-recordmoves-bots`); their files end in `-bot`. |
+| `--skill NAME` | The skill the profile's skill-relative values are scaled for (Trainee … Insane; default Hotshot). |
+| `--min-seconds N` | Skip players alive for less than N seconds (default 20). |
 
-### 8.2 Step 3: bot profiles
+Give it every recording you have of a player: all files of all evenings, the
+host's and the clients'. It first lists the files (format, length, host or
+client, cut short or damaged) and the games it found in them, then per player
+(most time alive first):
 
-The bots' behaviour is already parameterised (`skill_params` for skill,
-`style_params` for style, `common/main/bot_brain.h`). A profile sets a
-`style_params` (and the movement fields of `skill_params`) from a
-`.botstyle` file, clamped to the ranges the built-in styles use, while the
-skill still decides aim and reaction. The bot setup menu lists the profiles
-found in `botstyles/` next to the built-in styles as "<player> style"; the
-profile's name travels with the bot's configuration like the built-in style
-(Documentation/multiplayer-bots.md section 9.7).
+- **data**: games, minutes recorded, alive and in fights, kills and deaths,
+  how much of the controls is exact and how much estimated;
+- **Traits**: the key habits in plain words with the numbers that carry them
+  ("Heavy strafer: sideways or vertical thrust in 84% of the fight time, a
+  run in one direction lasts 0.5 s …");
+- **Numbers**: every statistic of section 8.4;
+- **Proposed bot style**: the values of section 8.5 with their confidence.
+
+To try it without a recording of your own, `build/common/test-movement-analysis
+-w DIR` writes four synthetic recordings (section 8.6) into `DIR`.
+
+The work is done by `common/main/movement_analysis.h` (header-only, standard
+C++ plus the bots' pure headers for their constants), in stages that can be
+used one by one: `load_recording` → `group_sessions` → `merge_session` →
+`build_track` → `analyse` → `propose_profile` → `write_report`;
+`analyse_recordings` runs them all.
+
+### 8.2 Several recordings of one game
+
+A game recorded on several machines gives several files with the same
+players. They are put together so that every moment of every player counts
+once, from the best source:
+
+1. **Same game?** Files with the same `session_id` (`sync` records, format
+   minor 1) are one game. Files without one (minor 0, or no network clock
+   yet) are taken for the same game if they are multiplayer recordings of the
+   same mission, started within half an hour of each other, with at least one
+   callsign in common and not both by a host.
+2. **One clock.** With `sync` records every file's time maps to the host's
+   clock (piecewise: the file's time stands still between two levels, the
+   host's clock does not). Without them the files are aligned by the path of
+   a player both recorded: every position in one file votes for the time
+   offsets to the moments the other file has the ship at the same place
+   (within 2.5 units), per level; the offset that 70 % of the positions agree
+   on wins. That is right to about a tick (each machine sees the other's ship
+   a little late). A file that belongs to a game by rule 1 but cannot be
+   aligned is analysed as a game of its own, with a note (its players then
+   count twice).
+3. **Best source per player and moment.** A player's own machine (exact
+   controls, exact shields) before the host (one consistent world) before
+   another client's view. Where the best source has no samples (it joined
+   later, left earlier, crashed), the next one fills in.
+4. **Events once.** An event is taken from the file that is the source of
+   its player at that moment (`pid`: the shooter, the victim, the one who
+   picked up), so a shot recorded on both machines counts once, and a hit
+   comes from the victim's machine, which applies the damage.
+
+Players are told apart by callsign (not case sensitive) across slots, levels
+and games; a bot and a human of the same name are two players.
+
+### 8.3 Controls: exact or estimated
+
+Samples of ships flown on the recording machine carry the controls. For the
+others (a client, recorded by the host only) the analysis estimates them from
+the motion. The ship's flight model is known (`physics.cpp`): under a thrust
+`c` (a share of the maximum per axis) the velocity goes toward
+`c × max_speed` at a fixed rate,
+
+```
+v(t + dt) = v(t) × R + c × max_speed × (1 − R),   R = exp(−rate × dt)
+```
+
+with `max_speed` 58.5 units/s and `rate` 2.12/s for the Pyro-GX (mass 4, drag
+0.033, thrust 7.8), and the same for the rotation (0.41 revolutions/s about
+one axis, 5.34/s). Solved for `c` between two samples and turned into the
+ship's frame, that is the thrust; it is averaged over three samples, and a
+value beyond what any thrust gives (a wall, a blast, a respawn) is dropped.
+The afterburner of a client that does not report it is "forward thrust above
+1.3".
+
+Every recording with exact controls tests the estimator: the report's
+`controls:` line gives the root mean square difference between the estimate
+and the recorded controls where both exist (0.02 to 0.09 of full thrust on
+the synthetic recordings; with real walls and network jitter expect more).
+Values that rest on controls get at most medium confidence when most of them
+were estimated.
+
+### 8.4 The movement profile
+
+All shares are of the time in the situation named. "Fight" is an enemy with
+a line of sight within 400 units. "Uses a control" is more than 0.3 of full
+deflection. The thresholds are the constants of `analysis::limits`.
+
+| Group | Statistic | How |
+|---|---|---|
+| Speed | mean, p10, median, p90; seconds per 20 units/s; share above 85 % and below 20 % of the top speed | alive samples |
+| Thrust | share with forward, reverse, sideways, vertical thrust, none, roll; the same in a fight | samples with controls |
+| Strafe | length of a run in one direction (median, quartiles), reversals per minute, vertical share (0 flat, 1 as much up/down as left/right), thrust and speed across | in a fight: a run lasts while the sideways/vertical thrust keeps its direction (less than 90° change) |
+| Large turns | how many; share flown with reverse, sideways, forward thrust; time per 180°; rotation rate; backward speed reached; push forward afterwards, with afterburner | runs of rotation above 35 % of the top rate through at least 110° in at most 2.5 s per 180° (the bots' `REVERSE_TURN_START`); the thrust during 40 % or more of the turn names it; the push is a mean forward thrust above 0.6 in the 0.8 s after |
+| Afterburner | share of the time; share while chasing (enemy in sight ahead, closing in, nose steady), fleeing (enemy behind, moving away), with no enemy in sight, otherwise; distance to the enemy while chasing with it | samples with the afterburner known (or estimated) |
+| Distance | to the enemy in sight: p10 … p90, seconds per band (35, 60, 95, 150, 250: the bots' fight band and weapon bands); distance at each primary shot | |
+| Approach and retreat | by shields (25 each): own speed toward the enemy; share closing in, backing off while facing it, flying away turned from it. The **retreat level**: the shields that split "flies away" below from "does not" above most clearly (at least 3 s of fight on each side, a difference of 15 percentage points) | fight samples |
+| Dodging | share of the enemy's bursts (first shot after a pause of 1 s, the enemy facing the player within 300 units) followed within 0.7 s by a change of the velocity across the line of fire of 30 % of the top speed; the same share in quiet moments (no shot 1.5 s before to 0.7 s after); the excess is the dodge probability; median time to the start of the sidestep | not measurable when the player moves across in more than half of the quiet moments too (a constant strafer) |
+| Weapons | primary shots per weapon and range band (< 60, 60–150, > 150, as the bots' weapon table); secondary shots per weapon, distance | fire events with the enemy in sight |
+| Missile volleys | volleys (missiles at most 0.7 s apart), size, time between two volleys of one fight | mines are left out |
+| Pickups | per minute; share taken off course (the course 1.5 s before pointed more than 40° away from the pickup); share in a fight | |
+| Pursuit | how often the player follows an enemy that left its sight, and for how long (until it has not thrust toward it for 1 s, it is in sight again, or another enemy took its place in the record) | losses of sight while not already flying away |
+| Hits | dealt (direct, splash), taken, damage, direct hits per primary shot (an estimate of accuracy; a shot of several bolts can hit more than once; the hits are those the victim's or the recording machine saw) | hit events |
+
+### 8.5 The bot style profile
+
+A profile is a text file `<callsign>.botstyle`, one `key = value` per line:
+
+```
+# D2X-Rebirth bot style profile
+format = 1
+name = Nico style
+callsign = Nico
+source = 3 games, 41.2 min alive, 12.5 min in fights, controls 74% exact
+base_skill = Hotshot
+base_style = Aggressive
+
+# shields below which the bot retreats
+style.retreat_shields = 20
+confidence.style.retreat_shields = medium
+style.range_scale = 0.62
+skill.strafe = 1
+skill.strafe_min_ms = 420
+tune.reverse_turn = 0.85
+measured.turn_180_ms = 1350
+```
+
+Rules (`common/main/bot_style_profile.h`: `write_style_profile`,
+`parse_style_profile`, `apply_style_profile`):
+
+- Spaces around the key and the value do not count; a line starting with `#`
+  and an empty line are skipped; a line that is not understood is skipped.
+- `format` must be there and not newer than the reader (1).
+- `name` is what the bot setup will show, `callsign` the player, `source`
+  free text. `base_skill` is the skill the skill-relative values were scaled
+  for. `base_style` is the built-in style nearest to the measured one; the
+  bot takes from it every value the profile leaves out.
+- `style.<field>`: a field of `style_params`. `skill.<field>`: a movement
+  field of `skill_params` (the skill still decides aim, reaction and senses).
+  `tune.<name>`: a constant of the bot code that is the same for every bot
+  today; step 3 decides which of them become per-bot. `measured.<name>`:
+  plain statistics for people, not read by the game.
+- `confidence.<key>` is `low`, `medium` or `high` (high if absent). The
+  loader goes the share 0.25, 0.7 or 1 of the way from the base value to the
+  profile's.
+- Known keys are clamped to a range (below); unknown keys are kept and
+  ignored, so a later version can add keys.
+
+The keys, their range, and what they are computed from:
+
+| Key | Range | From |
+|---|---|---|
+| `style.retreat_shields` | 5–90 | the retreat level; 10 if the player flies away in less than 5 % of at least a minute of fights |
+| `style.engage_weight` | 0.5–1.8 | 0.6 + the share of the moving-toward-or-away fight time spent closing in, mixed 60:40 with the share of lost enemies it follows |
+| `style.collect_weight` | 0.5–2 | 0.7 + the share of pickups off course + 0.6 × the share in a fight |
+| `style.range_scale` | 0.5–3 | median distance when firing (else with the enemy in sight) / 65, the middle of the bots' 35–95 band |
+| `style.chase_memory` | 0.4–2.5 | median pursuit time / the base skill's `pursuit_seconds` |
+| `style.close_scale` | 0.5–1.25 | mean speed toward or away when moving so / `COMBAT_CLOSE_SPEED` |
+| `style.burn_chase_distance` | 40–1000 | the 10th percentile of the distance while chasing with the afterburner (not the push after a turn); 1000 if it does not |
+| `style.dodge_bonus`, `mine_interval`, `strafe_scale`, `behind_engage`, `outgunned_retreat` | | not measured: never written, the base style's |
+| `skill.strafe` | 0/1 | sideways or vertical thrust in 20 % or more of the fight time |
+| `skill.strafe_min_ms`, `strafe_max_ms` | 150–3000, 250–5000 | the quartiles of the run length |
+| `skill.strafe_vertical` | 0–1 | vertical / sideways thrust while strafing |
+| `skill.strafe_speed` | 0–0.9 | mean thrust across while strafing (a pilot holding full thrust asks for the top speed) |
+| `skill.dodge_prob` | 0–0.95 | the dodge probability, where measurable |
+| `tune.range_lo`, `tune.range_hi` | 15–400, 30–800 | the quartiles of the firing distance (`BOT_RANGE_LO`/`HI`) |
+| `tune.reverse_turn` | 0–1 | share of the large turns flown backwards |
+| `tune.reverse_turn_speed` | 0–1 | backward speed reached in them (`REVERSE_TURN_SPEED`) |
+| `tune.turn_boost`, `tune.turn_boost_burn` | 0–1 | share of large turns followed by a push, and of those with the afterburner |
+| `tune.burn_retreat`, `tune.burn_roam` | 0–1 | share of the time fleeing / with no enemy in sight with the afterburner |
+| `tune.missile_interval_scale` | 0.3–4 | median time between volleys / the base skill's `missile_interval` |
+| `tune.volley_size` | 1–8 | missiles per volley |
+| `tune.pursuit_seconds` | 0–30 | median pursuit time (0: lets the enemy go) |
+| `tune.grab_detour` | 0–1 | share of pickups off course |
+
+A value the recordings say nothing about is left out; the confidence of the
+others comes from how much evidence there is (for example fights: low below
+one minute, high from five; large turns: low below 8, high from 30) and is
+at most medium where it rests on estimated controls.
+
+`apply_style_profile(profile, skill)` gives the `skill_params` and
+`style_params` of a bot that flies the profile at a skill: a skill that does
+not strafe or dodge at all (Trainee) still does not.
+
+### 8.6 Validation with synthetic recordings
+
+There are no recordings of real players in the repository, so
+`test-movement-analysis` makes its own: a small flight simulation with the
+ship's flight model flies scripted pilots through a fixed programme (a fight
+with three bursts of enemy fire, the enemy behind, the enemy out of sight and
+moving off, a flight with no enemy and a pickup; 40 s, repeated for 12
+minutes, with the shields at 100, 80, 60, 45, 30, 15 in turn) and writes what
+the game would record. The analysis must find the scripted habits again:
+
+| Pilot | Scripted | Found |
+|---|---|---|
+| strafer | full sideways thrust, 0.5 s per run | strafes 84 % of the fight time, runs 500 ms, 99 reversals/min, vertical 0; `skill.strafe = 1`, runs 500–600 ms |
+| bobber | strafe with equal vertical, 1.2 s runs, slides through turns | vertical 0.92, runs 1200 ms, 100 % sliding turns |
+| reverse turner | turns round with reverse thrust, pushes forward after with the afterburner, chases with it beyond 150 units | 18 of 18 turns reverse, 1.4 s per 180°, push after 100 % (afterburner 100 %); `style.burn_chase_distance` 151 |
+| sniper | fights at 250 units, gauss at range, flees below 50 shields with the afterburner, single missiles | fires at a median of 250; `style.range_scale` 3 (the cap); gauss 100 % beyond 150; retreat level 50; afterburner 97 % of the fleeing time; base style Cautious |
+| brawler | fights at 40 units, never flees, follows a lost enemy for 6 s, volleys of three 4 s apart, leaves its course for pickups | fires at 40; `style.retreat_shields` 10; follows 18 of 18 for 6.0 s; volleys of 3.0, 4.0 s apart; 100 % of pickups off course; base style Aggressive |
+| dodger | sidesteps 80 % of the bursts (46 of 54 in this run) after 250 ms | dodge probability 0.82 (baseline 0.16), reaction 300 ms; the others 0 |
+
+The same flights recorded by another machine (no controls) give the same
+picture from estimated thrust: shares within 0.06–0.08, the same turn
+classification and run lengths, confidence medium instead of high. A game
+recorded on the host and on a client that joined 50 s late and left early
+merges into one: every tick of every player once, the client's controls exact
+where its own file has them, every shot and hit once; by `sync` records, and
+without them by the ships' paths (33 ms off, the lag with which each machine
+sees the other). Also tested: two games that only look alike stay two, a file
+cut short, a slot that changes hands, several games of one player, and the
+profile's file format (round trip, hand-written files, clamping, confidence
+blending).
+
+Real recordings will differ: walls and blasts disturb the thrust estimate,
+the network smooths a client's motion, and no human repeats a habit 18 times
+in a row. The thresholds of `analysis::limits` and the mapping of section
+8.5 are first guesses to be tuned against the first real recordings.
+
+### 8.7 Step 3: bots that fly a profile (planned)
+
+The game loads the `.botstyle` files of `botstyles/` in the PhysFS write
+directory with `parse_style_profile`, lists them in the bot setup next to
+the built-in styles as "<name>", and gives a bot
+`apply_style_profile(profile, its skill)` in place of `style_of(style)` and
+`skill_of(skill)`; the profile's name travels with the bot's configuration
+like the built-in style (Documentation/multiplayer-bots.md section 9.7).
+The `tune.` keys need the constants they name to become per-bot values
+(`bot_tactics`, the reverse turn, the fight band, the missile interval, the
+pursuit); that is the larger part of step 3 and can go key by key.
 
 ## 9. Code
 
@@ -302,15 +544,21 @@ profile's name travels with the bot's configuration like the built-in style
 | `common/main/movement_record_reader.h` | Reader library (header-only) |
 | `common/main/movement_record.h`, `similar/main/movement_record.cpp` | The game's side: session file, sampling, context, event hooks |
 | `common/tools/movrec_dump.cpp` | The dump tool |
-| `common/unittest/movement_record.cpp` | Tests: round trips, header, chunks, truncation at every byte, damaged chunks, unknown records, the tick schedule at 20 to 1000 fps, quantisation and frames |
+| `common/unittest/movement_record.cpp` | Tests: round trips, header, chunks, truncation at every byte, damaged chunks, unknown records, the tick schedule at 20 to 1000 fps, quantisation and frames, the minor 1 additions |
+| `common/main/movement_analysis.h` | Step 2: loading, sessions and clocks, merging, tracks and the control estimate, the movement profile, the proposal, the report (header-only) |
+| `common/main/bot_style_profile.h` | The `.botstyle` format: keys and ranges, write, parse, apply to `skill_params`/`style_params` (header-only, for the game too) |
+| `common/tools/movrec_analyse.cpp` | The analysis tool |
+| `common/unittest/movement_analysis.cpp` | Tests: synthetic recordings of scripted pilots (section 8.6) |
 
 Hooks in the game (one call each): `GameProcessFrame` (sample, after the
 bots fired), the game window's close (end of the session),
 `do_laser_firing_player` and `do_missile_firing` (fire), `multi_do_fire`
-(remote fire), `collide_player_and_weapon` (hit), `multi_compute_kill`
+(remote fire), `collide_player_and_weapon` (hit),
+`object_create_explosion_with_damage` (splash hit), `multi_compute_kill`
 (kill), `do_powerup` and the host's pickup grant log (pickup). `net_v2.cpp`:
 clients set the afterburner bit of `INPUT`; `host_input_afterburner` reads
-it on the host.
+it on the host; `recording_clock` gives the session id and the host's clock
+for the `sync` records.
 
 The recording tick is its own schedule of game time (`tick_scheduler`): tick
 `k` is due `k / rate` seconds of game time after the session start; a frame
