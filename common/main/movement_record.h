@@ -42,6 +42,13 @@ void movement_record_hit(const object &victim, const object &weapon, fix damage)
  * the player ship `victim`.
  */
 void movement_record_splash(const object &victim, const object *origin, const object *parent, fix damage);
+/* A network game (protocol v2 stage 4): the host applied `damage` to
+ * player `victim` from player `attacker` (255: none) of the attacker kind
+ * `attacker_kind` (movement_record_format.h), with the weapon `weapon`
+ * (255: none), `splash` for a blast.  Recorded where the host decides
+ * and where its DAMAGE arrives, in place of the collisions seen here.
+ */
+void movement_record_damage(unsigned victim, unsigned attacker, std::uint8_t attacker_kind, unsigned weapon, fix damage, bool splash);
 /* The player `victim` was killed by `killer` (nullptr: none). */
 void movement_record_kill(const object &victim, const object *killer);
 /* Player `pnum` picked up a powerup of type `powerup`. */

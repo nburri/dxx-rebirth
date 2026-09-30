@@ -125,8 +125,9 @@ Written when they happen, each with its game time in milliseconds:
 | `end` | | | 0 closed by the game, 1 size limit | | | |
 
 Sources: `fire` from `do_laser_firing_player` and `do_missile_firing` (the
-local player and bots) and from `MULTI_FIRE` (remote players; flares are not
-recorded; a missile's `MULTI_FIRE` flags are its gun and a guided missile's
+local player and bots) and from `FIRE` (remote players, acted out by
+`multi_do_fire`; flares are not
+recorded; a missile's `FIRE` flags are its gun and a guided missile's
 generation, which mean nothing to the analysis, so missiles are recorded
 with flags 0 from both sources); `hit` from `collide_player_and_weapon`
 (direct hits) and from the blast in `object_create_explosion_with_damage`
@@ -134,7 +135,15 @@ with flags 0 from both sources); `hit` from `collide_player_and_weapon`
 and of a ship or robot that blows up; flag bit 1, with the attacker, the
 weapon that exploded and the damage after the distance falloff) on the
 recording machine; a player's own blast is recorded with itself as the
-attacker but does not count as "attacked by" in the samples;
+attacker but does not count as "attacked by" in the samples. In a network
+game (protocol v2 stage 4) the host decides the damage, so `hit` comes
+from its decision instead: on the host where it applies the damage, on a
+client where its `DAMAGE` arrives (for every victim; bit 0 on the
+victim's machine), with the host's amount, so a collision the host
+refused is not recorded and a hit the shooter saw but the victim did not
+is. Damage reported by the victim's machine without a player's weapon is
+recorded only when a robot, the reactor or a robot's mine did it (weapon
+255); walls, lava, bumps and the fusion overcharge are no hits, as before.
 `kill` from `multi_compute_kill` (network games); `death`, `respawn` and
 `weapon` from the change between two samples; `pickup` from `do_powerup`
 (local player) and from the host's pickup grants (clients).

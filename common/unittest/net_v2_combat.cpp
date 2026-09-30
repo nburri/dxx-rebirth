@@ -918,6 +918,8 @@ void test_wire()
 		m.victim = 1;
 		m.attacker = 4;
 		m.weapon_id = 9;
+		m.kind = hit_kind::splash;
+		m.cause = attacker_kind::mine;
 		m.amount = 5 * F1;
 		m.shields = -3 * F1;
 		m.point = {7, 8, -9};
@@ -926,6 +928,11 @@ void test_wire()
 		m.write(buf);
 		const auto r{damage_msg::read(buf)};
 		CHECK(r->victim == 1 && r->attacker == 4 && r->weapon_id == 9 && r->amount == 5 * F1 && r->shields == -3 * F1 && r->point == m.point);
+		CHECK(r->kind == hit_kind::splash && r->cause == attacker_kind::mine);
+		buf[3] = static_cast<std::uint8_t>(NET_V2_HIT_KINDS);
+		CHECK(!damage_msg::read(buf));
+		buf[3] = static_cast<std::uint8_t>((static_cast<unsigned>(attacker_kind::none) + 1) << 4);
+		CHECK(!damage_msg::read(buf));
 		m.amount = -1;
 		m.write(buf);
 		CHECK(!damage_msg::read(buf));

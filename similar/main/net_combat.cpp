@@ -60,6 +60,8 @@
 #include "console.h"
 #include "d_levelstate.h"
 #include "endlevel.h"
+#include "movement_record.h"
+#include "movement_record_format.h"
 
 namespace dsx {
 
@@ -433,6 +435,37 @@ void open_scope(const uint8_t pid, const netid_t first, const unsigned limit, co
 
 /* ---- The host: damage and kills ---- */
 
+/* The movement recording's hit, from the host's decision (the host) or
+ * its DAMAGE (a client), so that every machine records the damage that
+ * was done, not the collisions it saw.  As before stage 4, damage without
+ * a weapon or a blast (walls, lava, bumps, the fusion overcharge) is not
+ * a hit.
+ */
+void record_damage(const nv::damage_msg &d)
+{
+	namespace mr = ::dcx::movrec;
+	std::uint8_t akind;
+	switch (d.cause)
+	{
+		case nv::attacker_kind::player:
+			if (d.kind == nv::hit_kind::self)
+				return;
+			akind = mr::attacker_kind::player;
+			break;
+		case nv::attacker_kind::robot:
+			akind = mr::attacker_kind::robot;
+			break;
+		case nv::attacker_kind::reactor:
+		case nv::attacker_kind::mine:
+			akind = mr::attacker_kind::other;
+			break;
+		case nv::attacker_kind::none:
+		default:
+			return;
+	}
+	movement_record_damage(d.victim, d.attacker, akind, d.weapon_id, d.amount, d.kind == nv::hit_kind::splash);
+}
+
 [[nodiscard]]
 nv::victim_view view_of(const playernum_t victim, const object &ship)
 {
@@ -513,7 +546,7 @@ void host_kill(const playernum_t victim, const nv::kill_attribution killer, cons
 }
 
 /* The host applies damage to player `victim`, whoever reported it. */
-void host_apply(const playernum_t victim, const nv::attacker_kind kind, const uint8_t attacker, const uint8_t weapon_id, const fix amount, const vms_vector &point, const bool always)
+void host_apply(const playernum_t victim, const nv::hit_kind how, const nv::attacker_kind kind, const uint8_t attacker, const uint8_t weapon_id, const fix amount, const vms_vector &point, const bool always)
 {
 	if (victim >= N_players || victim >= MAX_PLAYERS)
 		return;
@@ -554,10 +587,13 @@ void host_apply(const playernum_t victim, const nv::attacker_kind kind, const ui
 	d.victim = static_cast<uint8_t>(victim);
 	d.attacker = by_player ? attacker : nv::NET_V2_PLAYER_ID_NONE;
 	d.weapon_id = weapon_id;
+	d.kind = how;
+	d.cause = kind;
 	d.amount = amount;
 	d.shields = shields;
 	d.point = to_net_vec(point);
 	send_msg(session_msg::damage, d);
+	record_damage(d);
 	if (shields < 0)
 		host_kill(victim, nv::kill_credit(kind, attacker, player_in_game(attacker)), weapon_id);
 }
@@ -586,7 +622,7 @@ void report_weapon_hit(const nv::hit_kind kind, const playernum_t shooter, const
 		/* The host's own shots and its bots' hit where the host shows the
 		 * target: nothing to check.
 		 */
-		host_apply(victim, nv::attacker_kind::player, static_cast<uint8_t>(shooter), wid, damage, point, false);
+		host_apply(victim, kind, nv::attacker_kind::player, static_cast<uint8_t>(shooter), wid, damage, point, false);
 		return;
 	}
 	nv::weapon_hit_msg m;
@@ -637,7 +673,7 @@ void own_damage(const playernum_t victim, const credit c, const fix amount, cons
 	const uint8_t target{c.kind == nv::attacker_kind::player && c.pid < MAX_PLAYERS ? c.pid : static_cast<uint8_t>(victim)};
 	if (multi_i_am_master())
 	{
-		host_apply(victim, c.kind, target, 0xff, amount, point, true);
+		host_apply(victim, nv::hit_kind::self, c.kind, target, 0xff, amount, point, true);
 		return;
 	}
 	if (victim != Player_num)
@@ -666,7 +702,7 @@ void host_receive_self(const playernum_t from, const nv::weapon_hit_msg &m)
 		if (b.type == object_type::OBJ_PLAYER && vm_vec_dist_quick(a.pos, b.pos) < BUMP_RANGE)
 			attacker = m.target;
 	}
-	host_apply(from, m.cause, attacker, 0xff, amount, to_vms(m.point), true);
+	host_apply(from, nv::hit_kind::self, m.cause, attacker, 0xff, amount, to_vms(m.point), true);
 }
 
 void host_receive_hit(const playernum_t from, const std::span<const uint8_t> payload)
@@ -716,7 +752,7 @@ void host_receive_hit(const playernum_t from, const std::span<const uint8_t> pay
 		return;
 	}
 	nv::consume_shot(*shot, m->target);
-	host_apply(playernum_t{m->target}, nv::attacker_kind::player, static_cast<uint8_t>(from), m->weapon_id, amount, to_vms(m->point), false);
+	host_apply(playernum_t{m->target}, m->kind, nv::attacker_kind::player, static_cast<uint8_t>(from), m->weapon_id, amount, to_vms(m->point), false);
 }
 
 /* ---- FIRE ---- */
@@ -863,6 +899,7 @@ void client_receive_damage(const std::span<const uint8_t> payload)
 	const auto m{nv::damage_msg::read(payload)};
 	if (!m || m->victim >= N_players)
 		return;
+	record_damage(*m);
 	if (m->victim == Player_num)
 	{
 		if (Player_dead_state == player_dead_state::no)
@@ -1169,7 +1206,7 @@ bool net_combat_splash_player(const vmobjptridx_t playerobj, const icobjptridx_t
 		/* A ship's explosion (its deres): the host's view decides. */
 		if (multi_i_am_master())
 			if (const auto c{credit_of(origin)}; c.kind == nv::attacker_kind::player)
-				host_apply(victim, c.kind, c.pid, 0xff, damage, fireball.pos, false);
+				host_apply(victim, nv::hit_kind::splash, c.kind, c.pid, 0xff, damage, fireball.pos, false);
 		return true;
 	}
 	if (flown_here(victim))

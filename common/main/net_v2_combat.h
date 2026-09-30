@@ -1209,6 +1209,12 @@ struct damage_msg
 	/* A player, or NET_V2_PLAYER_ID_NONE. */
 	std::uint8_t attacker{NET_V2_PLAYER_ID_NONE};
 	std::uint8_t weapon_id{0xff};
+	/* How it was done (for the movement recording): a direct hit, a
+	 * blast or the victim's own damage, and what did it.  One byte:
+	 * the kind in bits 0-3, the cause in bits 4-7.
+	 */
+	hit_kind kind{hit_kind::self};
+	attacker_kind cause{attacker_kind::none};
 	std::int32_t amount{};
 	/* The host's value after the damage. */
 	std::int32_t shields{};
@@ -1219,7 +1225,7 @@ struct damage_msg
 		c.u8(victim);
 		c.u8(attacker);
 		c.u8(weapon_id);
-		c.u8(0);
+		c.u8(static_cast<std::uint8_t>(static_cast<unsigned>(kind) | static_cast<unsigned>(cause) << 4));
 		c.i32(amount);
 		c.i32(shields);
 		detail::put_vec(c, point);
@@ -1234,12 +1240,15 @@ struct damage_msg
 		m.victim = c.r8();
 		m.attacker = c.r8();
 		m.weapon_id = c.r8();
-		(void)c.r8();
+		const std::uint8_t how{c.r8()};
 		m.amount = c.ri32();
 		m.shields = c.ri32();
 		m.point = detail::get_vec(c);
-		if (m.victim >= NET_V2_MAX_PLAYERS || m.amount < 0)
+		const unsigned kind{how & 0xfu}, cause{static_cast<unsigned>(how >> 4)};
+		if (m.victim >= NET_V2_MAX_PLAYERS || m.amount < 0 || kind >= NET_V2_HIT_KINDS || cause > static_cast<unsigned>(attacker_kind::none))
 			return std::nullopt;
+		m.kind = static_cast<hit_kind>(kind);
+		m.cause = static_cast<attacker_kind>(cause);
 		return m;
 	}
 };

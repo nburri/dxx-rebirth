@@ -2384,7 +2384,11 @@ static void collide_player_and_weapon(const d_robot_info_array &Robot_info, cons
 	}
 #endif
 
-	movement_record_hit(*playerobj, *weapon, damage);
+	/* A network game records the host's damage (net_combat.cpp). */
+#if DXX_USE_MULTIPLAYER
+	if (!net_combat_active())
+#endif
+		movement_record_hit(*playerobj, *weapon, damage);
 	const auto &&player_segp = vmsegptridx(playerobj->segnum);
 	if (get_player_id(playerobj) == Player_num)
 	{
