@@ -6,7 +6,8 @@ weapon choice, §9.2), stage B4 (secondaries, §9.4, §9.6) and stage B2
 (skill presets, styles, mixed bots, persistence, the `BOT` marker and
 humans replacing bots, §9.7) and stage B5 (managing bots during the game:
 the in-game Bots screen and the `/bot` chat command, §6.4, §9.11) are
-implemented. Target branch: `experimental-netcode`
+implemented; §9.12 retunes their flight after the first recordings of a
+human against them. Target branch: `experimental-netcode`
 (protocol v2, `Documentation/network-protocol-v2.md`, cited as "v2 §n").
 D2X-Rebirth only (v2 decision 6). Line numbers are omitted; function names are
 the anchors.
@@ -461,6 +462,7 @@ by skill and style, aims at walls and corners, and hugging.
 - **Strafe pattern**: lateral strafing whose direction flips every
   0.4–1.2 s (random within the style's range), plus vertical bobbing for
   Ace+. Circle-strafing happens when the target is in the band.
+  (Section 9.12: both are keys held as a human holds them.)
 - **Dodge**: at 20 Hz the bot scans weapon objects within 150 units whose
   parent is not itself (nor a teammate or coop partner when friendly fire
   is off). For each it predicts the closest approach over the
@@ -564,10 +566,12 @@ Styles are multipliers on top of the skill.
 
 | Style | Retreat at shields | Engage/Collect weighting | Range | Other |
 |---|---|---|---|---|
-| Balanced (default) | 35 | 1.0 / 1.0 | weapon default | — |
-| Aggressive | 20 | 1.5 / 0.6 | −25 % | chases 2× longer, fewer mines, uses mega more readily (section 9.6: more self-risk, hugs) |
-| Cautious | 55 | 0.8 / 1.2 | +25 % | dodge prob. +0.1, drops mines when retreating, breaks off when outgunned |
-| Collector | 40 | 0.7 / 1.8 | weapon default | roams powerup-rich areas and hoards before fighting |
+| Balanced (default) | 45 | 1.0 / 1.0 | weapon default | — |
+| Aggressive | 30 | 1.5 / 0.6 | −25 % | chases 2× longer, fewer mines, uses mega more readily (section 9.6: more self-risk, hugs) |
+| Cautious | 65 | 0.8 / 1.2 | +25 % | dodge prob. +0.1, drops mines when retreating, breaks off when outgunned |
+| Collector | 50 | 0.7 / 1.8 | weapon default | roams powerup-rich areas and hoards before fighting |
+
+(The retreat thresholds are those of section 9.12; B2 had 35, 20, 55, 40.)
 
 ---
 
@@ -2084,8 +2088,8 @@ row (`test_skill_monotonic`):
 | Heavy missiles: indirect fire, risk scale, hug scale | no, 0.3, 0 | no, 0.6, 0.3 | yes, 1, 1 | yes, 1.25, 1.15 | yes, 1.5, 1.3 |
 | Fusion release charge | 0.5 s | 0.6 s | 1.0 s | 1.3 s | 1.5 s |
 | Converter below shields | never | 50 | 80 | 100 | 110 |
-| Afterburner | never | chase | + retreat | + dodge | + long legs |
-| Strafe | none | runs 0.9–1.8 s, 0.5 × top speed, 25 % vertical | 0.6–1.4 s, 0.7, 50 % | 0.5–1.3 s, 0.75, 80 % | 0.4–1.1 s, 0.8, 100 % |
+| Afterburner | never | chase | + retreat, long legs with a reserve | + dodge | + long legs sooner |
+| Strafe (§9.12: key runs, key thrust, share of runs with an up/down key) | none | runs 0.4–1.0 s, 0.7, 10 % | 0.25–0.7 s, 0.95, 20 % | 0.22–0.65 s, 1.0, 20 % | 0.2–0.6 s, 1.0, 22 % |
 | Trigger duty (`fire_burst`) | 0.55 | 0.8 | 1 | 1 | 1 |
 | Map knowledge | 0 | 3 seg. (120 u) | 8 (320 u) | 15 (600 u) | whole level |
 | Powerup memory | 36 s | 39 s | 45 s | 51 s | 60 s |
@@ -2104,15 +2108,15 @@ preset has a zero reaction or a zero aim error (`test_skill_extremes`).
 
 | | Balanced | Aggressive | Cautious | Collector |
 |---|---|---|---|---|
-| Retreat at shields | 35 | 20 | 55 | 40 |
-| … when outgunned (advantage < 0.6) | 35 | 20 | 80 | 55 |
+| Retreat at shields (§9.12) | 45 | 30 | 65 | 50 |
+| … when outgunned (advantage < 0.6) | 45 | 30 | 90 | 65 |
 | Engage / collect weight | 1.0 / 1.0 | 1.5 / 0.6 | 0.8 / 1.2 | 0.7 / 1.8 (keeps collecting in sight of enemies) |
 | Engage weight when behind (advantage ≤ 0.5) | × 1 | × 1 | × 0.8 | × 0.5 |
 | Fight band (35–95 units) | × 1 | × 0.75 | × 1.25 | × 1 |
 | Hunts a lost target (× memory) | 1 | 2 | 0.8 | 1 |
 | Dodge probability | + 0 | + 0 | + 0.1 | + 0.05 |
 | Mine interval | × 1 | × 2 (fewer) | × 0.7 | × 1 |
-| Strafe pace / closing pace | 1 / 1 | 0.9 / 1.15 | 1.1 / 0.85 | 1 / 1 |
+| Strafe pace / closing pace (§9.12: thrust of the keys, the closing key 0.9 × this) | 1 / 1 | 0.9 / 1.15 | 1.1 / 0.85 | 1 / 1 |
 | Afterburner chase beyond | 150 | 100 | 200 | 150 |
 | Heavy missile budget, chance, trade (§9.6) | 0.12, 0.2, 2.5 | 0.30, 0.4, 1.5 | 0.02, 0, 8 | 0.06, 0.1, 4 |
 | Hug / standoff (§9.6) | 0.45 / 1.0 | 0.80 / 0.8 | 0.15 / 1.2 | 0.25 / 1.1 |
@@ -3017,6 +3021,127 @@ human replaces, also after a removal and with the option off.
 **Not in B5:** showing each bot's skill on the clients (they see `BOT`
 and the notices), `/bot remove #n`, adding bots between levels, CTF
 and hoard (B7).
+
+### 9.12 After the first recordings (2026-09-30): flying like a human
+
+The movement recordings (Documentation/movement-recording.md) of a
+strong human ("evilcow") against five bots (one Hotshot, four Insane)
+on two evenings, analysed with `movrec-analyse --bots`, put numbers on
+how differently they flew. Fight distance, missile volleys and pickups
+were already close; the flight itself was not:
+
+| | human | bots |
+|---|---|---|
+| Mean speed; share flat out (above 85 % of the top) | 52–54 units/s; 63–70 % | 37–41; 24–36 % |
+| Strafe reversals per minute of fight; vertical share | 45; 0.29–0.33 | 80–102; 0.71–1.00 |
+| Thrust across while strafing; speed across (upper quartile) | 98 %; 77–79 % | 75–79 %; 45–48 % |
+| 180° of a large turn; rotation rate | 1.6 s; 73 % of the top | 1.2–1.5 s; 80–99 % |
+| Large turns reversing / sliding; push forward after | 11 % / 86 %; 74–78 % | 24–45 % / 55–76 %; 31–48 % |
+| Afterburner overall; fleeing; no enemy in sight | 5–7 %; 16–21 %; 4–6 % | 0–2 %; 0–6 %; 0–3 % |
+| Flies away turned from the enemy below | about 65 shields | about 10 |
+
+**Root causes**, in the code, not the constants:
+
+- *Every strafe run was a reversal*: `juke_state` gave each run a new
+  direction at least 90° from the last, on a circle across the line of
+  sight, with the vertical share as a part of each direction (Insane's
+  1.0: every run half up or down).
+- *The velocity controller jittered the strafe*: the fight asked
+  `velocity_command` for a velocity (closing speed along the line of
+  sight plus the strafe), which it turns into thrust with a gain of 2 on
+  the error. The range keeping flips sign as the enemy moves in and out,
+  and with the nose on the lead point (up to 25° off the line) that
+  flip lands on the sideways axis; backing off along a path while facing
+  a strafing enemy flipped the lateral thrust almost every tick. The
+  analysis counted most of the 80–100 reversals there.
+- *Partial thrust, slow*: a velocity controller eases off as the speed
+  nears what it asked for (0.7–0.8 of the top), and the length of the
+  command was capped at 1, so the bot never held two keys at once; a
+  human holds forward and a strafe key together (the diagonal is 1.41
+  times the top speed: the human was above the top speed a tenth of
+  the time).
+- *Turns at the cap*: a large turn ran at the skill's full turn cap
+  (Insane 99 %), every large turn with room behind was flown backwards,
+  and only those ended in a push.
+- *The afterburner* needed the nose within 25° of where the bot went:
+  retreating, it faced its pursuer (backwards: never), and long straight
+  flights (beyond 100 units) lit it for Insane only.
+- *Retreat backwards*: the retreat was always flown facing the pursuer,
+  which the analysis counts as backing off, not as flying away.
+
+**Changes** (`bot_brain.h`, `bot_goals.h`, `bot.cpp`), all on the bot's
+own random numbers (deterministic on the host), no protocol change:
+
+- **Keys, not velocities, in a fight.** `juke_state` holds a strafe key
+  (left or right) for a run of the skill's length and, in the share
+  `strafe_vertical` of the runs, an up or down key with it; after a run
+  the keys are let go (`STRAFE_PAUSE_SHARE` 0.3, for 150–450 ms) or the
+  next run follows, the other way (`STRAFE_FLIP_SHARE` 0.75) or the same
+  way on. The preferred distance is drawn every 1–2.5 s. The range is a
+  key too (`approach_key`): forward beyond the preferred distance plus
+  15 units, reverse inside it less 15, held in between, at the style's
+  closing thrust (`COMBAT_CLOSE_SPEED` 0.9 × `close_scale`).
+  `fight_keys` gives the three axes in the ship's frame; the dodge adds
+  its full thrust to them, and the command is clamped per axis
+  (`steer_controls`), so forward and strafe together make the diagonal.
+  `skill.strafe_speed` is now the thrust of the strafe keys (0–1).
+- **No flicker.** `lateral_keys` filters the sideways and vertical
+  thrust of every command (keys and velocity alike) like a key: a push
+  the other way than the key held counts once it has lasted 100 ms
+  (`KEY_FLIP_TICKS`); until then that axis is released. A dodge, an
+  evasion and the stuck recovery flip at once.
+- **Turns.** `turn_round_state` draws each large turn's kind from
+  `turn_habits` (reverse 0.12, else a slide; push after 0.8, with the
+  afterburner in 0.3 of the pushes, from Hotshot); a slide holds a
+  strafe key at full thrust (`slide_state`, from 60° off the target to
+  34°, the way the ship already slides), also when a wall behind forbids
+  the reverse turn. The push lasts 1.1 s. The rotation cap falls from
+  the skill's with the nose 60° off to 0.8 of it from 110°
+  (`large_turn_cap`); aiming keeps the full cap.
+- **Retreat.** A retreat is flown turned away, the nose along the path,
+  in `FLEE_TURNED_SHARE` (0.4) of the time, drawn when it starts and
+  every 2 s; the afterburner (from Hotshot) in `FLEE_BURN_SHARE` (0.5)
+  of those draws. Shots and missiles go along `aim_dir`, the aim, so a
+  bot fleeing turned away does not fire at nothing. The styles retreat
+  10 shields earlier (Balanced 45, Aggressive 30, Cautious 65, Collector
+  50).
+- **Afterburner on long flights** from Hotshot: beyond 150 units to the
+  steer point (`BOT_LONG_STRAIGHT`), lit only with 90 % charge and kept
+  down to 50 % (Insane: 70 % and 35 %), so a fight still finds charge.
+- **Skills**: strafe key runs Rookie 0.4–1.0 s, Hotshot 0.25–0.7,
+  Ace 0.22–0.65, Insane 0.2–0.6; key thrust 0.7, 0.95, 1, 1; vertical
+  0.1, 0.2, 0.2, 0.22. Trainee still does not strafe, dodge or burn, and
+  turns slowest.
+
+**Measured.** There is no game data here to fly `-botarena`, so
+`test-bot-fight-sim` (new) flies the bots' movement code (the same
+functions `bot_tick` calls) in the model of the ship of
+`test-bot-flight` against a scripted enemy that strafes round the bot
+and appears behind it, with retreats at low shields, out-of-sight and
+empty stretches (16 minutes per bot), writes the flight as the
+recorder writes it and reads it with the analysis of `movrec-analyse`.
+With the old code the simulation reproduced the recordings' speed
+(37–40), thrust across (68–79 %), vertical share (0.76–1.0) and turn
+times (Hotshot 1.40 s at 83 %, Insane 1.17 s at 98 %), and doubled their
+reversals (about 190 per minute, from the backward retreats). Now
+(Hotshot / Insane; the test checks ranges for Hotshot, Ace and Insane,
+and the same at 30 and 144 fps):
+
+| | human | bots, recorded | simulation before | simulation now |
+|---|---|---|---|---|
+| Mean speed; flat out | 52–54; 63–70 % | 37–41; 24–36 % | 39–40; 35 % | 48; 50–51 % |
+| Strafe reversals / min; run | 45; 0.37 s | 80–102; 0.43 s | 190; 0.23–0.40 s | 42–45; 0.47–0.53 s |
+| Vertical share | 0.29–0.33 | 0.71–1.0 | 0.85–1.0 | 0.34–0.37 |
+| Thrust across; speed across | 98 %; 77–79 % | 75–79 %; 45–48 % | 76–79 %; 53–58 % | 86–89 %; 73 % |
+| 180° of a large turn; rate | 1.6 s; 73 % | 1.2–1.5 s; 80–99 % | 1.40 / 1.17 s; 83 / 98 % | 1.62 / 1.31 s; 75 / 90 % |
+| Turns sliding; push after (burning) | 86 %; 74 % (26 %) | 55–76 %; 31–48 % (0–28 %) | 96–100 %; 54–58 % (71–92 %) | 74–77 %; 53–55 % (28–46 %) |
+| Afterburner; fleeing; no enemy | 6 %; 21 %; 6 % | 0–2 %; 0–6 %; 0–3 % | 3–10 %; 0 %; 0–14 % | 4–4.5 %; 22–27 %; 3 % |
+| Flying away (share of the fight) | 19 % | 5–13 % | 7–9 % | 19–20 % |
+
+The simulation is open space: no walls to slide along, no pickups, no
+enemy fire to dodge, and an enemy that is no human; its numbers are for
+comparing the code before and after, and the next recordings of real
+games will tell how close the bots came.
 
 ---
 

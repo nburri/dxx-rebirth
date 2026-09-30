@@ -496,17 +496,17 @@ void test_goal_choice()
 	in.collect = collect_utility(item_value({item::shield}, with_shields(20)), 100);
 	in.collect_path = 100;
 	CHECK(choose_goal(in) == goal_kind::collect);
-	/* The style's threshold: an Aggressive bot fights on at 25, a
-	 * Cautious one retreats at 50.
+	/* The style's threshold: an Aggressive bot fights on at 30, a
+	 * Cautious one retreats at 60.
 	 */
 	goal_inputs fight;
 	fight.has_target = fight.target_visible = fight.threatened = true;
 	fight.target_score = 1;
-	fight.shields = 25;
+	fight.shields = 30;
 	fight.retreat_shields = style_of(bot_style::aggressive).retreat_shields;
 	fight.engage_weight = style_of(bot_style::aggressive).engage_weight;
 	CHECK(choose_goal(fight) == goal_kind::engage);
-	fight.shields = 50;
+	fight.shields = 60;
 	fight.retreat_shields = style_of(bot_style::cautious).retreat_shields;
 	fight.engage_weight = style_of(bot_style::cautious).engage_weight;
 	CHECK(choose_goal(fight) == goal_kind::retreat);
@@ -871,7 +871,7 @@ void test_afterburner()
 		CHECK(want_afterburner(v));
 	}
 	v.chasing_far = false;
-	/* Retreat from Hotshot, dodge from Ace, roaming from Insane. */
+	/* Retreat from Hotshot, dodge from Ace. */
 	v.retreating = true;
 	v.use = afterburner_of(bot_skill::rookie);
 	CHECK(!want_afterburner(v));
@@ -883,10 +883,30 @@ void test_afterburner()
 	v.use = afterburner_of(bot_skill::ace);
 	CHECK(want_afterburner(v));
 	v.dodging = false;
+	/* Section 9.12: long straight flights from Hotshot, only with most
+	 * of the charge and down to a reserve (Insane spends more).
+	 */
 	v.long_straight = true;
+	v.use = afterburner_of(bot_skill::rookie);
+	CHECK(!want_afterburner(v));
+	v.use = afterburner_of(bot_skill::hotshot);
+	CHECK(want_afterburner(v));
+	v.charge = AFTERBURNER_ROAM_LIGHT - 0.01;
+	CHECK(!want_afterburner(v));
+	v.burning = true;
+	CHECK(want_afterburner(v));
+	v.charge = AFTERBURNER_ROAM_KEEP - 0.01;
 	CHECK(!want_afterburner(v));
 	v.use = afterburner_of(bot_skill::insane);
 	CHECK(want_afterburner(v));
+	v.charge = AFTERBURNER_ROAM_KEEP_INSANE - 0.01;
+	CHECK(!want_afterburner(v));
+	v.burning = false;
+	v.charge = AFTERBURNER_ROAM_LIGHT_INSANE + 0.01;
+	CHECK(want_afterburner(v));
+	v.charge = 1;
+	v.long_straight = false;
+	v.chasing_far = true;
 	/* Lit above 30 %, kept down to 5 %. */
 	v.charge = 0.25;
 	CHECK(!want_afterburner(v));
@@ -904,7 +924,7 @@ void test_afterburner()
 	v.have = false;
 	CHECK(!want_afterburner(v));
 	v.have = true;
-	v.long_straight = false;
+	v.chasing_far = false;
 	CHECK(!want_afterburner(v));
 	/* An out-of-range skill: the default's rule. */
 	CHECK(afterburner_of(static_cast<bot_skill>(99)) == afterburner_of(BOT_DEFAULT_SKILL));

@@ -129,15 +129,18 @@ struct skill_params
 	/* Map knowledge in path segments; 0xffff is the whole level. */
 	unsigned map_knowledge;
 	bool strafe;
-	/* The strafe takes a new direction after this many ms (random in
-	 * range).
+	/* A run of the strafe (a strafe key held) lasts this many ms (random
+	 * in range; section 9.12).
 	 */
 	unsigned strafe_min_ms;
 	unsigned strafe_max_ms;
-	/* The vertical share of the strafe (0: flat; section 4.6, bobbing). */
+	/* The vertical share of the strafe (0: flat, 1: as much up and down
+	 * as left and right; section 9.12: the share of the runs that also
+	 * hold an up or down key).
+	 */
 	double strafe_vertical;
-	/* Section 9.7: the strafe's speed, a share of the top speed (B1:
-	 * 0.7 for every skill that strafes).
+	/* Section 9.12: the thrust of the strafe keys, a share of full
+	 * thrust (section 9.7 had a speed: B1 0.7 for every skill).
 	 */
 	double strafe_speed;
 	/* Section 9.7: the share of the time the trigger is held while a
@@ -149,10 +152,10 @@ struct skill_params
 inline constexpr std::array<skill_params, BOT_SKILL_COUNT> skill_table{{
 	/* reaction, sigma, drift, lead, turn, cone, fov, aware, hear, memory, dodge, smarts, map, strafe, runs, vertical, strafe speed, duty */
 	{550, 7.0, 600, 0.0, 0.45, 12, 45, 150, 0, 2000, 0.0, 0, 0, false, 1200, 2000, 0.0, 0.0, 0.55},
-	{400, 4.5, 500, 0.4, 0.60, 9, 60, 250, 80, 3000, 0.2, 1, 3, true, 900, 1800, 0.25, 0.5, 0.8},
-	{280, 2.8, 400, 0.7, 0.75, 6, 70, 350, 150, 5000, 0.45, 2, 8, true, 600, 1400, 0.5, 0.7, 1.0},
-	{200, 1.7, 300, 0.9, 0.90, 4, 80, 450, 250, 7000, 0.7, 3, 15, true, 500, 1300, 0.8, 0.75, 1.0},
-	{140, 1.0, 250, 1.0, 1.00, 3, 90, 600, 350, 10000, 0.85, 4, 0xffff, true, 400, 1100, 1.0, 0.8, 1.0},
+	{400, 4.5, 500, 0.4, 0.60, 9, 60, 250, 80, 3000, 0.2, 1, 3, true, 400, 1000, 0.1, 0.7, 0.8},
+	{280, 2.8, 400, 0.7, 0.75, 6, 70, 350, 150, 5000, 0.45, 2, 8, true, 250, 700, 0.2, 0.95, 1.0},
+	{200, 1.7, 300, 0.9, 0.90, 4, 80, 450, 250, 7000, 0.7, 3, 15, true, 220, 650, 0.2, 1.0, 1.0},
+	{140, 1.0, 250, 1.0, 1.00, 3, 90, 600, 350, 10000, 0.85, 4, 0xffff, true, 200, 600, 0.22, 1.0, 1.0},
 }};
 
 [[nodiscard]]
@@ -202,10 +205,10 @@ struct style_params
 
 inline constexpr std::array<style_params, BOT_STYLE_COUNT> style_table{{
 	/* retreat, engage, collect, range, chase, dodge, mines, strafe, close, behind, outgunned, burn */
-	{35, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0, 150},	/* balanced */
-	{20, 1.5, 0.6, 0.75, 2.0, 0.0, 2.0, 0.9, 1.15, 1.0, 0, 100},	/* aggressive */
-	{55, 0.8, 1.2, 1.25, 0.8, 0.1, 0.7, 1.1, 0.85, 0.8, 25, 200},	/* cautious */
-	{40, 0.7, 1.8, 1.0, 1.0, 0.05, 1.0, 1.0, 1.0, 0.5, 15, 150},	/* collector */
+	{45, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0, 150},	/* balanced */
+	{30, 1.5, 0.6, 0.75, 2.0, 0.0, 2.0, 0.9, 1.15, 1.0, 0, 100},	/* aggressive */
+	{65, 0.8, 1.2, 1.25, 0.8, 0.1, 0.7, 1.1, 0.85, 0.8, 25, 200},	/* cautious */
+	{50, 0.7, 1.8, 1.0, 1.0, 0.05, 1.0, 1.0, 1.0, 0.5, 15, 150},	/* collector */
 }};
 
 [[nodiscard]]
@@ -231,11 +234,11 @@ constexpr unsigned effective_memory_ms(const skill_params &k, const style_params
 [[nodiscard]]
 constexpr double effective_strafe_speed(const skill_params &k, const style_params &s)
 {
-	return k.strafe ? std::min(0.9, k.strafe_speed * s.strafe_scale) : 0.0;
+	return k.strafe ? std::clamp(k.strafe_speed * s.strafe_scale, 0.0, 1.0) : 0.0;
 }
 
 /* B1's closing speed in the fight band, a share of the top speed. */
-constexpr double COMBAT_CLOSE_SPEED{0.8};
+constexpr double COMBAT_CLOSE_SPEED{0.9};
 
 [[nodiscard]]
 constexpr double effective_close_speed(const style_params &s)
@@ -925,6 +928,24 @@ struct steer_output
 	double pitch{}, heading{}, forward{}, sideways{}, vertical{};
 };
 
+/* Section 9.12: a large turn is not flown at the skill's full turn
+ * rate.  The human turned half round in 1.6 s at 73 % of the top rate;
+ * the bots at their cap (Insane: 1.2 s at 99 %), a machine's snap.  The
+ * cap of the rotation falls from the skill's own with the nose 60
+ * degrees off the wanted direction to LARGE_TURN_RATE_SCALE of it at
+ * 110 degrees and beyond; aiming (a small error) is not affected.
+ */
+constexpr double LARGE_TURN_RATE_SCALE{0.8};
+constexpr double LARGE_TURN_RATE_FROM{1.05};	// 60 degrees
+constexpr double LARGE_TURN_RATE_FULL{1.92};	// 110 degrees
+
+[[nodiscard]]
+inline double large_turn_cap(const double cap, const double angle)
+{
+	const double w{std::clamp((angle - LARGE_TURN_RATE_FROM) / (LARGE_TURN_RATE_FULL - LARGE_TURN_RATE_FROM), 0.0, 1.0)};
+	return cap * (1 - (1 - LARGE_TURN_RATE_SCALE) * w);
+}
+
 [[nodiscard]]
 inline steer_output steer_controls(const steer_input &in, const turn_response &ship, const double cap, int &heading_pref)
 {
@@ -933,11 +954,14 @@ inline steer_output steer_controls(const steer_input &in, const turn_response &s
 	 * the nose goes up.
 	 */
 	const int pitch_pref{in.pitch_rate > 0.2 ? 1 : -1};
-	const auto e{in.shortest_only ? steer_errors_shortest(in.unrolled.to_local(in.face_dir), heading_pref) : steer_errors_local(in.unrolled.to_local(in.face_dir), heading_pref, pitch_pref)};
+	const auto local_dir{in.unrolled.to_local(in.face_dir)};
+	const auto e{in.shortest_only ? steer_errors_shortest(local_dir, heading_pref) : steer_errors_local(local_dir, heading_pref, pitch_pref)};
 	if (std::abs(e.heading) > 0.2)
 		heading_pref = e.heading > 0 ? 1 : -1;
-	c.pitch = rotation_axis(e.pitch, in.pitch_rate, ship, cap, dot(in.face_rate, in.unrolled.r));
-	c.heading = rotation_axis(e.heading, in.heading_rate, ship, cap, dot(in.face_rate, in.unrolled.u));
+	const auto nd{normalized(local_dir)};
+	const double rot_cap{nd == vec3{} ? cap : large_turn_cap(cap, std::acos(std::clamp(nd.z, -1.0, 1.0)))};
+	c.pitch = rotation_axis(e.pitch, in.pitch_rate, ship, rot_cap, dot(in.face_rate, in.unrolled.r));
+	c.heading = rotation_axis(e.heading, in.heading_rate, ship, rot_cap, dot(in.face_rate, in.unrolled.u));
 	const auto thrust{in.thrust_frame.to_local(in.move_cmd)};
 	c.sideways = std::clamp(thrust.x, -1.0, 1.0);
 	c.vertical = std::clamp(thrust.y, -1.0, 1.0);
@@ -990,45 +1014,101 @@ public:
 	}
 };
 
-/* Section 4.6, movement in a fight.  B1 first kept still inside the
- * 35-95 unit band and strafed straight left and right, reversing every
- * 0.4-1.2 s: the ship never reached speed before it turned back, so two
- * bots fighting each other shook on one spot.  Now each run of the strafe
- * takes a new direction across the line of sight, at least 90 degrees
- * from the last (so the bot circles, climbs and dives rather than
- * swinging), with a vertical share (`vertical`: 0 flat, 1 as much as
- * sideways), and a new preferred distance inside the band, so the bot
- * also closes in and backs off.
+/* Section 4.6, movement in a fight, as a human flies it (section 9.12).
+ *
+ * B1 kept still inside the 35-95 unit band and strafed left and right,
+ * reversing every 0.4-1.2 s; B2-B6 gave each run a new direction at
+ * least 90 degrees from the last, in a circle across the line of sight,
+ * and asked the velocity controller for it.  The first recordings of a
+ * strong human against the bots (2026-09-30) showed what that flew: a
+ * direction reversal about every 0.6 s (80-100 per minute against the
+ * human's 45), up and down as much as left and right (vertical share
+ * 0.7-1.0 against 0.33), 78 % of full thrust across (98 %), and a mean
+ * speed of 37-41 units/s (54): every run was a reversal by design, a
+ * direction on the circle is a part of each key, and a velocity
+ * controller eases off as the speed comes near what it asked for.  The
+ * velocity controller also turned the range keeping (toward or away
+ * along the line of sight, whose sign flips as the enemy moves) into
+ * sideways thrust whenever the nose was off the line (it points at the
+ * lead), which reversed the strafe further.
+ *
+ * Now the strafe is keys.  A run holds a strafe key (left or right) at
+ * the strafe's thrust, and with the share `vertical` of the runs also
+ * an up or down key; after a run the keys are let go for a moment
+ * (STRAFE_PAUSE_SHARE of the runs), or the next run follows at once,
+ * the other way (STRAFE_FLIP_SHARE) or the same way on (a longer run).
+ * Every FIGHT_RANGE_MIN_MS to FIGHT_RANGE_MAX_MS the bot draws a new
+ * preferred distance inside the band, so it closes in and backs off.
  */
+constexpr double STRAFE_PAUSE_SHARE{0.3};
+constexpr unsigned STRAFE_PAUSE_MIN_MS{150};
+constexpr unsigned STRAFE_PAUSE_MAX_MS{450};
+constexpr double STRAFE_FLIP_SHARE{0.75};
+/* The preferred distance is drawn anew after this long. */
+constexpr unsigned FIGHT_RANGE_MIN_MS{1000};
+constexpr unsigned FIGHT_RANGE_MAX_MS{2500};
+
 class juke_state
 {
-	double m_angle{};
+	int8_t m_side{}, m_vertical{};
+	int8_t m_last_side{};
 	double m_range{};
 	unsigned m_left{};
+	unsigned m_range_left{};
 public:
 	void reset()
 	{
 		*this = {};
 	}
 	/* Once per tick. */
-	void update(bot_rng &rng, const unsigned min_ticks, const unsigned max_ticks, const double lo, const double hi)
+	void update(bot_rng &rng, const unsigned min_ticks, const unsigned max_ticks, const double lo, const double hi, const double vertical)
 	{
-		if (m_left && m_range >= lo && m_range <= hi)
+		/* The preferred distance: its own time, a new one when the band
+		 * moved off it.
+		 */
+		if (m_range_left && m_range >= lo && m_range <= hi)
+			--m_range_left;
+		else
+		{
+			m_range = rng.uniform(lo, hi);
+			const unsigned a{ticks_from_ms(FIGHT_RANGE_MIN_MS)};
+			m_range_left = a + rng.below(ticks_from_ms(FIGHT_RANGE_MAX_MS) - a + 1);
+		}
+		if (m_left)
 		{
 			--m_left;
 			return;
 		}
-		m_angle = std::remainder(m_angle + rng.uniform(radians(90), radians(270)), 2 * std::numbers::pi);
-		m_range = rng.uniform(lo, hi);
+		const bool was_run{m_side != 0};
+		if (was_run && rng.uniform() < STRAFE_PAUSE_SHARE)
+		{
+			m_last_side = m_side;
+			m_side = m_vertical = 0;
+			const unsigned a{std::max(1u, ticks_from_ms(STRAFE_PAUSE_MIN_MS))};
+			const unsigned b{std::max(a, ticks_from_ms(STRAFE_PAUSE_MAX_MS))};
+			m_left = a + rng.below(b - a + 1);
+			return;
+		}
+		const int8_t last{was_run ? m_side : m_last_side};
+		if (!last)
+			m_side = static_cast<int8_t>(rng.uniform() < 0.5 ? -1 : 1);
+		else
+			m_side = rng.uniform() < STRAFE_FLIP_SHARE ? static_cast<int8_t>(-last) : last;
+		m_vertical = static_cast<int8_t>(rng.uniform() < vertical ? (rng.uniform() < 0.5 ? -1 : 1) : 0);
 		const unsigned a{std::max(1u, min_ticks)};
 		const unsigned b{std::max(a, max_ticks)};
 		m_left = a + rng.below(b - a + 1);
 	}
-	/* The angle of the strafe about the line of sight, from the right. */
+	/* The strafe keys: -1 left (down), 1 right (up), 0 none. */
 	[[nodiscard]]
-	double angle() const
+	int side() const
 	{
-		return m_angle;
+		return m_side;
+	}
+	[[nodiscard]]
+	int vertical() const
+	{
+		return m_vertical;
 	}
 	/* The preferred distance to the target. */
 	[[nodiscard]]
@@ -1043,27 +1123,180 @@ public:
 	}
 };
 
-/* The velocity a fighting bot wants: toward or away from the target to
- * reach the juke's preferred distance (at most `approach_speed`), plus
- * the strafe across the line of sight (`strafe_speed`, 0 for none) in the
- * juke's direction, taken in the frame (`right`, `up`) of the ship.
+/* The thrust of the keys, in the ship's frame (sideways right, vertical
+ * up, forward), each in [-1, 1].
+ */
+struct thrust_keys
+{
+	double sideways{}, vertical{}, forward{};
+	[[nodiscard]]
+	vec3 local() const
+	{
+		return {sideways, vertical, forward};
+	}
+};
+
+/* Section 9.12: the range keeping of a fight is a key too: forward
+ * while the target is further than the juke's preferred distance plus
+ * FIGHT_RANGE_DEADBAND, reverse while it is nearer than that distance
+ * less it, the key held in between.  (A velocity controller to the
+ * distance let the ship coast at the preferred distance; the human held
+ * forward or reverse most of the fight, which with the strafe key makes
+ * a diagonal thrust: his speed was above the top speed a tenth of the
+ * time.)  The thrust of the key is the style's closing speed
+ * (effective_close_speed).
+ */
+constexpr double FIGHT_RANGE_DEADBAND{15};
+
+class approach_key
+{
+	int8_t m_sign{};
+public:
+	void reset()
+	{
+		m_sign = 0;
+	}
+	/* Once per tick: 1 forward, -1 reverse, 0 none. */
+	int update(const double dist, const double range)
+	{
+		if (dist > range + FIGHT_RANGE_DEADBAND)
+			m_sign = 1;
+		else if (dist < range - FIGHT_RANGE_DEADBAND)
+			m_sign = -1;
+		return m_sign;
+	}
+	[[nodiscard]]
+	int sign() const
+	{
+		return m_sign;
+	}
+};
+
+/* The keys of a fighting bot: the strafe keys of the juke at `strafe`
+ * (the thrust, 0 for none), and the range key (`approach`: 1 forward,
+ * -1 reverse) at `close` (the thrust).  `no_closer`: it must not close
+ * in (its own blast); `no_back`: it must not back off (a wall behind).
  */
 [[nodiscard]]
-inline vec3 combat_velocity(const vec3 &to_target, const vec3 &right, const vec3 &up, const juke_state &juke, const double vertical, const double approach_speed, const double strafe_speed)
+inline thrust_keys fight_keys(const juke_state &juke, const int approach, const double close, const double strafe, const bool no_closer = false, const bool no_back = false)
 {
-	const auto d{normalized(to_target)};
-	if (d == vec3{})
-		return {};
-	const double dist{length(to_target)};
-	const double approach{std::clamp((dist - juke.range()) * 1.5, -approach_speed, approach_speed)};
-	/* The ship's right and up, made perpendicular to the line of sight. */
-	auto r{normalized(right - d * dot(right, d))};
-	if (r == vec3{})
-		r = normalized(cross(up, d));
-	const auto u{cross(d, r)};
-	const auto lateral{normalized(r * std::cos(juke.angle()) + u * (std::sin(juke.angle()) * vertical))};
-	return d * approach + lateral * strafe_speed;
+	thrust_keys k;
+	k.forward = approach * close;
+	if ((no_closer && k.forward > 0) || (no_back && k.forward < 0))
+		k.forward = 0;
+	k.sideways = juke.side() * strafe;
+	k.vertical = juke.vertical() * strafe;
+	return k;
 }
+
+/* Section 9.12: the slide while the nose comes round (the human slid
+ * through 86 % of his large turns, holding a strafe key at full
+ * thrust).  It starts with the nose SLIDE_START off the target and
+ * holds its key until the nose is within SLIDE_END (hysteresis: a key
+ * that came and went with the angle about one threshold was a burst of
+ * tiny strafe runs), the way the ship already slides when the slide
+ * starts (`slide_speed`: its velocity along its right axis), else
+ * `prefer` (-1 or 1).
+ */
+constexpr double SLIDE_START{1.05};	// 60 degrees
+constexpr double SLIDE_END{0.6};	// 34 degrees
+
+class slide_state
+{
+	int8_t m_sign{};
+public:
+	void reset()
+	{
+		m_sign = 0;
+	}
+	/* Once per tick; the key held (-1 left, 1 right), 0 for none. */
+	int update(const double face_error, const double slide_speed, const int prefer)
+	{
+		if (!m_sign && face_error > SLIDE_START)
+			m_sign = static_cast<int8_t>(std::abs(slide_speed) > 5 ? (slide_speed < 0 ? -1 : 1) : (prefer < 0 ? -1 : 1));
+		else if (m_sign && face_error < SLIDE_END)
+			m_sign = 0;
+		return m_sign;
+	}
+	[[nodiscard]]
+	int sign() const
+	{
+		return m_sign;
+	}
+};
+
+[[nodiscard]]
+inline thrust_keys slide_keys(const int sign)
+{
+	thrust_keys k;
+	k.sideways = sign < 0 ? -1 : 1;
+	return k;
+}
+
+/* Section 9.12: a human's strafe keys do not flip at the tick rate.
+ * The velocity controller (velocity_command) does, wherever the velocity
+ * it wants lies across the nose and turns about with it: backing off
+ * along a path while facing a strafing enemy, the sideways and vertical
+ * thrust changed sign almost every tick, which the recordings counted as
+ * a strafe reversal every quarter second.  The filter holds each of the
+ * two lateral axes like a key: a push the other way than the key held
+ * (more than KEY_USED) counts only once it has lasted KEY_FLIP_TICKS;
+ * until then that axis is released.  A dodge or an evasion
+ * (`immediate`) flips at once.
+ */
+constexpr double KEY_USED{0.3};
+constexpr unsigned KEY_FLIP_TICKS{ticks_from_ms(100)};
+
+class lateral_keys
+{
+	std::array<int8_t, 2> m_held{};
+	std::array<int8_t, 2> m_pending{};
+	std::array<uint32_t, 2> m_pending_since{};
+public:
+	void reset()
+	{
+		*this = {};
+	}
+	/* Once per tick, on the thrust in the ship's frame (right, up,
+	 * forward).
+	 */
+	[[nodiscard]]
+	vec3 apply(vec3 local, const uint32_t tick, const bool immediate = false)
+	{
+		for (std::size_t i{}; i != 2; ++i)
+		{
+			double &v{i ? local.y : local.x};
+			const int8_t s{static_cast<int8_t>(v > KEY_USED ? 1 : v < -KEY_USED ? -1 : 0)};
+			if (!s)
+			{
+				/* Let go (a small push is no key). */
+				m_held[i] = 0;
+				m_pending[i] = 0;
+				continue;
+			}
+			if (!m_held[i] || s == m_held[i] || immediate)
+			{
+				m_held[i] = s;
+				m_pending[i] = 0;
+				continue;
+			}
+			/* The other way: only once it has lasted. */
+			if (m_pending[i] != s)
+			{
+				m_pending[i] = s;
+				m_pending_since[i] = tick;
+			}
+			if (tick - m_pending_since[i] >= KEY_FLIP_TICKS)
+			{
+				m_held[i] = s;
+				m_pending[i] = 0;
+			}
+			else
+				v = 0;
+		}
+		return local;
+	}
+};
 
 /* Section 9.5: a bot that turns far round (to face a target behind it)
  * keeps moving, as a human does: a ship that stops to turn is the
@@ -1109,23 +1342,47 @@ inline vec3 keep_moving_in_turn(const vec3 &wanted, const double face_error, con
  * turn under it), with a little of the slide across the line of sight
  * so that it is not a still target on the line.  Once it faces the
  * target (REVERSE_TURN_FACING) it boosts forward toward it for
- * TURN_BOOST_TICKS (with the afterburner from Hotshot), unless the
- * target is already inside the near edge of its fight band.  It starts
- * only for a target more than REVERSE_TURN_START off the nose; below
- * that keep_moving_in_turn's slide applies.
+ * TURN_BOOST_TICKS, unless the target is already inside the near edge
+ * of its fight band.  It starts only for a target more than
+ * REVERSE_TURN_START off the nose.
+ *
+ * Section 9.12: the recordings of 2026-09-30 measured the human's large
+ * turns: 11 % flown backwards, 86 % sliding (a strafe key held), a push
+ * forward after 74 % of them, with the afterburner in a quarter of the
+ * pushes.  The bots flew every turn with room behind backwards (24-45 %
+ * measured, the rest had a wall behind), pushed only after those, and
+ * almost never burnt.  Now each large turn draws its kind from the
+ * bot's turn habits (turn_habits: by default the human's shares), a
+ * slide holds a strafe key at full thrust (slide_keys), and every kind
+ * of turn may end in the push, which draws its afterburner.
  */
 constexpr double REVERSE_TURN_START{1.92};	// 110 degrees
 constexpr double REVERSE_TURN_FACING{0.45};	// 26 degrees
 constexpr double REVERSE_TURN_SPEED{0.8};
 constexpr double REVERSE_TURN_ACROSS{0.4};
 constexpr unsigned REVERSE_TURN_MAX_TICKS{ticks_from_ms(2500)};
-constexpr unsigned TURN_BOOST_TICKS{ticks_from_ms(800)};
-constexpr double TURN_BOOST_MARGIN{15};
+constexpr unsigned TURN_BOOST_TICKS{ticks_from_ms(1100)};
+constexpr double TURN_BOOST_MARGIN{5};
+
+/* How a bot turns round (section 9.12): the share of its large turns
+ * flown backwards (the rest slide), its backward speed in them (a
+ * share of the top speed), the share of the turns followed by a push
+ * toward the target, and the share of the pushes with the afterburner.
+ */
+struct turn_habits
+{
+	double reverse{0.12};
+	double reverse_speed{REVERSE_TURN_SPEED};
+	double boost{0.8};
+	double boost_burn{0.3};
+};
 
 enum class turn_phase : uint8_t
 {
 	none,
 	reversing,
+	/* Section 9.12: turning round with a strafe key held. */
+	sliding,
 	boost,
 };
 
@@ -1134,31 +1391,39 @@ struct turn_round_state
 	turn_phase phase{turn_phase::none};
 	uint32_t since{};
 	uint32_t until{};
+	/* The push is flown with the afterburner. */
+	bool burn{};
 	void reset()
 	{
 		*this = {};
 	}
 	/* `face_error`: the nose off the target (radians); `distance` to it;
 	 * `near_edge`: the near edge of the fight band (no boost inside it).
+	 * The kind of a turn and whether a push follows (and burns) are drawn
+	 * from `rng` by `habits` when the turn starts and when it ends.
 	 */
-	turn_phase update(const double face_error, const uint32_t tick, const double distance, const double near_edge)
+	turn_phase update(const double face_error, const uint32_t tick, const double distance, const double near_edge, bot_rng &rng, const turn_habits &habits = {})
 	{
+		const auto start{[&] {
+			phase = rng.uniform() < habits.reverse ? turn_phase::reversing : turn_phase::sliding;
+			since = tick;
+			burn = false;
+		}};
 		switch (phase)
 		{
 			case turn_phase::none:
 				if (face_error > REVERSE_TURN_START)
-				{
-					phase = turn_phase::reversing;
-					since = tick;
-				}
+					start();
 				break;
 			case turn_phase::reversing:
+			case turn_phase::sliding:
 				if (face_error <= REVERSE_TURN_FACING)
 				{
-					if (distance > near_edge + TURN_BOOST_MARGIN)
+					if (distance > near_edge + TURN_BOOST_MARGIN && rng.uniform() < habits.boost)
 					{
 						phase = turn_phase::boost;
 						until = tick + TURN_BOOST_TICKS;
+						burn = rng.uniform() < habits.boost_burn;
 					}
 					else
 						phase = turn_phase::none;
@@ -1168,22 +1433,24 @@ struct turn_round_state
 				break;
 			case turn_phase::boost:
 				if (tick >= until || face_error > TURN_MOVE_ANGLE || distance <= near_edge)
+				{
 					phase = turn_phase::none;
+					burn = false;
+				}
 				/* A new target behind: turn round again. */
 				if (face_error > REVERSE_TURN_START)
-				{
-					phase = turn_phase::reversing;
-					since = tick;
-				}
+					start();
 				break;
 		}
 		return phase;
 	}
 };
 
-/* The velocity the bot wants in each phase (`wanted` outside them). */
+/* The velocity the bot wants in the reverse turn and in the push
+ * (`wanted` otherwise; the slide is keys, slide_keys).
+ */
 [[nodiscard]]
-inline vec3 turn_round_velocity(const turn_phase phase, const vec3 &wanted, const vec3 &to_target, const vec3 &vel, const vec3 &lateral_hint, const double max_speed)
+inline vec3 turn_round_velocity(const turn_phase phase, const vec3 &wanted, const vec3 &to_target, const vec3 &vel, const vec3 &lateral_hint, const double max_speed, const double reverse_speed = REVERSE_TURN_SPEED)
 {
 	const auto los{normalized(to_target)};
 	if (los == vec3{} || max_speed <= 0)
@@ -1191,6 +1458,7 @@ inline vec3 turn_round_velocity(const turn_phase phase, const vec3 &wanted, cons
 	switch (phase)
 	{
 		case turn_phase::none:
+		case turn_phase::sliding:
 			break;
 		case turn_phase::reversing:
 		{
@@ -1199,7 +1467,7 @@ inline vec3 turn_round_velocity(const turn_phase phase, const vec3 &wanted, cons
 				across = lateral_hint - los * dot(lateral_hint, los);
 			across = normalized(across);
 			const auto dir{normalized(-los + across * REVERSE_TURN_ACROSS)};
-			const double speed{std::max(REVERSE_TURN_SPEED * max_speed, dot(wanted, -los))};
+			const double speed{std::max(reverse_speed * max_speed, dot(wanted, -los))};
 			return dir * std::min(speed, max_speed);
 		}
 		case turn_phase::boost:
@@ -1321,6 +1589,23 @@ constexpr hit_reaction react_to_hit(const hit_view &v)
 		return hit_reaction::evade_flee;
 	return hit_reaction::evade_turn;
 }
+
+/* Section 9.12: a retreat from an enemy in sight.  B2-B6 always flew
+ * it backwards, facing the pursuer and firing: the recordings showed no
+ * bot flying away turned from its enemy above 10 shields, where the
+ * human did below about 65 (with the afterburner in a fifth of that
+ * time; backwards, the afterburner cannot help).  Now a retreat is flown
+ * turned away, the nose along the path (the afterburner lit, by skill),
+ * in this share of the time: drawn when the retreat starts and again
+ * every FLEE_ROLL_TICKS (a human turns to run and back to shoot).
+ */
+constexpr double FLEE_TURNED_SHARE{0.4};
+constexpr unsigned FLEE_ROLL_TICKS{ticks_from_ms(2000)};
+/* A flight turned away lights the afterburner (by skill, with charge)
+ * in this share of the draws: burning whenever it may, the bots burnt
+ * about 40 % of such time, the human a fifth.
+ */
+constexpr double FLEE_BURN_SHARE{0.5};
 
 /* The evasion: across the line from the attacker, the side the ship
  * already moves to (momentum), else `side` (the bot's roll), with a
