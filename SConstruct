@@ -5063,6 +5063,13 @@ class DXXArchive(DXXCommon):
 		RuntimeTest('test-bot-presets', (
 			'common/unittest/bot_presets.cpp',
 			)),
+		# Test of managing bots during a game: the host's /bot chat
+		# command, the add rules and their interplay with the admission
+		# of humans (bot_command.h, net_v2_session.h,
+		# Documentation/multiplayer-bots.md sections 6.4 and 9.11).
+		RuntimeTest('test-bot-commands', (
+			'common/unittest/bot_command.cpp',
+			)),
 		# Test of the score carry-over across a level load
 		# (net_score_carry.h).
 		RuntimeTest('test-net-score-carry', (
@@ -5074,7 +5081,8 @@ class DXXArchive(DXXCommon):
 			'common/unittest/world_time_pause.cpp',
 			)),
 		# Test of the curve of the palette effects and of the flash
-		# missile's whiteout at any frame rate (palette_flash.h).
+		# missile's whiteout and of the fusion charge glow at any frame
+		# rate (palette_flash.h).
 		RuntimeTest('test-palette-flash', (
 			'common/unittest/palette_flash.cpp',
 			)),

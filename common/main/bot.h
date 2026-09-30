@@ -25,12 +25,15 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
+#include <span>
 #include "dxxsconf.h"
 #include "dsx-ns.h"
 #include "fwd-player.h"
 #include "player-callsign.h"
 #include "bot_brain.h"
 #include "bot_profile.h"
+#include "bot_command.h"
 
 namespace dcx {
 
@@ -61,6 +64,22 @@ struct bot_setup
 };
 
 extern bot_setup Bot_setup;
+
+/* Section 6.4: the options of the game being played, taken from the
+ * setup when the game starts and changed on the in-game Bots screen:
+ * the skill and style of a bot added during the game, and whether a
+ * human who finds the game full replaces a bot.  They reach the setup
+ * (and the pilot's netgame profile) only with "Save as default setup"
+ * or `/bot save`.
+ */
+struct bot_game_options
+{
+	bot::bot_skill default_skill{bot::BOT_DEFAULT_SKILL};
+	bot::bot_style default_style{bot::bot_style::balanced};
+	bool replace{true};
+};
+
+extern bot_game_options Bot_game;
 
 /* Section 2.2: the slot's player is (or, after it left, was) a bot: on
  * the host from the setup, on a client from the PLAYER_LIST flag.  For
@@ -113,7 +132,59 @@ void bots_setup_load(const ::dcx::bot::bot_profile &p);
 [[nodiscard]]
 bool bots_allowed_in_mode(network_game_type mode);
 
+/* Section 6.4, bot_menu.cpp: the host's chat command `/bot ...`.  False
+ * if `text` is no /bot command; otherwise it was handled (on a client:
+ * "only the host can manage bots") and must not be sent.
+ */
+bool bots_chat_command(const char *text);
+/* The host's in-game Bots screen ("Bots..." in the game menu). */
+void bots_ingame_menu();
+/* The bots playing become the setup and are written to the pilot's
+ * netgame profile (section 6.5).
+ */
+void bots_save_as_default();
+
 /* In the game (bot.cpp). */
+/* Section 6.4: a bot playing, as the in-game Bots screen lists it. */
+struct bot_in_game
+{
+	playernum_t pid;
+	/* The order of addition: with `pid`, it names the bot (a slot may
+	 * be taken by another player while a menu is open).
+	 */
+	unsigned added;
+	bot_config cfg;
+};
+/* This machine hosts a network game in a mode with bots: it may manage
+ * them (the game menu's "Bots...", `/bot`).
+ */
+[[nodiscard]]
+bool bots_manageable();
+/* Whether a bot can be added now, and why not. */
+[[nodiscard]]
+::dcx::bot::add_verdict bots_add_verdict();
+/* The bots playing, in their order of addition; returns how many. */
+unsigned bots_in_game(std::span<bot_in_game, MAX_BOTS> out);
+/* The players in the game (humans and bots, the host included). */
+[[nodiscard]]
+unsigned bots_players_in_game();
+/* Section 6.4: a bot joins the game (as a player joining: everyone sees
+ * it join, it spawns at a site the host assigns).  An empty name takes
+ * the next built-in name nobody has; a taken one gets a number.
+ * Returns its slot, or nothing (`why` says why).
+ */
+std::optional<playernum_t> bots_add(const bot_config &wanted, ::dcx::bot::add_verdict &why);
+/* Bot `pnum` leaves the game as a player who quits (its items dropped
+ * once, "has left the game" for everyone, the slot free).
+ */
+bool bots_remove(playernum_t pnum);
+/* Bot `pnum` plays `skill` and `style` from now on. */
+bool bots_set_skill_style(playernum_t pnum, ::dcx::bot::bot_skill skill, ::dcx::bot::bot_style style);
+/* Bot `pnum`'s team (team modes; automatic keeps its team). */
+bool bots_set_team(playernum_t pnum, ::dcx::bot::bot_team team);
+/* Bot `pnum` is called `name` (made unique) from now on. */
+bool bots_rename(playernum_t pnum, const char *name);
+
 /* The host, when the lobby closes: the configured bots take the lowest
  * free slots below the player limit.  Returns the number placed (fewer
  * than configured if the game is full).

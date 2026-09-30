@@ -4408,14 +4408,18 @@ void life_frame(bot_state &bs, object &obj, const d_robot_info_array &Robot_info
 	}
 }
 
+/* `departed`: a player who left counts too (section 6.4: a human may
+ * come back by callsign, so a bot added or renamed during the game
+ * must not take the name).
+ */
 [[nodiscard]]
-bool callsign_taken(const callsign_t &name, const playernum_t except)
+bool callsign_taken(const callsign_t &name, const playernum_t except, const bool departed = false)
 {
 	for (playernum_t i = 0; i < MAX_PLAYERS; ++i)
 	{
 		if (i == except)
 			continue;
-		const bool in_game{i == Player_num || Netgame.players[i].connected != player_connection_status::disconnected || B.bots[i]};
+		const bool in_game{i == Player_num || Netgame.players[i].connected != player_connection_status::disconnected || B.bots[i] || (departed && Netgame.players[i].callsign[0u])};
 		if (in_game && !d_stricmp(Netgame.players[i].callsign, name))
 			return true;
 	}
@@ -4425,9 +4429,9 @@ bool callsign_taken(const callsign_t &name, const playernum_t except)
 /* Section 2.2: unique against every callsign in the game
  * ("havoc" -> "havoc2").
  */
-callsign_t unique_callsign(const callsign_t &wanted, const playernum_t slot)
+callsign_t unique_callsign(const callsign_t &wanted, const playernum_t slot, const bool departed = false)
 {
-	if (!callsign_taken(wanted, slot) && wanted[0u])
+	if (!callsign_taken(wanted, slot, departed) && wanted[0u])
 		return wanted;
 	const char *const base{wanted[0u] ? static_cast<const char *>(wanted) : "bot"};
 	for (unsigned k = 2; k < 100; ++k)
@@ -4440,7 +4444,7 @@ callsign_t unique_callsign(const callsign_t &wanted, const playernum_t slot)
 		std::memcpy(buf + keep, suffix, sl);
 		callsign_t c{};
 		c.copy_lower(std::span<const char>(buf, keep + sl));
-		if (!callsign_taken(c, slot))
+		if (!callsign_taken(c, slot, departed))
 			return c;
 	}
 	return wanted;
@@ -4530,7 +4534,7 @@ unsigned bot_added_order(const playernum_t pnum)
 
 bool bots_replaceable()
 {
-	return Bot_setup.replace;
+	return Bot_game.replace;
 }
 
 bool bot_ship_dying(const playernum_t pnum)
@@ -4563,9 +4567,13 @@ void bots_session_reset()
 unsigned bots_allocate_slots()
 {
 	bots_session_reset();
-	if (!(Game_mode & GM_NETWORK) || !multi_i_am_master() || !bots_allowed_in_mode(Netgame.gamemode))
+	if (!(Game_mode & GM_NETWORK) || !multi_i_am_master())
 		return 0;
 	bots_setup_init();
+	/* Section 6.4: the options of this game start as the setup's. */
+	Bot_game = {Bot_setup.default_skill, Bot_setup.default_style, Bot_setup.replace};
+	if (!bots_allowed_in_mode(Netgame.gamemode))
+		return 0;
 	unsigned placed{0};
 	const unsigned limit{std::min<unsigned>(Netgame.max_numplayers, MAX_PLAYERS)};
 	for (unsigned k = 0; k < Bot_setup.count; ++k)
@@ -4630,10 +4638,14 @@ void bots_apply_team_preferences(unsigned &team_vector, const unsigned num_playe
 		}
 }
 
-void bots_level_start()
+namespace {
+
+/* The level's data for the bots: the navigation graph, the ship limits,
+ * the spawn sites, the weapon supply; the tick starts.  At the level
+ * start, or when the first bot of the level is added during it.
+ */
+void prepare_level()
 {
-	if (!bots_running() || std::ranges::none_of(B.bots, [](const auto &o) { return o.has_value(); }))
-		return;
 	build_nav_graph();
 	compute_limits();
 	judge_spawn_sites();
@@ -4658,16 +4670,37 @@ void bots_level_start()
 	B.tick.reset(GameTime64);
 	B.last_time = GameTime64;
 	B.tick_started = true;
+}
+
+/* A bot's state for the level (at its start, or as it joins it). */
+void enter_level(bot_state &bs)
+{
+	bs.rng.seed(b::bot_seed(Netgame.protocol.udp.session_id, bs.pid, Current_level_num));
+	bs.last_attacker = 0xff;
+	bs.memory = {};
+	bs.powerups.clear();
+	bs.visited.assign(B.graph.size(), 0);
+}
+
+}
+
+void bots_level_start()
+{
+	if (!bots_running() || std::ranges::none_of(B.bots, [](const auto &o) { return o.has_value(); }))
+	{
+		/* No bot in this level (yet): one added during it prepares the
+		 * level then, not with the previous level's graph.
+		 */
+		B.tick_started = false;
+		return;
+	}
+	prepare_level();
 	for (auto &o : B.bots)
 	{
 		if (!o)
 			continue;
 		auto &bs{*o};
-		bs.rng.seed(b::bot_seed(Netgame.protocol.udp.session_id, bs.pid, Current_level_num));
-		bs.last_attacker = 0xff;
-		bs.memory = {};
-		bs.powerups.clear();
-		bs.visited.assign(B.graph.size(), 0);
+		enter_level(bs);
 		if (vcplayerptr(bs.pid)->connected != player_connection_status::playing)
 			continue;
 		auto &obj{ship_of(bs.pid)};
@@ -5115,6 +5148,241 @@ bool bot_hit_wall(const object &ship, const vmsegptridx_t seg, const sidenum_t s
 		wall_open_door(seg, side);
 		multi_send_door_open(seg, side, w.flags);
 	}
+	return true;
+}
+
+
+/* Section 6.4: managing the bots during the game. */
+
+namespace {
+
+[[nodiscard]]
+b::add_verdict judge_add_now(std::optional<playernum_t> &slot)
+{
+	const bool host{bots_running()};
+	slot = host ? net_v2::host_free_slot_for_bot() : std::nullopt;
+	return b::judge_add({
+		.host = host,
+		.mode_allowed = bots_allowed_in_mode(Netgame.gamemode),
+		.playing = Network_status == network_state::playing,
+		.countdown = LevelUniqueObjectState.ControlCenterState.Control_center_destroyed != 0,
+		.join_in_progress = host && net_v2::host_join_in_progress(),
+		.free_slot = slot.has_value(),
+	});
+}
+
+/* The next built-in name (section 6.2) nobody in this game has. */
+[[nodiscard]]
+callsign_t default_bot_name(const playernum_t slot)
+{
+	for (const auto n : b::bot_default_names)
+	{
+		callsign_t c{};
+		c.copy_lower(std::span<const char>(n, std::min<std::size_t>(std::strlen(n), CALLSIGN_LEN)));
+		if (!callsign_taken(c, slot, true))
+			return c;
+	}
+	return {};
+}
+
+/* Section 6.4: a bot's name in the game (b::usable_name): empty if
+ * nothing of it may be a name, or it is a word `/bot` reads as
+ * something else (`all`, a skill, a style, a command).
+ */
+[[nodiscard]]
+callsign_t clean_name(const char *const name)
+{
+	const auto clean{b::usable_name(name)};
+	callsign_t c{};
+	c.copy_lower(std::span<const char>(clean.data(), std::strlen(clean.data())));
+	return c;
+}
+
+[[nodiscard]]
+const char *skill_label(const b::bot_skill k)
+{
+	return b::bot_skill_names[static_cast<unsigned>(k) % b::BOT_SKILL_COUNT];
+}
+
+[[nodiscard]]
+const char *style_label(const b::bot_style st)
+{
+	return b::bot_style_names[static_cast<unsigned>(st) % b::BOT_STYLE_COUNT];
+}
+
+}
+
+bool bots_manageable()
+{
+	return bots_running() && bots_allowed_in_mode(Netgame.gamemode) && Network_status != network_state::menu && Network_status != network_state::browsing;
+}
+
+b::add_verdict bots_add_verdict()
+{
+	std::optional<playernum_t> slot;
+	return judge_add_now(slot);
+}
+
+unsigned bots_in_game(const std::span<bot_in_game, MAX_BOTS> out)
+{
+	unsigned n{0};
+	for (playernum_t i = 0; i < MAX_PLAYERS && n < out.size(); ++i)
+	{
+		const auto bs{find_bot(i)};
+		if (!bs || vcplayerptr(i)->connected == player_connection_status::disconnected)
+			continue;
+		out[n++] = {i, bs->added, bs->cfg};
+	}
+	std::ranges::sort(out.first(n), {}, &bot_in_game::added);
+	return n;
+}
+
+unsigned bots_players_in_game()
+{
+	unsigned n{0};
+	for (playernum_t i = 0; i < N_players && i < MAX_PLAYERS; ++i)
+		if (i == Player_num || vcplayerptr(i)->connected != player_connection_status::disconnected)
+			++n;
+	return n;
+}
+
+std::optional<playernum_t> bots_add(const bot_config &wanted, b::add_verdict &why)
+{
+	std::optional<playernum_t> free;
+	why = judge_add_now(free);
+	if (why != b::add_verdict::ok)
+		return std::nullopt;
+	const playernum_t slot{*free};
+	/* The first bot of this level: the level's data for the bots. */
+	if (!B.tick_started)
+		prepare_level();
+	bot_config cfg{wanted};
+	cfg.name = clean_name(wanted.name);
+	cfg.name = unique_callsign(cfg.name[0u] ? cfg.name : default_bot_name(slot), slot, true);
+	std::array<unsigned, MAX_PLAYERS> orders{};
+	for (auto &&[i, o] : enumerate(B.bots))
+		if (o)
+			orders[i] = o->added;
+	auto &np{Netgame.players[slot]};
+	np.callsign = cfg.name;
+	np.rank = netplayer_info::player_rank::None;
+	np.connected = player_connection_status::playing;
+	np.protocol.udp.addr = {};
+	np.LastPacketTime = timer_query();
+	np.ping = 0;
+	vmplayerptr(slot)->callsign = cfg.name;
+	auto &bs{B.bots[slot].emplace(slot, cfg)};
+	/* Section 2.3: added last, so a human who finds the game full
+	 * replaces this bot first.
+	 */
+	bs.added = b::next_added_order(orders);
+	set_player_is_bot(slot, true);
+	bool teams_changed{};
+	if (+(Game_mode & GM_TEAM))
+	{
+		/* Its team: the preferred one, else the smaller (blue on a tie). */
+		unsigned red{0}, blue{0};
+		for (playernum_t i = 0; i < N_players && i < MAX_PLAYERS; ++i)
+			if (i != slot && (i == Player_num || vcplayerptr(i)->connected != player_connection_status::disconnected))
+				++((Netgame.team_vector >> i) & 1 ? red : blue);
+		const bool to_red{cfg.team == b::bot_team::red || (cfg.team == b::bot_team::automatic && red < blue)};
+		const auto bit{static_cast<uint8_t>(1u << slot)};
+		if (to_red)
+			Netgame.team_vector |= bit;
+		else
+			Netgame.team_vector &= static_cast<uint8_t>(~bit);
+		teams_changed = true;
+	}
+	enter_level(bs);
+	/* It joins as a player: new_player on the host, PLAYER_JOINED and
+	 * the player list with its bot flag to everyone.
+	 */
+	net_v2::host_add_player(slot);
+	if (teams_changed)
+		multi_host_teams_changed();
+	auto &obj{ship_of(slot)};
+	obj.control_source = object::control_type::remote;
+	/* Its first spawn, at a site the host assigns (as for a joiner). */
+	bs.life = bot_life::dead;
+	bs.respawn_at = GameTime64;
+	respawn(bs, obj);
+	if (bs.life == bot_life::dead)
+		multi_make_player_ghost(slot);
+	con_printf(CON_NORMAL, "bots: '%s' joins the game as P#%u (%s, %s)", static_cast<const char *>(bs.cfg.name), slot, skill_label(bs.cfg.skill), style_label(bs.cfg.style));
+	return slot;
+}
+
+bool bots_remove(const playernum_t pnum)
+{
+	const auto bs{find_bot(pnum)};
+	if (!bs || !bots_running() || vcplayerptr(pnum)->connected == player_connection_status::disconnected)
+		return false;
+	con_printf(CON_NORMAL, "bots: the host removes '%s' (P#%u)", static_cast<const char *>(bs->cfg.name), pnum);
+	return remove_bot(pnum, kick_player_reason::quit);
+}
+
+bool bots_set_skill_style(const playernum_t pnum, const b::bot_skill skill, const b::bot_style style)
+{
+	const auto bs{find_bot(pnum)};
+	if (!bs || !bots_running())
+		return false;
+	if (bs->cfg.skill == skill && bs->cfg.style == style)
+		return true;
+	bs->cfg.skill = skill;
+	bs->cfg.style = style;
+	/* From its next tick on, not only from its next life. */
+	bs->apply_config();
+	con_printf(CON_NORMAL, "bots: '%s' (P#%u) now plays %s, %s", static_cast<const char *>(bs->cfg.name), pnum, skill_label(skill), style_label(style));
+	char msg[40];
+	std::snprintf(msg, sizeof(msg), "%s now %s %s", static_cast<const char *>(bs->cfg.name), skill_label(skill), style_label(style));
+	multi_send_host_notice(msg);
+	return true;
+}
+
+bool bots_set_team(const playernum_t pnum, const b::bot_team team)
+{
+	const auto bs{find_bot(pnum)};
+	if (!bs || !bots_running())
+		return false;
+	bs->cfg.team = team;
+	if (!(Game_mode & GM_TEAM) || team == b::bot_team::automatic)
+		return true;
+	const bool red{team == b::bot_team::red};
+	const auto bit{static_cast<uint8_t>(1u << pnum)};
+	if (((Netgame.team_vector & bit) != 0) == red)
+		return true;
+	if (red)
+		Netgame.team_vector |= bit;
+	else
+		Netgame.team_vector &= static_cast<uint8_t>(~bit);
+	multi_host_teams_changed();
+	char msg[40];
+	std::snprintf(msg, sizeof(msg), "%s joins team %s", static_cast<const char *>(bs->cfg.name), static_cast<const char *>(Netgame.team_name[red ? team_number::red : team_number::blue]));
+	multi_send_host_notice(msg);
+	return true;
+}
+
+bool bots_rename(const playernum_t pnum, const char *const name)
+{
+	const auto bs{find_bot(pnum)};
+	if (!bs || !bots_running() || !name || !name[0])
+		return false;
+	const auto wanted{clean_name(name)};
+	if (!wanted[0u])
+		return false;
+	if (!d_stricmp(wanted, bs->cfg.name))
+		return true;
+	const auto old{bs->cfg.name};
+	const auto c{unique_callsign(wanted, pnum, true)};
+	bs->cfg.name = c;
+	Netgame.players[pnum].callsign = c;
+	vmplayerptr(pnum)->callsign = c;
+	/* The clients take a bot's new name from the player list. */
+	net_v2::host_send_player_list();
+	con_printf(CON_NORMAL, "bots: '%s' (P#%u) is now '%s'", static_cast<const char *>(old), pnum, static_cast<const char *>(c));
+	char msg[40];
+	std::snprintf(msg, sizeof(msg), "%s is now called %s", static_cast<const char *>(old), static_cast<const char *>(c));
+	multi_send_host_notice(msg);
 	return true;
 }
 

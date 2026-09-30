@@ -28,6 +28,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include <stdio.h>
 #include <string.h>
 #include <ranges>
+#include <string>
 #if !defined(_MSC_VER) && !defined(macintosh)
 #include <unistd.h>
 #endif
@@ -1877,6 +1878,35 @@ void write_netgame_profile(const netgame_info *ng)
 			PHYSFSX_printf(file, "%s\n", lines[i].data());
 	}
 	PHYSFSX_puts_literal(file, NGPVersionStr "=" DXX_VERSION_STR "\n");
+}
+
+/* Documentation/multiplayer-bots.md section 6.4, "Save as default
+ * setup" during a game: only the bot lines of the ngp file are written.
+ * Every other line stays as the file has it: the Netgame of the game
+ * being played is not the setup the host made (the tracker is forced
+ * off in it without a tracker address, after the profile was written).
+ */
+void write_netgame_profile_bots()
+{
+	char filename[PATH_MAX];
+	snprintf(filename, sizeof(filename), PLAYER_DIRECTORY_STRING("%.8s.ngp"), static_cast<const char *>(InterfaceUniqueState.PilotName));
+	std::string text;
+	if (auto file{PHYSFSX_openReadBuffered(filename).first})
+	{
+		const auto length{PHYSFS_fileLength(file)};
+		/* A profile is a few hundred bytes. */
+		if (length > 0 && length < 0x10000)
+		{
+			text.resize(static_cast<std::size_t>(length));
+			const auto got{PHYSFSX_readBytes(file, text.data(), text.size())};
+			text.resize(got > 0 ? static_cast<std::size_t>(got) : 0);
+		}
+	}
+	const auto now{::dcx::bot::replace_profile_bot_lines(text, bots_setup_profile(), NGPVersionStr)};
+	auto file{PHYSFSX_openWriteBuffered(filename).first};
+	if (!file)
+		return;
+	PHYSFSX_puts(file, std::span<const char>(now.data(), now.size()));
 }
 #endif
 

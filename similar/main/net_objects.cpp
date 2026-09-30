@@ -1279,6 +1279,10 @@ void net_objects_host_join(const playernum_t pnum)
 	 */
 	A.mirrors[pnum].reset({});
 	A.dropped[pnum] = false;
+	/* A bot added to the slot during the game (bots section 6.4): its
+	 * first inventory is reported whatever a bot before it sent last.
+	 */
+	A.own_ships[pnum] = {};
 }
 
 void net_objects_frame()
