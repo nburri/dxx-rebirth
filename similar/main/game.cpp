@@ -71,6 +71,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "morph.h"
 #include "lighting.h"
 #include "newdemo.h"
+#include "world_time_pause.h"
 #include "collide.h"
 #include "weapon.h"
 #include "sounds.h"
@@ -522,52 +523,22 @@ namespace dcx {
 
 namespace {
 
-class game_world_time_paused
-{
-	unsigned time_paused;
-public:
-	explicit operator bool() const
-	{
-		return time_paused;
-	}
-	void increase_pause_count();
-	void decrease_pause_count();
-};
+static world_time_pause_count time_paused;
 
-static game_world_time_paused time_paused;
-
-}
-
-void game_world_time_paused::increase_pause_count()
-{
-	if (time_paused==0) {
-		const fix64 time = timer_update();
-		last_timer_value = time - last_timer_value;
-		if (last_timer_value < 0) {
-			last_timer_value = 0;
-		}
-	}
-	time_paused++;
-}
-
-void game_world_time_paused::decrease_pause_count()
-{
-	Assert(time_paused > 0);
-	--time_paused;
-	if (time_paused==0) {
-		const fix64 time = timer_update();
-		last_timer_value = time - last_timer_value;
-	}
 }
 
 void start_time()
 {
-	time_paused.decrease_pause_count();
+	/* A release of a pause that is not held is ignored; see
+	 * world_time_pause.h.
+	 */
+	if (!time_paused.resume(timer_update(), last_timer_value))
+		con_puts(CON_DEBUG, "start_time: the game world time was not paused");
 }
 
 void stop_time()
 {
-	time_paused.increase_pause_count();
+	time_paused.pause(timer_update(), last_timer_value);
 }
 
 pause_game_world_time::pause_game_world_time()
@@ -1819,6 +1790,12 @@ window_event_result game_window::event_handler(const d_event &event)
 		case event_type::key_command:
 		case event_type::key_release:
 		case event_type::idle:
+			/* Outside any pause of the world time, so that the save
+			 * prompt of a recording which could not write its file does
+			 * not unbalance the pauses (world_time_pause.h).
+			 */
+			if (newdemo_record_stop_if_failed())
+				return window_event_result::handled;
 			return ReadControls(LevelSharedRobotInfoState, event, Controls);
 
 		case event_type::window_draw:
