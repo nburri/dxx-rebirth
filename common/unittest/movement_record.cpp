@@ -21,6 +21,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <string_view>
 #include <vector>
 
 #include "movement_record_reader.h"
@@ -506,6 +507,87 @@ void test_quantisation()
 	}
 }
 
+/* Minor 1: the header's minor field (a minor 0 header, without it,
+ * still reads), the sync record, the scaled relative vectors.
+ */
+void test_minor_1()
+{
+	{
+		std::array<std::uint8_t, MAX_HEADER_SIZE> buf;
+		auto h{make_header()};
+		CHECK(h.minor == FORMAT_MINOR);
+		const auto n{encode_header(buf, h)};
+		const auto d{decode_header(std::span<const std::uint8_t>(buf).first(n))};
+		CHECK(d && d->first.minor == FORMAT_MINOR && d->first == h);
+		/* The same header as minor 0 wrote it: no minor field. */
+		std::vector<std::uint8_t> old(buf.begin(), buf.begin() + static_cast<std::ptrdiff_t>(n - 6));
+		const std::size_t total{old.size() + 4};
+		old[10] = static_cast<std::uint8_t>(total);
+		old[11] = static_cast<std::uint8_t>(total >> 8);
+		const auto c{crc32(old)};
+		for (unsigned i{}; i != 4; ++i)
+			old.push_back(static_cast<std::uint8_t>(c >> (8 * i)));
+		const auto o{decode_header(old)};
+		CHECK(o && o->second == total && o->first.minor == 0);
+		h.minor = 0;
+		CHECK(o->first == h);
+	}
+	{
+		record_buffer buf;
+		const sync_record y{123456, 0xdeadbeefu, -5000000000LL, sync_flag::clock_valid | sync_flag::host};
+		const auto bytes{encode(buf, y)};
+		CHECK(bytes.size() == RECORD_HEADER_SIZE + SYNC_SIZE);
+		CHECK(bytes[0] == static_cast<std::uint8_t>(record_type::sync));
+		const auto d{decode_sync(bytes.subspan(RECORD_HEADER_SIZE))};
+		CHECK(d && *d == y);
+		CHECK(!decode_sync(bytes.subspan(RECORD_HEADER_SIZE, SYNC_SIZE - 1)));
+		/* In a file: the reader hands it over. */
+		std::array<std::uint8_t, MAX_HEADER_SIZE> hb;
+		const auto n{encode_header(hb, make_header())};
+		std::vector<std::uint8_t> file(hb.begin(), hb.begin() + static_cast<std::ptrdiff_t>(n));
+		auto cb{std::make_unique<chunk_builder>()};
+		CHECK(cb->append(bytes));
+		const auto chunk{cb->finish()};
+		file.insert(file.end(), chunk.begin(), chunk.end());
+		unsigned seen{};
+		const auto res{read_recording(file, [&](const record &r) {
+			if (const auto p{std::get_if<sync_record>(&r)})
+			{
+				CHECK(*p == y);
+				++seen;
+			}
+		})};
+		CHECK(seen == 1 && res.stats.unknown_records == 0);
+		CHECK(std::string_view{record_type_name(record_type::sync)} == "sync");
+	}
+	{
+		/* Short vectors: the plain shift (floor), not scaled. */
+		const auto [a, sa]{scale_rel16({{65536 * 100, -65536 * 100, 4095}}, quant::REL_POS_SHIFT)};
+		CHECK(!sa && a[0] == 1600 && a[1] == -1600 && a[2] == 0);
+		const auto [b, sb]{scale_rel16({{-1, 0, 0}}, quant::REL_POS_SHIFT)};
+		CHECK(!sb && b[0] == -1);
+		/* 3000 units right, 1000 up: one axis beyond 2048 units.  The
+		 * whole vector shrinks and keeps its direction (clamping each
+		 * axis would give 2048, 1000).
+		 */
+		const auto [c, sc]{scale_rel16({{std::int64_t{65536} * 3000, std::int64_t{65536} * 1000, 0}}, quant::REL_POS_SHIFT)};
+		CHECK(sc);
+		CHECK(c[0] == 32767);
+		CHECK(std::abs(c[1] - 10922) <= 1);
+		CHECK(c[2] == 0);
+		/* The reader flags the distance as a lower bound. */
+		sample s;
+		s.context = context_flag::kind_player | context_flag::rel_pos_scaled;
+		s.enemy_rel_pos = c;
+		const auto u{to_units(s)};
+		CHECK(u.enemy_distance_scaled && !u.enemy_rel_vel_scaled);
+		CHECK(std::fabs(u.enemy_rel_pos[1] / u.enemy_rel_pos[0] - 1.0 / 3) < 0.001);
+	}
+	/* The splash flag is its own bit. */
+	static_assert((hit_flag::splash & hit_flag::applied_here) == 0);
+	static_assert((context_flag::rel_pos_scaled & (context_flag::kind_mask | context_flag::line_of_sight | context_flag::in_my_cone | context_flag::me_in_its_cone | context_flag::enemy_cloaked)) == 0);
+}
+
 void test_crc()
 {
 	/* The standard check value. */
@@ -528,6 +610,7 @@ int main()
 	test_unknown_records();
 	test_tick_scheduler();
 	test_quantisation();
+	test_minor_1();
 	std::puts("test-movement-record: all checks passed");
 	return 0;
 }

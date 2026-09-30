@@ -4985,6 +4985,21 @@ bool host_slot_has_peer(const playernum_t slot)
 	return slot < MAX_PLAYERS && S.peers[slot].ph != peer::phase::none;
 }
 
+bool recording_clock(uint32_t &session_id, std::int64_t &host_clock)
+{
+	session_id = S.session_id;
+	const net_clock now{timer_query()};
+	host_clock = now;
+	if (multi_i_am_master())
+		return session_id != 0;
+	if (const auto &hc{S.peers[0].conn}; hc && hc->clock_valid())
+	{
+		host_clock = now + hc->clock_offset();
+		return true;
+	}
+	return false;
+}
+
 int host_input_afterburner(const playernum_t slot)
 {
 	if (slot >= MAX_PLAYERS || slot == Player_num)
