@@ -571,7 +571,7 @@ void test_steering()
 
 /* The pieces of the fight (sections 3.4 and 4.6; the flight itself is
  * test-bot-flight): shortest-rotation errors near the vertical, the
- * feed-forward, the line of sight's rate, the jukes, the combat velocity,
+ * feed-forward, the line of sight's rate, the jukes, the fight's keys,
  * the dodge and the trigger.
  */
 void test_fight_pieces()
@@ -612,53 +612,147 @@ void test_fight_pieces()
 	CHECK(line_of_sight_rate({0, 0, 60}, {0, 0, -50}) == vec3{});
 	CHECK(line_of_sight_rate({}, {1, 0, 0}) == vec3{});
 
-	/* Jukes: each run a new direction at least 90 degrees from the last,
-	 * a new distance in the band, and a run length in range.
+	/* Jukes (section 9.12): runs of strafe keys (left or right, with an
+	 * up or down key in the share `vertical` of the runs) in range,
+	 * pauses between some of them, the next run mostly the other way; a
+	 * preferred distance in the band, held for its own time.
 	 */
 	{
 		bot_rng rng{11};
 		juke_state j;
-		j.update(rng, 36, 84, 35, 95);
-		double angle{j.angle()};
-		unsigned run{1}, runs{0};
-		for (unsigned i = 0; i < 20000; ++i)
+		j.update(rng, 36, 84, 35, 95, 0.3);
+		int side{j.side()};
+		unsigned left{j.ticks_left()};
+		unsigned run{1}, runs{0}, pauses{0}, flips{0}, with_vertical{0}, keys{0};
+		double range{j.range()};
+		unsigned range_run{1}, range_changes{0};
+		for (unsigned i = 0; i < 60000; ++i)
 		{
-			j.update(rng, 36, 84, 35, 95);
+			j.update(rng, 36, 84, 35, 95, 0.3);
 			CHECK(j.range() >= 35 && j.range() <= 95);
-			if (j.angle() != angle)
+			CHECK(j.side() >= -1 && j.side() <= 1 && j.vertical() >= -1 && j.vertical() <= 1);
+			/* No up or down key without a strafe key. */
+			CHECK(j.side() || !j.vertical());
+			if (j.range() != range)
 			{
-				const double turn{std::abs(std::remainder(j.angle() - angle, 2 * std::numbers::pi))};
-				CHECK(turn >= radians(90) - 1e-9);
-				CHECK(run >= 36 && run <= 85);
-				angle = j.angle();
-				run = 0;
-				++runs;
+				CHECK(range_run >= ticks_from_ms(FIGHT_RANGE_MIN_MS) && range_run <= ticks_from_ms(FIGHT_RANGE_MAX_MS) + 1);
+				range = j.range();
+				range_run = 0;
+				++range_changes;
 			}
+			++range_run;
+			/* A new decision: the time left starts again. */
+			if (j.ticks_left() >= left)
+			{
+				if (side)
+				{
+					CHECK(run >= 36 && run <= 85);
+					++runs;
+					if (!j.side())
+						++pauses;
+					else if (j.side() == -side)
+						++flips;
+				}
+				else
+					CHECK(run >= ticks_from_ms(STRAFE_PAUSE_MIN_MS) && run <= ticks_from_ms(STRAFE_PAUSE_MAX_MS) + 1);
+				side = j.side();
+				run = 0;
+				if (side)
+				{
+					++keys;
+					with_vertical += j.vertical() != 0;
+				}
+			}
+			left = j.ticks_left();
 			++run;
 		}
-		CHECK(runs > 20000 / 85 && runs < 20000 / 36);
-		/* A band that moves (the style's scale) starts a new run. */
-		j.update(rng, 36, 84, 200, 300);
+		CHECK(runs > 60000 / 85 / 2);
+		/* The shares, roughly (a run the same way on counts as one). */
+		CHECK(pauses > runs * (STRAFE_PAUSE_SHARE - 0.1) && pauses < runs * (STRAFE_PAUSE_SHARE + 0.1));
+		CHECK(flips > (runs - pauses) * (STRAFE_FLIP_SHARE - 0.1) && flips < (runs - pauses) * (STRAFE_FLIP_SHARE + 0.1));
+		CHECK(with_vertical > keys * 0.2 && with_vertical < keys * 0.4);
+		CHECK(range_changes > 60000 / ticks_from_ms(FIGHT_RANGE_MAX_MS) && range_changes < 60000 / ticks_from_ms(FIGHT_RANGE_MIN_MS) + 1);
+		/* A band that moves (the style's scale) takes a new distance. */
+		j.update(rng, 36, 84, 200, 300, 0.3);
 		CHECK(j.range() >= 200 && j.range() <= 300);
+		/* Flat: never an up or down key. */
+		juke_state flat;
+		for (unsigned i = 0; i < 5000; ++i)
+		{
+			flat.update(rng, 36, 84, 35, 95, 0);
+			CHECK(!flat.vertical());
+		}
 	}
-	/* Combat velocity: closes in when far, backs off when near, the
-	 * strafe across the line of sight.
+	/* The fight's keys: the range key with hysteresis about the preferred
+	 * distance, the strafe keys at the strafe's thrust, nothing toward the
+	 * blast or back into a wall.
 	 */
 	{
+		approach_key a;
+		CHECK(a.update(60, 60) == 0);
+		CHECK(a.update(60 + FIGHT_RANGE_DEADBAND + 1, 60) == 1);
+		CHECK(a.update(60, 60) == 1);
+		CHECK(a.update(60 - FIGHT_RANGE_DEADBAND - 1, 60) == -1);
+		CHECK(a.update(60, 60) == -1);
+		/* A narrow band (hugging): a narrow hysteresis. */
+		approach_key hug;
+		CHECK(hug.update(14, 11, 8) == 1);
+		CHECK(hug.update(10, 11, 8) == 1);
+		CHECK(hug.update(8.5, 11, 8) == -1);
 		bot_rng rng{2};
 		juke_state j;
-		j.update(rng, 36, 84, 60, 60);
-		const vec3 r{1, 0, 0}, u{0, 1, 0};
-		const auto far{combat_velocity({0, 0, 150}, r, u, j, 0.5, 40, 0)};
-		CHECK(near(far.z, 40, 1e-9) && near(far.x, 0, 1e-9));
-		const auto close{combat_velocity({0, 0, 30}, r, u, j, 0.5, 40, 0)};
-		CHECK(close.z < -30);
-		const auto there{combat_velocity({0, 0, 60}, r, u, j, 0.5, 40, 35)};
-		CHECK(near(there.z, 0, 1e-9));
-		CHECK(near(length(there), 35, 1e-9));
-		const auto flat{combat_velocity({0, 0, 60}, r, u, j, 0, 40, 35)};
-		CHECK(near(flat.y, 0, 1e-9));
-		CHECK(combat_velocity({}, r, u, j, 0.5, 40, 35) == vec3{});
+		do
+			j.update(rng, 36, 84, 60, 60, 1);
+		while (!j.side());
+		const auto k{fight_keys(j, 0.9, 0.8)};
+		CHECK(near(k.forward, 0.9, 1e-12) && near(std::abs(k.sideways), 0.8, 1e-12) && near(std::abs(k.vertical), 0.8, 1e-12));
+		CHECK(fight_keys(j, 0.9, 0.8, true).forward == 0);
+		CHECK(fight_keys(j, -0.9, 0.8, true).forward < 0);
+		CHECK(fight_keys(j, -0.9, 0.8, false, true).forward == 0);
+		CHECK(fight_keys(j, 0.9, 0.8, false, true).forward > 0);
+		CHECK(fight_keys(j, 0.9, 0).sideways == 0);
+		/* A narrow band: the proportional thrust, gentle near the
+		 * distance, full far off, braking a fast approach.
+		 */
+		CHECK(approach_thrust(11, 11, 0, 0.9, 58) == 0);
+		CHECK(approach_thrust(200, 11, 0, 0.9, 58) == 1);
+		CHECK(approach_thrust(12, 11, 30, 0.9, 58) < -0.5);
+		CHECK(approach_thrust(1, 1, 0, 0.9, 0) == 0);
+	}
+	/* The slide: starts beyond SLIDE_START the way the ship slides (else
+	 * the preferred way), holds its key down to SLIDE_END.
+	 */
+	{
+		slide_state sl;
+		CHECK(sl.update(radians(50), 20, 1) == 0);
+		CHECK(sl.update(radians(70), -20, 1) == -1);
+		CHECK(sl.update(radians(40), 30, 1) == -1);
+		CHECK(sl.update(radians(30), 30, 1) == 0);
+		CHECK(sl.update(radians(90), 1, -1) == -1);
+		CHECK(slide_keys(-1).sideways == -1 && slide_keys(1).sideways == 1 && slide_keys(1).forward == 0);
+	}
+	/* The strafe keys do not flip at the tick rate: the other way counts
+	 * once the key has not been pushed its way for KEY_FLIP_TICKS
+	 * (released meanwhile), at once for a dodge; a small push is no key;
+	 * forward is never touched.
+	 */
+	{
+		lateral_keys lk;
+		CHECK(lk.apply({1, 0, 1}, 0).x == 1);
+		auto v{lk.apply({-1, 0.5, 1}, 1)};
+		CHECK(v.x == 0 && v.y == 0.5 && v.z == 1);
+		for (uint32_t t = 2; t < KEY_FLIP_TICKS; ++t)
+			CHECK(lk.apply({-1, 0, 1}, t).x == 0);
+		CHECK(lk.apply({-1, 0, 1}, KEY_FLIP_TICKS).x == -1);
+		/* Flicker never flips the key. */
+		for (uint32_t t = 100; t < 200; ++t)
+			CHECK(lk.apply({t % 2 ? 1.0 : -1.0, 0, 0}, t).x <= 0);
+		/* Nor does a flicker through a small push. */
+		for (uint32_t t = 200; t < 300; ++t)
+			CHECK(lk.apply({t % 3 == 0 ? -1.0 : t % 3 == 1 ? 0.1 : 1.0, 0, 0}, t).x <= 0.1);
+		CHECK(lk.apply({0.2, 0, 0}, 400).x == 0.2);
+		CHECK(lk.apply({0.9, 0, 0}, 401).x == 0.9);
+		CHECK(lk.apply({-0.9, 0, 0}, 402, true).x == -0.9);
 	}
 	/* Dodge: a shot that will pass within the radius makes the bot move
 	 * away from where it passes; one that misses, or flies away, not.

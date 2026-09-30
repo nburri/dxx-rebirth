@@ -100,9 +100,11 @@ void test_skill_monotonic()
 			if (want_convert(shields, 150, a.weapon_smarts))
 				CHECK(want_convert(shields, 150, b.weapon_smarts));
 	}
-	/* Hotshot is the default, and what B1 to B4 played. */
+	/* Hotshot is the default; section 9.12: its strafe keys near full
+	 * thrust.
+	 */
 	CHECK(&skill_of(BOT_DEFAULT_SKILL) == &skill_table[2]);
-	CHECK(skill_of(bot_skill::hotshot).strafe_speed == 0.7);
+	CHECK(skill_of(bot_skill::hotshot).strafe_speed == 0.95);
 	CHECK(skill_of(bot_skill::hotshot).fire_duty == 1.0);
 	CHECK(effective_close_speed(style_of(bot_style::balanced)) == COMBAT_CLOSE_SPEED);
 }
@@ -145,7 +147,7 @@ void test_skill_extremes()
 		CHECK(s.reaction_ms >= 120);
 		CHECK(s.aim_sigma_deg > 0);
 		CHECK(s.fire_duty > 0 && s.fire_duty <= 1);
-		CHECK(s.strafe_speed >= 0 && s.strafe_speed < 1);
+		CHECK(s.strafe_speed >= 0 && s.strafe_speed <= 1);
 	}
 }
 
@@ -267,10 +269,10 @@ void test_style_goals()
 	/* Low shields: the cautious and the collector retreat, the balanced
 	 * and the aggressive fight on.
 	 */
-	CHECK(goal_for(bot_style::cautious, 1, 45) == goal_kind::retreat);
-	CHECK(goal_for(bot_style::collector, 1, 38) == goal_kind::retreat);
+	CHECK(goal_for(bot_style::cautious, 1, 60) == goal_kind::retreat);
+	CHECK(goal_for(bot_style::collector, 1, 48) == goal_kind::retreat);
 	CHECK(goal_for(bot_style::balanced, 1, 45) == goal_kind::engage);
-	CHECK(goal_for(bot_style::aggressive, 1, 25) == goal_kind::engage);
+	CHECK(goal_for(bot_style::aggressive, 1, 30) == goal_kind::engage);
 	/* Outgunned at 70 shields: the cautious bot breaks off. */
 	CHECK(goal_for(bot_style::cautious, 0.4, 70) == goal_kind::retreat);
 	CHECK(goal_for(bot_style::balanced, 0.4, 70) == goal_kind::engage);

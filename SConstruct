@@ -5052,6 +5052,12 @@ class DXXArchive(DXXCommon):
 		RuntimeTest('test-bot-flight', (
 			'common/unittest/bot_flight.cpp',
 			)),
+		# Test of how the bots fly a fight, measured as the movement
+		# analysis measures a human (bot_brain.h, bot_goals.h,
+		# movement_analysis.h).
+		RuntimeTest('test-bot-fight-sim', (
+			'common/unittest/bot_fight_sim.cpp',
+			)),
 		# Test of the bots' resources and goals: the weapon table, the
 		# powerup values, the goal choice, the map knowledge, the memory
 		# of powerups and the afterburner (bot_goals.h).

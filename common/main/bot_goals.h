@@ -1757,6 +1757,20 @@ constexpr double AFTERBURNER_LIGHT_CHARGE{0.3};
 constexpr double AFTERBURNER_KEEP_CHARGE{0.05};
 /* Chasing a target further than this lights it (section 4.7). */
 constexpr double AFTERBURNER_CHASE_DISTANCE{150};
+/* Section 9.12: a long straight flight with no fight lights it only
+ * with this much charge and keeps it only above the reserve, so that a
+ * fight finds the bot with charge (the human burnt 6 % of such time;
+ * the bots, Insane only, almost never).  From Hotshot; Insane spends
+ * more of it.
+ */
+constexpr double AFTERBURNER_ROAM_LIGHT{0.9};
+/* A straight flight is long when the point the bot steers at is further
+ * than this (section 4.7 had 100).
+ */
+constexpr double BOT_LONG_STRAIGHT{150};
+constexpr double AFTERBURNER_ROAM_KEEP{0.5};
+constexpr double AFTERBURNER_ROAM_LIGHT_INSANE{0.7};
+constexpr double AFTERBURNER_ROAM_KEEP_INSANE{0.35};
 
 [[nodiscard]]
 constexpr bool want_afterburner(const afterburner_view &v)
@@ -1768,12 +1782,16 @@ constexpr bool want_afterburner(const afterburner_view &v)
 		v.chasing_far ||
 		(v.retreating && level >= static_cast<unsigned>(afterburner_use::retreat)) ||
 		(v.dodging && level >= static_cast<unsigned>(afterburner_use::dodge)) ||
-		(v.turn_boost && level >= static_cast<unsigned>(afterburner_use::retreat)) ||
-		(v.long_straight && level >= static_cast<unsigned>(afterburner_use::roam))
+		(v.turn_boost && level >= static_cast<unsigned>(afterburner_use::retreat))
 	};
-	if (!reason)
-		return false;
-	return v.charge > (v.burning ? AFTERBURNER_KEEP_CHARGE : AFTERBURNER_LIGHT_CHARGE);
+	if (reason)
+		return v.charge > (v.burning ? AFTERBURNER_KEEP_CHARGE : AFTERBURNER_LIGHT_CHARGE);
+	if (v.long_straight && level >= static_cast<unsigned>(afterburner_use::retreat))
+	{
+		const bool insane{level >= static_cast<unsigned>(afterburner_use::roam)};
+		return v.charge > (v.burning ? (insane ? AFTERBURNER_ROAM_KEEP_INSANE : AFTERBURNER_ROAM_KEEP) : (insane ? AFTERBURNER_ROAM_LIGHT_INSANE : AFTERBURNER_ROAM_LIGHT));
+	}
+	return false;
 }
 
 inline constexpr std::array<afterburner_use, BOT_SKILL_COUNT> afterburner_by_skill{{
