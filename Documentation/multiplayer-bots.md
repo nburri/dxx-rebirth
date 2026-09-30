@@ -3213,7 +3213,7 @@ go 0.25 and 0.7 of the way from the base value):
 |---|---|
 | `style.*` (all 12) | the bot's `style_params`: retreat, engage and collect weights, range scale, hunt memory, dodge bonus, mines, strafe and closing pace, behind and outgunned, afterburner chase distance |
 | `skill.strafe`, `strafe_min_ms`, `strafe_max_ms`, `strafe_vertical`, `strafe_speed`, `dodge_prob` | the movement fields of the bot's `skill_params` (a skill that neither strafes nor dodges, Trainee, still does not) |
-| `tune.range_lo`, `tune.range_hi` | the fight band (`tune_params`, in place of 35–95); with both, `style.range_scale` (the same measurement) is 1 |
+| `tune.range_lo`, `tune.range_hi` | the fight band (`tune_params`, in place of 35–95); with either, `style.range_scale` (the same measurement) is 1, so a band of 400 is not scaled to 1200 |
 | `tune.reverse_turn`, `reverse_turn_speed`, `turn_boost`, `turn_boost_burn` | the bot's `turn_habits` (§9.12) |
 | `tune.burn_retreat` | the share of the draws of a flight turned away that light the afterburner: the measured share of the fleeing time over 0.4, what a bot that burns at every draw reaches |
 | `tune.burn_roam` | the share of the draws (every 2 s) on a long straight flight that may light it: the measured share of the time with no enemy in sight over 0.05 |

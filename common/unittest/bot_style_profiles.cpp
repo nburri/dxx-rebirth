@@ -265,6 +265,15 @@ void test_real_profile()
 		CHECK(c.tune.missile_interval_scale < 0 && c.tune.volley_size < 0 && c.tune.pursuit_seconds < 0 && c.tune.grab_detour_scale == 1);
 		CHECK(c.style.range_scale == balanced.range_scale);
 	}
+	/* One edge alone: the band is the profile's too, never scaled. */
+	{
+		const auto q{parse_style_profile("format = 1\nstyle.range_scale = 3\ntune.range_lo = 400\n")};
+		CHECK(q);
+		const auto c{apply_style_profile(*q, bot_skill::hotshot)};
+		CHECK(c.style.range_scale == 1 && c.tune.range_lo == 400 && c.tune.range_hi == 410);
+		const auto r{parse_style_profile("format = 1\nstyle.range_scale = 3\n")};
+		CHECK(apply_style_profile(*r, bot_skill::hotshot).style.range_scale == 3);
+	}
 }
 
 /* Every value a file can give stays in its range, however bad the file. */
@@ -278,6 +287,8 @@ void check_sane(const style_profile_params &b)
 	CHECK(in(b.style.retreat_shields, 5, 90) && in(b.style.engage_weight, 0.5, 1.8) && in(b.style.range_scale, 0.5, 3));
 	CHECK(in(b.style.burn_chase_distance, 40, 1000) && in(b.style.chase_memory, 0.4, 2.5));
 	CHECK(in(b.tune.range_lo, 15, 400) && in(b.tune.range_hi, b.tune.range_lo + 10, 810));
+	/* A band of the profile's is never scaled. */
+	CHECK(b.style.range_scale == 1 || (b.tune.range_lo == 35 && b.tune.range_hi == 95));
 	CHECK(in(b.tune.turns.reverse, 0, 1) && in(b.tune.turns.reverse_speed, 0, 1) && in(b.tune.turns.boost, 0, 1) && in(b.tune.turns.boost_burn, 0, 1));
 	CHECK(in(b.tune.flee_burn, 0, 1) && in(b.tune.roam_burn, 0, 1) && in(b.tune.grab_detour_scale, 0.25, 3));
 	CHECK(b.tune.missile_interval_scale < 0 || in(b.tune.missile_interval_scale, 0.3, 4));

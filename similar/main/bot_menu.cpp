@@ -338,13 +338,30 @@ struct bot_edit_menu
 	std::array<newmenu_item, count> m;
 	std::array<char, CALLSIGN_LEN + 1> name_text{};
 	char skill_text[40]{};
-	char style_text[40]{};
+	char style_text[56]{};
 	char team_text[40]{};
 	ntstring<NM_MAX_TEXT_LEN> skill_saved, style_saved, team_saved;
+	/* Section 9.13: the bot's style profile is not loaded (its file is
+	 * gone): the slider's first place stands for it.
+	 */
+	const char *missing_profile{};
+	unsigned missing_choice{};
+	void note_missing(const b::bot_style st, const b::style_name &profile)
+	{
+		missing_profile = nullptr;
+		if (profile[0] && !bots_style_library().find(profile.data()))
+		{
+			missing_profile = profile.data();
+			missing_choice = style_choice(st, profile);
+		}
+	}
 	void update_labels()
 	{
 		std::snprintf(skill_text, sizeof(skill_text), "Skill: %s", skill_name(b::bot_skill{static_cast<uint8_t>(m[skill].value)}));
-		std::snprintf(style_text, sizeof(style_text), "Style: %s", style_choice_name(static_cast<unsigned>(m[style].value)));
+		if (missing_profile && static_cast<unsigned>(m[style].value) == missing_choice)
+			std::snprintf(style_text, sizeof(style_text), "Style: %s (no file)", missing_profile);
+		else
+			std::snprintf(style_text, sizeof(style_text), "Style: %s", style_choice_name(static_cast<unsigned>(m[style].value)));
 		if (team_mode)
 			std::snprintf(team_text, sizeof(team_text), "Team: %s", team_name(b::bot_team{static_cast<uint8_t>(m[team].value)}));
 		else
@@ -388,6 +405,7 @@ void run_bot_edit(const unsigned i, const network_game_type mode)
 	nm_set_item_input(e.m[bot_edit_menu::name], e.name_text);
 	nm_set_item_slider(e.m[bot_edit_menu::skill], e.skill_text, static_cast<unsigned>(c.skill), 0, b::BOT_SKILL_COUNT - 1, e.skill_saved);
 	nm_set_item_slider(e.m[bot_edit_menu::style], e.style_text, style_choice(c.style, c.profile), 0, style_choice_max(), e.style_saved);
+	e.note_missing(c.style, c.profile);
 	if (e.team_mode)
 		nm_set_item_slider(e.m[bot_edit_menu::team], e.team_text, static_cast<unsigned>(c.team), 0, b::BOT_TEAM_COUNT - 1, e.team_saved);
 	else
@@ -814,6 +832,7 @@ bool run_ingame_edit(const bot_in_game *const existing)
 	nm_set_item_input(e.m[bot_edit_menu::name], e.name_text);
 	nm_set_item_slider(e.m[bot_edit_menu::skill], e.skill_text, static_cast<unsigned>(start.skill), 0, b::BOT_SKILL_COUNT - 1, e.skill_saved);
 	nm_set_item_slider(e.m[bot_edit_menu::style], e.style_text, style_choice(start.style, start.profile), 0, style_choice_max(), e.style_saved);
+	e.note_missing(start.style, start.profile);
 	if (e.team_mode)
 		nm_set_item_slider(e.m[bot_edit_menu::team], e.team_text, static_cast<unsigned>(team), 0, b::BOT_TEAM_COUNT - 1, e.team_saved);
 	else

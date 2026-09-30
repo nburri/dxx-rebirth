@@ -377,9 +377,9 @@ inline std::optional<style_profile> parse_style_profile(const std::string_view t
  * `skill.` and `tune.` key drives the bot.  The `tune.` keys become the
  * bot's tune_params:
  *
- * - `tune.range_lo`, `tune.range_hi`: the fight band; with both, the band
- *   is the profile's own and `style.range_scale` (the same measurement)
- *   is not applied on top (1);
+ * - `tune.range_lo`, `tune.range_hi`: the fight band; with either, the
+ *   band is the profile's own and `style.range_scale` (the same
+ *   measurement) is not applied on top (1);
  * - `tune.reverse_turn`, `reverse_turn_speed`, `turn_boost`,
  *   `turn_boost_burn`: the turn habits;
  * - `tune.burn_retreat` (a share of the fleeing time) and
@@ -461,7 +461,11 @@ inline style_profile_params apply_style_profile(const style_profile &p, const bo
 	auto &t{r.tune};
 	t.range_lo = blend("tune.range_lo", t.range_lo, same);
 	t.range_hi = std::max(t.range_lo + 10, blend("tune.range_hi", t.range_hi, same));
-	if (p.find("tune.range_lo") && p.find("tune.range_hi"))
+	/* The review of PR #64: with either edge (a hand-written file may
+	 * give one), the band is the profile's: the range scale on top would
+	 * take a band of 400 units to 1200.
+	 */
+	if (p.find("tune.range_lo") || p.find("tune.range_hi"))
 		s.range_scale = 1;
 	auto &h{t.turns};
 	h.reverse = blend("tune.reverse_turn", h.reverse, same);
