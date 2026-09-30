@@ -5058,6 +5058,13 @@ class DXXArchive(DXXCommon):
 		RuntimeTest('test-bot-fight-sim', (
 			'common/unittest/bot_fight_sim.cpp',
 			)),
+		# Test of the bots that fly a style profile: a real profile
+		# applied, the styles folder, the netgame profile, the chat
+		# (bot_style_profile.h, bot_style_library.h, bot_profile.h,
+		# bot_command.h).
+		RuntimeTest('test-bot-style-profiles', (
+			'common/unittest/bot_style_profiles.cpp',
+			)),
 		# Test of the bots' resources and goals: the weapon table, the
 		# powerup values, the goal choice, the map knowledge, the memory
 		# of powerups and the afterburner (bot_goals.h).

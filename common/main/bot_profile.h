@@ -21,6 +21,14 @@
  * A bot line is name, skill 0-4, style 0-3, team (0 auto, 1 blue, 2 red);
  * the three numbers are read from the right, so a name may hold a comma.
  * A file without bot lines (older builds) leaves the setup as it is.
+ *
+ * Section 9.13: a bot (and the default) that flies a style profile has
+ * a line with the profile's name besides, its style number being the
+ * profile's base style (what the bot flies when the file is gone, and
+ * what an older build reads):
+ *
+ *	BotDefaultStyle=evilcow style
+ *	BotStyle1=evilcow style
  */
 
 #pragma once
@@ -36,6 +44,7 @@
 #include <string_view>
 
 #include "bot_brain.h"
+#include "bot_style_library.h"
 
 namespace dcx::bot {
 
@@ -51,6 +60,8 @@ struct profile_entry
 	bot_skill skill{BOT_DEFAULT_SKILL};
 	bot_style style{bot_style::balanced};
 	bot_team team{bot_team::automatic};
+	/* Section 9.13: the style profile it flies (empty: `style`). */
+	style_name profile{};
 	constexpr bool operator==(const profile_entry &) const = default;
 };
 
@@ -61,28 +72,42 @@ struct bot_profile
 	bot_style default_style{bot_style::balanced};
 	bool replace{true};
 	std::array<profile_entry, BOT_PROFILE_MAX_BOTS> bots{};
+	/* Section 9.13: the default's style profile (empty: default_style). */
+	style_name default_profile{};
 	constexpr bool operator==(const bot_profile &) const = default;
 };
+
+/* The most lines format_profile writes. */
+constexpr std::size_t BOT_PROFILE_MAX_LINES{4 + 2 * BOT_PROFILE_MAX_BOTS};
 
 using profile_line = std::array<char, BOT_PROFILE_LINE_SIZE>;
 
 /* The lines of `p` (without newlines) into `out`; returns how many (0
- * if `out` is too small: it needs 3 + p.count lines).
+ * if `out` is too small: it needs BOT_PROFILE_MAX_LINES lines, or 3 +
+ * p.count and one per style profile).
  */
 inline std::size_t format_profile(const bot_profile &p, const std::span<profile_line> out)
 {
 	const unsigned count{std::min<unsigned>(p.count, BOT_PROFILE_MAX_BOTS)};
-	if (out.size() < 3 + count)
+	std::size_t need{3 + count + (p.default_profile[0] ? 1u : 0u)};
+	for (unsigned i = 0; i < count; ++i)
+		need += p.bots[i].profile[0] ? 1 : 0;
+	if (out.size() < need)
 		return 0;
-	std::snprintf(out[0].data(), BOT_PROFILE_LINE_SIZE, "BotCount=%u", count);
-	std::snprintf(out[1].data(), BOT_PROFILE_LINE_SIZE, "BotDefault=%u,%u", static_cast<unsigned>(p.default_skill), static_cast<unsigned>(p.default_style));
-	std::snprintf(out[2].data(), BOT_PROFILE_LINE_SIZE, "BotReplace=%u", p.replace ? 1u : 0u);
+	std::size_t n{0};
+	std::snprintf(out[n++].data(), BOT_PROFILE_LINE_SIZE, "BotCount=%u", count);
+	std::snprintf(out[n++].data(), BOT_PROFILE_LINE_SIZE, "BotDefault=%u,%u", static_cast<unsigned>(p.default_skill), static_cast<unsigned>(p.default_style));
+	if (p.default_profile[0])
+		std::snprintf(out[n++].data(), BOT_PROFILE_LINE_SIZE, "BotDefaultStyle=%.31s", p.default_profile.data());
+	std::snprintf(out[n++].data(), BOT_PROFILE_LINE_SIZE, "BotReplace=%u", p.replace ? 1u : 0u);
 	for (unsigned i = 0; i < count; ++i)
 	{
 		const auto &b{p.bots[i]};
-		std::snprintf(out[3 + i].data(), BOT_PROFILE_LINE_SIZE, "Bot%u=%.8s,%u,%u,%u", i, b.name.data(), static_cast<unsigned>(b.skill), static_cast<unsigned>(b.style), static_cast<unsigned>(b.team));
+		std::snprintf(out[n++].data(), BOT_PROFILE_LINE_SIZE, "Bot%u=%.8s,%u,%u,%u", i, b.name.data(), static_cast<unsigned>(b.skill), static_cast<unsigned>(b.style), static_cast<unsigned>(b.team));
+		if (b.profile[0])
+			std::snprintf(out[n++].data(), BOT_PROFILE_LINE_SIZE, "BotStyle%u=%.31s", i, b.profile.data());
 	}
-	return 3 + count;
+	return n;
 }
 
 namespace detail {
@@ -134,6 +159,10 @@ class profile_reader
 	bot_profile m_profile;
 	/* Bot line `i` was read and accepted. */
 	std::array<bool, BOT_PROFILE_MAX_BOTS> m_read{};
+	/* Section 9.13: the style profile lines (in any order with the bot
+	 * lines).
+	 */
+	std::array<style_name, BOT_PROFILE_MAX_BOTS> m_profiles{};
 	bool m_seen{};
 public:
 	/* Line `key`=`value`: true if it is a bot key (taken, or ignored as
@@ -162,6 +191,22 @@ public:
 				m_profile.default_skill = *k;
 			if (const auto s{detail::parse_enum<bot_style, BOT_STYLE_COUNT>(*style_field)})
 				m_profile.default_style = *s;
+			return true;
+		}
+		if (rest == "DefaultStyle")
+		{
+			m_seen = true;
+			m_profile.default_profile = make_style_name(value);
+			return true;
+		}
+		if (rest.starts_with("Style"))
+		{
+			const auto i{detail::parse_unsigned(rest.substr(5))};
+			if (!i)
+				return false;
+			m_seen = true;
+			if (*i < BOT_PROFILE_MAX_BOTS)
+				m_profiles[*i] = make_style_name(value);
 			return true;
 		}
 		if (rest == "Replace")
@@ -218,7 +263,9 @@ public:
 			if (i >= p.count)
 				p.bots[i] = {};
 			else if (!m_read[i])
-				p.bots[i] = {.skill = p.default_skill, .style = p.default_style};
+				p.bots[i] = {.skill = p.default_skill, .style = p.default_style, .profile = p.default_profile};
+			else
+				p.bots[i].profile = m_profiles[i];
 		}
 		return p;
 	}
@@ -237,7 +284,7 @@ public:
 [[nodiscard]]
 inline std::string replace_profile_bot_lines(const std::string_view text, const bot_profile &p, const std::string_view version_key)
 {
-	std::array<profile_line, 3 + BOT_PROFILE_MAX_BOTS> lines;
+	std::array<profile_line, BOT_PROFILE_MAX_LINES> lines;
 	const auto n{format_profile(p, lines)};
 	std::string block;
 	for (std::size_t i = 0; i < n; ++i)

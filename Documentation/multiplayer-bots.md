@@ -7,7 +7,7 @@ weapon choice, §9.2), stage B4 (secondaries, §9.4, §9.6) and stage B2
 humans replacing bots, §9.7) and stage B5 (managing bots during the game:
 the in-game Bots screen and the `/bot` chat command, §6.4, §9.11) are
 implemented; §9.12 retunes their flight after the first recordings of a
-human against them. Target branch: `experimental-netcode`
+human against them, and §9.13 lets them fly a player's style profile. Target branch: `experimental-netcode`
 (protocol v2, `Documentation/network-protocol-v2.md`, cited as "v2 §n").
 D2X-Rebirth only (v2 decision 6). Line numbers are omitted; function names are
 the anchors.
@@ -698,7 +698,7 @@ bots, in the modes bots play (anarchy, team anarchy, bounty).
   | `/bot add [skill] [style] [name]` | adds a bot; what is left out is the "new bots" skill or style, and the next built-in name |
   | `/bot remove <name\|all>` | removes the bot, or all |
   | `/bot skill <name\|all> <skill>` | trainee, rookie, hotshot, ace, insane |
-  | `/bot style <name\|all> <style>` | balanced, aggressive, cautious, collector |
+  | `/bot style <name\|all> <style>` | balanced, aggressive, cautious, collector, or a loaded style profile's word (§9.13) |
   | `/bot list` | one HUD line per bot, for the host only |
   | `/bot save` | as "Save as default setup" |
   | `/bot`, `/bot help` | the usage |
@@ -717,6 +717,11 @@ bots, in the modes bots play (anarchy, team anarchy, bounty).
   the host can manage bots"; the line is not sent as chat. A chat line
   holds 33 characters, so a long command needs the short words
   (`/bot add hot agg ravager`).
+  Section 9.13: in a style's place a loaded style profile's word (its
+  player's callsign, `/bot add hot evilcow`) chooses that profile; in
+  `/bot add` a word in the style's place is read as a profile's word
+  before it is read as a name (`/bot add hot bal evilcow` names a bot
+  "evilcow").
 - **Limits.** A bot is added only while a level is played (not between
   levels, not during the reactor countdown), and not while the host
   serves a human's join (a moment later it works). It takes the slot a
@@ -746,6 +751,11 @@ bots, in the modes bots play (anarchy, team anarchy, bounty).
   ```
 
   The fields are name, skill 0–4, style 0–3, and team (0 auto, 1 blue, 2 red).
+  Section 9.13: a bot that flies a style profile has a line
+  `BotStyle<n>=<profile name>` besides (and the default
+  `BotDefaultStyle=<profile name>`); its style number is the profile's
+  base style, what an older build (which ignores the line) or a host
+  without the file flies.
   The file is written when the setup menu closes. What the host changes
   during a game (§6.4) stays in that game; the saved setup changes only
   with "Save as default setup" (or `/bot save`), which writes the bots
@@ -3146,6 +3156,110 @@ The simulation is open space: no walls to slide along, no pickups, no
 enemy fire to dodge, and an enemy that is no human; its numbers are for
 comparing the code before and after, and the next recordings of real
 games will tell how close the bots came.
+
+### 9.13 Step 3 of the movement recordings: bots that fly a style profile
+
+`movrec-analyse` (Documentation/movement-recording.md §8) turns the
+recordings of a player into a `.botstyle` profile. The host now loads
+them and bots fly them.
+
+**Where the files go.** The folder `botstyles/` of the PhysFS write
+directory, next to the pilot files and `recordings/` (Linux
+`~/.d2x-rebirth/botstyles/`, macOS `~/Library/Preferences/D2X
+Rebirth/botstyles/`, Windows the game's folder). The game makes the
+folder. It reads every `*.botstyle` file there when the setup starts,
+whenever a Bots screen opens (a file dropped in meanwhile appears) and
+when a game starts, in the order of the file names; the console lists
+what it loaded (`bots: style "evilcow style" from
+botstyles/evilcow.botstyle (base Balanced, /bot word evilcow)`) and why
+a file was refused. Only the host needs the files: the bots are flown on
+the host, the clients see ordinary players, nothing goes over the
+network but the notices' text.
+
+**Untrusted files** (`bot_style_library.h`). A file is read up to
+64 KiB (a larger one is refused), at most 24 styles are kept, a file
+without a `format` line (or a newer one) is refused, the parser skips
+every line it does not understand, rejects values that are not finite
+numbers and clamps every known key to its range
+(`bot_style_profile.h`); a second file of the same name is refused. The
+style's name is the profile's `name`, else "<callsign> style", else
+"<file> style", cut to 31 characters of printable ASCII (a UTF-8 letter
+becomes one '?', no '=' or ','), so that it fits a menu line and the
+`.ngp` line. Its chat word is the callsign (else the file's name) in
+lower case letters, digits, `-` and `_`, up to 16, and none if that is a
+word `/bot` reads otherwise or another style has it.
+
+**Choosing it.** Every style slider (the Bots screen's default, the
+per-bot screen, the in-game screen's "new bots' style" and a bot's own
+screen) offers the four built-in styles, then the loaded profiles by
+name ("evilcow style"). The lists show the first seven letters. `/bot
+add [skill] <word> [name]` and `/bot style <name|all> <word>` take the
+profile's word. A bot keeps the profile by name (`bot_config::profile`),
+with its base style as `style`; `.ngp` keeps both (§6.5).
+
+**The file is gone.** A bot whose profile is not loaded (the file was
+removed or renamed, or the setup came from another machine) flies the
+profile's base style, and the console says so once per bot (`bots:
+'ravager': no style "evilcow style" in botstyles/ (a .botstyle file): it
+flies Balanced`). Its setup line keeps the name, so the bot flies the
+profile again once the file is back; moving its style slider replaces
+it.
+
+**Every key drives the bot** (`apply_style_profile`, at every
+(re)spawn and change, at the bot's own skill; low and medium confidence
+go 0.25 and 0.7 of the way from the base value):
+
+| Keys | What they set |
+|---|---|
+| `style.*` (all 12) | the bot's `style_params`: retreat, engage and collect weights, range scale, hunt memory, dodge bonus, mines, strafe and closing pace, behind and outgunned, afterburner chase distance |
+| `skill.strafe`, `strafe_min_ms`, `strafe_max_ms`, `strafe_vertical`, `strafe_speed`, `dodge_prob` | the movement fields of the bot's `skill_params` (a skill that neither strafes nor dodges, Trainee, still does not) |
+| `tune.range_lo`, `tune.range_hi` | the fight band (`tune_params`, in place of 35–95); with both, `style.range_scale` (the same measurement) is 1 |
+| `tune.reverse_turn`, `reverse_turn_speed`, `turn_boost`, `turn_boost_burn` | the bot's `turn_habits` (§9.12) |
+| `tune.burn_retreat` | the share of the draws of a flight turned away that light the afterburner: the measured share of the fleeing time over 0.4, what a bot that burns at every draw reaches |
+| `tune.burn_roam` | the share of the draws (every 2 s) on a long straight flight that may light it: the measured share of the time with no enemy in sight over 0.05 |
+| `tune.missile_interval_scale` | in place of the style's scale of the time between volleys |
+| `tune.volley_size` | the rounds of a good volley of light missiles (rounded; a smart missile burst at most 3), in place of the table |
+| `tune.pursuit_seconds` | how long a lost target is pursued, in place of the skill's and style's (0: it lets it go, no pursuit starts) |
+| `tune.grab_detour` | a scale of the detour a grab may take in a fight: the measured share of pickups off course over 0.45, the bots' with the scale 1 |
+| `measured.*` | not read: statistics for people |
+
+No key is left unapplied. One caveat: the analysis counts a large turn
+as reversed only with reverse thrust in 40 % of it, and the bot's
+reverse turn holds its momentum away from the target (forward thrust
+while the nose points away, reverse in the second half), so a bot that
+flies every turn backwards still measures about the share of the others
+(`test-bot-fight-sim`); the measured human share (0.11) is applied as
+the bot's share, which makes its turns what they were measured to be
+only as far as the two definitions agree.
+
+**The real profile.** `evilcow.botstyle` (both evenings) on a Hotshot
+bot: strafe runs 200–700 ms, vertical 0.33, strafe thrust 0.9; engage
+0.95, collect 1.38, hunt memory × 0.4, closing × 0.87, no afterburner
+chase; band 41–97; turns reversed 0.11 at 0.71 of the top speed, pushes
+0.74 with the afterburner in 0.26; flight turned away burnt in 0.54 of
+the draws, long flights always; missile interval × 1.39, volleys of 2;
+no pursuit; grab detours × 0.8. Its retreat level (65 in the one game
+it was measured) is not in that file (both games together gave no
+clear level), so the bot keeps Balanced's 45. In `test-bot-fight-sim`
+(`-f FILE` flies a file) it flies at 48 units/s (52 % flat out), 42
+strafe reversals per minute, vertical share 0.45, 180° in 1.6 s at 75 %,
+the afterburner 3.8 % of the time and 23 % when fleeing.
+
+**Tests** (`test-bot-style-profiles`, new): the real profile parsed,
+round-tripped and applied (every key's value in the bot, and the rules
+that read them: the pursuit that does not start, the volley's size, the
+missile interval, the grab's detour, the turn habits' shares, the
+strafe and closing thrust, the hunt memory; every skill; lower
+confidence; a built-in style's defaults); untrusted input (out of
+range, not a number, infinite, junk lines, 3000 random files of noise
+and random keys: every value in its range, every name clean); the
+library (names, words, duplicates, the limits); the `.ngp` lines (round
+trip, line length, order, an older file, "Save as default setup"); the
+chat with a profile's word. `test-bot-fight-sim` flies two made-up
+profiles and checks that their keys change the flight (bobbing, every
+own turn reversed, no burn fleeing; a far band backs off);
+`build/common/test-bot-style-profiles -f FILE` checks a file and prints
+the bot it makes at every skill.
 
 ---
 

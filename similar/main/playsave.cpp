@@ -1872,7 +1872,7 @@ void write_netgame_profile(const netgame_info *ng)
 #endif
 	{
 		/* Documentation/multiplayer-bots.md section 6.5. */
-		std::array<::dcx::bot::profile_line, 3 + ::dcx::bot::BOT_PROFILE_MAX_BOTS> lines;
+		std::array<::dcx::bot::profile_line, ::dcx::bot::BOT_PROFILE_MAX_LINES> lines;
 		const auto n{::dcx::bot::format_profile(bots_setup_profile(), lines)};
 		for (std::size_t i = 0; i < n; ++i)
 			PHYSFSX_printf(file, "%s\n", lines[i].data());

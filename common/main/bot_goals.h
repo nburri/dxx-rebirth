@@ -740,6 +740,10 @@ struct goal_inputs
 	double engage_weight{1};
 	double collect_weight{1};
 	bool collector{};
+	/* Section 9.13: the bot's scale of the detour for a grab in a fight
+	 * (tune_params::grab_detour_scale).
+	 */
+	double detour_scale{1};
 	/* Section 9.10: the bot pursues its (unseen) target: collections
 	 * are short detours (PURSUIT_COLLECT, PURSUIT_GRAB_PATH).
 	 */
@@ -879,9 +883,9 @@ constexpr double GRAB_DETOUR_COLLECTOR{1.5};
 constexpr double GRAB_DETOUR_FACTOR{1.3};
 
 [[nodiscard]]
-constexpr bool grab_is_detour(const double value, const double path_cost, const bool collector)
+constexpr bool grab_is_detour(const double value, const double path_cost, const bool collector, const double detour_scale = 1)
 {
-	const double scale{collector ? GRAB_DETOUR_COLLECTOR : 1.0};
+	const double scale{(collector ? GRAB_DETOUR_COLLECTOR : 1.0) * detour_scale};
 	return path_cost <= (value >= GRAB_HIGH_VALUE ? GRAB_DETOUR_HIGH_PATH : GRAB_DETOUR_PATH) * scale;
 }
 
@@ -1081,7 +1085,19 @@ struct pursuit_view
 	unsigned stronger_near{};
 	/* It is known to hold a mega or an earthshaker. */
 	bool target_heavy{};
+	/* Section 9.13: how long this bot pursues (a style profile's
+	 * tune.pursuit_seconds; 0: it lets a lost enemy go); negative: by
+	 * skill and style (pursuit_seconds).
+	 */
+	double seconds{-1};
 };
+
+/* How long the bot of `v` pursues. */
+[[nodiscard]]
+constexpr double pursuit_limit(const pursuit_view &v)
+{
+	return v.seconds >= 0 ? v.seconds : pursuit_seconds(v.skill, v.style);
+}
 
 /* Too weak to go on (or to start: `margin` more): below the style's
  * retreat threshold plus its break margin; Cautious also when behind.
@@ -1114,7 +1130,7 @@ constexpr bool pursuit_ambush(const pursuit_view &v)
 [[nodiscard]]
 constexpr pursuit_reason pursuit_start(const pursuit_view &v)
 {
-	if (v.since_engaged > PURSUIT_ENGAGED_WITHIN)
+	if (v.since_engaged > PURSUIT_ENGAGED_WITHIN || !(pursuit_limit(v) > 0))
 		return pursuit_reason::none;
 	if (pursuit_weak(v, PURSUIT_START_MARGIN) || pursuit_ambush(v))
 		return pursuit_reason::none;
@@ -1133,7 +1149,7 @@ constexpr pursuit_reason pursuit_start(const pursuit_view &v)
 [[nodiscard]]
 constexpr std::optional<pursuit_end> pursuit_stop(const pursuit_view &v, const double elapsed)
 {
-	if (elapsed > pursuit_seconds(v.skill, v.style))
+	if (elapsed > pursuit_limit(v))
 		return pursuit_end::expired;
 	if (pursuit_weak(v))
 		return pursuit_end::weak;
@@ -1261,7 +1277,7 @@ constexpr double grab_goal_utility(const goal_inputs &in, const double fight)
 	 */
 	if (!in.has_target && !(in.seek > 0))
 		return base;
-	if (!grab_is_detour(in.grab_value, in.grab_path, in.collector))
+	if (!grab_is_detour(in.grab_value, in.grab_path, in.collector, in.detour_scale))
 		return 0;
 	return std::max(fight * GRAB_DETOUR_FACTOR, ROAM_UTILITY * 2);
 }

@@ -1615,6 +1615,36 @@ constexpr unsigned FLEE_ROLL_TICKS{ticks_from_ms(2000)};
  */
 constexpr double FLEE_BURN_SHARE{0.5};
 
+/* Section 9.13 (Documentation/multiplayer-bots.md): the constants of the
+ * bot code that a style profile tunes (`tune.<name>` of a `.botstyle`
+ * file, apply_style_profile), per bot.  The defaults are the code's
+ * constants: a bot of a built-in style flies with these.
+ */
+struct tune_params
+{
+	/* The fight band before the style's range_scale (BOT_RANGE_LO/HI). */
+	double range_lo{35}, range_hi{95};
+	turn_habits turns;
+	/* The share of the draws of a flight turned away that light the
+	 * afterburner (FLEE_BURN_SHARE).
+	 */
+	double flee_burn{FLEE_BURN_SHARE};
+	/* The share of the draws on a long straight flight that may light
+	 * it (1: whenever the charge rule allows).
+	 */
+	double roam_burn{1};
+	/* Negative: the style's and the skill's (missile_interval_scale,
+	 * volley_size's table, pursuit_seconds).
+	 */
+	double missile_interval_scale{-1};
+	double volley_size{-1};
+	double pursuit_seconds{-1};
+	/* A scale of the detour a pickup may take in a fight
+	 * (grab_is_detour).
+	 */
+	double grab_detour_scale{1};
+};
+
 /* The evasion: across the line from the attacker, the side the ship
  * already moves to (momentum), else `side` (the bot's roll), with a
  * little away from the attacker.
