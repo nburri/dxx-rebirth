@@ -277,6 +277,8 @@ namespace dsx {
 struct netgame_info;
 void read_netgame_profile(netgame_info *ng);
 void write_netgame_profile(const netgame_info *ng);
+/* Only the bot setup (Bot_setup); every other line of the file stays. */
+void write_netgame_profile_bots();
 }
 #endif
 

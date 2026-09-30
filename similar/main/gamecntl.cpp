@@ -81,6 +81,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "playsave.h"
 
 #include "multi.h"
+#include "bot.h"
 #include "cntrlcen.h"
 #include "fuelcen.h"
 #include "state.h"
@@ -818,7 +819,13 @@ static window_event_result HandleSystemKey(const int key, const d_event::source 
 			case KEY_ESC:
 			{
 				const bool allow_saveload{!(Game_mode & GM_MULTI) || (+(Game_mode & GM_MULTI_COOP) && Player_num == 0)};
-				const auto choice = nm_messagebox_str(menu_title{nullptr}, allow_saveload ? nm_messagebox_tie("Abort Game", TXT_OPTIONS_, "Save Game...", TXT_LOAD_GAME) : nm_messagebox_tie("Abort Game", TXT_OPTIONS_), menu_subtitle{"Game Menu"});
+				/* Documentation/multiplayer-bots.md section 6.4: the
+				 * host of a network game with bots allowed manages them
+				 * here (never together with save and load: bots do not
+				 * play cooperative games).
+				 */
+				const bool allow_bots{!allow_saveload && bots_manageable()};
+				const auto choice = nm_messagebox_str(menu_title{nullptr}, allow_saveload ? nm_messagebox_tie("Abort Game", TXT_OPTIONS_, "Save Game...", TXT_LOAD_GAME) : allow_bots ? nm_messagebox_tie("Abort Game", TXT_OPTIONS_, "Bots...") : nm_messagebox_tie("Abort Game", TXT_OPTIONS_), menu_subtitle{"Game Menu"});
 				switch(choice)
 				{
 					case 0:
@@ -826,6 +833,15 @@ static window_event_result HandleSystemKey(const int key, const d_event::source 
 					case 1:
 						return HandleSystemKey(KEY_F2, {});
 					case 2:
+						if (allow_bots)
+						{
+							/* The game runs on while the screen is open
+							 * (as under the game menu itself); should it
+							 * end meanwhile, the screen closes itself.
+							 */
+							bots_ingame_menu();
+							return window_event_result::handled;
+						}
 						return HandleSystemKey(KEY_ALTED | KEY_F2, {});
 					case 3:
 						return HandleSystemKey(KEY_ALTED | KEY_F3, {});

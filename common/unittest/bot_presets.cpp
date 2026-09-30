@@ -23,6 +23,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <string_view>
 
 #include "bot_brain.h"
@@ -501,6 +502,68 @@ void test_profile()
 	}
 }
 
+/* Section 6.4: "Save as default setup" during a game replaces the bot
+ * lines of the pilot's profile and nothing else.
+ */
+void test_profile_bot_lines_only()
+{
+	const auto p{sample_profile()};
+	std::array<profile_line, 3 + BOT_PROFILE_MAX_BOTS> lines;
+	const auto n{format_profile(p, lines)};
+	CHECK(n == 3 + p.count);
+	std::string block;
+	for (std::size_t i = 0; i < n; ++i)
+		block += std::string(lines[i].data()) + "\n";
+	const auto read_back{[](const std::string_view text) {
+		profile_reader r;
+		for (std::size_t pos{0}; pos < text.size();)
+		{
+			const auto nl{text.find('\n', pos)};
+			const auto line{text.substr(pos, nl == std::string_view::npos ? std::string_view::npos : nl - pos)};
+			pos = nl == std::string_view::npos ? text.size() : nl + 1;
+			if (const auto eq{line.find('=')}; eq != std::string_view::npos)
+				r.parse(line.substr(0, eq), line.substr(eq + 1));
+		}
+		return r.result();
+	}};
+	/* A profile with other bots: every other line stays as it is (the
+	 * tracker the host chose, not the game's), the bot lines where they
+	 * were, a bot line beyond the new count gone.
+	 */
+	{
+		const std::string_view old{"game_name=My game\nTracker=1\ntrackernat=2\nBotCount=7\nBotDefault=0,0\nBotReplace=0\nBot0=a,0,0,0\nBot1=b,0,0,0\nBot2=c,0,0,0\nBot3=d,0,0,0\nBot4=e,0,0,0\nBot5=f,0,0,0\nBot6=g,0,0,0\nngp version=x\n"};
+		const auto now{replace_profile_bot_lines(old, p, "ngp version")};
+		CHECK(now == "game_name=My game\nTracker=1\ntrackernat=2\n" + block + "ngp version=x\n");
+		CHECK(read_back(now) == p);
+		/* Saving again changes nothing. */
+		CHECK(replace_profile_bot_lines(now, p, "ngp version") == now);
+	}
+	/* A profile of an older build, without bot lines: before the
+	 * version line.
+	 */
+	{
+		const auto now{replace_profile_bot_lines("game_name=g\nTracker=1\nngp version=x\n", p, "ngp version")};
+		CHECK(now == "game_name=g\nTracker=1\n" + block + "ngp version=x\n");
+	}
+	/* No version line, no final newline, a line without `=`, DOS line
+	 * ends, bot lines apart from each other: all kept, the bots once.
+	 */
+	{
+		const auto now{replace_profile_bot_lines("Bot0=x,1,1,1\r\njunk\r\nTracker=1\r\nBotCount=1\r\nKillGoal=3", p, "ngp version")};
+		CHECK(now == block + "junk\r\nTracker=1\r\nKillGoal=3\n");
+		CHECK(read_back(now) == p);
+	}
+	/* No profile yet: the bot lines alone. */
+	CHECK(replace_profile_bot_lines("", p, "ngp version") == block);
+	/* No bots: the three option lines, the old bots gone. */
+	{
+		bot_profile none;
+		none.replace = false;
+		const auto now{replace_profile_bot_lines("Tracker=1\nBotCount=1\nBot0=x,1,1,1\n", none, "ngp version")};
+		CHECK(now == "Tracker=1\nBotCount=0\nBotDefault=2,0\nBotReplace=0\n");
+		CHECK(read_back(now) == none);
+	}
+}
 
 /* Section 9.8: the BOT marker in the kill list, always (a grey `*`
  * without the ping column, the ping column's `BOT` with it), never in
@@ -531,6 +594,7 @@ int main()
 	test_style_goals();
 	test_fire_burst();
 	test_profile();
+	test_profile_bot_lines_only();
 	std::puts("test-bot-presets: all checks passed");
 	return 0;
 }

@@ -1197,12 +1197,9 @@ void PALETTE_FLASH_ADD(const int _dr, const int _dg, const int _db)
 #endif
 			30
 	};
-	const int nr{std::clamp(PaletteRedAdd + _dr, -maxval, maxval)};
-	const int ng{std::clamp(PaletteGreenAdd + _dg, -maxval, maxval)};
-	const int nb{std::clamp(PaletteBlueAdd + _db, -maxval, maxval)};
-	PaletteRedAdd = nr;
-	PaletteGreenAdd = ng;
-	PaletteBlueAdd = nb;
+	palette_channel_add(PaletteRedAdd, _dr, maxval);
+	palette_channel_add(PaletteGreenAdd, _dg, maxval);
+	palette_channel_add(PaletteBlueAdd, _db, maxval);
 }
 
 }
@@ -2365,9 +2362,16 @@ bool FireLaser(player_info &player_info, const control_info &Controls)
 			return false;
 		} else {
 			static fix64 Fusion_next_sound_time = 0;
+			/* The fraction of a glow unit carried from frame to frame
+			 * (palette_fusion_glow_frame).
+			 */
+			static int32_t Fusion_glow_remainder;
 
 			if (player_info.Fusion_charge == 0)
+			{
 				energy -= F1_0*2;
+				Fusion_glow_remainder = 0;
+			}
 
 			const auto Fusion_charge = (player_info.Fusion_charge += FrameTime);
 			energy -= FrameTime;
@@ -2381,8 +2385,12 @@ bool FireLaser(player_info &player_info, const control_info &Controls)
 			player_info.energy = energy;
 
 			{
+				/* The original added Fusion_charge >> 11 on every frame,
+				 * so the glow depended on the frame rate.  Add it at the
+				 * rate it had at 30 fps instead (palette_flash.h).
+				 */
 				int dg, db;
-				const int dr = Fusion_charge >> 11;
+				const int dr{palette_fusion_glow_frame(Fusion_charge, FrameTime, Fusion_glow_remainder)};
 				if (Fusion_charge < F1_0*2)
 					dg = 0, db = dr;
 				else

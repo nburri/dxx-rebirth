@@ -533,6 +533,16 @@ static inline void multi_send_endlevel_start(multi_endlevel_type)
 #endif
 /* Player `pnum` (the local player, or on the host a bot) exploded. */
 void multi_send_player_deres(deres_type_t type, playernum_t pnum);
+/* Host (Documentation/multiplayer-bots.md section 6.4): a chat line from
+ * the host to everyone (MULTI_MESSAGE), shown on the host's HUD too.
+ * At most 34 characters are sent; `text` must not hold ": " (the
+ * receiver would read a recipient).
+ */
+void multi_send_host_notice(const char *text);
+/* Host: Netgame.team_vector changed (a bot added or moved): the ships'
+ * colours, the cockpit, and the clients (MULTI_GMODE_UPDATE).
+ */
+void multi_host_teams_changed();
 }
 void multi_send_play_sound(sound_effect sound_num, fix volume, sound_stack once);
 void multi_send_create_explosion(playernum_t);
