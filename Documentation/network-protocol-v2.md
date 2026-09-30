@@ -2484,7 +2484,8 @@ not a demo played back (`net_combat_active`). Differences from §6.5,
   weapon follows or 0xFF), `WEAPON_HIT` 0x28 (28 bytes: `netid`,
   `weapon_id`, `kind` direct/splash/self, `target`, `cause`,
   `target_time`, point, segment, damage), `DAMAGE` 0x29 (24 bytes, with
-  the host's shields after it), `PLAYER_KILLED` 0x2A (14 bytes, the
+  the host's shields after it and the hit kind and cause, for the
+  movement recording), `PLAYER_KILLED` 0x2A (14 bytes, the
   scores after the kill) and `PLAYER_SPAWN` 0x2B (25 bytes). The design's
   `WANT_RESPAWN` in `INPUT` is not used: the host-assigned spawns
   (`SPAWN_REQUEST`/`SPAWN_SITE`) stay, and `PLAYER_SPAWN` announces the
