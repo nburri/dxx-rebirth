@@ -92,15 +92,17 @@ vec3 sub(const vec3 &a, const vec3 &b)
 	return {{a[0] - b[0], a[1] - b[1], a[2] - b[2]}};
 }
 
-/* The difference of two fix vectors, quantised with `shift`. */
+/* The difference of two fix vectors, quantised with `shift`; scaled
+ * down as a whole when too long (the flag).
+ */
 [[nodiscard]]
-std::array<std::int16_t, 3> rel16(const vms_vector &a, const vms_vector &b, const int shift)
+std::pair<std::array<std::int16_t, 3>, bool> rel16(const vms_vector &a, const vms_vector &b, const int shift)
 {
-	const auto one{[shift](const fix x, const fix y) {
-		const std::int64_t d{std::int64_t{x} - std::int64_t{y}};
-		return static_cast<std::int16_t>(std::clamp<std::int64_t>(d >> shift, INT16_MIN, INT16_MAX));
-	}};
-	return {{one(a.x, b.x), one(a.y, b.y), one(a.z, b.z)}};
+	return mr::scale_rel16({{
+		std::int64_t{a.x} - std::int64_t{b.x},
+		std::int64_t{a.y} - std::int64_t{b.y},
+		std::int64_t{a.z} - std::int64_t{b.z},
+	}}, shift);
 }
 
 struct player_track
@@ -115,6 +117,25 @@ struct player_track
 	std::uint8_t weapons{};
 	/* Session time + 1 of the last hit by each player, 0 = none. */
 	std::array<std::uint32_t, MAX_PLAYERS> hit_by_ms{};
+};
+
+/* Who holds a slot, across levels: a new occupant (another callsign, a
+ * bot in place of a human, or a player who left and came back) starts
+ * with a clean state, so that the old one's life, weapons and hits
+ * do not turn into events of the new one (no `respawn` or `weapon`
+ * event for the first sample of the newcomer, no "attacked by" from
+ * hits the old occupant took or dealt).
+ */
+struct slot_occupant
+{
+	bool in_game{};
+	bool bot{};
+	callsign_t callsign{};
+	/* The client's INPUT afterburner bit was 1 at least once: it is a
+	 * client that reports the afterburner (clients before exp-25 always
+	 * send 0, which is no information).
+	 */
+	bool afterburner_seen{};
 };
 
 struct recorder
@@ -136,6 +157,9 @@ struct recorder
 	fix64 last_game_time{};
 	const void *mission{};
 	std::array<player_track, MAX_PLAYERS> players{};
+	std::array<slot_occupant, MAX_PLAYERS> occupants{};
+	std::uint32_t last_sync_ms{};
+	bool sync_due{};
 	/* Line of sight between two players this tick: 0 unknown, 1 clear,
 	 * 2 blocked.
 	 */
@@ -314,6 +338,7 @@ void begin_level()
 	R.mission = Current_mission.get();
 	for (auto &t : R.players)
 		t = {};
+	R.sync_due = true;
 	mr::record_buffer buf;
 	put_record(mr::encode_level(buf, static_cast<std::int8_t>(std::clamp(Current_level_num, -128, 127)), static_cast<std::uint16_t>(R.segments), underlying_value(Game_mode), mission_name(), static_cast<const char *>(Current_level_name)));
 	announce_players(true);
@@ -360,6 +385,8 @@ bool begin_session()
 	R.level_known = false;
 	R.last_flush_ms = 0;
 	R.last_game_time = GameTime64;
+	R.occupants = {};
+	R.sync_due = true;
 
 	mr::file_header h;
 	h.tick_rate = static_cast<std::uint16_t>(R.sched.tick_rate());
@@ -542,10 +569,16 @@ void fill_context(mr::sample &s, const unsigned pid, const object &me, const d_r
 	}
 	if (e.type == object_type::OBJ_PLAYER && +(e.ctype.player_info.powerup_flags & player_flag::cloaked))
 		ctx |= mr::context_flag::enemy_cloaked;
+	const auto [rel_pos, pos_scaled]{rel16(e.pos, me.pos, mr::quant::REL_POS_SHIFT)};
+	const auto [rel_vel, vel_scaled]{rel16(e.mtype.phys_info.velocity, me.mtype.phys_info.velocity, mr::quant::VEL_SHIFT)};
+	if (pos_scaled)
+		ctx |= mr::context_flag::rel_pos_scaled;
+	if (vel_scaled)
+		ctx |= mr::context_flag::rel_vel_scaled;
 	s.context = ctx;
 	s.enemy_id = c.id;
-	s.enemy_rel_pos = rel16(e.pos, me.pos, mr::quant::REL_POS_SHIFT);
-	s.enemy_rel_vel = rel16(e.mtype.phys_info.velocity, me.mtype.phys_info.velocity, mr::quant::VEL_SHIFT);
+	s.enemy_rel_pos = rel_pos;
+	s.enemy_rel_vel = rel_vel;
 }
 
 void sample_player(const unsigned pid, const d_robot_info_array &Robot_info)
@@ -637,12 +670,20 @@ void sample_player(const unsigned pid, const d_robot_info_array &Robot_info)
 #if DXX_USE_MULTIPLAYER
 	else if (!local && mode_multi() && multi_i_am_master())
 	{
-		/* A client's own report (INPUT, section 5.3 bit 1). */
+		/* A client's own report (INPUT, section 5.3 bit 1); known only
+		 * once the client has set the bit (older clients never do).
+		 */
 		if (const auto ab{net_v2::host_input_afterburner(pid)}; ab >= 0)
 		{
-			s.flags2 |= mr::sample_flag2::afterburner_known;
+			auto &o{R.occupants[pid]};
 			if (ab)
-				s.flags |= mr::sample_flag::afterburner;
+				o.afterburner_seen = true;
+			if (o.afterburner_seen)
+			{
+				s.flags2 |= mr::sample_flag2::afterburner_known;
+				if (ab)
+					s.flags |= mr::sample_flag::afterburner;
+			}
 		}
 	}
 #endif
@@ -665,13 +706,68 @@ void sample_player(const unsigned pid, const d_robot_info_array &Robot_info)
 	put_record(mr::encode(buf, s));
 }
 
+/* Slot `pid` has a new occupant (or none any more): forget the old
+ * one's state.
+ */
+void check_occupant(const unsigned pid)
+{
+	auto &o{R.occupants[pid]};
+	const bool in_game{player_in_game(pid)};
+	const bool bot{in_game && is_bot(pid)};
+	const auto &cs{vcplayerptr(pid)->callsign};
+	if (in_game == o.in_game && (!in_game || (bot == o.bot && cs == o.callsign)))
+		return;
+	auto &t{R.players[pid]};
+	t.alive_known = false;
+	t.weapons_known = false;
+	t.hit_by_ms.fill(0);
+	for (auto &p : R.players)
+		p.hit_by_ms[pid] = 0;
+	o.in_game = in_game;
+	if (!in_game)
+		/* Gone (or between two levels): if the same player returns, it
+		 * is still the same program.
+		 */
+		return;
+	if (bot != o.bot || !(cs == o.callsign))
+		o.afterburner_seen = false;
+	o.bot = bot;
+	o.callsign = cs;
+}
+
+/* The link to the session's shared clock (sync_record). */
+void put_sync()
+{
+	R.sync_due = false;
+	R.last_sync_ms = R.sched.time_ms();
+#if DXX_USE_MULTIPLAYER
+	/* Only a network game has a clock to share. */
+	if (!(Game_mode & GM_NETWORK))
+		return;
+	mr::sync_record y{.time_ms = R.sched.time_ms()};
+	std::int64_t host_clock{};
+	if (net_v2::recording_clock(y.session_id, host_clock))
+		y.flags |= mr::sync_flag::clock_valid;
+	/* net time units are 1/65536 s */
+	y.host_ms = (host_clock * 1000) >> 16;
+	if (multi_i_am_master())
+		y.flags |= mr::sync_flag::host;
+	mr::record_buffer buf;
+	put_record(mr::encode(buf, y));
+#endif
+}
+
 void sample_tick(const std::uint32_t tick, const d_robot_info_array &Robot_info)
 {
 	for (auto &row : R.los)
 		row.fill(0);
+	for (unsigned pid{}; pid != MAX_PLAYERS; ++pid)
+		check_occupant(pid);
 	announce_players(false);
 	mr::record_buffer buf;
 	put_record(mr::encode(buf, mr::tick_record{tick, R.sched.time_ms()}));
+	if (R.sync_due || R.sched.time_ms() - R.last_sync_ms >= FLUSH_INTERVAL_MS)
+		put_sync();
 	for (unsigned pid{}; pid != player_count(); ++pid)
 		if (player_recorded(pid))
 			sample_player(pid, Robot_info);
@@ -748,8 +844,12 @@ void movement_record_fire_remote(const object &shooter, const uint8_t raw_weapon
 		return;
 	if (raw_weapon >= MISSILE_ADJUST)
 	{
+		/* A missile's MULTI_FIRE flags are its gun and (guided) its
+		 * generation, which the local path (do_missile_firing) does not
+		 * record: 0 for every missile, from every source.
+		 */
 		if (const auto w{static_cast<unsigned>(raw_weapon - MISSILE_ADJUST)}; w < MAX_SECONDARY_WEAPONS)
-			movement_record_fire(shooter, true, w, flags);
+			movement_record_fire(shooter, true, w, 0);
 	}
 	else if (raw_weapon < MAX_PRIMARY_WEAPONS)
 		movement_record_fire(shooter, false, raw_weapon, flags);
@@ -758,6 +858,22 @@ void movement_record_fire_remote(const object &shooter, const uint8_t raw_weapon
 	(void)raw_weapon;
 	(void)flags;
 #endif
+}
+
+namespace {
+
+/* A hit event of `damage` to player `vpid` by player `apid` (or none). */
+void record_damage(const unsigned vpid, const unsigned apid, const std::uint8_t akind, const unsigned weapon, const fix damage, const unsigned flags)
+{
+	if (!player_recorded(vpid) && (apid == mr::PLAYER_NONE || !player_recorded(apid)))
+		return;
+	/* Its own blast is not an attack on it. */
+	if (apid < MAX_PLAYERS && apid != vpid)
+		R.players[vpid].hit_by_ms[apid] = R.sched.time_ms() + 1;
+	const auto amount{std::clamp<fix>(damage >> 8, 0, 0xffff)};
+	put_event(mr::record_type::hit, vpid, apid, akind, weapon, static_cast<unsigned>(amount), flags | (locally_flown(vpid) ? mr::hit_flag::applied_here : 0u));
+}
+
 }
 
 void movement_record_hit(const object &victim, const object &weapon, const fix damage)
@@ -780,12 +896,26 @@ void movement_record_hit(const object &victim, const object &weapon, const fix d
 			apid = player_of(parent);
 		}
 	}
-	if (!player_recorded(vpid) && (apid == mr::PLAYER_NONE || !player_recorded(apid)))
+	record_damage(vpid, apid, akind, underlying_value(get_weapon_id(weapon)), damage, 0);
+}
+
+void movement_record_splash(const object &victim, const object *const origin, const object *const parent, const fix damage)
+{
+	if (!R.file)
 		return;
-	if (apid < MAX_PLAYERS)
-		R.players[vpid].hit_by_ms[apid] = R.sched.time_ms() + 1;
-	const auto amount{std::clamp<fix>(damage >> 8, 0, 0xffff)};
-	put_event(mr::record_type::hit, vpid, apid, akind, underlying_value(get_weapon_id(weapon)), static_cast<unsigned>(amount), locally_flown(vpid) ? mr::hit_flag::applied_here : 0u);
+	const auto vpid{player_of(victim)};
+	if (vpid == mr::PLAYER_NONE)
+		return;
+	unsigned apid{mr::PLAYER_NONE};
+	std::uint8_t akind{mr::attacker_kind::other};
+	/* The weapon's parent; else a ship that blew up (explode_badass_player). */
+	if (const auto a{parent ? parent : origin && origin->type == object_type::OBJ_PLAYER ? origin : nullptr})
+	{
+		akind = kind_of(*a);
+		apid = player_of(*a);
+	}
+	const unsigned weapon{origin && origin->type == object_type::OBJ_WEAPON ? underlying_value(get_weapon_id(*origin)) : 255u};
+	record_damage(vpid, apid, akind, weapon, damage, mr::hit_flag::splash);
 }
 
 void movement_record_kill(const object &victim, const object *const killer)

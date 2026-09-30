@@ -5104,6 +5104,18 @@ class DXXArchive(DXXCommon):
 		RuntimeTest('movrec-dump', (
 			'common/tools/movrec_dump.cpp',
 			)),
+		# Test of the analysis of the movement recordings and of the bot
+		# style profiles: synthetic recordings of scripted players with
+		# known habits, which the analysis must find again
+		# (movement_analysis.h, bot_style_profile.h).
+		RuntimeTest('test-movement-analysis', (
+			'common/unittest/movement_analysis.cpp',
+			)),
+		# Not a test: the analysis tool of the movement recordings
+		# (Documentation/movement-recording.md section 8).
+		RuntimeTest('movrec-analyse', (
+			'common/tools/movrec_analyse.cpp',
+			)),
 			)
 	del RuntimeTest
 

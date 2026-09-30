@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cctype>
+#include <cinttypes>
 #include <cmath>
 #include <cstring>
 #include <string>
@@ -50,6 +51,7 @@ struct player_summary
 	double enemy_dist_sum{};
 	std::uint64_t attacked{}, aimed_at{};
 	std::uint64_t fire_primary{}, fire_secondary{};
+	unsigned splash_taken{};
 	std::uint64_t hits_taken{}, hits_dealt{}, kills{}, deaths{}, suicides{}, respawns{}, pickups{}, weapon_switches{};
 	double damage_taken{}, damage_dealt{};
 	/* Reverse thrust while turning hard: the controls of the ships flown
@@ -105,6 +107,8 @@ int dump(const char *const path, const options &opt)
 	unsigned levels{};
 	std::string level_lines;
 	std::uint64_t ticks{}, events{};
+	unsigned syncs{};
+	std::uint32_t session_id{};
 	std::uint32_t last_time_ms{};
 	const auto wanted{[&opt](const unsigned pid) {
 		return opt.only_player < 0 || static_cast<unsigned>(opt.only_player) == pid;
@@ -140,6 +144,14 @@ int dump(const char *const path, const options &opt)
 			++ticks;
 			if (opt.records)
 				std::printf("tick %u t=%.3f\n", t->tick, t->time_ms / 1000.0);
+		}
+		else if (const auto y{std::get_if<sync_record>(&r)})
+		{
+			++syncs;
+			if (y->session_id)
+				session_id = y->session_id;
+			if (opt.records)
+				std::printf("sync t=%.3f session %08x host clock %.3f s%s%s\n", y->time_ms / 1000.0, y->session_id, static_cast<double>(y->host_ms) / 1000.0, (y->flags & sync_flag::clock_valid) ? "" : " (not valid)", (y->flags & sync_flag::host) ? " (host)" : "");
 		}
 		else if (const auto l{std::get_if<level_record>(&r)})
 		{
@@ -224,6 +236,8 @@ int dump(const char *const path, const options &opt)
 				case record_type::hit:
 					if (pid < MAX_PID)
 					{
+						if (e->flags & hit_flag::splash)
+							++players[pid].splash_taken;
 						++players[pid].hits_taken;
 						players[pid].damage_taken += e->value / 256.0;
 					}
@@ -275,17 +289,19 @@ int dump(const char *const path, const options &opt)
 	}
 	const auto &h{*result.header};
 	const auto &st{result.stats};
-	std::printf("%s: format %u, %s, %u Hz, started %lld (unix time)\n", path, h.version, h.program.c_str(), h.tick_rate, static_cast<long long>(h.start_unix_time));
+	std::printf("%s: format %u.%u, %s, %u Hz, started %" PRId64 " (unix time)\n", path, h.version, h.minor, h.program.c_str(), h.tick_rate, h.start_unix_time);
 	std::printf("  %s%s%s, local player %u, first level %d \"%s\" of \"%s\"\n",
 		(h.flags & static_cast<std::uint16_t>(header_flag::multiplayer)) ? "multiplayer" : "single player",
 		(h.flags & static_cast<std::uint16_t>(header_flag::host)) ? " host" : "",
 		(h.flags & static_cast<std::uint16_t>(header_flag::bots_recorded)) ? ", bots recorded" : "",
 		h.local_pid, h.level_num, h.level_name.c_str(), h.mission.c_str());
-	const std::size_t file_size{data->size()};
-	std::printf("  %llu bytes, %u chunks, %u damaged, %u missing, %llu records (%llu unknown, %llu malformed), %s\n",
-		static_cast<unsigned long long>(file_size), st.chunks_ok, st.chunks_bad, st.sequence_gaps, static_cast<unsigned long long>(st.records), static_cast<unsigned long long>(st.unknown_records), static_cast<unsigned long long>(st.malformed_records),
+	const std::uint64_t file_size{data->size()};
+	std::printf("  %" PRIu64 " bytes, %u chunks, %u damaged, %u missing, %" PRIu64 " records (%" PRIu64 " unknown, %" PRIu64 " malformed), %s\n",
+		file_size, st.chunks_ok, st.chunks_bad, st.sequence_gaps, st.records, st.unknown_records, st.malformed_records,
 		st.clean_end ? "closed by the game" : st.truncated ? "cut short (the game stopped while writing)" : "not closed");
-	std::printf("  %u level(s), %llu ticks, %.1f s of game time, %llu events\n", levels, static_cast<unsigned long long>(ticks), last_time_ms / 1000.0, static_cast<unsigned long long>(events));
+	std::printf("  %u level(s), %" PRIu64 " ticks, %.1f s of game time, %" PRIu64 " events\n", levels, ticks, last_time_ms / 1000.0, events);
+	if (syncs)
+		std::printf("  %u sync records, network session %08x\n", syncs, session_id);
 	std::fputs(level_lines.c_str(), stdout);
 	for (unsigned pid{}; pid != MAX_PID; ++pid)
 	{
@@ -293,18 +309,18 @@ int dump(const char *const path, const options &opt)
 		if (!p.samples || !wanted(pid))
 			continue;
 		const double dt{1.0 / h.tick_rate};
-		std::printf("  player %u \"%s\"%s%s: %llu samples, alive %.1f s\n", pid, p.callsign.c_str(), (p.flags & player_flag::bot) ? " (bot)" : "", (p.flags & player_flag::local) ? " (local)" : "", static_cast<unsigned long long>(p.samples), p.alive * dt);
+		std::printf("  player %u \"%s\"%s%s: %" PRIu64 " samples, alive %.1f s\n", pid, p.callsign.c_str(), (p.flags & player_flag::bot) ? " (bot)" : "", (p.flags & player_flag::local) ? " (local)" : "", p.samples, p.alive * dt);
 		std::printf("    mean speed %.1f, reversing %.0f%%, strafing %.0f%%, climbing/diving %.0f%% of the time alive\n", p.alive ? p.speed_sum / p.alive : 0.0, pct(p.reversing, p.alive), pct(p.strafing, p.alive), pct(p.climbing, p.alive));
 		if (p.ab_known)
-			std::printf("    afterburner %.1f%% of %llu known samples\n", pct(p.ab_on, p.ab_known), static_cast<unsigned long long>(p.ab_known));
+			std::printf("    afterburner %.1f%% of %" PRIu64 " known samples\n", pct(p.ab_on, p.ab_known), p.ab_known);
 		if (p.with_controls)
-			std::printf("    controls in %llu samples; turning hard %.0f%%, of which reverse thrust %.0f%%\n", static_cast<unsigned long long>(p.with_controls), pct(p.turning, p.with_controls), pct(p.turning_reverse, p.turning));
+			std::printf("    controls in %" PRIu64 " samples; turning hard %.0f%%, of which reverse thrust %.0f%%\n", p.with_controls, pct(p.turning, p.with_controls), pct(p.turning_reverse, p.turning));
 		std::printf("    enemy in sight %.0f%% (mean distance %.0f), under attack %.0f%%, aimed at %.0f%%\n", pct(p.enemy_seen, p.alive), p.enemy_seen ? p.enemy_dist_sum / p.enemy_seen : 0.0, pct(p.attacked, p.alive), pct(p.aimed_at, p.alive));
-		std::printf("    fired %llu primary, %llu secondary; hits dealt %llu (%.0f), taken %llu (%.0f); kills %llu, deaths %llu (%llu suicides), respawns %llu; pickups %llu, weapon switches %llu\n",
-			static_cast<unsigned long long>(p.fire_primary), static_cast<unsigned long long>(p.fire_secondary),
-			static_cast<unsigned long long>(p.hits_dealt), p.damage_dealt, static_cast<unsigned long long>(p.hits_taken), p.damage_taken,
-			static_cast<unsigned long long>(p.kills), static_cast<unsigned long long>(p.deaths), static_cast<unsigned long long>(p.suicides), static_cast<unsigned long long>(p.respawns),
-			static_cast<unsigned long long>(p.pickups), static_cast<unsigned long long>(p.weapon_switches));
+		std::printf("    fired %" PRIu64 " primary, %" PRIu64 " secondary; hits dealt %" PRIu64 " (%.0f), taken %" PRIu64 " (%.0f; %u splash); kills %" PRIu64 ", deaths %" PRIu64 " (%" PRIu64 " suicides), respawns %" PRIu64 "; pickups %" PRIu64 ", weapon switches %" PRIu64 "\n",
+			p.fire_primary, p.fire_secondary,
+			p.hits_dealt, p.damage_dealt, p.hits_taken, p.damage_taken, p.splash_taken,
+			p.kills, p.deaths, p.suicides, p.respawns,
+			p.pickups, p.weapon_switches);
 	}
 	return 0;
 }
