@@ -314,7 +314,7 @@ void test_combat_movement()
 				const auto to{target - s.pos};
 				face = normalized(to);
 				rate = line_of_sight_rate(to, -s.vel);
-				const auto k{fight_keys(juke, approach.update(length(to), juke.range()), effective_close_speed(st), effective_strafe_speed(sk, st))};
+				const auto k{fight_keys(juke, approach.update(length(to), juke.range(), 60) * effective_close_speed(st), effective_strafe_speed(sk, st))};
 				move = s.orient.to_world(lateral.apply(k.local(), ticks));
 				++ticks;
 				if (ticks > 60)

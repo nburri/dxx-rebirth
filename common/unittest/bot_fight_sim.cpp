@@ -417,7 +417,7 @@ flight_result fly(const pilot_setup &setup)
 						if (sl)
 							k = slide_keys(sl);
 						else
-							k = fight_keys(juke, approach.update(dist, juke.range()), effective_close_speed(st), effective_strafe_speed(sk, st));
+							k = fight_keys(juke, approach.update(dist, juke.range(), range_hi - range_lo) * effective_close_speed(st), effective_strafe_speed(sk, st));
 					}
 				}
 			}

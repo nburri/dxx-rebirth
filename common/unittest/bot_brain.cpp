@@ -694,18 +694,30 @@ void test_fight_pieces()
 		CHECK(a.update(60, 60) == 1);
 		CHECK(a.update(60 - FIGHT_RANGE_DEADBAND - 1, 60) == -1);
 		CHECK(a.update(60, 60) == -1);
+		/* A narrow band (hugging): a narrow hysteresis. */
+		approach_key hug;
+		CHECK(hug.update(14, 11, 8) == 1);
+		CHECK(hug.update(10, 11, 8) == 1);
+		CHECK(hug.update(8.5, 11, 8) == -1);
 		bot_rng rng{2};
 		juke_state j;
 		do
 			j.update(rng, 36, 84, 60, 60, 1);
 		while (!j.side());
-		const auto k{fight_keys(j, 1, 0.9, 0.8)};
+		const auto k{fight_keys(j, 0.9, 0.8)};
 		CHECK(near(k.forward, 0.9, 1e-12) && near(std::abs(k.sideways), 0.8, 1e-12) && near(std::abs(k.vertical), 0.8, 1e-12));
-		CHECK(fight_keys(j, 1, 0.9, 0.8, true).forward == 0);
-		CHECK(fight_keys(j, -1, 0.9, 0.8, true).forward < 0);
-		CHECK(fight_keys(j, -1, 0.9, 0.8, false, true).forward == 0);
-		CHECK(fight_keys(j, 1, 0.9, 0.8, false, true).forward > 0);
-		CHECK(fight_keys(j, 1, 0.9, 0).sideways == 0);
+		CHECK(fight_keys(j, 0.9, 0.8, true).forward == 0);
+		CHECK(fight_keys(j, -0.9, 0.8, true).forward < 0);
+		CHECK(fight_keys(j, -0.9, 0.8, false, true).forward == 0);
+		CHECK(fight_keys(j, 0.9, 0.8, false, true).forward > 0);
+		CHECK(fight_keys(j, 0.9, 0).sideways == 0);
+		/* A narrow band: the proportional thrust, gentle near the
+		 * distance, full far off, braking a fast approach.
+		 */
+		CHECK(approach_thrust(11, 11, 0, 0.9, 58) == 0);
+		CHECK(approach_thrust(200, 11, 0, 0.9, 58) == 1);
+		CHECK(approach_thrust(12, 11, 30, 0.9, 58) < -0.5);
+		CHECK(approach_thrust(1, 1, 0, 0.9, 0) == 0);
 	}
 	/* The slide: starts beyond SLIDE_START the way the ship slides (else
 	 * the preferred way), holds its key down to SLIDE_END.
@@ -720,23 +732,27 @@ void test_fight_pieces()
 		CHECK(slide_keys(-1).sideways == -1 && slide_keys(1).sideways == 1 && slide_keys(1).forward == 0);
 	}
 	/* The strafe keys do not flip at the tick rate: the other way counts
-	 * once it has lasted KEY_FLIP_TICKS (released meanwhile), at once for
-	 * a dodge; a small push is no key; forward is never touched.
+	 * once the key has not been pushed its way for KEY_FLIP_TICKS
+	 * (released meanwhile), at once for a dodge; a small push is no key;
+	 * forward is never touched.
 	 */
 	{
 		lateral_keys lk;
 		CHECK(lk.apply({1, 0, 1}, 0).x == 1);
 		auto v{lk.apply({-1, 0.5, 1}, 1)};
 		CHECK(v.x == 0 && v.y == 0.5 && v.z == 1);
-		for (uint32_t t = 2; t < 1 + KEY_FLIP_TICKS; ++t)
+		for (uint32_t t = 2; t < KEY_FLIP_TICKS; ++t)
 			CHECK(lk.apply({-1, 0, 1}, t).x == 0);
-		CHECK(lk.apply({-1, 0, 1}, 1 + KEY_FLIP_TICKS).x == -1);
+		CHECK(lk.apply({-1, 0, 1}, KEY_FLIP_TICKS).x == -1);
 		/* Flicker never flips the key. */
 		for (uint32_t t = 100; t < 200; ++t)
 			CHECK(lk.apply({t % 2 ? 1.0 : -1.0, 0, 0}, t).x <= 0);
-		CHECK(lk.apply({0.2, 0, 0}, 300).x == 0.2);
-		CHECK(lk.apply({0.9, 0, 0}, 301).x == 0.9);
-		CHECK(lk.apply({-0.9, 0, 0}, 302, true).x == -0.9);
+		/* Nor does a flicker through a small push. */
+		for (uint32_t t = 200; t < 300; ++t)
+			CHECK(lk.apply({t % 3 == 0 ? -1.0 : t % 3 == 1 ? 0.1 : 1.0, 0, 0}, t).x <= 0.1);
+		CHECK(lk.apply({0.2, 0, 0}, 400).x == 0.2);
+		CHECK(lk.apply({0.9, 0, 0}, 401).x == 0.9);
+		CHECK(lk.apply({-0.9, 0, 0}, 402, true).x == -0.9);
 	}
 	/* Dodge: a shot that will pass within the radius makes the bot move
 	 * away from where it passes; one that misses, or flies away, not.

@@ -4038,10 +4038,14 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 				 * does not back into a wall (the earthshaker's children
 				 * burst there).
 				 */
-				const int approach{bs.approach.update(dist, bs.juke.range())};
+				const double band{range_hi - range_lo};
+				const double close{b::effective_close_speed(*bs.style)};
+				const double forward{band < b::FIGHT_KEY_MIN_BAND
+					? b::approach_thrust(dist, bs.juke.range(), b::dot(vel, b::normalized(to)), close, max_speed)
+					: bs.approach.update(dist, bs.juke.range(), band) * close};
 				const bool no_closer{tick < bs.blast_hold_until};
-				const bool no_back{approach < 0 && bs.standoff > 0 && !bs.hugging && wall_distance(obj, -b::normalized(to), BOT_BACK_WALL_CLEARANCE) < BOT_BACK_WALL_CLEARANCE};
-				keys = b::fight_keys(bs.juke, approach, b::effective_close_speed(*bs.style), b::effective_strafe_speed(sk, *bs.style), no_closer, no_back);
+				const bool no_back{forward < 0 && bs.standoff > 0 && !bs.hugging && wall_distance(obj, -b::normalized(to), BOT_BACK_WALL_CLEARANCE) < BOT_BACK_WALL_CLEARANCE};
+				keys = b::fight_keys(bs.juke, forward, b::effective_strafe_speed(sk, *bs.style), no_closer, no_back);
 				use_keys = true;
 				break;
 			}

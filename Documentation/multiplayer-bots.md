@@ -3080,16 +3080,20 @@ own random numbers (deterministic on the host), no protocol change:
   way on. The preferred distance is drawn every 1–2.5 s. The range is a
   key too (`approach_key`): forward beyond the preferred distance plus
   15 units, reverse inside it less 15, held in between, at the style's
-  closing thrust (`COMBAT_CLOSE_SPEED` 0.9 × `close_scale`).
+  closing thrust (`COMBAT_CLOSE_SPEED` 0.9 × `close_scale`); a band
+  narrower than 30 units (hugging an enemy within its own blast) keeps
+  the proportional thrust of before (`approach_thrust`), which does not
+  overshoot into the enemy.
   `fight_keys` gives the three axes in the ship's frame; the dodge adds
   its full thrust to them, and the command is clamped per axis
   (`steer_controls`), so forward and strafe together make the diagonal.
   `skill.strafe_speed` is now the thrust of the strafe keys (0–1).
 - **No flicker.** `lateral_keys` filters the sideways and vertical
   thrust of every command (keys and velocity alike) like a key: a push
-  the other way than the key held counts once it has lasted 100 ms
-  (`KEY_FLIP_TICKS`); until then that axis is released. A dodge, an
-  evasion and the stuck recovery flip at once.
+  the other way than the key last held counts once the key has not been
+  pushed its way for 100 ms (`KEY_FLIP_TICKS`); until then that axis is
+  released. A flicker never flips the key; the strafe's own flip comes
+  100 ms late. A dodge, an evasion and the stuck recovery flip at once.
 - **Turns.** `turn_round_state` draws each large turn's kind from
   `turn_habits` (reverse 0.12, else a slide; push after 0.8, with the
   afterburner in 0.3 of the pushes, from Hotshot); a slide holds a
@@ -3129,14 +3133,14 @@ and the same at 30 and 144 fps):
 
 | | human | bots, recorded | simulation before | simulation now |
 |---|---|---|---|---|
-| Mean speed; flat out | 52–54; 63–70 % | 37–41; 24–36 % | 39–40; 35 % | 48; 50–51 % |
-| Strafe reversals / min; run | 45; 0.37 s | 80–102; 0.43 s | 190; 0.23–0.40 s | 42–45; 0.47–0.53 s |
-| Vertical share | 0.29–0.33 | 0.71–1.0 | 0.85–1.0 | 0.34–0.37 |
-| Thrust across; speed across | 98 %; 77–79 % | 75–79 %; 45–48 % | 76–79 %; 53–58 % | 86–89 %; 73 % |
-| 180° of a large turn; rate | 1.6 s; 73 % | 1.2–1.5 s; 80–99 % | 1.40 / 1.17 s; 83 / 98 % | 1.62 / 1.31 s; 75 / 90 % |
-| Turns sliding; push after (burning) | 86 %; 74 % (26 %) | 55–76 %; 31–48 % (0–28 %) | 96–100 %; 54–58 % (71–92 %) | 74–77 %; 53–55 % (28–46 %) |
-| Afterburner; fleeing; no enemy | 6 %; 21 %; 6 % | 0–2 %; 0–6 %; 0–3 % | 3–10 %; 0 %; 0–14 % | 4–4.5 %; 22–27 %; 3 % |
-| Flying away (share of the fight) | 19 % | 5–13 % | 7–9 % | 19–20 % |
+| Mean speed; flat out | 52–54; 63–70 % | 37–41; 24–36 % | 39–40; 35 % | 48; 52–53 % |
+| Strafe reversals / min; run | 45; 0.37 s | 80–102; 0.43 s | 190; 0.23–0.40 s | 44–49; 0.47–0.57 s |
+| Vertical share | 0.29–0.33 | 0.71–1.0 | 0.85–1.0 | 0.35–0.36 |
+| Thrust across; speed across | 98 %; 77–79 % | 75–79 %; 45–48 % | 76–79 %; 53–58 % | 86–90 %; 73–74 % |
+| 180° of a large turn; rate | 1.6 s; 73 % | 1.2–1.5 s; 80–99 % | 1.40 / 1.17 s; 83 / 98 % | 1.61 / 1.32 s; 75 / 90 % |
+| Turns sliding; push after (burning) | 86 %; 74 % (26 %) | 55–76 %; 31–48 % (0–28 %) | 96–100 %; 54–58 % (71–92 %) | 82–84 %; 60–61 % (20–40 %) |
+| Afterburner; fleeing; no enemy | 6 %; 21 %; 6 % | 0–2 %; 0–6 %; 0–3 % | 3–10 %; 0 %; 0–14 % | 3.7–4.3 %; 20–24 %; 3–4 % |
+| Flying away (share of the fight) | 19 % | 5–13 % | 7–9 % | 18–20 % |
 
 The simulation is open space: no walls to slide along, no pickups, no
 enemy fire to dodge, and an enemy that is no human; its numbers are for

@@ -1138,8 +1138,8 @@ struct thrust_keys
 
 /* Section 9.12: the range keeping of a fight is a key too: forward
  * while the target is further than the juke's preferred distance plus
- * FIGHT_RANGE_DEADBAND, reverse while it is nearer than that distance
- * less it, the key held in between.  (A velocity controller to the
+ * FIGHT_RANGE_DEADBAND (a quarter of a narrower band), reverse while
+ * it is nearer than that distance less it, the key held in between.  (A velocity controller to the
  * distance let the ship coast at the preferred distance; the human held
  * forward or reverse most of the fight, which with the strafe key makes
  * a diagonal thrust: his speed was above the top speed a tenth of the
@@ -1156,12 +1156,16 @@ public:
 	{
 		m_sign = 0;
 	}
-	/* Once per tick: 1 forward, -1 reverse, 0 none. */
-	int update(const double dist, const double range)
+	/* Once per tick: 1 forward, -1 reverse, 0 none.  `band`: the width
+	 * of the fight band; a narrower one than 60 narrows the hysteresis
+	 * to a quarter of it.
+	 */
+	int update(const double dist, const double range, const double band = 60)
 	{
-		if (dist > range + FIGHT_RANGE_DEADBAND)
+		const double deadband{std::clamp(band / 4, 2.0, FIGHT_RANGE_DEADBAND)};
+		if (dist > range + deadband)
 			m_sign = 1;
-		else if (dist < range - FIGHT_RANGE_DEADBAND)
+		else if (dist < range - deadband)
 			m_sign = -1;
 		return m_sign;
 	}
@@ -1172,16 +1176,35 @@ public:
 	}
 };
 
+/* A band narrower than this (hugging an enemy within its own blast, 8 to
+ * 14-22 units) is kept with a proportional forward thrust, as B1-B6
+ * kept every band: a full key would overshoot it into the enemy.
+ */
+constexpr double FIGHT_KEY_MIN_BAND{30};
+
+/* The forward thrust that brings the speed toward the target
+ * (`closing`) to what reaches `range` from `dist`, at most
+ * `close_speed` (a share of the top speed).
+ */
+[[nodiscard]]
+inline double approach_thrust(const double dist, const double range, const double closing, const double close_speed, const double max_speed)
+{
+	if (max_speed <= 0)
+		return 0;
+	const double want{std::clamp((dist - range) * 1.5, -close_speed * max_speed, close_speed * max_speed)};
+	return std::clamp((want + 2 * (want - closing)) / max_speed, -1.0, 1.0);
+}
+
 /* The keys of a fighting bot: the strafe keys of the juke at `strafe`
- * (the thrust, 0 for none), and the range key (`approach`: 1 forward,
- * -1 reverse) at `close` (the thrust).  `no_closer`: it must not close
+ * (the thrust, 0 for none), and `forward` (the range key times the
+ * closing thrust, or approach_thrust).  `no_closer`: it must not close
  * in (its own blast); `no_back`: it must not back off (a wall behind).
  */
 [[nodiscard]]
-inline thrust_keys fight_keys(const juke_state &juke, const int approach, const double close, const double strafe, const bool no_closer = false, const bool no_back = false)
+inline thrust_keys fight_keys(const juke_state &juke, const double forward, const double strafe, const bool no_closer = false, const bool no_back = false)
 {
 	thrust_keys k;
-	k.forward = approach * close;
+	k.forward = forward;
 	if ((no_closer && k.forward > 0) || (no_back && k.forward < 0))
 		k.forward = 0;
 	k.sideways = juke.side() * strafe;
@@ -1239,10 +1262,12 @@ inline thrust_keys slide_keys(const int sign)
  * along a path while facing a strafing enemy, the sideways and vertical
  * thrust changed sign almost every tick, which the recordings counted as
  * a strafe reversal every quarter second.  The filter holds each of the
- * two lateral axes like a key: a push the other way than the key held
- * (more than KEY_USED) counts only once it has lasted KEY_FLIP_TICKS;
- * until then that axis is released.  A dodge or an evasion
- * (`immediate`) flips at once.
+ * two lateral axes like a key: a push the other way than the key last
+ * held (more than KEY_USED) counts only once the key has not been
+ * pushed its own way for KEY_FLIP_TICKS; until then that axis is
+ * released.  So a flicker never flips the key, and a deliberate flip
+ * (the strafe's next run) comes KEY_FLIP_TICKS late.  A dodge, an
+ * evasion or the stuck recovery (`immediate`) flips at once.
  */
 constexpr double KEY_USED{0.3};
 constexpr unsigned KEY_FLIP_TICKS{ticks_from_ms(100)};
@@ -1250,8 +1275,7 @@ constexpr unsigned KEY_FLIP_TICKS{ticks_from_ms(100)};
 class lateral_keys
 {
 	std::array<int8_t, 2> m_held{};
-	std::array<int8_t, 2> m_pending{};
-	std::array<uint32_t, 2> m_pending_since{};
+	std::array<uint32_t, 2> m_pushed{};
 public:
 	void reset()
 	{
@@ -1267,29 +1291,13 @@ public:
 		{
 			double &v{i ? local.y : local.x};
 			const int8_t s{static_cast<int8_t>(v > KEY_USED ? 1 : v < -KEY_USED ? -1 : 0)};
+			/* A small push is no key. */
 			if (!s)
-			{
-				/* Let go (a small push is no key). */
-				m_held[i] = 0;
-				m_pending[i] = 0;
 				continue;
-			}
-			if (!m_held[i] || s == m_held[i] || immediate)
+			if (s == m_held[i] || !m_held[i] || immediate || tick - m_pushed[i] >= KEY_FLIP_TICKS)
 			{
 				m_held[i] = s;
-				m_pending[i] = 0;
-				continue;
-			}
-			/* The other way: only once it has lasted. */
-			if (m_pending[i] != s)
-			{
-				m_pending[i] = s;
-				m_pending_since[i] = tick;
-			}
-			if (tick - m_pending_since[i] >= KEY_FLIP_TICKS)
-			{
-				m_held[i] = s;
-				m_pending[i] = 0;
+				m_pushed[i] = tick;
 			}
 			else
 				v = 0;
