@@ -227,6 +227,9 @@ inline std::optional<recording> load_recording(const std::span<const std::uint8_
 			rec.syncs.push_back(*y);
 		else if (const auto s{std::get_if<sample>(&r)})
 		{
+			/* A sample of no player (a damaged or hostile file). */
+			if (s->pid == PLAYER_NONE)
+				return;
 			if (rec.levels.empty())
 				rec.levels.push_back({{head->first.level_num, 0, head->first.game_mode, head->first.mission, head->first.level_name}, now_ms});
 			file_sample fs;
@@ -495,10 +498,21 @@ inline bool may_share_game(const recording &a, const recording &b)
 inline std::vector<session> group_sessions(const std::span<const recording> files, std::vector<std::string> *const notes = nullptr)
 {
 	std::vector<std::vector<std::size_t>> groups;
+	/* Two files of different network sessions (or two hosts' files) are
+	 * never one game, even if a file without a session (minor 0) looks
+	 * like both.
+	 */
+	const auto other_session{[&files](const std::size_t a, const std::size_t b) {
+		if (files[a].host() && files[b].host())
+			return true;
+		const auto ia{files[a].session_id()}, ib{files[b].session_id()};
+		return ia && ib && ia != ib;
+	}};
 	for (std::size_t i{}; i != files.size(); ++i)
 	{
 		const auto g{std::find_if(groups.begin(), groups.end(), [&](const std::vector<std::size_t> &members) {
-			return std::any_of(members.begin(), members.end(), [&](const std::size_t m) { return detail::may_share_game(files[m], files[i]); });
+			return std::any_of(members.begin(), members.end(), [&](const std::size_t m) { return detail::may_share_game(files[m], files[i]); })
+				&& std::none_of(members.begin(), members.end(), [&](const std::size_t m) { return other_session(m, i); });
 		})};
 		if (g == groups.end())
 			groups.push_back({i});
@@ -1913,7 +1927,7 @@ inline bot::style_profile propose_profile(const player_stats &s, const bot::bot_
 	/* style.engage_weight: of the time it moves toward or away from the
 	 * enemy, the share toward it; with what it does when it loses sight.
 	 */
-	if (const double moving{s.approach_share + s.back_off_share + s.retreat_share}; s.fight_s >= 20 && moving > 0)
+	if (const double moving{s.approach_share + s.back_off_share + s.retreat_share}; s.fight_s >= 20 && moving >= 0.1)
 	{
 		double aggression{s.approach_share / moving};
 		if (s.sight_losses >= 5)
@@ -2022,7 +2036,11 @@ inline bot::style_profile propose_profile(const player_stats &s, const bot::bot_
 	if (s.volleys >= 4)
 	{
 		const auto c{confidence_of(s, s.volleys, 8, 30)};
-		p.set("tune.missile_interval_scale", s.volley_gap_s.p50 / bot::missile_interval(std::max(skill.weapon_smarts, 1u)), c);
+		/* Only volleys of one fight tell the interval: without such
+		 * pairs the median would be 0, the fastest firing there is.
+		 */
+		if (s.volley_gap_s.n >= 3)
+			p.set("tune.missile_interval_scale", s.volley_gap_s.p50 / bot::missile_interval(std::max(skill.weapon_smarts, 1u)), std::min(c, confidence_of(s, static_cast<double>(s.volley_gap_s.n), 8, 30)));
 		p.set("tune.volley_size", s.volley_size, c);
 	}
 
@@ -2156,7 +2174,7 @@ inline std::vector<std::string> describe_traits(const player_stats &s, const shi
 	if (s.fight_s >= 20)
 	{
 		auto &l{line()};
-		const char *const kind{s.approach_share > 1.5 * (s.back_off_share + s.retreat_share) ? "Presses the attack" : s.back_off_share + s.retreat_share > 1.5 * s.approach_share ? "Gives ground" : "Closes in and backs off in turn"};
+		const char *const kind{s.approach_share + s.back_off_share + s.retreat_share < 0.1 ? "Holds its distance" : s.approach_share > 1.5 * (s.back_off_share + s.retreat_share) ? "Presses the attack" : s.back_off_share + s.retreat_share > 1.5 * s.approach_share ? "Gives ground" : "Closes in and backs off in turn"};
 		appendf(l, "%s: closing in %.0f%%, backing off while facing %.0f%%, flying away %.0f%% of the fight time", kind, pct(s.approach_share), pct(s.back_off_share), pct(s.retreat_share));
 		if (s.retreat_contrast >= 0.15)
 			appendf(l, "; breaks off below about %.0f shields (flies away %.0f percentage points more often below than above)", s.retreat_shields, pct(s.retreat_contrast));

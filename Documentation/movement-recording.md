@@ -474,7 +474,7 @@ The keys, their range, and what they are computed from:
 | `tune.reverse_turn_speed` | 0–1 | backward speed reached in them (`REVERSE_TURN_SPEED`) |
 | `tune.turn_boost`, `tune.turn_boost_burn` | 0–1 | share of large turns followed by a push, and of those with the afterburner |
 | `tune.burn_retreat`, `tune.burn_roam` | 0–1 | share of the time fleeing / with no enemy in sight with the afterburner |
-| `tune.missile_interval_scale` | 0.3–4 | median time between volleys / the base skill's `missile_interval` |
+| `tune.missile_interval_scale` | 0.3–4 | median time between volleys of one fight / the base skill's `missile_interval` (only with 3 such pairs or more) |
 | `tune.volley_size` | 1–8 | missiles per volley |
 | `tune.pursuit_seconds` | 0–30 | median pursuit time (0: lets the enemy go) |
 | `tune.grab_detour` | 0–1 | share of pickups off course |

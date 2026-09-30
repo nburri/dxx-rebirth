@@ -1220,6 +1220,27 @@ void test_several_games()
 	CHECK(p.stats.primary_shots == fa.primary_shots + fb.primary_shots);
 	CHECK_RANGE(p.stats.retreat_shields, 50, 50);
 	CHECK(p.profile.source.find("2 games") != std::string::npos);
+
+	/* A file without a session (minor 0) that looks like two games of
+	 * different sessions does not make them one: first in the list, it
+	 * joins one of them, and the other stays apart.
+	 */
+	view old, host_a, client_b;
+	old.sync = false;
+	old.host = false;
+	old.local_pid = 1;
+	host_a.session_id = 1;
+	client_b.session_id = 2;
+	client_b.host = false;
+	client_b.local_pid = 1;
+	client_b.host_epoch_ms += 3'600'000;
+	const std::array<recording, 3> bridged{{load(record(fa, old), "old.dmr"), load(record(fa, host_a), "a.dmr"), load(record(fb, client_b), "b.dmr")}};
+	const auto sessions{group_sessions(bridged)};
+	for (const auto &ses : sessions)
+		for (const auto &x : ses.files)
+			for (const auto &y : ses.files)
+				CHECK(bridged[x.file].session_id() == 0 || bridged[y.file].session_id() == 0 || bridged[x.file].session_id() == bridged[y.file].session_id());
+	CHECK(sessions.size() == 2);
 }
 
 /* A recording cut short by a crash, and a slot that changes hands. */
@@ -1266,6 +1287,10 @@ void test_reader_cases()
 	CHECK(cb->append(encode(buf, tick_record{1, 33})));
 	CHECK(cb->append(encode(buf, s)));
 	CHECK(cb->append(encode(buf, event_record{record_type::hit, 40, 0, 1, attacker_kind::player, 0, 256, 0})));
+	/* A sample of no player (a damaged or hostile file) is skipped. */
+	sample nobody{s};
+	nobody.pid = PLAYER_NONE;
+	CHECK(cb->append(encode(buf, nobody)));
 	const auto chunk{cb->finish()};
 	file.insert(file.end(), chunk.begin(), chunk.end());
 	const auto rec{load(file, "slots")};
