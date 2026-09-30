@@ -299,6 +299,18 @@ void check_sane(const style_profile_params &b)
 /* Files from anywhere: the parser and the library take anything. */
 void test_untrusted()
 {
+	/* The review of PR #64: a byte order mark before `format` (a
+	 * hand-edited file), and a backward turn at no speed (a bot that
+	 * stood still while its nose came round).
+	 */
+	{
+		const auto p{parse_style_profile(
+			"\xef\xbb\xbf" "format = 1\r\n"
+			"tune.reverse_turn_speed = 0\r\n")};
+		CHECK(p);
+		const auto b{apply_style_profile(*p, bot_skill::ace)};
+		CHECK(close_to(b.tune.turns.reverse_speed, 0.3));
+	}
 	/* Out of range, not numbers, not finite. */
 	{
 		const auto p{parse_style_profile(

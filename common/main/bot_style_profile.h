@@ -108,7 +108,10 @@ inline constexpr std::array<style_profile_key, 30> style_profile_keys{{
 	{"tune.range_lo", 15, 400, "near edge of the fight band (BOT_RANGE_LO, 35)"},
 	{"tune.range_hi", 30, 800, "far edge of the fight band (BOT_RANGE_HI, 95)"},
 	{"tune.reverse_turn", 0, 1, "share of the large turns flown backwards (turn_habits::reverse, 0.12)"},
-	{"tune.reverse_turn_speed", 0, 1, "backward speed in such a turn, share of the top speed (REVERSE_TURN_SPEED, 0.8)"},
+	/* The review of PR #64: no less than 0.3, a reverse turn at no speed
+	 * is a bot that stands while its nose comes round.
+	 */
+	{"tune.reverse_turn_speed", 0.3, 1, "backward speed in such a turn, share of the top speed (REVERSE_TURN_SPEED, 0.8)"},
 	{"tune.turn_boost", 0, 1, "share of the large turns followed by a push forward (turn_habits::boost, 0.8)"},
 	{"tune.turn_boost_burn", 0, 1, "share of those pushes with the afterburner (turn_habits::boost_burn, 0.3)"},
 	{"tune.burn_retreat", 0, 1, "share of the time fleeing with the afterburner"},
@@ -300,12 +303,17 @@ inline std::string write_style_profile(const style_profile &p)
 
 /* The profile in `text`, or nothing if it is not one (no `format` line,
  * or a format newer than this reader).  Known keys are clamped to their
- * range; lines that are not understood are skipped.
+ * range; lines that are not understood are skipped.  The review of PR
+ * #64: a UTF-8 byte order mark (an editor's, on a hand-edited file) is
+ * skipped; it made the first line (`format`) unknown and the file no
+ * profile.
  */
 [[nodiscard]]
-inline std::optional<style_profile> parse_style_profile(const std::string_view text)
+inline std::optional<style_profile> parse_style_profile(std::string_view text)
 {
 	using namespace style_profile_detail;
+	if (constexpr std::string_view bom{"\xef\xbb\xbf"}; text.starts_with(bom))
+		text.remove_prefix(bom.size());
 	style_profile p;
 	p.format = 0;
 	std::vector<std::pair<std::string, style_confidence>> confidences;
