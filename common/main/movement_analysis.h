@@ -1099,6 +1099,13 @@ struct player_stats
 	double dodge_prob{};
 	bool dodge_measurable{};
 	double dodge_reaction_ms{};
+	/* The shots of the other players in the recordings, and the hits
+	 * they dealt to this player.  Hits without any shot: the recording
+	 * lacks the enemies' fire (older recorders left out the shots of
+	 * players whose samples were not recorded, such as the bots without
+	 * -recordmoves-bots), and dodging cannot be measured.
+	 */
+	unsigned enemy_shots{}, hits_taken_from_players{};
 
 	/* Weapons. */
 	unsigned primary_shots{}, secondary_shots{};
@@ -1162,6 +1169,7 @@ struct accum
 	std::vector<double> close_speed;
 	unsigned dodge_triggers{}, dodged{}, baseline_n{}, baseline_dodged{};
 	std::vector<double> dodge_reaction_ms;
+	unsigned enemy_shots{}, hits_taken_from_players{};
 	unsigned primary_shots{}, secondary_shots{};
 	std::array<std::array<unsigned, WEAPON_SLOTS>, bot::BOT_RANGE_BANDS> primary_by_band{};
 	std::array<unsigned, WEAPON_SLOTS> secondary_count{};
@@ -1484,6 +1492,7 @@ inline void scan_dodge(const track &tr, accum &a, const ship_model &ship)
 	const auto &pts{tr.pts};
 	std::map<int, std::int64_t> last_shot;
 	std::vector<std::int64_t> shots;
+	a.enemy_shots += static_cast<unsigned>(tr.enemy_fire.size());
 	for (const auto &e : tr.enemy_fire)
 	{
 		shots.push_back(e.t);
@@ -1617,6 +1626,8 @@ inline void scan_events(const track &tr, accum &a)
 			}
 			case record_type::hit:
 				++a.hits_taken;
+				if (e.e.kind == attacker_kind::player && e.other >= 0 && e.other != e.who)
+					++a.hits_taken_from_players;
 				a.damage_taken += e.e.value / 256.0;
 				break;
 			case record_type::death:
@@ -1833,6 +1844,8 @@ inline player_stats analyse(const std::span<const track> tracks, const ship_mode
 	s.dodge_measurable = a.dodge_triggers && s.dodge_baseline <= limits::DODGE_BASELINE_MAX;
 	s.dodge_prob = s.dodge_measurable ? std::clamp((s.dodge_rate - s.dodge_baseline) / (1 - s.dodge_baseline), 0.0, 1.0) : 0;
 	s.dodge_reaction_ms = s.dodge_measurable ? summarise(a.dodge_reaction_ms).p50 : 0;
+	s.enemy_shots = a.enemy_shots;
+	s.hits_taken_from_players = a.hits_taken_from_players;
 
 	s.primary_shots = a.primary_shots;
 	s.secondary_shots = a.secondary_shots;
@@ -2287,6 +2300,8 @@ inline std::string write_report(const player_stats &s, const bot::style_profile 
 		appendf(o, "%6.0f s  %+6.1f units/s  %3.0f%% / %3.0f%% / %3.0f%%\n", k.seconds, k.approach_mean, pct(k.approach), pct(k.back_off), pct(k.retreat));
 	}
 	appendf(o, "  dodging: %u bursts aimed at it, sidestep after %.0f%%; quiet moments %.0f (sidestep %.0f%%); excess %.2f%s; reaction %.0f ms\n", s.dodge_triggers, pct(s.dodge_rate), static_cast<double>(s.dodge_baseline_n), pct(s.dodge_baseline), s.dodge_prob, s.dodge_measurable ? "" : " (not measurable)", s.dodge_reaction_ms);
+	if (!s.enemy_shots && s.hits_taken_from_players)
+		appendf(o, "  warning: took %u hits from other players but the recordings hold no shot of theirs; dodging cannot be measured (a recording of an older build, whose bots' shots were left out without -recordmoves-bots?)\n", s.hits_taken_from_players);
 	appendf(o, "  primary shots: %u", s.primary_shots);
 	for (std::size_t band{}; band != bot::BOT_RANGE_BANDS; ++band)
 	{

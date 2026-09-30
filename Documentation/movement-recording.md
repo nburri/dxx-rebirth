@@ -147,6 +147,11 @@ recorded only when a robot, the reactor or a robot's mine did it (weapon
 `kill` from `multi_compute_kill` (network games); `death`, `respawn` and
 `weapon` from the change between two samples; `pickup` from `do_powerup`
 (local player) and from the host's pickup grants (clients).
+`fire` and `kill` are recorded for every player, also for one whose
+samples are not (a bot without `-recordmoves-bots`): the analysis of a
+recorded player needs its enemies' shots (dodging) and deaths. `hit` is
+recorded when its victim or its attacker is recorded; `death`, `respawn`,
+`weapon` and `pickup` only for recorded players.
 
 **A slot that changes hands.** When another player (another callsign, a bot
 in place of a human, or a player who left and came back) takes a slot, the
@@ -410,7 +415,7 @@ deflection. The thresholds are the constants of `analysis::limits`.
 | Afterburner | share of the time; share while chasing (enemy in sight ahead, closing in, nose steady), fleeing (enemy behind, moving away), with no enemy in sight, otherwise; distance to the enemy while chasing with it | samples with the afterburner known (or estimated) |
 | Distance | to the enemy in sight: p10 … p90, seconds per band (35, 60, 95, 150, 250: the bots' fight band and weapon bands); distance at each primary shot | |
 | Approach and retreat | by shields (25 each): own speed toward the enemy; share closing in, backing off while facing it, flying away turned from it. The **retreat level**: the shields that split "flies away" below from "does not" above most clearly (at least 3 s of fight on each side, a difference of 15 percentage points) | fight samples |
-| Dodging | share of the enemy's bursts (first shot after a pause of 1 s, the enemy facing the player within 300 units) followed within 0.7 s by a change of the velocity across the line of fire of 30 % of the top speed; the same share in quiet moments (no shot 1.5 s before to 0.7 s after); the excess is the dodge probability; median time to the start of the sidestep | not measurable when the player moves across in more than half of the quiet moments too (a constant strafer) |
+| Dodging | share of the enemy's bursts (first shot after a pause of 1 s, the enemy facing the player within 300 units) followed within 0.7 s by a change of the velocity across the line of fire of 30 % of the top speed; the same share in quiet moments (no shot 1.5 s before to 0.7 s after); the excess is the dodge probability; median time to the start of the sidestep | not measurable when the player moves across in more than half of the quiet moments too (a constant strafer); the report warns when the player took hits from other players but the recordings hold none of their shots (a recording of an older build without the bots' shots) |
 | Weapons | primary shots per weapon and range band (< 60, 60–150, > 150, as the bots' weapon table); secondary shots per weapon, distance | fire events with the enemy in sight |
 | Missile volleys | volleys (missiles at most 0.7 s apart), size, time between two volleys of one fight | mines are left out |
 | Pickups | per minute; share taken off course (the course 1.5 s before pointed more than 40° away from the pickup); share in a fight | |
