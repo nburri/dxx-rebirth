@@ -27,7 +27,7 @@
 
 namespace dcx::movrec {
 
-using record = std::variant<level_record, player_record, tick_record, sample, event_record>;
+using record = std::variant<level_record, player_record, tick_record, sample, event_record, sync_record>;
 
 struct read_stats
 {
@@ -98,6 +98,12 @@ void parse_payload(const std::span<const std::uint8_t> payload, read_stats &stat
 			case record_type::tick:
 				if (const auto t{decode_tick(body)})
 					on_record(record{*t});
+				else
+					++stats.malformed_records;
+				break;
+			case record_type::sync:
+				if (const auto y{decode_sync(body)})
+					on_record(record{*y});
 				else
 					++stats.malformed_records;
 				break;
@@ -274,6 +280,12 @@ struct sample_units
 	vec3 enemy_rel_pos_ship;	/* right, up, forward */
 	vec3 enemy_rel_vel;		/* world */
 	double enemy_distance;
+	/* The relative position (velocity) was scaled down to fit (minor 1,
+	 * context_flag::rel_pos_scaled): the direction is right, the length
+	 * a lower bound (2048 units and more).
+	 */
+	bool enemy_distance_scaled;
+	bool enemy_rel_vel_scaled;
 	/* Positive when the enemy comes closer. */
 	double enemy_closing_speed;
 	unsigned primary, secondary;
@@ -301,6 +313,8 @@ inline sample_units to_units(const sample &s)
 	u.has_enemy = (s.context & context_flag::kind_mask) != context_flag::kind_none;
 	u.enemy_rel_pos_ship = to_ship_frame(u.orient, u.enemy_rel_pos);
 	u.enemy_distance = length(u.enemy_rel_pos);
+	u.enemy_distance_scaled = (s.context & context_flag::rel_pos_scaled) != 0;
+	u.enemy_rel_vel_scaled = (s.context & context_flag::rel_vel_scaled) != 0;
 	if (u.has_enemy && u.enemy_distance > 0)
 	{
 		u.enemy_closing_speed = -dot(u.enemy_rel_vel, u.enemy_rel_pos) / u.enemy_distance;
@@ -329,6 +343,7 @@ inline const char *record_type_name(const record_type t)
 		case record_type::pickup: return "pickup";
 		case record_type::weapon: return "weapon";
 		case record_type::end: return "end";
+		case record_type::sync: return "sync";
 	}
 	return "unknown";
 }

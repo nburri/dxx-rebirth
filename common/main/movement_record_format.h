@@ -39,6 +39,14 @@ namespace dcx::movrec {
 /* "DXXMOVES" */
 constexpr std::array<std::uint8_t, 8> FILE_MAGIC{{'D', 'X', 'X', 'M', 'O', 'V', 'E', 'S'}};
 constexpr std::uint16_t FORMAT_VERSION{1};
+/* Additions that old readers skip (new record types, new flag bits,
+ * fields appended to the header): 0 for the first release (exp-25), 1
+ * for the sync record, splash hits, the scaled relative vectors, the
+ * afterburner "known once seen" rule and slot reuse
+ * (Documentation/movement-recording.md section 4).  Appended to the
+ * header; a header without it is minor 0.
+ */
+constexpr std::uint16_t FORMAT_MINOR{1};
 /* "MRCK" as bytes in the file. */
 constexpr std::uint32_t CHUNK_MAGIC{0x4b43524du};
 /* magic, sequence, payload size, payload CRC-32 */
@@ -71,6 +79,8 @@ enum class record_type : std::uint8_t
 	pickup = 10,
 	weapon = 11,
 	end = 12,
+	/* Minor 1: the session's shared clock (sync_record). */
+	sync = 13,
 };
 
 /* file_header::flags */
@@ -114,6 +124,11 @@ constexpr std::uint8_t line_of_sight{1 << 2};
 constexpr std::uint8_t in_my_cone{1 << 3};	/* the enemy is within 30 degrees of my nose */
 constexpr std::uint8_t me_in_its_cone{1 << 4};	/* I am within 30 degrees of its nose */
 constexpr std::uint8_t enemy_cloaked{1 << 5};
+/* Minor 1: enemy_rel_pos (enemy_rel_vel) did not fit 16 bits and was
+ * scaled down as a whole, keeping its direction (scale_rel16).
+ */
+constexpr std::uint8_t rel_pos_scaled{1 << 6};
+constexpr std::uint8_t rel_vel_scaled{1 << 7};
 }
 
 /* player_record::flags */
@@ -142,6 +157,17 @@ constexpr std::uint8_t other{3};
 /* event_record::flags for hit */
 namespace hit_flag {
 constexpr std::uint8_t applied_here{1 << 0};	/* this machine applies the damage */
+/* Minor 1: splash damage of an explosion (mega, smart, earthshaker,
+ * mines, a dying ship or robot), not a direct hit.  `id` is the weapon
+ * that exploded, 255 when it was no weapon.
+ */
+constexpr std::uint8_t splash{1 << 1};
+}
+
+/* sync_record::flags */
+namespace sync_flag {
+constexpr std::uint8_t clock_valid{1 << 0};	/* host_ms is the host's clock */
+constexpr std::uint8_t host{1 << 1};		/* the recording machine is the host */
 }
 
 /* event_record::kind for end */
@@ -177,6 +203,29 @@ constexpr std::int32_t quantise_pos(const std::int32_t fix_value)
 {
 	/* A 32 bit value shifted by 8 always fits 24 bits. */
 	return fix_value >> quant::POS_SHIFT;
+}
+
+/* A difference vector (16.16 fixed point, as 64 bit) quantised to
+ * 16 bits per axis with `shift`.  A vector too long for that is scaled
+ * down as a whole, so that it keeps its direction (clamping each axis
+ * would bend it); the flag says so.
+ */
+[[nodiscard]]
+inline std::pair<std::array<std::int16_t, 3>, bool> scale_rel16(const std::array<std::int64_t, 3> &fix_diff, const int shift)
+{
+	std::array<double, 3> q{};
+	double m{};
+	for (std::size_t i{}; i != 3; ++i)
+	{
+		q[i] = std::ldexp(static_cast<double>(fix_diff[i]), -shift);
+		m = std::max(m, std::abs(q[i]));
+	}
+	const bool scaled{m > INT16_MAX};
+	const double k{scaled ? INT16_MAX / m : 1.0};
+	std::array<std::int16_t, 3> r{};
+	for (std::size_t i{}; i != 3; ++i)
+		r[i] = static_cast<std::int16_t>(std::clamp(scaled ? std::round(q[i] * k) : std::floor(q[i]), -32767.0, 32767.0));
+	return {r, scaled};
 }
 
 [[nodiscard]]
@@ -535,6 +584,25 @@ struct event_record
 
 constexpr std::size_t EVENT_SIZE{11};
 
+/* Minor 1: the link between this file's time and the session's shared
+ * clock, so that recordings of one game made on several machines can be
+ * merged (the analysis, section 8.2).  Written at every level start and
+ * once per second.  `host_ms` is the host's clock (net_v2: the host's
+ * own on the host, the client's estimate of it on a client) at
+ * `time_ms` of this file, in milliseconds; `session_id` the network
+ * session (0 outside a network game).
+ */
+struct sync_record
+{
+	std::uint32_t time_ms{};
+	std::uint32_t session_id{};
+	std::int64_t host_ms{};
+	std::uint8_t flags{};		/* sync_flag */
+	constexpr bool operator==(const sync_record &) const = default;
+};
+
+constexpr std::size_t SYNC_SIZE{17};
+
 struct tick_record
 {
 	std::uint32_t tick{};
@@ -653,6 +721,18 @@ inline std::span<const std::uint8_t> encode(record_buffer &buf, const event_reco
 }
 
 [[nodiscard]]
+inline std::span<const std::uint8_t> encode(record_buffer &buf, const sync_record &y)
+{
+	byte_writer w{buf};
+	detail::begin_record(w, record_type::sync);
+	w.u32(y.time_ms);
+	w.u32(y.session_id);
+	w.i64(y.host_ms);
+	w.u8(y.flags);
+	return detail::finish_record(w);
+}
+
+[[nodiscard]]
 inline std::span<const std::uint8_t> encode(record_buffer &buf, const tick_record &t)
 {
 	byte_writer w{buf};
@@ -760,6 +840,20 @@ inline std::optional<tick_record> decode_tick(const std::span<const std::uint8_t
 }
 
 [[nodiscard]]
+inline std::optional<sync_record> decode_sync(const std::span<const std::uint8_t> payload)
+{
+	byte_reader r{payload};
+	sync_record y;
+	y.time_ms = r.u32();
+	y.session_id = r.u32();
+	y.host_ms = r.i64();
+	y.flags = r.u8();
+	if (!r.ok())
+		return std::nullopt;
+	return y;
+}
+
+[[nodiscard]]
 inline std::optional<level_record> decode_level(const std::span<const std::uint8_t> payload)
 {
 	byte_reader r{payload};
@@ -811,6 +905,8 @@ struct file_header
 	};
 	std::array<player, MAX_RECORDED_PLAYERS> players{};
 	std::uint8_t num_players{};
+	/* FORMAT_MINOR of the writer; 0 when the header has no such field. */
+	std::uint16_t minor{FORMAT_MINOR};
 	bool operator==(const file_header &) const = default;
 };
 
@@ -818,7 +914,9 @@ struct file_header
  * included), tick rate u16, flags u16, start time i64, game mode u32,
  * local player u8, program str8, mission str8, level name str8, level
  * number i8, player count u8, per player {pid u8, flags u8, team u8,
- * callsign str8}, CRC-32 u32 of everything before it.  Returns the size,
+ * callsign str8}, minor u16 (FORMAT_MINOR; absent in minor 0), CRC-32 u32
+ * of everything before it.  Fields appended before the CRC are skipped
+ * by older readers.  Returns the size,
  * 0 if `out` is too small.
  */
 [[nodiscard]]
@@ -848,6 +946,7 @@ inline std::size_t encode_header(const std::span<std::uint8_t> out, const file_h
 		w.u8(p.team);
 		w.str8(p.callsign);
 	}
+	w.u16(h.minor);
 	const std::size_t total{w.size() + 4};
 	if (!w.ok() || total > MAX_HEADER_SIZE || total > out.size())
 		return 0;
@@ -896,6 +995,7 @@ inline std::optional<std::pair<file_header, std::size_t>> decode_header(const st
 		p.team = b.u8();
 		p.callsign = b.str8();
 	}
+	h.minor = b.remaining() >= 2 ? b.u16() : 0;
 	if (!b.ok() || h.tick_rate == 0)
 		return std::nullopt;
 	return std::pair{std::move(h), total};

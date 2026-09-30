@@ -37,6 +37,11 @@ void movement_record_fire(const object &shooter, bool secondary, unsigned weapon
 void movement_record_fire_remote(const object &shooter, uint8_t raw_weapon, unsigned flags);
 /* The weapon `weapon` hit the player ship `victim` for `damage`. */
 void movement_record_hit(const object &victim, const object &weapon, fix damage);
+/* The explosion of `origin` (a weapon, a dying ship; nullptr: none)
+ * fired by `parent` (nullptr: none) did `damage` of splash damage to
+ * the player ship `victim`.
+ */
+void movement_record_splash(const object &victim, const object *origin, const object *parent, fix damage);
 /* The player `victim` was killed by `killer` (nullptr: none). */
 void movement_record_kill(const object &victim, const object *killer);
 /* Player `pnum` picked up a powerup of type `powerup`. */

@@ -62,6 +62,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "automap.h"
 #include "byteutil.h"
 #include "segment_depths.h"
+#include "movement_record.h"
 
 #include "compiler-range_for.h"
 #include "digi.h"
@@ -578,6 +579,7 @@ static imobjptridx_t object_create_explosion_with_damage(const d_robot_info_arra
 									if (GameUniqueState.Difficulty_level == Difficulty_level_type::_0)
 									damage /= 4;
 #endif
+									movement_record_splash(obj_iter, obj_explosion_origin == object_none ? nullptr : &*obj_explosion_origin, parent == object_none ? nullptr : &*parent, damage);
 									apply_damage_to_player(obj_iter, killer, damage, apply_damage_player::check_for_friendly);
 								}
 							}

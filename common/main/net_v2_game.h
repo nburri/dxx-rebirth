@@ -173,6 +173,11 @@ bool host_slot_has_peer(playernum_t slot);
  */
 [[nodiscard]]
 int host_input_afterburner(playernum_t slot);
+/* The session id and the host's clock now (net time units; on a client
+ * its estimate of the host's), for the movement recording's sync
+ * records.  False while the clock is not known (the id is set anyway).
+ */
+bool recording_clock(uint32_t &session_id, std::int64_t &host_clock);
 /* Remove player `slot`, which has no connection (a bot), from the game:
  * the others are told it left for `why`, and the host drops what it
  * carried (multi_disconnect_player).
