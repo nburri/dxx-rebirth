@@ -143,12 +143,31 @@ void test_add()
 		CHECK(sn.kind == command_kind::add && sn.skill == bot_skill::trainee && !sn.style && name_of(sn) == "dummy");
 	}
 	{
-		/* The order is skill, style, name: a style before a skill makes
-		 * the skill word the name, and then there is a word too many.
+		/* The order is skill, style, name: a style before a skill puts
+		 * the skill word in the name's place, and no bot is called by a
+		 * skill or style word: an error that says the order, not a bot
+		 * named "ace".
 		 */
-		const auto c{parse_command("/bot add aggressive ace")};
-		CHECK(c.kind == command_kind::add && c.style == bot_style::aggressive && name_of(c) == "ace");
-		CHECK(parse_command("/bot add aggressive ace havoc").kind == command_kind::error);
+		for (const auto line : {"/bot add aggressive ace", "/bot add col ace", "/bot add Coll INSANE", "/bot add ace ace", "/bot add ace col hot", "/bot add col bal", "/bot add cautious caut", "/bot add aggressive ace havoc"})
+		{
+			const auto c{parse_command(line)};
+			CHECK(c.kind == command_kind::error);
+			CHECK(c.error && std::string_view(c.error).find("Skill, then style") != std::string_view::npos);
+			CHECK(name_of(c).empty());
+		}
+		/* Nor by `all` or a command word. */
+		for (const auto line : {"/bot add all", "/bot add ALL", "/bot add ace all", "/bot add ace col all", "/bot add add", "/bot add remove", "/bot add rm", "/bot add kick", "/bot add skill", "/bot add style", "/bot add list", "/bot add save", "/bot add help", "/bot add bot"})
+		{
+			const auto c{parse_command(line)};
+			CHECK(c.kind == command_kind::error);
+			CHECK(c.error && std::string_view(c.error) == BOT_NAME_RESERVED_TEXT);
+		}
+		/* A name that only begins like one is a name. */
+		CHECK(name_of(parse_command("/bot add acer")) == "acer");
+		CHECK(name_of(parse_command("/bot add ace col ally")) == "ally");
+		CHECK(name_of(parse_command("/bot add hotdog")) == "hotdog");
+		CHECK(name_of(parse_command("/bot add adder")) == "adder");
+		CHECK(name_of(parse_command("/bot add bots")) == "bots");
 		CHECK(parse_command("/bot add ace bal one two").kind == command_kind::error);
 	}
 	/* Names: 8 characters, one word of letters, digits, - and _. */
@@ -166,6 +185,38 @@ void test_sanitize()
 	CHECK(std::string_view(sanitize_name("123456789abc").data()) == "12345678");
 	CHECK(std::string_view(sanitize_name(": ").data()).empty());
 	CHECK(std::string_view(sanitize_name("").data()).empty());
+}
+
+void test_reserved_names()
+{
+	/* `all`, the skills and styles as /bot reads them, the commands. */
+	for (const auto w : {"all", "All", "trainee", "rookie", "hotshot", "ace", "insane", "tra", "roo", "hot", "ins", "INS", "balanced", "aggressive", "cautious", "collector", "bal", "agg", "cau", "col", "aggr", "caut", "coll", "Coll", "add", "remove", "rm", "kick", "skill", "style", "list", "save", "help", "bot"})
+	{
+		CHECK(name_reserved(w));
+		CHECK(!usable_name(w)[0]);
+	}
+	for (const auto w : {"", "rook", "acer", "ally", "al", "colt", "balance", "insaner", "kicker", "bots", "x"})
+		CHECK(!name_reserved(w));
+	/* No built-in name is reserved. */
+	for (const auto n : bot_default_names)
+	{
+		CHECK(!name_reserved(n));
+		CHECK(usable_name(n)[0]);
+	}
+	/* What the Bots screen's name field gives: cleaned first, so a
+	 * reserved word with other characters around it is caught too.
+	 */
+	CHECK(std::string_view(usable_name("Havoc").data()) == "havoc");
+	CHECK(std::string_view(usable_name("my bot").data()) == "mybot");
+	CHECK(std::string_view(usable_name("a l l").data()).empty());
+	CHECK(std::string_view(usable_name("A.C.E").data()).empty());
+	CHECK(std::string_view(usable_name(": ").data()).empty());
+	/* A reserved word in the place of a target is what it says: `all`
+	 * is every bot, anything else names a bot by its beginning.
+	 */
+	CHECK(parse_command("/bot remove all").all);
+	CHECK(!parse_command("/bot remove ace").all);
+	CHECK(name_of(parse_command("/bot remove ace")) == "ace");
 }
 
 void test_remove_skill_style()
@@ -396,6 +447,7 @@ int main()
 	test_skill_and_style_words();
 	test_add();
 	test_sanitize();
+	test_reserved_names();
 	test_remove_skill_style();
 	test_target();
 	test_add_verdict();

@@ -5185,11 +5185,14 @@ callsign_t default_bot_name(const playernum_t slot)
 	return {};
 }
 
-/* Section 6.4: a bot's name in the game (b::sanitize_name). */
+/* Section 6.4: a bot's name in the game (b::usable_name): empty if
+ * nothing of it may be a name, or it is a word `/bot` reads as
+ * something else (`all`, a skill, a style, a command).
+ */
 [[nodiscard]]
 callsign_t clean_name(const char *const name)
 {
-	const auto clean{b::sanitize_name(name)};
+	const auto clean{b::usable_name(name)};
 	callsign_t c{};
 	c.copy_lower(std::span<const char>(clean.data(), std::strlen(clean.data())));
 	return c;

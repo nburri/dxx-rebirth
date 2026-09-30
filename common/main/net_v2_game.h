@@ -197,7 +197,9 @@ bool host_join_in_progress();
  * PLAYER_JOINED and the player list (with the bot flag) to everyone.
  */
 void host_add_player(playernum_t slot);
-/* PLAYER_LIST to every player in the game (a bot renamed or added). */
+/* PLAYER_LIST to every player in the game and to one joining it (a bot
+ * renamed or added).
+ */
 void host_send_player_list();
 
 /* Stage 3 (similar/main/net_objects.cpp): a reliable game message of

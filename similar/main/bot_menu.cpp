@@ -279,8 +279,11 @@ void run_bot_edit(const unsigned i, const network_game_type mode)
 	c.style = b::bot_style{static_cast<uint8_t>(e.m[bot_edit_menu::style].value)};
 	if (e.team_mode)
 		c.team = b::bot_team{static_cast<uint8_t>(e.m[bot_edit_menu::team].value)};
-	/* An empty or taken name keeps the old one. */
-	if (e.name_text[0] && !name_in_use(e.name_text.data(), i))
+	/* An empty or taken name keeps the old one, and so does a word
+	 * `/bot` reads as something else (section 6.4: `all`, a skill, a
+	 * style, a command).
+	 */
+	if (e.name_text[0] && !name_in_use(e.name_text.data(), i) && !b::name_reserved(e.name_text.data()))
 		set_name(c.name, e.name_text.data());
 }
 
@@ -427,7 +430,10 @@ void bots_setup_load(const b::bot_profile &p)
 	for (unsigned i = 0; i < Bot_setup.count; ++i)
 	{
 		const char *const n{p.bots[i].name.data()};
-		if (n[0] && !name_in_use(n, i))
+		/* A reserved word (section 6.4) from a profile written by hand
+		 * or by an older build: the next built-in name instead.
+		 */
+		if (n[0] && !name_in_use(n, i) && !b::name_reserved(n))
 			set_name(Bot_setup.bots[i].name, n);
 	}
 	for (unsigned i = 0; i < Bot_setup.count; ++i)
@@ -599,6 +605,27 @@ const char *team_label(const playernum_t pid)
 	return multi_get_team_from_player(Netgame, pid) == team_number::red ? "Red" : "Blue";
 }
 
+/* A message with "OK" in front of the running game.  False if the game
+ * closed it (game_leave_menus: the host was hit, died, the level
+ * ended): the Bots screens then stay closed instead of coming back in
+ * front of a game that wants the host's attention.
+ */
+int notice_handler(newmenu *, const d_event &event, close_watch *const watch)
+{
+	watch->see(event);
+	return 0;
+}
+
+[[nodiscard]]
+bool notice(const char *const text)
+{
+	close_watch watch;
+	std::array<newmenu_item, 1> m;
+	nm_set_item_menu(m[0], TXT_OK);
+	const int r{newmenu_do2(menu_title{"BOTS"}, menu_subtitle{text}, m, notice_handler, &watch, 0)};
+	return !(r == -1 && watch.forced) && bots_manageable();
+}
+
 void say_add_failure(const b::add_verdict why, char *const buf, const std::size_t size)
 {
 	if (why == b::add_verdict::full)
@@ -671,13 +698,23 @@ bool run_ingame_edit(const bot_in_game *const existing)
 		/* Only "Add this bot" adds ("Cancel" is the screen's `done`). */
 		if (r != MENU_REBUILD)
 			return true;
-		set_name(c.name, b::sanitize_name(e.name_text.data()).data());
+		const auto clean{b::sanitize_name(e.name_text.data())};
+		/* No bot is called by a word `/bot` reads as something else:
+		 * said here, not answered with a built-in name.
+		 */
+		if (b::name_reserved(clean.data()))
+		{
+			char msg[96];
+			std::snprintf(msg, sizeof(msg), "A bot cannot be called '%s':\n'all', skills, styles and\n/bot commands are not names.", clean.data());
+			return notice(msg);
+		}
+		set_name(c.name, clean.data());
 		b::add_verdict why;
 		if (!bots_add(c, why))
 		{
 			char msg[64];
 			say_add_failure(why, msg, sizeof(msg));
-			nm_messagebox_str(menu_title{"BOTS"}, nm_messagebox_tie(TXT_OK), menu_subtitle{msg});
+			return notice(msg);
 		}
 		return true;
 	}
@@ -695,7 +732,16 @@ bool run_ingame_edit(const bot_in_game *const existing)
 	 * from the setup may hold characters a rename would drop).
 	 */
 	if (e.name_text[0] && d_stricmp(e.name_text.data(), static_cast<const char *>(start.name)))
+	{
+		const auto clean{b::sanitize_name(e.name_text.data())};
+		if (b::name_reserved(clean.data()))
+		{
+			char msg[112];
+			std::snprintf(msg, sizeof(msg), "'%s' keeps its name: 'all',\nskills, styles and /bot commands\nare not names.", static_cast<const char *>(start.name));
+			return notice(msg);
+		}
 		bots_rename(existing->pid, e.name_text.data());
+	}
 	return true;
 }
 
@@ -959,7 +1005,11 @@ void bots_save_as_default()
 	Bot_setup.replace = Bot_game.replace;
 	for (unsigned i = 0; i < MAX_BOTS; ++i)
 		Bot_setup.bots[i] = i < n ? bots[i].cfg : bot_config{};
-	write_netgame_profile(&Netgame);
+	/* Only the bot lines: every other line of the profile stays as the
+	 * host's setup wrote it (the game's Netgame differs from it: the
+	 * tracker is forced off in it without a tracker address).
+	 */
+	write_netgame_profile_bots();
 	con_printf(CON_NORMAL, "bots: the %u bots of this game are the default setup now", n);
 }
 
@@ -989,7 +1039,9 @@ void bots_ingame_menu()
 			{
 				char msg[64];
 				say_add_failure(why, msg, sizeof(msg));
-				nm_messagebox_str(menu_title{"BOTS"}, nm_messagebox_tie(TXT_OK), menu_subtitle{msg});
+				/* The game closed the message: the list stays closed. */
+				if (!notice(msg))
+					return;
 			}
 			citem = -1;
 			continue;
@@ -1006,7 +1058,8 @@ void bots_ingame_menu()
 			bots_save_as_default();
 			char msg[96];
 			std::snprintf(msg, sizeof(msg), "The %u bot%s of this game\nare the default setup now.", im.listed, im.listed == 1 ? "" : "s");
-			nm_messagebox_str(menu_title{"BOTS"}, nm_messagebox_tie(TXT_OK), menu_subtitle{msg});
+			if (!notice(msg))
+				return;
 			citem = static_cast<int>(im.opt_save);
 			continue;
 		}

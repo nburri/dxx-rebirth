@@ -2440,6 +2440,8 @@ void queue_snapshot(peer &p)
 		 */
 		Netgame.numplayers = static_cast<uint8_t>(::dcx::net_v2::player_count_including(Netgame.numplayers, slot));
 		Netgame.kills[slot] = {};
+		for (auto &row : Netgame.kills)
+			row[slot] = 0;
 		Netgame.killed[slot] = 0;
 		Netgame.player_kills[slot] = 0;
 		Netgame.player_score[slot] = 0;
@@ -2962,7 +2964,14 @@ void new_player(const playernum_t pnum, const callsign_t &callsign, const netpla
 	Netgame.players[pnum].rank = rank;
 
 	plr.connected = player_connection_status::playing;
+	/* The slot's kills, and the kills of it: both were those of the
+	 * player who held the slot before (a bot the host removed, a bot a
+	 * human replaced).  On the host and the clients alike; the joiner
+	 * itself gets the same from its snapshot (queue_snapshot).
+	 */
 	kill_matrix[pnum] = {};
+	for (auto &row : kill_matrix)
+		row[pnum] = 0;
 	auto &objp = *vmobjptr(plr.objnum);
 	auto &player_info = objp.ctype.player_info;
 	player_info.net_killed_total = 0;
@@ -5008,8 +5017,13 @@ void host_send_player_list()
 		return;
 	/* The list's `connected` bytes as the game has them now. */
 	net_udp_update_netgame();
+	/* A peer still joining too (it has its first list from its
+	 * JOIN_ACCEPT, and loads the level now): a bot renamed meanwhile
+	 * must not keep its old name there.  Its snapshot brings the list
+	 * once more; the reliable stream keeps them in order.
+	 */
 	for (auto &&[i, p] : enumerate(S.peers))
-		if (i && peer_receives_broadcasts(p))
+		if (i && p.conn && (p.ph == peer::phase::joining || peer_receives_broadcasts(p)))
 			send_player_list(p);
 }
 

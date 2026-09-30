@@ -701,7 +701,13 @@ bots, in the modes bots play (anarchy, team anarchy, bounty).
 
   A skill or style is its full name or exactly its first three letters
   (`hot`, `agg`; also the list's `Aggr`, `Caut`, `Coll`), in any case. A
-  bot is named by its name or by a unique beginning of it. The answers
+  bot is named by its name or by a unique beginning of it. No bot is
+  called by a reserved word: `all`, a skill or style word (full, three
+  letters, the list's short names) or a command word (`add`, `remove`,
+  `rm`, `kick`, `skill`, `style`, `list`, `save`, `help`, `bot`). So
+  `/bot add col ace` (style before skill) is an error that says the
+  order, not a bot named "ace"; the Bots screens refuse such a name with
+  a message, and the setup keeps the old name. The answers
   (and the errors) are HUD messages on the host. `/kick: <botname>` still
   removes a bot (as kicked). A client that types `/bot ...` reads "Only
   the host can manage bots"; the line is not sent as chat. A chat line
@@ -2872,8 +2878,10 @@ everyone; the slot for a bot; a bot's new name on the clients),
 `similar/main/net_objects.cpp` (a slot's last inventory report is
 forgotten when a player enters it), `similar/main/multi.cpp` (`/bot` in the chat, the host's notice, the
 team change), `similar/main/gamecntl.cpp` (the game menu). Test:
-`test-bot-commands` (new). The protocol numbers stay 104: no message
-changed its layout.
+`test-bot-commands` (new), `test-bot-presets` (the profile's bot
+lines). `similar/main/playsave.cpp` writes the bot lines alone
+(`write_netgame_profile_bots`). The protocol numbers stay 105: no
+message changed its layout.
 
 **The options of the game.** `Bot_game` (the skill and style of a new
 bot, humans replace bots) is copied from the setup when the game starts
@@ -2893,7 +2901,9 @@ is never taken). Then:
    `bots_level_start` marks a level without bots as unprepared, so the
    graph of an earlier level is never used.
 2. The name: the one given (lower case, 8 characters, letters, digits,
-   `-` and `_`), else the next built-in name; made unique against every
+   `-` and `_`; not a reserved word, `name_reserved`: `/bot` and the
+   screens refuse one, and `bots_add` itself would take a built-in name
+   instead), else the next built-in name; made unique against every
    callsign in the game, those of departed players included (a human who
    dropped comes back by callsign).
 3. The bot's state is created with the order of addition after every
@@ -2903,7 +2913,10 @@ is never taken). Then:
    sends `MULTI_GMODE_UPDATE`.
 4. `net_v2::host_add_player`: the slot's inventory copy is reset
    (`net_objects_host_join`), `new_player` runs on the host (scores and
-   kill-matrix row zeroed, "is joining", the kill list sorted),
+   the slot's kill-matrix row and column zeroed, as on every client
+   with `PLAYER_JOINED` and in a joining human's snapshot: the kills of
+   the slot's previous holder are not the new player's; "is joining", the
+   kill list sorted),
    `PLAYER_JOINED` goes to everyone, and then `PLAYER_LIST`: the first
    clears the slot's bot flag on a client (a human took the slot), the
    second, behind it in the same reliable stream, sets it.
@@ -2938,14 +2951,22 @@ colours, `MULTI_GMODE_UPDATE`, a notice. Name: the host's player and
 netgame entries, then `PLAYER_LIST` to everyone; a client takes a new
 callsign for a slot flagged as a bot from the list during the game
 (`read_player_list`), so its kill list and name tags follow. A client
-of an older build of protocol 104 keeps the old name until the next
-level; nothing else differs for it.
+of an older build of protocol 105 keeps the old name until the next
+level; nothing else differs for it. The list also goes to a peer that is
+still joining (between its `JOIN_ACCEPT` and its snapshot), so a bot
+renamed meanwhile does not keep its old name there; the snapshot brings
+the list once more.
 
 **Persistence.** *Decision:* in-game changes stay in the game. "Save as
 default setup" and `/bot save` copy the bots playing (in the order of
 addition, with their current names, skills, styles and team
-preferences) and the game's options into `Bot_setup` and write the
-pilot's `.ngp`. Reason: adding a bot to fill an evening, or losing one
+preferences) and the game's options into `Bot_setup` and write the bot
+lines of the pilot's `.ngp` (`replace_profile_bot_lines`: the file is
+read, its bot lines are replaced, every other line stays as it is). The
+whole profile is not written from the game's `Netgame`, which is not
+the setup the host made: without a tracker address the tracker is
+switched off in it after the setup was saved, and saving it would
+switch the tracker off in the profile. Reason: adding a bot to fill an evening, or losing one
 to a human, should not silently change the setup of the next game.
 
 **Menus and the running game.** The Bots screen is opened from the game
@@ -2969,7 +2990,10 @@ is applied, and the screen is built again. Because the game runs on:
   tells the two apart (`close_watch`: the host's Escape or click is the
   screen's last event before it closes; the game's close is not): after
   the host's Escape the per-bot screen goes back to the list, after the
-  game's close all Bots screens are left and nothing is applied;
+  game's close all Bots screens are left and nothing is applied. The
+  messages of these screens ("The game is full", the saved setup, a
+  refused name) are watched the same way (`notice`): a message the game
+  closed does not bring the list back;
 - with the deferred deletion of PR #48 a window closed while one of its
   handlers is on the stack (the game window under these nested loops,
   or a screen closed from the game's frame) stays allocated until the
@@ -2980,7 +3004,9 @@ is applied, and the screen is built again. Because the game runs on:
 `/bot: hi`), help, list and save, every skill and style word and its
 three-letter form, that no built-in name reads as a skill or style
 (`rook` is a name), `/bot add` with each part left out and in the wrong
-order, the name rules, remove/skill/style with `all`, missing and
+order (an error), the reserved words (refused as names in `/bot add`
+and by `usable_name`, while names that only begin like one stay
+names), the name rules, remove/skill/style with `all`, missing and
 surplus words, that every error says why; the target (exact before
 prefix, ambiguous, none); the add verdict; and with
 `net_v2_session.h`: the slot a bot takes (lowest free, the limit for

@@ -20,7 +20,11 @@
  *   balanced, aggressive, cautious or collector.  Each may be given by
  *   exactly its first three letters (and a style by the Bots screen's
  *   short names Aggr, Caut, Coll).  Case does not matter.  Any other
- *   word in the place of `/bot add`'s name is the name.
+ *   word in the place of `/bot add`'s name is the name, unless it is a
+ *   reserved word (name_reserved): `all`, a skill or style word, or a
+ *   command word.  No bot is called so, in the chat or on the Bots
+ *   screens: `/bot add col ace` (style before skill) is an error, not a
+ *   bot named "ace", and `/bot remove all` never meets a bot named "all".
  * - which bot a name means (exact, else a unique prefix);
  * - whether the host may add a bot now, and why not.
  */
@@ -192,6 +196,37 @@ constexpr std::optional<bot_style> parse_style(const std::string_view w)
 	return std::nullopt;
 }
 
+/* A word no bot is called: `all` (every bot, in remove, skill and
+ * style), a skill or a style as `/bot` reads it (the full word, its
+ * first three letters, the Bots screen's short names), and the command
+ * words.  As a bot's name it would be read as something else in a
+ * command, or hide a mistake in one (`/bot add col ace`).
+ */
+[[nodiscard]]
+constexpr bool name_reserved(const std::string_view w)
+{
+	constexpr std::array<std::string_view, 11> words{{"all", "add", "remove", "rm", "kick", "skill", "style", "list", "save", "help", "bot"}};
+	for (const auto r : words)
+		if (detail::iequal(w, r))
+			return true;
+	return parse_skill(w) || parse_style(w);
+}
+
+/* sanitize_name, and nothing if what is left is a reserved word (the
+ * bot then gets a built-in name, or keeps the name it has).
+ */
+[[nodiscard]]
+constexpr std::array<char, BOT_COMMAND_NAME_LEN + 1> usable_name(const std::string_view w)
+{
+	auto out{sanitize_name(w)};
+	/* Also the word as given: "aggressive" is longer than a name. */
+	if (name_reserved(w) || name_reserved(std::string_view(out.data())))
+		out = {};
+	return out;
+}
+
+inline constexpr const char *BOT_NAME_RESERVED_TEXT{"Not a name: a skill, style or command word"};
+
 /* The chat line `s` as a /bot command (`none` if it is not one). */
 [[nodiscard]]
 constexpr command parse_command(std::string_view s)
@@ -238,6 +273,9 @@ constexpr command parse_command(std::string_view s)
 			c.name = sanitize_name(w);
 			if (!c.name[0] || std::string_view(c.name.data()).size() != w.size())
 				return detail::error("A name has letters, digits, - and _");
+			/* `/bot add col ace`: the skill comes before the style. */
+			if (name_reserved(w))
+				return detail::error(parse_skill(w) || parse_style(w) ? "Skill, then style, then name: /bot add ace col name" : BOT_NAME_RESERVED_TEXT);
 		}
 		if (!detail::next_word(rest).empty())
 			return detail::error("Usage: /bot add [skill] [style] [name]");
