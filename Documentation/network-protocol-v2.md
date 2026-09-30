@@ -808,7 +808,10 @@ D1: the four D2-only bytes are sent as 0 so the layout is shared.
 the host flies (protocol 104, `Documentation/multiplayer-bots.md` §2.2;
 `encode_list_connected` / `decode_list_connected` in `net_v2_session.h`);
 the low bits are the connection status. The flag stays on a bot's slot
-after the bot left, until a human takes the slot (`PLAYER_JOINED`). Replaces the per-player part of v1
+after the bot left, until a human takes the slot (`PLAYER_JOINED`). A bot
+added during the game is announced with `PLAYER_JOINED` followed by
+`PLAYER_LIST` (which sets the flag again); a bot the host renames reaches
+the clients through the list's callsign (bots §9.11). Replaces the per-player part of v1
 heavy game info and the v1 `addplayer` packet; `PLAYER_JOINED` (0x0A: `pid`,
 callsign 9, rank, team) and `PLAYER_LEFT` (0x0B: `pid`, `reason`) are the
 incremental forms used during play.

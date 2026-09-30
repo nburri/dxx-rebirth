@@ -1368,6 +1368,13 @@ void read_player_list(reader &r)
 		set_player_is_bot(i, c.bot);
 		np.rank = build_rank_from_untrusted(r.u8());
 		r.u8();	/* team: derived from team_vector */
+		/* Bots section 6.4: the host renamed a bot during the game. */
+		if (c.bot && Network_status == network_state::playing && !multi_i_am_master() && i < N_players)
+			if (auto &plr{*vmplayerptr(static_cast<playernum_t>(i))}; plr.connected != player_connection_status::disconnected && np.callsign[0u] && d_stricmp(plr.callsign, np.callsign))
+			{
+				con_printf(CON_NORMAL, "net: bot P#%u '%s' is now '%s'", static_cast<unsigned>(i), static_cast<const char *>(plr.callsign), static_cast<const char *>(np.callsign));
+				plr.callsign = np.callsign;
+			}
 	}
 }
 
@@ -3476,6 +3483,18 @@ void handle_level_ready(peer &p, const std::span<const uint8_t> payload)
 	}
 }
 
+/* Host: tell everyone but `exclude` that a new player is in `slot`. */
+void broadcast_player_joined(const playernum_t slot, const playernum_t exclude)
+{
+	std::array<uint8_t, PLAYER_JOINED_SIZE> buf;
+	writer w{buf.data()};
+	w.u8(slot);
+	w.bytes(&Netgame.players[slot].callsign[0u], CALLSIGN_LEN + 1);
+	w.u8(underlying_value(Netgame.players[slot].rank));
+	w.u8((Netgame.team_vector >> slot) & 1);
+	broadcast_reliable(session_msg::player_joined, buf, exclude);
+}
+
 /* Host: the joining peer applied the snapshot (v1 rejoin sync). */
 void handle_client_ready(peer &p)
 {
@@ -3491,13 +3510,7 @@ void handle_client_ready(peer &p)
 		p.is_new = false;
 		S.awaits_entry[slot] = false;
 		new_player(slot, Netgame.players[slot].callsign, Netgame.players[slot].rank);
-		std::array<uint8_t, PLAYER_JOINED_SIZE> buf;
-		writer w{buf.data()};
-		w.u8(slot);
-		w.bytes(&Netgame.players[slot].callsign[0u], CALLSIGN_LEN + 1);
-		w.u8(underlying_value(Netgame.players[slot].rank));
-		w.u8((Netgame.team_vector >> slot) & 1);
-		broadcast_reliable(session_msg::player_joined, buf, slot);
+		broadcast_player_joined(slot, slot);
 	}
 	else
 		vmplayerptr(slot)->connected = player_connection_status::playing;
@@ -4948,6 +4961,56 @@ int host_input_afterburner(const playernum_t slot)
 	if (!st.valid)
 		return -1;
 	return st.input.has_flag(input_flag::afterburner) ? 1 : 0;
+}
+
+bool host_join_in_progress()
+{
+	return multi_i_am_master() && join_in_progress(_sockaddr{});
+}
+
+std::optional<playernum_t> host_free_slot_for_bot()
+{
+	if (!multi_i_am_master())
+		return std::nullopt;
+	/* The rule of a joining human who finds room (section 4.2): a free
+	 * slot below the player limit, else a departed bot's.  A slot with a
+	 * connection (a join under way, a linger) counts as taken; a
+	 * disconnected human's slot is kept for their return.
+	 */
+	const auto views{build_slot_views(callsign_t{}, _sockaddr{})};
+	const auto s{::dcx::net_v2::free_admission_slot(views, std::min<unsigned>(Netgame.max_numplayers, MAX_PLAYERS))};
+	if (!s || !*s || *s >= MAX_PLAYERS || host_slot_has_peer(static_cast<playernum_t>(*s)))
+		return std::nullopt;
+	return static_cast<playernum_t>(*s);
+}
+
+void host_add_player(const playernum_t slot)
+{
+	if (!multi_i_am_master() || !slot || slot >= MAX_PLAYERS)
+		return;
+	S.now = timer_query();
+	drop_extras_for(slot);
+	net_objects_host_join(slot);
+	S.awaits_entry[slot] = false;
+	new_player(slot, Netgame.players[slot].callsign, Netgame.players[slot].rank);
+	Netgame.players[slot].connected = player_connection_status::playing;
+	Netgame.players[slot].LastPacketTime = S.now;
+	/* PLAYER_JOINED clears the slot's bot flag on the clients (a human
+	 * took it); the player list behind it sets it again.
+	 */
+	broadcast_player_joined(slot, MAX_PLAYERS);
+	host_send_player_list();
+}
+
+void host_send_player_list()
+{
+	if (!multi_i_am_master())
+		return;
+	/* The list's `connected` bytes as the game has them now. */
+	net_udp_update_netgame();
+	for (auto &&[i, p] : enumerate(S.peers))
+		if (i && peer_receives_broadcasts(p))
+			send_player_list(p);
 }
 
 void host_remove_player(const playernum_t slot, const kick_player_reason why)

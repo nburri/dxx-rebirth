@@ -18,6 +18,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <optional>
 #include <span>
 #include "dxxsconf.h"
 #include "dsx-ns.h"
@@ -178,6 +179,26 @@ int host_input_afterburner(playernum_t slot);
  * carried (multi_disconnect_player).
  */
 void host_remove_player(playernum_t slot, kick_player_reason why);
+/* Documentation/multiplayer-bots.md section 6.4: the slot a bot added
+ * during the game may take (a free slot below the player limit, else a
+ * departed bot's; never one with a connection or a disconnected human's),
+ * or none.
+ */
+[[nodiscard]]
+std::optional<playernum_t> host_free_slot_for_bot();
+/* The host is serving a join in progress (between a human's JOIN_ACCEPT
+ * and the end of its extras): no bot is added meanwhile, since the
+ * joiner's snapshot describes the game without it.
+ */
+[[nodiscard]]
+bool host_join_in_progress();
+/* A player without a connection (a bot) whose Netgame.players entry the
+ * caller filled enters the game in `slot`: new_player on the host,
+ * PLAYER_JOINED and the player list (with the bot flag) to everyone.
+ */
+void host_add_player(playernum_t slot);
+/* PLAYER_LIST to every player in the game (a bot renamed or added). */
+void host_send_player_list();
 
 /* Stage 3 (similar/main/net_objects.cpp): a reliable game message of
  * type `type` (net_v2_session.h).  On the host, to every player in the

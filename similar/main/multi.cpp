@@ -1510,6 +1510,20 @@ static void multi_send_message_end(const d_robot_info_array &Robot_info, fvmobjp
 				return;
 			}
 	}
+	else if (+(Game_mode & GM_NETWORK) && bots_chat_command(Network_message.data()))
+	{
+		/* Documentation/multiplayer-bots.md section 6.4: `/bot ...`
+		 * was the host's order (or, on a client, refused); not sent.
+		 */
+		multi_message_index = 0;
+		multi_sending_message[Player_num] = msgsend_state::none;
+#if DXX_BUILD_DESCENT == 2
+		multi_send_msgsend_state(msgsend_state::none);
+		key_toggle_repeat(0);
+		game_flush_inputs(Controls);
+#endif
+		return;
+	}
 	else if (!d_stricmp (Network_message.data(), "/killreactor") && +(Game_mode & GM_NETWORK) && !LevelUniqueControlCenterState.Control_center_destroyed)
 	{
 		if (!multi_i_am_master())
@@ -2685,6 +2699,38 @@ void multi_send_message()
 		multi_send_data(multibuf, multiplayer_data_priority::_0);
 		Network_message_reciever = -1;
 	}
+}
+
+}
+
+namespace dsx {
+
+void multi_send_host_notice(const char *const text)
+{
+	if (!(Game_mode & GM_MULTI) || !multi_i_am_master())
+		return;
+	multi_command<multiplayer_command_t::MULTI_MESSAGE> multibuf;
+	/* Obsolete - reclaim player number field on next multiplayer protocol version bump */
+	multibuf[1] = Player_num;
+	const std::size_t room{multibuf.size() - 3};
+	const std::size_t n{std::min(std::strlen(text), room)};
+	std::copy_n(text, n, std::next(multibuf.begin(), 2));
+	std::fill(std::next(multibuf.begin(), 2 + n), multibuf.end(), 0);
+	multi_send_data(multibuf, multiplayer_data_priority::_0);
+	HUD_init_message(HM_MULTI, "%s", text);
+}
+
+void multi_host_teams_changed()
+{
+	if (!multi_i_am_master() || !(Game_mode & GM_TEAM))
+		return;
+	auto &Objects = LevelUniqueObjectState.Objects;
+	auto &vmobjptr = Objects.vmptr;
+	range_for (auto &t, partial_const_range(Players, N_players))
+		if (t.connected != player_connection_status::disconnected)
+			multi_reset_object_texture(vmobjptr(t.objnum));
+	reset_cockpit();
+	multi_send_gmode_update();
 }
 
 }
