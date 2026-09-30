@@ -4118,6 +4118,10 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 	}
 	else
 	{
+		/* The review of PR #63: a slide of a fight that ended out of
+		 * sight does not carry its key into the next fight.
+		 */
+		bs.slide.reset();
 		wanted = follow_path(bs, obj, false);
 		/* Section 9.5: hit by an attacker it did not see, the bot turns
 		 * to where it was, a reaction time after the hit, and keeps
@@ -4246,8 +4250,12 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 	}
 	else
 		bs.move_cmd = b::velocity_command(wanted, vel, max_speed);
-	/* Section 9.12: the strafe keys do not flip at the tick rate. */
-	bs.move_cmd = frame.to_world(bs.lateral.apply(frame.to_local(bs.move_cmd), tick, dodging || bs.stuck.recovering()));
+	/* Section 9.12: the strafe keys do not flip at the tick rate.  The
+	 * review of PR #63: nor does the push off a wall wait for the filter
+	 * (a strafe key held toward the wall, the push the other way was
+	 * released for up to b::KEY_FLIP_TICKS: the bot slid on into it).
+	 */
+	bs.move_cmd = frame.to_world(bs.lateral.apply(frame.to_local(bs.move_cmd), tick, dodging || bs.stuck.recovering() || tick < bs.avoid_until));
 	if (!aim_set)
 		bs.aim_dir = bs.face_dir;
 	decide_afterburner(bs, obj, use_keys ? vec3{} : wanted, tick);
