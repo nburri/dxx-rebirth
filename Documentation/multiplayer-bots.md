@@ -875,7 +875,7 @@ and one PR per change.
 | **B3** | Pickups and resources: `powerup_apply` for bots, collect and retreat goals, fuel centres, death drops from the bot's inventory, weapon choice tables, afterburner. | B1 and v2 stage 3 | M |
 | **B4** | Secondaries and mines, dodge, strafe patterns, cloak/invul behaviour, converter. `-botarena` test mode. | B3 | M |
 | **B5** | In-game bot menu, chat commands, add/remove during play, join in progress with bots (extras inventory until stage 5). Implemented: §9.11. | B2 | S |
-| **B6** | Move to stage 4 authority: bots in the history ring, robot-style hit detection for bot shots, generic `PLAYER_KILLED`/`PLAYER_SPAWN`; delete the bot-specific kill path. | v2 stage 4 | S |
+| **B6** | Move to stage 4 authority: bots in the history ring, robot-style hit detection for bot shots, generic `PLAYER_KILLED`/`PLAYER_SPAWN`; delete the bot-specific kill path. Done with stage 4 (network-protocol-v2.md, "Stage 4 as implemented"): the host records its bots' positions every frame, a bot's hits are applied where the host shows the target, damage to a bot goes through `bot_take_damage` from the host's decision, and a bot's death and respawn are announced with `PLAYER_KILLED`/`PLAYER_SPAWN`. | v2 stage 4 | S |
 | **B7** | CTF and hoard: goal segments (`fuelcen_check_for_goal` / `_hoard_goal` for bots on the host), flag and orb roles (attack/defend/escort), team coordination through a shared host-side blackboard. | v2 stage 6 | M |
 
 B1 is shippable on its own for playtesting against "target practice" bots.
