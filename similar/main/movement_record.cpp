@@ -918,6 +918,13 @@ void movement_record_splash(const object &victim, const object *const origin, co
 	record_damage(vpid, apid, akind, weapon, damage, mr::hit_flag::splash);
 }
 
+void movement_record_damage(const unsigned victim, const unsigned attacker, const std::uint8_t attacker_kind, const unsigned weapon, const fix damage, const bool splash)
+{
+	if (!R.file || victim >= MAX_PLAYERS)
+		return;
+	record_damage(victim, attacker < MAX_PLAYERS ? attacker : mr::PLAYER_NONE, attacker_kind, weapon, damage, splash ? mr::hit_flag::splash : 0u);
+}
+
 void movement_record_kill(const object &victim, const object *const killer)
 {
 	if (!R.file)

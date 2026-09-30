@@ -2459,6 +2459,113 @@ Differences from §6.1–§6.4 and decisions:
   and `InvulAppear` works; a deliberately teleporting client (debug key)
   gets corrected and does not warp on others' screens.
 
+#### Stage 4 as implemented
+
+The game-independent part (position history and rewind, the rewind
+window, the shot registry and the verdicts on hit reports, the damage
+and kill rules, the rate limits, the checks of `FIRE` and of `INPUT`,
+catch-up stepping, the client's own damage in portions, and the wire
+layouts) is `common/main/net_v2_combat.h`, tested by
+`test-net-v2-combat` (including a simulated host with up to 7 clients at
+15-150 ms, jitter and loss: every machine ends with the host's scores,
+damage and shields). The game side is `similar/main/net_combat.cpp`,
+with hooks in `laser.cpp`, `collide.cpp`, `fireball.cpp`, `object.cpp`,
+`gameseq.cpp`, `bot.cpp`, `multi.cpp`, `net_objects.cpp`,
+`net_interp.cpp` and `net_v2.cpp`. `MULTI_PROTO_VERSION` and
+`NET_V2_PROTO_VERSION` are 106. Active in every network game that is
+not a demo played back (`net_combat_active`). Differences from §6.5,
+§6.6 and decisions:
+
+- **Messages.** Reliable session messages on the ordered stream (with
+  `LEGACY_MDATA`, so their order with the v1 records is kept): `FIRE`
+  0x27 (36 bytes: `pid`, `fire_time`, weapon, level, flags, origin,
+  segment, orientation as a quaternion instead of the direction, `seed`,
+  first `netid`, `count` of projectiles, `track` = the player a homing
+  weapon follows or 0xFF), `WEAPON_HIT` 0x28 (28 bytes: `netid`,
+  `weapon_id`, `kind` direct/splash/self, `target`, `cause`,
+  `target_time`, point, segment, damage), `DAMAGE` 0x29 (24 bytes, with
+  the host's shields after it and the hit kind and cause, for the
+  movement recording), `PLAYER_KILLED` 0x2A (14 bytes, the
+  scores after the kill) and `PLAYER_SPAWN` 0x2B (25 bytes). The design's
+  `WANT_RESPAWN` in `INPUT` is not used: the host-assigned spawns
+  (`SPAWN_REQUEST`/`SPAWN_SITE`) stay, and `PLAYER_SPAWN` announces the
+  new ship. Removed: `MULTI_FIRE`, `MULTI_FIRE_TRACK`, `MULTI_FIRE_BOMB`,
+  `MULTI_KILL_HOST`, `MULTI_KILL_CLIENT`, `MULTI_REAPPEAR`.
+  `MULTI_PLAYER_DERES` grew by the first id of the dying player's mines
+  (7 bytes).
+- **Projectile ids.** The shooter's machine numbers the weapons one shot
+  creates (`net_combat_begin_fire` … `net_combat_send_fire`, dynamic ids
+  with the shooter's slot as creator, consecutive); every other machine
+  gives its copies the same ids in creation order. A child (smart
+  missile blobs, earthshaker children, smart mine blobs) has its parent's
+  id. The omega cannon may create a different number of blobs on
+  another machine (the target lock is local); extra copies have no id.
+  The mines a dying ship arms get ids reserved by its machine and sent in
+  the deres. The guided missile record's `id` is now the missile's id.
+- **Firing.** The shooter seeds the shot (`d_srand(seed)`), so vulcan and
+  gauss spread and speed variance are the same everywhere. Receivers put
+  the shooter's ship at the origin and orientation of `FIRE` for the
+  shot (and back afterwards), then advance each new projectile by its age
+  (at most 250 ms) in 1/60 s steps of `do_physics_sim`, so it stops at the
+  first wall or object. The muzzle flash is carried by the displayed ship
+  as before. The host checks a client's `FIRE` (rate, sender, alive or
+  fired before its death, time window, weapon in the host's copy of the
+  inventory, the laser at most at the host's laser level, origin
+  against the shooter's history with at most 250 ms of unknown flight,
+  fire rate per primary/missile/flare with the weapon's delay and a
+  secondary's volley of `fire_count` rounds, a known weapon and no more
+  projectiles than it fires) and relays it only if
+  accepted; a refused shot flies on the shooter's screen only and its
+  hits are unknown to the host. Energy and ammunition are still spent by
+  the client and reported (stage 3); the host does not deduct them.
+- **Hits.** Only the machine flying the shooter reports: a client sends
+  `WEAPON_HIT` with the time the target was shown at on its screen
+  (`net_interp_display_time`, the render time of that ship this frame;
+  its own clock for itself), the host judges it against the target's
+  history (`INPUT` positions of clients, its own ship and its bots every
+  frame) at that time, limited to the rewind window (200 ms), and
+  applies its own damage: the claim clamped to the weapon's maximum for a
+  direct hit, the host's distance for a blast. The host's own shots and
+  its bots' are applied where the host shows the target, without a
+  check. The host keeps a position of its own ship and its bots at most
+  every 5 ms, so that the history spans the rewind window at any frame
+  rate. The level end protects only the host's own ship from the host's
+  `Endlevel_sequence` (its bots stop during it, as before). Not implemented from §6.5: the line-of-sight check of step 4 and
+  robots, the reactor and walls as targets (they keep the v1 handling).
+- **Own damage.** Damage without a player's weapon (walls, lava, bumps,
+  the fusion overcharge, matcens, robots' and the reactor's weapons,
+  robots' explosions) is reported by the machine that flies the ship
+  (`self`, summed over at most 50 ms), credited to the ship itself or,
+  for a bump, to the other ship if it is within 40 units on the host.
+  The explosion of a dying ship (its deres) is judged by the host.
+- **Damage and shields.** The host applies the rules (alive, invulnerable,
+  friendly fire, level end), takes the damage from its copy of a client's
+  shields (numbered like a grant, so a report sent before the damage
+  arrived does not give the shields back), from its own ship or through
+  `bot_take_damage` for a bot, and sends `DAMAGE`. The victim takes it
+  off its shields (palette flash); others show the host's shields. A
+  client never kills itself: its shields may go below zero for a moment
+  before the `PLAYER_KILLED` that follows.
+- **Kills.** When shields drop below zero the host decides the kill
+  (credited like v1's `multi_compute_kill`, now with an explicit killer
+  kind and player), applies it, and sends `PLAYER_KILLED` with the team
+  vector and bounty target before the kill and the counts after it;
+  receivers apply the same rules and then take the host's counts. The
+  victim's death sequence starts from it (the local ship, a bot on the
+  host). The bounty is sent after the kill as before.
+- **Not yet.** `INPUT` validation and `CORRECTION` (§5.5, the functions
+  are written and tested but not wired: rejecting positions risks
+  pulling honest ships back after explosions and respawns, which needs a
+  playtest first); host-side deduction of ammunition and energy; weapon
+  ids for shots in flight in a join-in-progress snapshot; the
+  line-of-sight check.
+- **Tested** by `test-net-v2-combat` (history, rewind window, every hit
+  verdict, splash damage, damage and friendly fire rules, kill credit
+  and scores in every mode, rate limits, fire checks, input checks,
+  catch-up, damage in the inventory copy, wire round trips and malformed
+  sizes, and the simulation above); `test-net-v2-authority` for the
+  larger inventory copy. Only playable: everything that touches objects.
+
 ### Stage 5 — Join in progress, level flow, level end
 
 - Implement §4.3–§4.5, §4.7: `LEVEL_START`/`READY`/`GO`, `SNAPSHOT_*`,

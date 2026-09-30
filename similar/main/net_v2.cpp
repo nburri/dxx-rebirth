@@ -1729,7 +1729,8 @@ std::optional<guided_record> local_guided_record(const playernum_t pnum)
 	const auto p{pose_of(*gim)};
 	return guided_record{
 		.pid = static_cast<uint8_t>(pnum),
-		.id = gim.get_unchecked_index(),
+		/* The missile's id (its FIRE, stage 4). */
+		.id = net_combat_netid_of(gim),
 		.gen = multi_guided_generation(pnum),
 		.orient = p.orient,
 		.pos = p.pos,
@@ -1816,7 +1817,11 @@ void apply_input(peer &p, const std::span<const uint8_t> payload)
 	st.arrival = S.now;
 	Netgame.players[slot].LastPacketTime = S.now;
 	if (in->has_flag(input_flag::alive))
+	{
 		interp::receive_ship(slot, snapshot_of(t, in->pose, true), S.now);
+		/* Stage 4: the history the hits are judged against. */
+		net_combat_host_position(slot, t, vms_vector{in->pose.pos.x, in->pose.pos.y, in->pose.pos.z}, segnum_t{in->pose.segment});
+	}
 	else
 		interp::receive_ghost(slot);
 	if (in->guided)
@@ -2428,12 +2433,13 @@ void queue_snapshot(peer &p)
 	net_udp_update_netgame();
 	fill_netgame_scores();
 	net_objects_host_join(slot);
+	net_combat_host_join(slot);
 	if (p.is_new)
 	{
 		/* A new player enters the game (new_player) only with its
 		 * CLIENT_READY, after this snapshot.  Describe the game it enters:
 		 * its slot counted in the player count (otherwise its N_players
-		 * leaves itself out, so that it drops every MULTI_KILL_HOST about
+		 * leaves itself out, so that it drops every PLAYER_KILLED about
 		 * its own deaths and misses itself in the kill list) and its
 		 * scores as new_player will reset them, not those of a player who
 		 * held the slot before.
@@ -2576,6 +2582,7 @@ void apply_snapshot_begin(const std::span<const uint8_t> payload)
 	// Clear object array
 	init_objects();
 	net_objects_snapshot_begin();
+	net_combat_level_start();
 	Network_rejoined = 1;
 	S.snapshot_mode_static = true;
 	S.snapshot_objects = 0;
@@ -4149,6 +4156,22 @@ void handle_reliable(peer &p, const session_msg type, const std::span<const uint
 	 * in the game; an answer also while this client still waits for
 	 * LEVEL_GO (the site of its join in progress comes just before it).
 	 */
+	/* Stage 4 (net_combat.cpp): gated like the object messages; the host
+	 * relays or answers them itself.
+	 */
+	switch (type)
+	{
+		case session_msg::fire:
+		case session_msg::weapon_hit:
+		case session_msg::damage:
+		case session_msg::player_killed:
+		case session_msg::player_spawn:
+			if (peer_sends_game_data(p) && legacy_processing_allowed())
+				net_combat_receive(slot, static_cast<uint8_t>(type), payload);
+			return;
+		default:
+			break;
+	}
 	if (type == session_msg::spawn_request || type == session_msg::spawn_site)
 	{
 		if (multi_i_am_master() ? peer_sends_game_data(p) : legacy_processing_allowed())
@@ -5015,6 +5038,7 @@ void host_add_player(const playernum_t slot)
 	S.now = timer_query();
 	drop_extras_for(slot);
 	net_objects_host_join(slot);
+	net_combat_host_join(slot);
 	S.awaits_entry[slot] = false;
 	new_player(slot, Netgame.players[slot].callsign, Netgame.players[slot].rank);
 	Netgame.players[slot].connected = player_connection_status::playing;

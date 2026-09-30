@@ -2599,7 +2599,8 @@ static void StartLevel(int random_flag)
 	{
 		if (+(Game_mode & GM_MULTI_COOP))
 			multi_send_score();
-	 	multi_send_reappear(Player_num);
+		/* PLAYER_SPAWN (protocol v2 stage 4). */
+		net_combat_send_spawn(Player_num);
 		multi::dispatch->do_protocol_frame(1, 1);
 	}
 	else // in Singleplayer, after we died ...

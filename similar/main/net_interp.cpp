@@ -90,6 +90,8 @@ struct interp_state
 	per_player_array<net_clock> lag_age{};
 	/* The objects written this frame; object_move_one leaves them alone. */
 	per_player_array<objnum_t> driven_ship{};
+	/* The host time each driven ship is shown at this frame. */
+	per_player_array<host_clock> render_time{};
 	per_player_array<sweep_start> sweep_from{};
 	/* The pose a ship had before net_interp_snap_to_newest moved it this
 	 * frame, so that the sweep starts from where the ship was drawn.
@@ -500,6 +502,22 @@ void net_interp_carry_flash(const vcobjptridx_t ship, const vcobjptridx_t flash)
 	});
 }
 
+bool net_interp_display_time(const playernum_t pnum, int64_t &host_time)
+{
+	if (pnum >= MAX_PLAYERS || I.driven_ship[pnum] == object_none)
+		return false;
+	host_time = I.render_time[pnum];
+	return true;
+}
+
+bool net_interp_host_clock(int64_t &host_time)
+{
+	if (!I.clock_valid)
+		return false;
+	host_time = est_host_now(timer_query());
+	return true;
+}
+
 bool net_interp_player_lagging(const playernum_t pnum)
 {
 	return pnum < MAX_PLAYERS && pnum != Player_num && I.lag[pnum].lagging();
@@ -536,6 +554,7 @@ void net_interp_apply_all()
 			if (obj->type == object_type::OBJ_PLAYER)
 				if (const auto p{sample(t.ring, t.render_time(est))})
 				{
+					I.render_time[i] = t.render_time(est);
 					auto &b = I.before_snap[i];
 					const sweep_start from{b.valid ? b : sweep_start{obj->pos, obj->segnum, true}};
 					if (write_pose(obj, *p))
@@ -576,13 +595,12 @@ void net_interp_apply_all()
 		}
 		if (gim == nullptr || !g.who.active || g.track.ring.empty())
 			continue;
-		/* Only the missile the snapshots describe (MULTI_FIRE_BOMB and
-		 * MULTI_FIRE_TRACK map the owner's object number to the copy and
-		 * set its generation): the records of the next missile, in the
-		 * same object slot, that arrive before its fire message are not
-		 * applied to the previous copy.
+		/* Only the missile the snapshots describe (its id, from its
+		 * FIRE, and its generation): the records of the next missile
+		 * that arrive before its fire message are not applied to the
+		 * previous copy.
 		 */
-		if (local != objnum_remote_to_local(g.who.id, static_cast<int8_t>(i)) || !g.who.describes(g.who.id, multi_guided_generation(i)))
+		if (local != net_combat_object_of(g.who.id) || !g.who.describes(g.who.id, multi_guided_generation(i)))
 			continue;
 		const auto p{sample(g.track.ring, g.track.render_time(est))};
 		/* Before its first snapshot (just launched) and after the records

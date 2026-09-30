@@ -579,8 +579,15 @@ static imobjptridx_t object_create_explosion_with_damage(const d_robot_info_arra
 									if (GameUniqueState.Difficulty_level == Difficulty_level_type::_0)
 									damage /= 4;
 #endif
-									movement_record_splash(obj_iter, obj_explosion_origin == object_none ? nullptr : &*obj_explosion_origin, parent == object_none ? nullptr : &*parent, damage);
-									apply_damage_to_player(obj_iter, killer, damage, apply_damage_player::check_for_friendly);
+									/* A network game: the shooter's machine reports it,
+									 * the host decides (protocol v2 stage 4); the
+									 * recording has the host's damage (net_combat.cpp).
+									 */
+									if (!net_combat_splash_player(obj_iter, obj_explosion_origin, killer, damage, *obj_fireball))
+									{
+										movement_record_splash(obj_iter, obj_explosion_origin == object_none ? nullptr : &*obj_explosion_origin, parent == object_none ? nullptr : &*parent, damage);
+										apply_damage_to_player(obj_iter, killer, damage, apply_damage_player::check_for_friendly);
+									}
 								}
 							}
 								break;

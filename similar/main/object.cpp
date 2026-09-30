@@ -1706,11 +1706,9 @@ namespace {
 //	------------------------------------------------------------------------------------------------------------------
 static void start_player_death_sequence(object &player)
 {
-	auto &Objects = LevelUniqueObjectState.Objects;
 #if DXX_BUILD_DESCENT == 2
-	auto &vmobjptr = Objects.vmptr;
+	auto &vmobjptr = LevelUniqueObjectState.Objects.vmptr;
 #endif
-	auto &vmobjptridx = Objects.vmptridx;
 	assert(&player == ConsoleObject);
 	if (Player_dead_state != player_dead_state::no ||
 		Dead_player_camera != NULL ||
@@ -1758,7 +1756,8 @@ static void start_player_death_sequence(object &player)
 			}
 		}
 #endif
-		multi_send_kill(vmobjptridx(get_local_player().objnum));
+		/* The host decided the kill (protocol v2 stage 4, PLAYER_KILLED). */
+		net_combat_local_death_started();
 	}
 	
 	PaletteRedAdd = 40;

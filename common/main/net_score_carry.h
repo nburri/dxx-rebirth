@@ -95,8 +95,8 @@ constexpr void restore_all_scores(const std::array<carried_scores, N> &scores, i
  * stage 1: LEGACY_ENDLEVEL_HOST and LEGACY_ENDLEVEL_CLIENT, once per
  * second while the reactor countdown runs and at the score screen).
  *
- * The host computes every kill (a client's own death goes to the host as
- * MULTI_KILL_CLIENT, the host credits it and relays MULTI_KILL_HOST), so
+ * The host computes every kill (stage 4: the host decides every kill and
+ * announces it with PLAYER_KILLED), so
  * the host's kills, deaths and kill matrix are the game's.  A client's
  * report holds the client's view of its own row, which lags the host by
  * the kills still on their way to it: a report sent before the relay of

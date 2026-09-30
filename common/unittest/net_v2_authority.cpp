@@ -461,11 +461,12 @@ void test_inventory_mirror()
 	CHECK(l.life == 0 && !l.dropped);
 	/* Many grants in flight: bounded, the newest kept. */
 	m.reset(spawn_inventory());
-	for (int i = 0; i < 40; ++i)
+	constexpr int many{static_cast<int>(inventory_mirror::MAX_PENDING) + 8};
+	for (int i = 0; i < many; ++i)
 		m.on_grant(r, SHIELD, {true, true, 1, 0});
 	CHECK(m.pending() == inventory_mirror::MAX_PENDING);
-	CHECK(m.issued() == 40);
-	m.on_report(r, spawn_inventory(), 40);
+	CHECK(m.issued() == many);
+	m.on_report(r, spawn_inventory(), many);
 	CHECK(m.pending() == 0);
 	/* The grant count wraps. */
 	m.reset(spawn_inventory());
