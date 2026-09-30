@@ -3304,7 +3304,7 @@ static void net_udp_process_dump(const upid_rspan<upid::dump> data, const _socka
 							? "You were removed from the game.\nYou failed receiving important\npackets. Sorry."
 							: "You were kicked by Host!"}
 			);
-			if (g)
+			if (g && g == Game_wind)
 				g->set_visible(1);
 			multi_quit_game = 1;
 			game_leave_menus();
@@ -5593,7 +5593,7 @@ static void net_udp_noloss_add_queue_pkt(fix64 time, const std::span<const uint8
 			if (g)
 				g->set_visible(0);
 			nm_messagebox_str(menu_title{nullptr}, nm_messagebox_tie(TXT_OK), menu_subtitle{"You left the game. You failed\nsending important packets.\nSorry."});
-			if (g)
+			if (g && g == Game_wind)
 				g->set_visible(1);
 			multi_quit_game = 1;
 			game_leave_menus();
@@ -5787,7 +5787,7 @@ void net_udp_noloss_process_queue(fix64 time)
 					if (g)
 						g->set_visible(0);
 					nm_messagebox_str(menu_title{nullptr}, nm_messagebox_tie(TXT_OK), menu_subtitle{"You left the game. You failed\nsending important packets.\nSorry."});
-					if (g)
+					if (g && g == Game_wind)
 						g->set_visible(1);
 					multi_quit_game = 1;
 					game_leave_menus();
