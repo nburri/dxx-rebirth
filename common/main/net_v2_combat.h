@@ -415,6 +415,13 @@ public:
 		const auto i{shots_.find(id)};
 		return i == shots_.end() ? nullptr : &i->second;
 	}
+	/* Forget the shots of `owner` (its slot is taken by a new player). */
+	void forget_owner(const std::uint8_t owner)
+	{
+		std::erase_if(shots_, [owner](const auto &kv) {
+			return kv.second.owner == owner;
+		});
+	}
 	/* Forget the shots whose time is over (called now and then). */
 	void expire(const net_clock now)
 	{
@@ -792,10 +799,11 @@ public:
 		started_ = false;
 	}
 	/* A shot at `fire_time` of a weapon that waits `wait` between
-	 * shots.
+	 * shots.  `rounds`: a volley (a secondary's `fire_count`) fires that
+	 * many shots, one per frame, before the weapon waits.
 	 */
 	[[nodiscard]]
-	constexpr bool allow(const net_clock fire_time, const net_clock wait)
+	constexpr bool allow(const net_clock fire_time, const net_clock wait, const unsigned rounds = 1)
 	{
 		const auto step{std::max<net_clock>(wait * 4 / 5, 1)};
 		if (!started_)
@@ -804,12 +812,25 @@ public:
 			due_ = fire_time;
 		}
 		if (fire_time < due_ - NET_V2_FIRE_BURST)
+		{
+			/* The further rounds of the volley just started. */
+			if (extra_ + 1 < rounds && fire_time <= volley_ + NET_V2_FIRE_BURST)
+			{
+				++extra_;
+				return true;
+			}
 			return false;
+		}
 		due_ = std::max(due_, fire_time) + step;
+		volley_ = fire_time;
+		extra_ = 0;
 		return true;
 	}
 private:
 	bool started_{};
+	unsigned extra_{};
+	/* When the current volley started. */
+	net_clock volley_{};
 	/* When the next shot is due at the weapon's rate. */
 	net_clock due_{};
 };
@@ -853,8 +874,11 @@ inline fire_verdict judge_fire(const net_clock now, const net_clock fire_time, c
 		return fire_verdict::not_owned;
 	if (shooter_at)
 	{
-		/* Past the newest position the ship may have flown on. */
-		const auto unknown{net_travel(NET_V2_MAX_SHIP_SPEED, shooter_at->beyond)};
+		/* Past the newest position the ship may have flown on, for a
+		 * while: a client that stops sending INPUT does not fire from
+		 * anywhere.
+		 */
+		const auto unknown{net_travel(NET_V2_MAX_SHIP_SPEED, std::min(shooter_at->beyond, NET_V2_FIRE_BURST))};
 		if (shooter_at->quality != rewind_quality::snapped && net_distance(origin, shooter_at->pos) > NET_V2_FIRE_ORIGIN_SLACK + unknown + net_travel(NET_V2_MAX_SHIP_SPEED, net_milliseconds(50)))
 			return fire_verdict::origin;
 	}
@@ -1002,6 +1026,11 @@ public:
 	{
 		if (amount > 0)
 			pending_ += amount;
+	}
+	[[nodiscard]]
+	constexpr bool empty() const
+	{
+		return pending_ <= 0;
 	}
 	/* The amount to report now, or 0. */
 	[[nodiscard]]

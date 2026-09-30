@@ -175,6 +175,14 @@ void test_hit_verdicts()
 	const auto id{dynamic_netid(1, 7)};
 	reg.add(make_shot(id, 1, t0));
 	CHECK(reg.size() == 1);
+	/* A new player in the slot: the old one's shots are forgotten. */
+	{
+		shot_registry other;
+		other.add(make_shot(dynamic_netid(1, 3), 1, t0));
+		other.add(make_shot(dynamic_netid(2, 3), 2, t0));
+		other.forget_owner(1);
+		CHECK(other.size() == 1 && !other.find(dynamic_netid(1, 3)) && other.find(dynamic_netid(2, 3)));
+	}
 	/* The target stands 60 units down the x axis; the shot needs half a
 	 * second to get there.
 	 */
@@ -541,6 +549,24 @@ void test_rates()
 		f.reset();
 		CHECK(f.allow(net_seconds(1), wait));
 	}
+	/* A volley of a slow secondary: its rounds come one per frame. */
+	{
+		fire_limiter f;
+		const net_clock slow{net_seconds(1)};
+		const net_clock t{net_seconds(5)};
+		const net_clock frame{net_seconds(1) / 60};
+		CHECK(f.allow(t, slow, 2));
+		CHECK(f.allow(t + frame, slow, 2));
+		CHECK(!f.allow(t + 2 * frame, slow, 2));
+		CHECK(!f.allow(t + 3 * frame, slow));
+		CHECK(f.allow(t + slow, slow, 2));
+		CHECK(f.allow(t + slow + frame, slow, 2));
+		CHECK(!f.allow(t + slow + 2 * frame, slow, 2));
+		/* Without a volley: one shot per step. */
+		fire_limiter g;
+		CHECK(g.allow(t, slow));
+		CHECK(!g.allow(t + frame, slow));
+	}
 	/* The checks of FIRE. */
 	{
 		const net_clock now{net_seconds(30)};
@@ -558,6 +584,10 @@ void test_rates()
 		 */
 		CHECK(judge_fire(now, now, true, true, vec(10, 40, 0), rewound{vec(10, 0, 0), 0, rewind_quality::newest, net_milliseconds(200)}) == fire_verdict::accept);
 		CHECK(judge_fire(now, now, true, true, vec(10, 60, 0), rewound{vec(10, 0, 0), 0, rewind_quality::newest, net_milliseconds(200)}) == fire_verdict::origin);
+		/* A ship whose positions stopped long ago does not fire from
+		 * anywhere: at most 250 ms of flight are unknown.
+		 */
+		CHECK(judge_fire(now, now, true, true, vec(10, 200, 0), rewound{vec(10, 0, 0), 0, rewind_quality::newest, net_seconds(10)}) == fire_verdict::origin);
 		/* No history (just spawned): nothing to compare with. */
 		CHECK(judge_fire(now, now, true, true, vec(500, 0, 0), std::nullopt) == fire_verdict::accept);
 		CHECK(std::string_view{fire_verdict_name(fire_verdict::origin)} == "origin");
@@ -818,8 +848,11 @@ void test_mirror_damage()
 		CHECK(a.take(now + net_milliseconds(20), interval) == 0);
 		a.add(F1);
 		CHECK(a.take(now + net_milliseconds(50), interval) == 2 * F1);
+		CHECK(a.empty());
 		a.add(F1);
+		CHECK(!a.empty());
 		a.reset();
+		CHECK(a.empty());
 		CHECK(a.take(now + net_seconds(1), interval) == 0);
 	}
 }

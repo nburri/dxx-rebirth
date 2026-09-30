@@ -2510,8 +2510,11 @@ not a demo played back (`net_combat_active`). Differences from §6.5,
   first wall or object. The muzzle flash is carried by the displayed ship
   as before. The host checks a client's `FIRE` (rate, sender, alive or
   fired before its death, time window, weapon in the host's copy of the
-  inventory, origin against the shooter's history, fire rate per
-  primary/missile/flare with the weapon's delay) and relays it only if
+  inventory, the laser at most at the host's laser level, origin
+  against the shooter's history with at most 250 ms of unknown flight,
+  fire rate per primary/missile/flare with the weapon's delay and a
+  secondary's volley of `fire_count` rounds, a known weapon and no more
+  projectiles than it fires) and relays it only if
   accepted; a refused shot flies on the shooter's screen only and its
   hits are unknown to the host. Energy and ammunition are still spent by
   the client and reported (stage 3); the host does not deduct them.
@@ -2524,7 +2527,10 @@ not a demo played back (`net_combat_active`). Differences from §6.5,
   applies its own damage: the claim clamped to the weapon's maximum for a
   direct hit, the host's distance for a blast. The host's own shots and
   its bots' are applied where the host shows the target, without a
-  check. Not implemented from §6.5: the line-of-sight check of step 4 and
+  check. The host keeps a position of its own ship and its bots at most
+  every 5 ms, so that the history spans the rewind window at any frame
+  rate. The level end protects only the host's own ship from the host's
+  `Endlevel_sequence` (its bots stop during it, as before). Not implemented from §6.5: the line-of-sight check of step 4 and
   robots, the reactor and walls as targets (they keep the v1 handling).
 - **Own damage.** Damage without a player's weapon (walls, lava, bumps,
   the fusion overcharge, matcens, robots' and the reactor's weapons,

@@ -2036,7 +2036,13 @@ int do_laser_firing(vmobjptridx_t objp, const primary_weapon_index weapon_num, c
 			break;
 		}
 		case primary_weapon_index::vulcan: {
-			if (Laser_player_fire_spread(LevelSharedRobotInfoState.Robot_info, objp, weapon_id_type::VULCAN_ID, player_gun_number::center, d_rand()/8 - 32767/16, d_rand()/8 - 32767/16, weapon_sound_flag::audible, shot_orientation, object_none) == object_none)
+			/* The spread in a fixed order: the order in which arguments are
+			 * evaluated is the compiler's, and the shot's seed must give the
+			 * same spread on every machine (protocol v2 stage 4).
+			 */
+			const fix spread_r{d_rand()/8 - 32767/16};
+			const fix spread_u{d_rand()/8 - 32767/16};
+			if (Laser_player_fire_spread(LevelSharedRobotInfoState.Robot_info, objp, weapon_id_type::VULCAN_ID, player_gun_number::center, spread_r, spread_u, weapon_sound_flag::audible, shot_orientation, object_none) == object_none)
 				return 0;
 			break;
 		}
@@ -2062,7 +2068,12 @@ int do_laser_firing(vmobjptridx_t objp, const primary_weapon_index weapon_num, c
 
 		case primary_weapon_index::fusion: {
 			auto &&weapon_obj = Laser_player_fire(LevelSharedRobotInfoState.Robot_info, objp, weapon_id_type::FUSION_ID, player_gun_number::_0, weapon_sound_flag::audible, shot_orientation, object_none);
-			Laser_player_fire(LevelSharedRobotInfoState.Robot_info, objp, weapon_id_type::FUSION_ID, player_gun_number::_1, weapon_sound_flag::audible, shot_orientation, object_none);
+			/* The second bolt only with the first: a shot that is cancelled
+			 * below must not leave a bolt that flies here only (protocol v2
+			 * stage 4: its hits would be of an unknown shot).
+			 */
+			if (weapon_obj != object_none)
+				Laser_player_fire(LevelSharedRobotInfoState.Robot_info, objp, weapon_id_type::FUSION_ID, player_gun_number::_1, weapon_sound_flag::audible, shot_orientation, object_none);
 
 			assert(objp->type == object_type::OBJ_PLAYER);
 			auto &Fusion_charge = objp->ctype.player_info.Fusion_charge;
@@ -2095,7 +2106,10 @@ int do_laser_firing(vmobjptridx_t objp, const primary_weapon_index weapon_num, c
 			break;
 #if DXX_BUILD_DESCENT == 2
 		case primary_weapon_index::gauss: {
-			if (Laser_player_fire_spread(LevelSharedRobotInfoState.Robot_info, objp, weapon_id_type::GAUSS_ID, player_gun_number::center, (d_rand()/8 - 32767/16)/5, (d_rand()/8 - 32767/16)/5, weapon_sound_flag::audible, shot_orientation, object_none) == object_none)
+			/* In a fixed order, as the vulcan's. */
+			const fix spread_r{(d_rand()/8 - 32767/16)/5};
+			const fix spread_u{(d_rand()/8 - 32767/16)/5};
+			if (Laser_player_fire_spread(LevelSharedRobotInfoState.Robot_info, objp, weapon_id_type::GAUSS_ID, player_gun_number::center, spread_r, spread_u, weapon_sound_flag::audible, shot_orientation, object_none) == object_none)
 				return 0;
 			break;
 		}

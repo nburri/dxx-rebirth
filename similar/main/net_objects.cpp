@@ -1675,7 +1675,7 @@ bool net_objects_host_has_report(const playernum_t pnum)
 	return pnum < MAX_PLAYERS && !A.dropped[pnum] && A.mirrors[pnum].has_report();
 }
 
-bool net_objects_host_owns_weapon(const playernum_t pnum, const uint8_t weapon)
+bool net_objects_host_owns_weapon(const playernum_t pnum, const uint8_t weapon, const uint8_t level)
 {
 	if (pnum >= MAX_PLAYERS)
 		return false;
@@ -1690,12 +1690,14 @@ bool net_objects_host_owns_weapon(const playernum_t pnum, const uint8_t weapon)
 	if (weapon >= MAX_PRIMARY_WEAPONS)
 		return false;
 	const auto w{primary_weapon_index{weapon}};
+	/* The laser, and the super laser as the laser, at most at the level
+	 * the host has for it (the pickups that raise it are the host's).
+	 */
 	if (w == primary_weapon_index::laser)
-		return true;
+		return level <= inv.laser_level;
 #if DXX_BUILD_DESCENT == 2
-	/* The super laser is fired as the laser. */
 	if (w == primary_weapon_index::super_laser)
-		return true;
+		return false;
 #endif
 	return (inv.primary_flags & HAS_PRIMARY_FLAG(w)) != 0;
 }

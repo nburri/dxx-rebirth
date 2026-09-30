@@ -1185,7 +1185,7 @@ bool net_objects_host_has_report(playernum_t pnum);
  * FLARE_ADJUST).
  */
 [[nodiscard]]
-bool net_objects_host_owns_weapon(playernum_t pnum, uint8_t weapon);
+bool net_objects_host_owns_weapon(playernum_t pnum, uint8_t weapon, uint8_t level);
 
 /* Where the remote ship of player `pnum` is shown this frame: the host
  * time of its pose (net_interp.cpp).  False if it is not shown by

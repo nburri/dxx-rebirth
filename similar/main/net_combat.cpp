@@ -90,6 +90,13 @@ constexpr fix BUMP_RANGE{F1_0 * 40};
  * size.
  */
 constexpr std::int64_t PROJECTILE_SLACK{3 * nv::NET_V2_UNIT};
+/* The host keeps a position of its own ship and its bots at most this
+ * often: the history's ring must span the rewind window at any frame
+ * rate (64 entries of 5 ms: 320 ms).
+ */
+constexpr net_clock HOST_HISTORY_STEP{nv::net_milliseconds(5)};
+/* The own damage of different causes is summed apart. */
+constexpr std::size_t SELF_DAMAGE_SLOTS{4};
 #if DXX_BUILD_DESCENT == 2
 /* laser.cpp: MAX_OMEGA_DIST, OMEGA_DAMAGE_SCALE * OMEGA_BASE_TIME. */
 constexpr std::int64_t OMEGA_REACH{80 * nv::NET_V2_UNIT};
@@ -125,6 +132,11 @@ struct host_player
 	nv::fire_limiter secondary;
 	nv::fire_limiter flare;
 	nv::token_bucket bucket{nv::NET_V2_COMBAT_RATE, nv::NET_V2_COMBAT_BURST};
+	/* The time of the newest entry the host pushed for its own ship or
+	 * a bot (net_combat_frame).
+	 */
+	net_clock last_push{};
+	bool pushed{};
 };
 
 struct self_damage
@@ -143,7 +155,7 @@ struct combat_state
 	std::array<netid_t, MAX_PLAYERS> expected_mines{};
 	std::array<host_player, MAX_PLAYERS> host{};
 	nv::shot_registry registry;
-	self_damage self;
+	std::array<self_damage, SELF_DAMAGE_SLOTS> self{};
 	std::array<unsigned, nv::NET_V2_HIT_VERDICTS> hit_verdicts{};
 	std::array<unsigned, nv::NET_V2_FIRE_VERDICTS> fire_verdicts{};
 };
@@ -288,6 +300,14 @@ std::optional<weapon_id_type> fired_weapon_id(const uint8_t weapon, const uint8_
 	if (weapon >= MAX_PRIMARY_WEAPONS)
 		return std::nullopt;
 	const primary_weapon_index w{weapon};
+	/* D1's table has the cheap spreadfire; do_laser_firing fires this. */
+	if (w == primary_weapon_index::spreadfire)
+		return weapon_id_type::SPREADFIRE_ID;
+#if DXX_BUILD_DESCENT == 2
+	/* Fired as the laser, never under its own number. */
+	if (w == primary_weapon_index::super_laser)
+		return std::nullopt;
+#endif
 	if (w == primary_weapon_index::laser)
 		switch (laser_level{level})
 		{
@@ -327,6 +347,38 @@ weapon_id_type children_of(const weapon_id_type id)
 #endif
 }
 
+/* The most projectiles one FIRE of this weapon creates (children are
+ * not counted: they take their parent's id).
+ */
+[[nodiscard]]
+unsigned max_projectiles(const uint8_t weapon, const uint8_t flags)
+{
+	if (weapon >= MISSILE_ADJUST)
+		return 1;
+	switch (primary_weapon_index{weapon})
+	{
+		case primary_weapon_index::laser:
+			return (flags & LASER_QUAD) ? 4 : 2;
+		case primary_weapon_index::spreadfire:
+			return 3;
+		case primary_weapon_index::plasma:
+		case primary_weapon_index::fusion:
+			return 2;
+#if DXX_BUILD_DESCENT == 2
+		case primary_weapon_index::helix:
+			return 5;
+		case primary_weapon_index::phoenix:
+			return 2;
+		case primary_weapon_index::omega:
+			/* The placeholder and MAX_OMEGA_BLOBS (laser.cpp) blobs. */
+			return 2 + 16;
+#endif
+		case primary_weapon_index::vulcan:
+		default:
+			return 1;
+	}
+}
+
 /* The host's record of one projectile of an accepted shot. */
 [[nodiscard]]
 nv::shot_record shot_for(const playernum_t owner, const netid_t id, const std::optional<weapon_id_type> wid, const net_clock fire_time, const nv::net_vec &origin)
@@ -341,8 +393,8 @@ nv::shot_record shot_for(const playernum_t owner, const netid_t id, const std::o
 		/* Nothing known: any weapon, far and long. */
 		r.max_speed = 1000 * nv::NET_V2_UNIT;
 		r.lifetime = nv::net_seconds(40);
-		r.per_target_limit = 1 + NUM_SMART_CHILDREN;
-		r.total_limit = r.per_target_limit * nv::NET_V2_MAX_PLAYERS;
+		r.per_target_limit = static_cast<uint8_t>(1 + NUM_SMART_CHILDREN);
+		r.total_limit = static_cast<uint8_t>(r.per_target_limit * nv::NET_V2_MAX_PLAYERS);
 		return r;
 	}
 	const auto Difficulty_level{GameUniqueState.Difficulty_level};
@@ -493,7 +545,10 @@ void kill_local_ship(const nv::kill_attribution &k)
 {
 	auto &Objects{LevelUniqueObjectState.Objects};
 	auto &plrobj{*Objects.vmptr(get_local_player().objnum)};
-	if (plrobj.type != object_type::OBJ_PLAYER || Player_dead_state != player_dead_state::no)
+	/* An escaped ship does not die (start_player_death_sequence would
+	 * not start, leaving it marked dead); the kill still counts.
+	 */
+	if (plrobj.type != object_type::OBJ_PLAYER || Player_dead_state != player_dead_state::no || get_local_player().connected != player_connection_status::playing)
 		return;
 	plrobj.ctype.player_info.killer_objnum = k.kind == nv::attacker_kind::player && k.pid < MAX_PLAYERS ? vcplayerptr(playernum_t{k.pid})->objnum : object_none;
 	if (plrobj.shields >= 0)
@@ -558,7 +613,10 @@ void host_apply(const playernum_t victim, const nv::hit_kind how, const nv::atta
 		.team_game = +(Game_mode & GM_TEAM) != 0,
 		.coop = +(Game_mode & GM_MULTI_COOP) != 0,
 		.no_friendly_fire = Netgame.NoFriendlyFire != 0,
-		.endlevel = Endlevel_sequence != 0,
+		/* The host's own exit: the others still in the mine are
+		 * playing (an escaped client is not, view_of).
+		 */
+		.endlevel = victim == Player_num && Endlevel_sequence != 0,
 	};
 	const auto verdict{nv::evaluate_damage(view, kind, by_player ? team_of(attacker) : 0, ctx, always, amount)};
 	if (verdict != nv::damage_verdict::apply)
@@ -577,7 +635,11 @@ void host_apply(const playernum_t victim, const nv::hit_kind how, const nv::atta
 		/* The bot's reaction to the hit, its shields and, if they are
 		 * gone, its death.
 		 */
+		const fix before{ship->shields};
 		if (!bot_take_damage(ship, killer, amount, false))
+			return;
+		/* It may have ignored the damage (its death is pending). */
+		if (ship->shields == before)
 			return;
 		shields = ship->shields;
 	}
@@ -642,9 +704,8 @@ void report_weapon_hit(const nv::hit_kind kind, const playernum_t shooter, const
 	client_report(m);
 }
 
-void flush_self(const bool force)
+void flush_self_slot(self_damage &s, const bool force)
 {
-	auto &s{C.self};
 	if (!s.have)
 		return;
 	const auto amount{s.pending.take(clock_now(), force ? 0 : SELF_DAMAGE_INTERVAL)};
@@ -665,6 +726,12 @@ void flush_self(const bool force)
 	client_report(m);
 }
 
+void flush_self(const bool force)
+{
+	for (auto &s : C.self)
+		flush_self_slot(s, force);
+}
+
 /* Damage of the ship `victim`, flown here, without a player's weapon. */
 void own_damage(const playernum_t victim, const credit c, const fix amount, const vms_vector &point)
 {
@@ -678,13 +745,40 @@ void own_damage(const playernum_t victim, const credit c, const fix amount, cons
 	}
 	if (victim != Player_num)
 		return;
-	auto &s{C.self};
-	if (s.have && (s.cause != c.kind || s.target != target))
-		flush_self(true);
-	s.have = true;
-	s.cause = c.kind;
-	s.target = target;
-	s.pending.add(amount);
+	/* Each cause (a robot and a wall at once) is summed on its own, so
+	 * that two of them do not send a report every frame.
+	 */
+	self_damage *slot{};
+	for (auto &s : C.self)
+		if (s.have && s.cause == c.kind && s.target == target)
+		{
+			slot = &s;
+			break;
+		}
+	if (!slot)
+	{
+		for (auto &s : C.self)
+			if (!s.have || s.pending.empty())
+			{
+				slot = &s;
+				break;
+			}
+		if (!slot)
+		{
+			/* More causes at once than slots: send the oldest. */
+			slot = &C.self[0];
+			flush_self_slot(*slot, true);
+		}
+		/* A slot keeps its cause while it has one; its interval runs on. */
+		if (!slot->have || slot->cause != c.kind || slot->target != target)
+		{
+			*slot = {};
+			slot->have = true;
+			slot->cause = c.kind;
+			slot->target = target;
+		}
+	}
+	slot->pending.add(amount);
 }
 
 /* ---- The host: messages from clients ---- */
@@ -699,7 +793,9 @@ void host_receive_self(const playernum_t from, const nv::weapon_hit_msg &m)
 		auto &Objects{LevelUniqueObjectState.Objects};
 		auto &a{*Objects.vcptr(vcplayerptr(from)->objnum)};
 		auto &b{*Objects.vcptr(vcplayerptr(playernum_t{m.target})->objnum)};
-		if (b.type == object_type::OBJ_PLAYER && vm_vec_dist_quick(a.pos, b.pos) < BUMP_RANGE)
+		/* Never a teammate's: a suicide next to it would cost it a kill. */
+		const bool teammate{+(Game_mode & GM_TEAM) && team_of(from) == team_of(playernum_t{m.target})};
+		if (!teammate && b.type == object_type::OBJ_PLAYER && vm_vec_dist_quick(a.pos, b.pos) < BUMP_RANGE)
 			attacker = m.target;
 	}
 	host_apply(from, nv::hit_kind::self, m.cause, attacker, 0xff, amount, to_vms(m.point), true);
@@ -853,6 +949,11 @@ void host_receive_fire(const playernum_t from, const std::span<const uint8_t> pa
 	auto m{nv::fire_msg::read(payload)};
 	if (!m || (m->count && nv::netid_creator(m->netid) != from))
 		return count(nv::fire_verdict::malformed);
+	/* A weapon the game has, with no more projectiles than it fires: an
+	 * unknown weapon would be registered as a shot of any weapon.
+	 */
+	if (const auto wid{fired_weapon_id(m->weapon, m->level)}; !wid || !valid_weapon(underlying_value(*wid)) || m->count > max_projectiles(m->weapon, m->flags))
+		return count(nv::fire_verdict::malformed);
 	/* The shooter is the sender, whatever it wrote. */
 	m->pid = static_cast<uint8_t>(from);
 	auto &hp{C.host[from]};
@@ -861,7 +962,7 @@ void host_receive_fire(const playernum_t from, const std::span<const uint8_t> pa
 		return count(nv::fire_verdict::rate_limited);
 	const auto fire_time{::dcx::net_interp::unwrap(m->fire_time, now)};
 	const bool alive{hp.alive || fire_time <= hp.death_time};
-	const bool owned{net_objects_host_owns_weapon(from, m->weapon)};
+	const bool owned{net_objects_host_owns_weapon(from, m->weapon, m->level)};
 	const auto shooter_at{hp.history.empty() ? std::nullopt : hp.history.rewind(fire_time)};
 	auto verdict{nv::judge_fire(now, fire_time, alive, owned, m->origin, shooter_at)};
 	if (verdict == nv::fire_verdict::accept)
@@ -870,7 +971,12 @@ void host_receive_fire(const playernum_t from, const std::span<const uint8_t> pa
 		 * bombs, flares.
 		 */
 		auto &limiter{m->weapon == FLARE_ADJUST ? hp.flare : m->weapon >= MISSILE_ADJUST ? hp.secondary : hp.primary};
-		if (!limiter.allow(fire_time, fire_wait_of(m->weapon, m->level)))
+		/* A secondary's volley (fire_count) comes one round per frame. */
+		unsigned rounds{1};
+		if (m->weapon != FLARE_ADJUST && m->weapon >= MISSILE_ADJUST)
+			if (const auto wid{fired_weapon_id(m->weapon, m->level)}; wid && valid_weapon(underlying_value(*wid)))
+				rounds = static_cast<unsigned>(std::max<int>(Weapon_info[*wid].fire_count, 1));
+		if (!limiter.allow(fire_time, fire_wait_of(m->weapon, m->level), rounds))
 			verdict = nv::fire_verdict::too_fast;
 	}
 	count(verdict);
@@ -916,9 +1022,17 @@ void client_receive_damage(const std::span<const uint8_t> payload)
 
 void client_receive_killed(const std::span<const uint8_t> payload)
 {
-	const auto m{nv::player_killed_msg::read(payload)};
-	if (!m || m->victim >= N_players || (m->kind == nv::attacker_kind::player && m->killer >= N_players))
+	auto m{nv::player_killed_msg::read(payload)};
+	if (!m || m->victim >= N_players)
 		return;
+	/* A killer this machine does not know yet (a join in progress): no
+	 * killer, but the victim dies all the same.
+	 */
+	if (m->kind == nv::attacker_kind::player && m->killer >= N_players)
+	{
+		m->kind = nv::attacker_kind::none;
+		m->killer = nv::NET_V2_PLAYER_ID_NONE;
+	}
 	Netgame.team_vector = m->team_vector;
 	Bounty_target = m->bounty_target;
 	multi_player_killed(playernum_t{m->victim}, static_cast<uint8_t>(m->kind), m->killer);
@@ -962,6 +1076,7 @@ void host_spawned(const playernum_t pnum)
 	auto &hp{C.host[pnum]};
 	hp.alive = true;
 	hp.history.clear();
+	hp.pushed = false;
 	hp.primary.reset();
 	hp.secondary.reset();
 	hp.flare.reset();
@@ -1005,6 +1120,11 @@ void net_combat_host_join(const playernum_t pnum)
 		return;
 	C.host[pnum] = {};
 	C.host[pnum].bucket.reset(timer_query());
+	/* The slot's previous player: its shots and mines are not the new
+	 * player's.
+	 */
+	C.registry.forget_owner(static_cast<uint8_t>(pnum));
+	C.expected_mines[pnum] = NETID_NONE;
 }
 
 void net_combat_frame()
@@ -1026,8 +1146,13 @@ void net_combat_frame()
 		if (!flown_here(i) || vcplayerptr(i)->connected != player_connection_status::playing)
 			continue;
 		auto &ship{*Objects.vcptr(vcplayerptr(i)->objnum)};
-		if (ship.type == object_type::OBJ_PLAYER)
-			C.host[i].history.push(now, to_net_vec(ship.pos), static_cast<uint16_t>(ship.segnum));
+		auto &hp{C.host[i]};
+		if (ship.type == object_type::OBJ_PLAYER && (!hp.pushed || now - hp.last_push >= HOST_HISTORY_STEP))
+		{
+			hp.history.push(now, to_net_vec(ship.pos), static_cast<uint16_t>(ship.segnum));
+			hp.last_push = now;
+			hp.pushed = true;
+		}
 	}
 	C.registry.expire(now);
 }
