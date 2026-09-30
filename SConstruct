@@ -5074,7 +5074,8 @@ class DXXArchive(DXXCommon):
 			'common/unittest/world_time_pause.cpp',
 			)),
 		# Test of the curve of the palette effects and of the flash
-		# missile's whiteout at any frame rate (palette_flash.h).
+		# missile's whiteout and of the fusion charge glow at any frame
+		# rate (palette_flash.h).
 		RuntimeTest('test-palette-flash', (
 			'common/unittest/palette_flash.cpp',
 			)),
