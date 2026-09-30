@@ -69,6 +69,9 @@ mixin_trackable_window::~mixin_trackable_window()
 
 int window_close(window *wind)
 {
+	if (wind->w_close_deferred)
+		/* Already closed; deleted when its running handler returns. */
+		return 1;
 	if (wind == window_get_front())
 		wind->send_event(d_event{event_type::window_deactivated});	// Deactivate first
 
@@ -84,7 +87,20 @@ int window_close(window *wind)
 	menu_destroy_hook(wind);
 
 	if (result != window_event_result::deleted)	// don't attempt to re-delete
-		delete wind;
+	{
+		if (wind->w_dispatch_depth)
+		{
+			/* One of its handlers is on the stack and will return into
+			 * this object: hide it now, delete it when that handler
+			 * returns (window::send_event).
+			 */
+			con_printf(CON_VERBOSE, "window: closed %p from inside its own event handler; deleting it when the handler returns", static_cast<const void *>(wind));
+			wind->w_close_deferred = true;
+			wind->w_visible = 0;
+		}
+		else
+			delete wind;
+	}
 
 	if (const auto prev = window_get_front())
 		prev->send_event(d_event{event_type::window_activated});
@@ -136,6 +152,9 @@ void window_select(window &wind)
 window *window::set_visible(uint8_t visible)
 {
 	window *prev = window_get_front();
+	if (w_close_deferred)
+		/* Closed: it must not come back to the front. */
+		return prev;
 	w_visible = visible;
 	auto wind = window_get_front();	// get the new front window
 	if (wind == prev)
@@ -158,7 +177,18 @@ window_event_result window::send_event(const d_event &event
 #if DXX_HAVE_CXX_BUILTIN_FILE_LINE
 	con_printf(CON_DEBUG, "%s:%u: sending event %i to window of dimensions %dx%d", file, line, underlying_value(event.type), w_canv.cv_bitmap.bm_w, w_canv.cv_bitmap.bm_h);
 #endif
+	if (w_close_deferred)
+		return window_event_result::deleted;
+	++w_dispatch_depth;
 	const auto r = event_handler(event);
+	if (--w_dispatch_depth == 0 && w_close_deferred)
+	{
+		delete this;
+		return window_event_result::deleted;
+	}
+	if (w_close_deferred)
+		/* Still inside an outer handler of this window. */
+		return window_event_result::deleted;
 	if (r == window_event_result::close)
 		if (window_close(this))
 			return window_event_result::deleted;

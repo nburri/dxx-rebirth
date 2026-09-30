@@ -111,6 +111,19 @@ constexpr unsigned dump_stack_bytes = 2048 * sizeof(void *);
 constexpr unsigned dump_stack_stride = 16;
 
 /*
+ * The first byte above this thread's stack, from the thread information
+ * block.  The stack is committed from the stack pointer up to this
+ * address, so reads in [sp, stack_base) are safe.  Memory above it
+ * belongs to something else and may well be mapped, so a scan up from
+ * the stack pointer must stop here rather than rely on a fault.
+ */
+static uintptr_t current_thread_stack_base()
+{
+	const auto tib = reinterpret_cast<const NT_TIB *>(NtCurrentTeb());
+	return reinterpret_cast<uintptr_t>(tib->StackBase);
+}
+
+/*
  * This includes leading text describing the UUID, so it must be bigger
  * than a bare UUID would require.
  */
@@ -224,7 +237,15 @@ DXX_ASM_LABEL("dxx_rebirth_veh_ud2") ":\n"
 			:: "a" (&dtc) : "memory"
 		);
 		auto p = reinterpret_cast<uintptr_t>(sp);
-		for (auto e = p + dump_stack_bytes; p != e; ++p)
+		/* Never scan past the top of this thread's stack: the memory
+		 * above it may be mapped, so no fault would stop the scan, and
+		 * the dump would then show (or fault in) unrelated memory.
+		 */
+		const auto stack_base{current_thread_stack_base()};
+		auto scan_end{p + dump_stack_bytes};
+		if (stack_base > p && scan_end > stack_base)
+			scan_end = stack_base;
+		for (auto e = scan_end; p != e; ++p)
 			asm volatile(
 DXX_ASM_LABEL("dxx_rebirth_veh_sp") ":\n"
 /*
@@ -401,7 +422,11 @@ DXX_REPORT_TEXT_LEADER_EXCEPTION_MESSAGE "\"%s\"\n"
 	{
 		char hexdump[dump_stack_stride + 1];
 		const auto base_paragraph_pointer = &sp[i];
-		if (base_paragraph_pointer == end_sp)
+		/* Stop at or past the end: `end_sp` is the first unreadable
+		 * paragraph (or the stack base), and a paragraph that reaches
+		 * past it must not be read.
+		 */
+		if (base_paragraph_pointer + dump_stack_stride > end_sp)
 			break;
 		hexdump[dump_stack_stride] = 0;
 		for (unsigned j = dump_stack_stride; j--;)
