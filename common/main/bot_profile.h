@@ -32,6 +32,7 @@
 #include <cstdio>
 #include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 
 #include "bot_brain.h"
@@ -223,6 +224,60 @@ public:
 	}
 };
 
+/* Section 6.4, "Save as default setup" during a game: the text of a
+ * profile with its bot lines replaced by those of `p`, and every other
+ * line as the file has it.  The game being played is not the setup the
+ * host made (the command line may have switched the tracker off in it,
+ * a level may have changed its options), so only the bots are written.
+ * The bot lines go where the file's first one was, else before its
+ * version line (`version_key`, the last line the game writes), else at
+ * the end; a file that does not exist (empty `text`) gets them alone,
+ * and its reader leaves every other option at its default.
+ */
+[[nodiscard]]
+inline std::string replace_profile_bot_lines(const std::string_view text, const bot_profile &p, const std::string_view version_key)
+{
+	std::array<profile_line, 3 + BOT_PROFILE_MAX_BOTS> lines;
+	const auto n{format_profile(p, lines)};
+	std::string block;
+	for (std::size_t i = 0; i < n; ++i)
+	{
+		block += lines[i].data();
+		block += '\n';
+	}
+	std::string out;
+	out.reserve(text.size() + block.size());
+	bool placed{};
+	const auto place{[&] {
+		if (!placed)
+			out += block;
+		placed = true;
+	}};
+	profile_reader scratch;
+	for (std::size_t pos{0}; pos < text.size();)
+	{
+		const auto nl{text.find('\n', pos)};
+		const auto end{nl == std::string_view::npos ? text.size() : nl};
+		const auto line{text.substr(pos, end - pos)};
+		pos = end + (nl == std::string_view::npos ? 0 : 1);
+		const auto eq{line.find('=')};
+		if (eq != std::string_view::npos)
+		{
+			const auto key{line.substr(0, eq)};
+			if (scratch.parse(key, line.substr(eq + 1)))
+			{
+				place();
+				continue;
+			}
+			if (key == version_key)
+				place();
+		}
+		out += line;
+		out += '\n';
+	}
+	place();
+	return out;
+}
 
 /* Section 9.8: the BOT marker in the HUD's kill list.  The exp-16
  * playtest: "Bots do not show up as 'BOT' in scoring for me."  The kill

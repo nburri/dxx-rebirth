@@ -4,7 +4,9 @@ Status: design; stage B0 (the pilot refactor, §3.2.1), stage B1 (the
 first bot with its setup menus, §9.1), stage B3 (pickups, resources and
 weapon choice, §9.2), stage B4 (secondaries, §9.4, §9.6) and stage B2
 (skill presets, styles, mixed bots, persistence, the `BOT` marker and
-humans replacing bots, §9.7) are implemented. Target branch: `experimental-netcode`
+humans replacing bots, §9.7) and stage B5 (managing bots during the game:
+the in-game Bots screen and the `/bot` chat command, §6.4, §9.11) are
+implemented. Target branch: `experimental-netcode`
 (protocol v2, `Documentation/network-protocol-v2.md`, cited as "v2 §n").
 D2X-Rebirth only (v2 decision 6). Line numbers are omitted; function names are
 the anchors.
@@ -628,7 +630,7 @@ B7.
 
 ```
                     BOT 2
-   Name:   [Havoc___]            (8 chars; not editable in game)
+   Name:   [Havoc___]            (8 chars; in game the bot is renamed)
    Skill:        Ace   [===|=]
    Style: Aggressive   [=|==]
    Team:        Auto   [|==]     (Auto / Blue / Red; team modes only)
@@ -638,16 +640,89 @@ B7.
 
 ### 6.4 In game
 
-- **ESC "Game Menu"** (`HandleSystemKey(KEY_ESC)`, `gamecntl.cpp`) gets a
-  "Bots..." choice for the host in network anarchy modes: `Abort Game`,
-  `Options...`, `Bots...`. It opens §6.2 in in-game mode. The menu does not
-  pause the game, as today. Skill and style changes apply at the next
-  strategy tick. Add and remove work as described in §2.3.
-- **Chat commands** for quick use, next to the existing `/kick:` and
-  `/move:` in `multi_send_message_end`:
-  `/bot add [skill] [style]`, `/bot remove <name|#n>`,
-  `/bot skill <name|all> <trainee..insane>`. `/kick: <botname>` removes a bot.
-- **Kill list**: bots show `BOT` in the ping column (with the flag of §2.2).
+As implemented in stage B5 (details in §9.11). Only the host manages
+bots, in the modes bots play (anarchy, team anarchy, bounty).
+
+- **ESC "Game Menu"** (`HandleSystemKey(KEY_ESC)`, `gamecntl.cpp`) has a
+  third choice for the host: `Abort Game`, `Options...`, `Bots...`. It
+  opens the in-game Bots screen. The game runs on underneath, as under
+  the game menu itself.
+
+  ```
+                        BOTS
+                    in this game
+     New bots' skill: Hotshot   [==|==]
+     New bots' style: Balanced  [|===]
+     [x] Humans replace bots when full
+     Players: 5 of 8, 3 bots
+
+     1. ravager   Hotshot Bal  Blue
+     2. havoc     Ace     Aggr Red
+     3. sparky    Rookie  Caut Blue
+
+     Add a bot
+     Add a bot: name, skill, style...
+     Save as default setup
+     Done
+  ```
+
+  - The list shows the bots playing (name, skill, style, and the team in
+    team modes), in the order they were added. It is rebuilt at once
+    when the bots change by any way (this screen, `/bot`, `/kick`, a
+    human replacing a bot).
+  - **Add a bot** adds one with the "new bots" skill and style and the
+    next built-in name nobody in the game has or had. **Add a bot:
+    name, skill, style...** opens the per-bot screen first (§6.3 with
+    "Add this bot" / "Cancel").
+  - A bot line opens the per-bot screen of §6.3 for that bot: name,
+    skill, style, team (team modes), "Remove this bot", "Done". Only
+    "Done" applies the changes; Escape discards them (unlike the setup,
+    where nothing is at stake while the screen is open).
+  - As every in-game menu of a network game, the screens close by
+    themselves when the host is hit, dies or the level ends
+    (`game_leave_menus`); nothing half-edited is applied then. The chat
+    commands are the way to manage bots under fire.
+  - The two sliders and the checkbox are the options of this game only;
+    they start as the setup's.
+  - **Save as default setup** makes the bots playing (and the three
+    options) the saved setup (§6.5).
+- **Chat commands** on the host, next to `/kick:` and `/move:` in
+  `multi_send_message_end`:
+
+  | Command | Effect |
+  |---|---|
+  | `/bot add [skill] [style] [name]` | adds a bot; what is left out is the "new bots" skill or style, and the next built-in name |
+  | `/bot remove <name\|all>` | removes the bot, or all |
+  | `/bot skill <name\|all> <skill>` | trainee, rookie, hotshot, ace, insane |
+  | `/bot style <name\|all> <style>` | balanced, aggressive, cautious, collector |
+  | `/bot list` | one HUD line per bot, for the host only |
+  | `/bot save` | as "Save as default setup" |
+  | `/bot`, `/bot help` | the usage |
+
+  A skill or style is its full name or exactly its first three letters
+  (`hot`, `agg`; also the list's `Aggr`, `Caut`, `Coll`), in any case. A
+  bot is named by its name or by a unique beginning of it. No bot is
+  called by a reserved word: `all`, a skill or style word (full, three
+  letters, the list's short names) or a command word (`add`, `remove`,
+  `rm`, `kick`, `skill`, `style`, `list`, `save`, `help`, `bot`). So
+  `/bot add col ace` (style before skill) is an error that says the
+  order, not a bot named "ace"; the Bots screens refuse such a name with
+  a message, and the setup keeps the old name. The answers
+  (and the errors) are HUD messages on the host. `/kick: <botname>` still
+  removes a bot (as kicked). A client that types `/bot ...` reads "Only
+  the host can manage bots"; the line is not sent as chat. A chat line
+  holds 33 characters, so a long command needs the short words
+  (`/bot add hot agg ravager`).
+- **Limits.** A bot is added only while a level is played (not between
+  levels, not during the reactor countdown), and not while the host
+  serves a human's join (a moment later it works). It takes the slot a
+  joining human would get without anyone leaving: a free slot below
+  `max_numplayers`, else a departed bot's. A disconnected human's slot
+  is kept for that human, so the game can be "full" for bots with fewer
+  players than the limit. A bot added during the game is the newest, so
+  it is the first a joining human replaces.
+- **Kill list**: bots show `BOT` in the ping column (with the flag of
+  §2.2).
 
 ### 6.5 Defaults and persistence
 
@@ -667,7 +742,12 @@ B7.
   ```
 
   The fields are name, skill 0–4, style 0–3, and team (0 auto, 1 blue, 2 red).
-  The file is written when the setup menu closes and after in-game changes.
+  The file is written when the setup menu closes. What the host changes
+  during a game (§6.4) stays in that game; the saved setup changes only
+  with "Save as default setup" (or `/bot save`), which writes the bots
+  then playing, the "new bots" skill and style and the replace option.
+  So a bot added for one evening, or a bot a human replaced, does not
+  alter what the next game starts with unless the host says so.
 
 ---
 
@@ -794,7 +874,7 @@ and one PR per change.
 | **B2** | `.ngp` persistence, five skill presets, styles, `PLAYER_LIST` bot flag and `BOT` in the kill list, humans replace bots. | B1 | M |
 | **B3** | Pickups and resources: `powerup_apply` for bots, collect and retreat goals, fuel centres, death drops from the bot's inventory, weapon choice tables, afterburner. | B1 and v2 stage 3 | M |
 | **B4** | Secondaries and mines, dodge, strafe patterns, cloak/invul behaviour, converter. `-botarena` test mode. | B3 | M |
-| **B5** | In-game bot menu, chat commands, add/remove during play, join in progress with bots (extras inventory until stage 5). | B2 | S |
+| **B5** | In-game bot menu, chat commands, add/remove during play, join in progress with bots (extras inventory until stage 5). Implemented: §9.11. | B2 | S |
 | **B6** | Move to stage 4 authority: bots in the history ring, robot-style hit detection for bot shots, generic `PLAYER_KILLED`/`PLAYER_SPAWN`; delete the bot-specific kill path. | v2 stage 4 | S |
 | **B7** | CTF and hoard: goal segments (`fuelcen_check_for_goal` / `_hoard_goal` for bots on the host), flag and orb roles (attack/defend/escort), team coordination through a shared host-side blackboard. | v2 stage 6 | M |
 
@@ -2784,6 +2864,159 @@ corner shot chosen and released, the interval), `test-bot-goals`
 `test-bot-nav` `test_pursuit_prediction_l_junction` (the L-junction: the
 point inside the wall without the check, the fallbacks with it, an open
 line unchanged).
+
+### 9.11 B5 as implemented
+
+**Files.** `common/main/bot_command.h` (new, pure: the `/bot` parser,
+the skill and style words, which bot a name means, the add verdict, the
+order of addition, the name a bot may carry), `similar/main/bot.cpp`
+(add, remove, change, rename, team; the level's data prepared on
+demand), `similar/main/bot_menu.cpp` (the in-game Bots screen, the
+chat command, "Save as default setup"), `similar/main/net_v2.cpp` (a
+player without a connection enters the game; the player list to
+everyone; the slot for a bot; a bot's new name on the clients),
+`similar/main/net_objects.cpp` (a slot's last inventory report is
+forgotten when a player enters it), `similar/main/multi.cpp` (`/bot` in the chat, the host's notice, the
+team change), `similar/main/gamecntl.cpp` (the game menu). Test:
+`test-bot-commands` (new), `test-bot-presets` (the profile's bot
+lines). `similar/main/playsave.cpp` writes the bot lines alone
+(`write_netgame_profile_bots`). The protocol numbers stay 105: no
+message changed its layout.
+
+**The options of the game.** `Bot_game` (the skill and style of a new
+bot, humans replace bots) is copied from the setup when the game starts
+(`bots_allocate_slots`) and is what the game reads (`bots_replaceable`).
+The in-game screen changes it, not `Bot_setup`.
+
+**Adding a bot** (`bots_add`). The checks are `judge_add`: host of a
+network game, a mode with bots, a level being played, no reactor
+countdown, a slot, no join in progress. The slot is
+`free_admission_slot` on the host's slot views, the same rule as for a
+human who finds room (`host_free_slot_for_bot`; a slot with a connection
+is never taken). Then:
+
+1. If the level has no bot data yet (it started without bots),
+   `prepare_level` builds the navigation graph, the ship limits, the
+   spawn sites and the weapon count, and starts the tick.
+   `bots_level_start` marks a level without bots as unprepared, so the
+   graph of an earlier level is never used.
+2. The name: the one given (lower case, 8 characters, letters, digits,
+   `-` and `_`; not a reserved word, `name_reserved`: `/bot` and the
+   screens refuse one, and `bots_add` itself would take a built-in name
+   instead), else the next built-in name; made unique against every
+   callsign in the game, those of departed players included (a human who
+   dropped comes back by callsign).
+3. The bot's state is created with the order of addition after every
+   bot in the game (`next_added_order`), and the slot's bot flag is set.
+   In team modes it goes to its preferred team, else to the smaller
+   (blue on a tie); `multi_host_teams_changed` recolours the ships and
+   sends `MULTI_GMODE_UPDATE`.
+4. `net_v2::host_add_player`: the slot's inventory copy is reset
+   (`net_objects_host_join`), `new_player` runs on the host (scores and
+   the slot's kill-matrix row and column zeroed, as on every client
+   with `PLAYER_JOINED` and in a joining human's snapshot: the kills of
+   the slot's previous holder are not the new player's; "is joining", the
+   kill list sorted),
+   `PLAYER_JOINED` goes to everyone, and then `PLAYER_LIST`: the first
+   clears the slot's bot flag on a client (a human took the slot), the
+   second, behind it in the same reliable stream, sets it.
+5. The first spawn is the bot's ordinary respawn: a site assigned by
+   the host (`choose_bot_spawn`, with the reservations of the
+   host-assigned spawns), `MULTI_REAPPEAR` as the bot, its inventory.
+
+A client needs nothing new for this: `PLAYER_JOINED`, `PLAYER_LIST` and
+`MULTI_REAPPEAR` are what a joining human causes. A human who joins
+later gets the bot in the snapshot as any player (the list with the
+flag, the ship object, the kill matrix, and the inventory with the
+extras). While a join is being served the add is refused ("A player is
+joining; try again in a moment"): the joiner's snapshot was built
+without the bot, and its level start would otherwise restore the
+previous holder's score in a reused slot.
+
+**Removing a bot** (`bots_remove`) is the path of a kicked or replaced
+bot (§9.7) with the reason `quit`: a bot in its death tumble explodes
+first, otherwise its inventory copy is brought up to date;
+`multi_disconnect_player` drops its items (once: a bot already exploded
+has none), makes the ship a ghost, prints "has left the game" and sends
+`PLAYER_LEFT(quit)`. The slot is a departed bot's, free for a human or
+a new bot; its line stays in the kill list with its score until then.
+
+**Changing a bot.** Skill and style: `bot_state::apply_config` at once
+(the presets are read every tick, so the next tick plays them; nothing
+waits for the next life), and a chat line from the host tells everyone
+(`havoc now Ace Aggressive`; `multi_send_host_notice`, an ordinary
+`MULTI_MESSAGE`). Clients have no other display of a bot's skill, so
+the notice is the refresh. Team: the bit of `team_vector`, the ships'
+colours, `MULTI_GMODE_UPDATE`, a notice. Name: the host's player and
+netgame entries, then `PLAYER_LIST` to everyone; a client takes a new
+callsign for a slot flagged as a bot from the list during the game
+(`read_player_list`), so its kill list and name tags follow. A client
+of an older build of protocol 105 keeps the old name until the next
+level; nothing else differs for it. The list also goes to a peer that is
+still joining (between its `JOIN_ACCEPT` and its snapshot), so a bot
+renamed meanwhile does not keep its old name there; the snapshot brings
+the list once more.
+
+**Persistence.** *Decision:* in-game changes stay in the game. "Save as
+default setup" and `/bot save` copy the bots playing (in the order of
+addition, with their current names, skills, styles and team
+preferences) and the game's options into `Bot_setup` and write the bot
+lines of the pilot's `.ngp` (`replace_profile_bot_lines`: the file is
+read, its bot lines are replaced, every other line stays as it is). The
+whole profile is not written from the game's `Netgame`, which is not
+the setup the host made: without a tracker address the tracker is
+switched off in it after the setup was saved, and saving it would
+switch the tracker off in the profile. Reason: adding a bot to fill an evening, or losing one
+to a human, should not silently change the setup of the next game.
+
+**Menus and the running game.** The Bots screen is opened from the game
+window's key handler and runs its own event loop (`newmenu_do2`), like
+the game menu and the options. In a network game the game window keeps
+drawing, and its draw event runs the frame (`GameProcessFrame`), so the
+game, the bots and the network go on; the menu does not sleep between
+events in a network game. Each action closes the screen with a code,
+is applied, and the screen is built again. Because the game runs on:
+
+- on every idle event the screen checks that this machine still hosts a
+  game with bots (else it closes) and that the bots listed are the bots
+  playing (else it rebuilds); the per-bot screen closes when its bot is
+  gone;
+- a bot is identified by its slot *and* its order of addition, checked
+  again before anything is applied, so a change never lands on a human
+  or another bot that took the slot meanwhile;
+- the game closes the menus in front of it when the host is hit, dies,
+  the level ends or the countdown nears its end (`game_leave_menus`,
+  from the game's own frame). A screen that returns without a choice
+  tells the two apart (`close_watch`: the host's Escape or click is the
+  screen's last event before it closes; the game's close is not): after
+  the host's Escape the per-bot screen goes back to the list, after the
+  game's close all Bots screens are left and nothing is applied. The
+  messages of these screens ("The game is full", the saved setup, a
+  refused name) are watched the same way (`notice`): a message the game
+  closed does not bring the list back;
+- with the deferred deletion of PR #48 a window closed while one of its
+  handlers is on the stack (the game window under these nested loops,
+  or a screen closed from the game's frame) stays allocated until the
+  handler returns; when the game itself is over, the loop finds it
+  unmanageable (`bots_manageable`) and returns without touching it.
+
+**Tests** (`test-bot-commands`): what is no command (`/bottle`,
+`/bot: hi`), help, list and save, every skill and style word and its
+three-letter form, that no built-in name reads as a skill or style
+(`rook` is a name), `/bot add` with each part left out and in the wrong
+order (an error), the reserved words (refused as names in `/bot add`
+and by `usable_name`, while names that only begin like one stay
+names), the name rules, remove/skill/style with `all`, missing and
+surplus words, that every error says why; the target (exact before
+prefix, ambiguous, none); the add verdict; and with
+`net_v2_session.h`: the slot a bot takes (lowest free, the limit for
+humans and bots together, a departed bot's slot, never a disconnected
+human's), and that a bot added during the game is the one a joining
+human replaces, also after a removal and with the option off.
+
+**Not in B5:** showing each bot's skill on the clients (they see `BOT`
+and the notices), `/bot remove #n`, adding bots between levels, CTF
+and hoard (B7).
 
 ---
 
