@@ -955,6 +955,20 @@ void test_dodger()
 	CHECK_RANGE(still.stats.dodge_triggers, f.bursts - 3, f.bursts);
 	CHECK_RANGE(still.stats.dodge_prob, 0, 0.1);
 	CHECK_RANGE(value(still.profile, "skill.dodge_prob"), 0, 0.1);
+
+	/* The enemy's shots: counted; no warning while they are there. */
+	CHECK(s.enemy_shots == 4 * f.bursts);
+	CHECK(s.hits_taken_from_players == f.bursts - f.dodges);
+	CHECK(write_report(s, r.profile).find("warning: took") == std::string::npos);
+	/* A recording without the enemy's shots (an older recorder left out
+	 * the shots of the bots not recorded): hits but no shot, a warning.
+	 */
+	auto blind{f};
+	std::erase_if(blind.events, [](const happening &h) { return h.e.type == record_type::fire && h.e.pid != 0; });
+	const auto b{analyse_flight(blind)};
+	CHECK(b.stats.enemy_shots == 0 && b.stats.dodge_triggers == 0);
+	CHECK(b.stats.hits_taken_from_players == s.hits_taken_from_players);
+	CHECK(write_report(b.stats, b.profile).find("warning: took") != std::string::npos);
 }
 
 /* The afterburner: chasing from 150 units, and with no enemy about. */

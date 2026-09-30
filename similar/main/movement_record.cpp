@@ -829,8 +829,12 @@ void movement_record_fire(const object &shooter, const bool secondary, const uns
 {
 	if (!R.file)
 		return;
+	/* Every player's shot, also of a player whose samples are not
+	 * recorded (a bot without -recordmoves-bots): the analysis of a
+	 * recorded player needs its enemies' shots (dodging).
+	 */
 	const auto pid{player_of(shooter)};
-	if (pid == mr::PLAYER_NONE || !player_recorded(pid))
+	if (pid == mr::PLAYER_NONE)
 		return;
 	put_event(mr::record_type::fire, pid, mr::PLAYER_NONE, secondary ? mr::fire_kind::secondary : mr::fire_kind::primary, weapon, 0, flags);
 }
