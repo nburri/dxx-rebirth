@@ -798,7 +798,7 @@ constexpr std::int64_t VOLLEY_SAME_FIGHT_MS{15000};
  */
 constexpr std::int64_t DETOUR_LOOK_BACK_MS{1500};
 constexpr double DETOUR_DEG{40};
-/* Section 8.9, the power missiles: the pickups of every recorded
+/* Section 8.9, the power pickups: the pickups of every recorded
  * player give where a powerup lay; it lay there at most SIGHT_LOOK_BACK_MS
  * before it was taken (or since a ship blew up within DROP_RADIUS of it:
  * its drop).  A player had it in sight with it within VIEW_HALF_DEG of
@@ -1221,17 +1221,18 @@ constexpr std::size_t DODGE_LATENCY_BINS{limits::DODGE_WINDOW_MS / DODGE_LATENCY
 inline constexpr std::array<const char *, WEAPON_SLOTS> primary_names{{"laser", "vulcan", "spreadfire", "plasma", "fusion", "super laser", "gauss", "helix", "phoenix", "omega"}};
 inline constexpr std::array<const char *, WEAPON_SLOTS> secondary_names{{"concussion", "homing", "proximity bomb", "smart", "mega", "flash", "guided", "smart mine", "mercury", "earthshaker"}};
 inline constexpr std::array<const char *, bot::BOT_RANGE_BANDS> band_names{{"close (< 60)", "mid (60-150)", "distant (> 150)"}};
-/* Section 8.9: the power missiles (the bots' power_class big and smart
- * missiles: the game's POW_SMARTBOMB_WEAPON 20, POW_MEGA_WEAPON 21,
- * POW_EARTHSHAKER_MISSILE 45 of Descent 2) and every other pickup.
+/* Section 8.9: the power pickups (the bots' power_class missiles and
+ * the omega cannon: the game's POW_SMARTBOMB_WEAPON 20, POW_MEGA_WEAPON
+ * 21, POW_OMEGA_WEAPON 31, POW_EARTHSHAKER_MISSILE 45 of Descent 2) and
+ * every other pickup.
  */
 constexpr std::size_t PICKUP_CLASSES{2};
-inline constexpr std::array<const char *, PICKUP_CLASSES> pickup_class_names{{"power missiles", "other pickups"}};
+inline constexpr std::array<const char *, PICKUP_CLASSES> pickup_class_names{{"power pickups", "other pickups"}};
 
 [[nodiscard]]
 constexpr std::size_t pickup_class_of(const std::uint8_t powerup_id)
 {
-	return powerup_id == 20 || powerup_id == 21 || powerup_id == 45 ? 0 : 1;
+	return powerup_id == 20 || powerup_id == 21 || powerup_id == 31 || powerup_id == 45 ? 0 : 1;
 }
 
 struct shield_bucket
@@ -2969,7 +2970,7 @@ inline bot::style_profile propose_profile(const player_stats &s, const bot::bot_
 	if (s.pickup_detour_n >= 5)
 		p.set("tune.grab_detour", s.pickup_detour_share, confidence_of(s, s.pickup_detour_n, 10, 40));
 
-	/* Section 8.9: tune.power_pickup, the share of the power missiles in
+	/* Section 8.9: tune.power_pickup, the share of the power pickups in
 	 * sight the player went for; no more than medium when most sightings
 	 * were judged without the level's geometry.
 	 */
@@ -3232,8 +3233,8 @@ inline std::vector<std::string> describe_traits(const player_stats &s, const shi
 	if (const auto &pw{s.pickup_sight[0]}, &ot{s.pickup_sight[1]}; pw.seen >= 3)
 	{
 		auto &l{line()};
-		const char *const kind{pw.went_share >= 0.7 ? "Goes for every power missile it sees" : pw.went_share >= 0.4 ? "Often goes for the power missiles it sees" : "Lets most power missiles go"};
-		appendf(l, "%s: of %u smart, mega and earthshaker missiles in sight it went for %.0f%% and took %.0f%%", kind, pw.seen, pct(pw.went_share), pct(pw.taken_share));
+		const char *const kind{pw.went_share >= 0.7 ? "Goes for every power pickup it sees" : pw.went_share >= 0.4 ? "Often goes for the power pickups it sees" : "Lets most power pickups go"};
+		appendf(l, "%s: of %u smart, mega, earthshaker missiles and omega cannons in sight it went for %.0f%% and took %.0f%%", kind, pw.seen, pct(pw.went_share), pct(pw.taken_share));
 		if (pw.fight_seen >= 3)
 			appendf(l, "; %.0f%% of the %u seen in a fight%s", pct(pw.fight_went_share), pw.fight_seen, pw.fight_went_share >= 0.5 ? " (breaks off for them)" : "");
 		if (pw.sight_distance.n >= 3)

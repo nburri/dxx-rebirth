@@ -1312,8 +1312,9 @@ constexpr double grab_goal_utility(const goal_inputs &in, const double fight)
  *
  * Now a power pickup in sight (in the bot's field of view with a line
  * of sight, at any distance) is a goal of its own: the earthshaker,
- * mega missile and invulnerability (big), the smart missile and the
- * cloak (smart).  It is worth POWER_BIG_UTILITY (POWER_SMART_UTILITY)
+ * mega missile, the omega cannon ("humans always go for it, it nearly
+ * guarantees one or two kills"; not when the bot has one) and
+ * invulnerability (big), the smart missile and the cloak (smart).  It is worth POWER_BIG_UTILITY (POWER_SMART_UTILITY)
  * times the bot's power weight (power_pickup_weight: Trainee hardly,
  * Insane nearly always, Collector most), falling to half at
  * POWER_DISTANCE_SCALE of path; in a fight, at least POWER_FIGHT_FACTOR
@@ -1343,6 +1344,11 @@ constexpr power_class power_class_of(const item_desc &d)
 {
 	switch (d.kind)
 	{
+		case item::primary:
+			/* The omega cannon: "it nearly guarantees one or two kills"
+			 * (worth nothing to a bot that has it, item_value).
+			 */
+			return d.weapon == primary::omega ? power_class::big : power_class::none;
 		case item::secondary:
 			switch (static_cast<secondary>(d.secondary))
 			{

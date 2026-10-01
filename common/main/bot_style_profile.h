@@ -120,7 +120,7 @@ inline constexpr std::array<style_profile_key, 31> style_profile_keys{{
 	{"tune.volley_size", 1, 8, "missiles per volley"},
 	{"tune.pursuit_seconds", 0, 30, "how long a target is followed after it left the sight (pursuit_seconds)"},
 	{"tune.grab_detour", 0, 1, "share of the pickups taken by leaving the course (grab_is_detour)"},
-	{"tune.power_pickup", 0, 1, "share of the power missiles in sight the bot goes for (power_pickup_weight)"},
+	{"tune.power_pickup", 0, 1, "share of the power pickups in sight the bot goes for (power_pickup_weight)"},
 }};
 
 [[nodiscard]]
@@ -402,7 +402,7 @@ inline std::optional<style_profile> parse_style_profile(std::string_view text)
  * - `tune.grab_detour` (the share of pickups off course): a scale of the
  *   detour a grab may take in a fight, over the share the bots took
  *   with the scale 1 (GRAB_DETOUR_BASE_SHARE);
- * - `tune.power_pickup` (the share of the power missiles in sight the
+ * - `tune.power_pickup` (the share of the power pickups in sight the
  *   pilot went for): the bot's power weight, in place of the skill's
  *   and the style's (power_pickup_weight, section 9.14).
  */

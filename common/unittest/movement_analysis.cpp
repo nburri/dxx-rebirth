@@ -999,7 +999,8 @@ void test_brawler()
 /* Section 8.9: a programme of powerups in sight.  Every 20 s a powerup
  * appears 120 units ahead and 40 to the side of the pilot (in its view,
  * within SIGHT_NO_GEOMETRY: the test level has no geometry): a power
- * missile (an earthshaker) and another pickup (energy) in turn, in a
+ * pickup (an earthshaker, mega, omega, smart missile) and another pickup
+ * (energy) in turn, in a
  * fight (the enemy in sight 100 units ahead) in half of the cycles.  The
  * pilot flies to the classes it goes for and takes them; it turns away
  * from the others, which the enemy takes 8 s later.
@@ -1013,6 +1014,7 @@ flight fly_pickups(const char *const name, const bool for_power, const bool for_
 	ship s;
 	vec3 spot{};
 	bool taken{}, power{}, fight{}, goes{};
+	unsigned power_id{45};
 	const auto add_event{[&out](const std::uint32_t ms, const unsigned pid, const unsigned id) {
 		out.events.push_back({ms, {record_type::pickup, ms, static_cast<std::uint8_t>(pid), PLAYER_NONE, 0, static_cast<std::uint8_t>(id), 0, 0}});
 	}};
@@ -1030,6 +1032,10 @@ flight fly_pickups(const char *const name, const bool for_power, const bool for_
 			s.pos = {{static_cast<double>(cycle) * 1200 - 14000, 0, 0}};
 			spot = s.pos + s.fwd * 120 + s.right * 40;
 			power = cycle % 2 == 0;
+			/* An earthshaker, a mega missile, an omega cannon, a smart
+			 * missile in turn.
+			 */
+			power_id = std::array<unsigned, 4>{{45, 21, 31, 20}}[(cycle / 2) % 4];
 			fight = cycle % 4 < 2;
 			goes = power ? for_power : for_other;
 			taken = false;
@@ -1043,7 +1049,7 @@ flight fly_pickups(const char *const name, const bool for_power, const bool for_
 			if (length(to_spot) < 6)
 			{
 				taken = true;
-				add_event(now, 0, power ? 45 : 1);
+				add_event(now, 0, power ? power_id : 1);
 				++out.pickups;
 			}
 		}
@@ -1064,7 +1070,7 @@ flight fly_pickups(const char *const name, const bool for_power, const bool for_
 		{
 			mo.enemy_pos = spot;
 			if (in_cycle == 8 * RATE + 1)
-				add_event(now, 1, power ? 45 : 1);
+				add_event(now, 1, power ? power_id : 1);
 		}
 		s.step(c, m);
 		mo.pilot = s;
@@ -1076,7 +1082,7 @@ flight fly_pickups(const char *const name, const bool for_power, const bool for_
 	return out;
 }
 
-/* Section 8.9: a pilot that goes for every power missile it sees (in a
+/* Section 8.9: a pilot that goes for every power pickup it sees (in a
  * fight too) and lets the other pickups go, and one that lets all go.
  */
 void test_power_pickups()
@@ -1087,6 +1093,8 @@ void test_power_pickups()
 	const auto &hp{h.pickup_sight[0]}, &ho{h.pickup_sight[1]};
 	CHECK(hp.seen == cycles / 2 && ho.seen == cycles / 2);
 	CHECK(hp.taken == cycles / 2 && ho.taken == 0);
+	CHECK(pickup_class_of(31) == 0 && pickup_class_of(45) == 0 && pickup_class_of(21) == 0 && pickup_class_of(20) == 0);
+	CHECK(pickup_class_of(1) == 1 && pickup_class_of(30) == 1 && pickup_class_of(28) == 1);
 	CHECK_RANGE(hp.went_share, 1, 1);
 	CHECK_RANGE(hp.fight_went_share, 1, 1);
 	CHECK(hp.fight_seen == cycles / 4 && hp.calm_seen == cycles / 4);

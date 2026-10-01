@@ -1624,6 +1624,19 @@ void test_power_pickups()
 	CHECK(power_class_of(smart) == power_class::smart);
 	CHECK(power_class_of({item::invulnerability}) == power_class::big && power_class_of({item::cloak}) == power_class::smart);
 	CHECK(power_class_of(conc) == power_class::none && power_class_of({item::shield}) == power_class::none && power_class_of({item::quad}) == power_class::none);
+	/* The omega cannon too ("it nearly guarantees one or two kills"),
+	 * no other gun; worth nothing (no power pickup, best_power) to a bot
+	 * that has one.
+	 */
+	const item_desc omega{item::primary, primary::omega, 0};
+	CHECK(power_class_of(omega) == power_class::big);
+	CHECK(power_class_of({item::primary, primary::gauss, 0}) == power_class::none && power_class_of({item::primary, primary::helix, 0}) == power_class::none);
+	{
+		resource_view with_omega;
+		CHECK(item_value(omega, with_omega) > 0);
+		with_omega.weapons.owned = static_cast<uint16_t>(with_omega.weapons.owned | (1u << static_cast<unsigned>(primary::omega)));
+		CHECK(item_value(omega, with_omega) == 0);
+	}
 	/* The weight: by skill, Collector strongest, Aggressive close to
 	 * Balanced, Trainee barely, at most 1.
 	 */

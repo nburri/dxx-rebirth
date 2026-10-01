@@ -3227,7 +3227,7 @@ go 0.25 and 0.7 of the way from the base value):
 | `tune.volley_size` | the rounds of a good volley of light missiles (rounded; a smart missile burst at most 3), in place of the table |
 | `tune.pursuit_seconds` | how long a lost target is pursued, in place of the skill's and style's (0: it lets it go, no pursuit starts) |
 | `tune.grab_detour` | a scale of the detour a grab may take in a fight: the measured share of pickups off course over 0.45, the bots' with the scale 1 |
-| `tune.power_pickup` | the bot's power weight (§9.14), in place of the skill's and style's: the measured share of the power missiles in sight the pilot went for |
+| `tune.power_pickup` | the bot's power weight (§9.14), in place of the skill's and style's: the measured share of the power pickups in sight the pilot went for |
 | `measured.*` | not read: statistics for people |
 
 No key is left unapplied. One caveat: the analysis counts a large turn
@@ -3268,7 +3268,7 @@ own turn reversed, no burn fleeing; a far band backs off);
 `build/common/test-bot-style-profiles -f FILE` checks a file and prints
 the bot it makes at every skill.
 
-### 9.14 After the Corona game (2026-10-01): power missiles
+### 9.14 After the Corona game (2026-10-01): power pickups
 
 The playtest on "Corona" (CORONA (Sny), 805 segments, mostly large open
 rooms), EC against five bots for 22 minutes: "Flight looks much better,
@@ -3283,11 +3283,12 @@ the 25 smart missiles; each bot 1–3 earthshakers. EC made 59 kills for
 **Measured** (`movrec-analyse --missions`, the new pickup sight of
 movement-recording.md §8.9, on that recording; "in sight" is within 45°
 of the nose with a free line through the level, up to 15 s before
-someone took it):
+someone took it; nobody took the omega cannon in those 22 minutes, so
+the power pickups measured are the missiles):
 
 | | EC | bots (5) |
 |---|---|---|
-| Power missiles in sight before taken | 43 | 23–28 each |
+| Power pickups in sight before taken | 43 | 23–28 each |
 | ... taken / went for | 70 % / 86 % | 12–32 % / 29–39 % |
 | ... went for when first seen in a fight | 77 % of 22 | 14–47 % of 14–22 |
 | ... taken from (median, p90) | 136, 268 units, 2.7 s after the first sight | 71–160, 125–310 units, 2.5–11 s |
@@ -3306,11 +3307,16 @@ nearest first.
 `sight_power_powerups`, `best_power`), deterministic on the host (game
 state and the bot's own state only), no protocol change:
 
-- **Power pickups**: the earthshaker, the mega missile and
-  invulnerability (big, `POWER_BIG_UTILITY` 7), the smart missile and
-  the cloak (smart, 4.5). Invulnerability and cloak count because the
-  goal code already treats them with the big missiles (`GRAB_HIGH_VALUE`,
-  `collect_in_fight`).
+- **Power pickups**: the earthshaker, the mega missile, the omega
+  cannon and invulnerability (big, `POWER_BIG_UTILITY` 7), the smart
+  missile and the cloak (smart, 4.5). The omega because humans always go
+  for it too ("it nearly guarantees one or two kills"); a bot that has
+  one does not (its value is 0). Invulnerability and cloak count because
+  the goal code already treats them with the big missiles
+  (`GRAB_HIGH_VALUE`, `collect_in_fight`). Nothing is special to a
+  level: on Corona the omega lies in a one-segment dead end behind a door
+  near four quad lasers, and a bot knows of it as of any powerup (its
+  map knowledge by skill, or a sighting).
 - **In sight at any distance.** Every strategy tick the bot checks the
   power pickups in its field of view (the skill's, 45°–90°) for a line
   of sight, at most 4 (the nearest two, the others in turn, so that a
@@ -3348,7 +3354,8 @@ state and the bot's own state only), no protocol change:
 - The bot's log shows ` power` on the goal line and on the pickup line.
 
 **Profile.** `movrec-analyse` writes `tune.power_pickup` (the share of
-the power missiles in sight the pilot went for; confidence from the
+the power pickups in sight the pilot went for: smart, mega and
+earthshaker missiles and the omega cannon; confidence from the
 sightings: low below 8, high from 25, at most medium when most were
 judged without the level's geometry) and, for people,
 `measured.power_seen`, `measured.power_taken_share`,
@@ -3361,13 +3368,14 @@ measure what a pilot did, with races lost and powerups taken by others
 in between).
 
 **Tests.** `test-bot-goals`: an earthshaker in sight 400 units away
-beats energy the bot needs 20 units away and an engagement it is in
+(and the omega, not when the bot has one) beats energy the bot needs 20 units away and an engagement it is in
 (Insane, Hotshot), not for Rookie and Trainee; full: no detour; an enemy
 nearer but not by half: still goes, nearer by half: gives up; the kill
 imminent, in danger (invulnerability yes), only known, the smart
 missile, armed and in pursuit, the sighting's hold and commitment, the
 hysteresis, the memory's sighting. `test-movement-analysis`: a
-synthetic pilot that flies to every power missile it sees (in a fight
+synthetic pilot that flies to every power pickup it sees (earthshaker,
+mega, omega and smart missile in turn; in a fight
 too) and lets the other pickups go, one that lets all go and one that
 takes all; their shares, distances, times and the profile key.
 
