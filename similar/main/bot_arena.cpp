@@ -135,13 +135,21 @@ std::string_view trim(std::string_view s)
 }
 
 /* -botarena-bots "skill:style[:name],...": the bots, in order; a bot the
- * list leaves out plays the default skill and style.  False (and a log
- * line) if a word is no skill or style.
+ * list leaves out (or a field it leaves empty) plays the setup's default.
+ * False (and a log line) if a word is no skill or style.
  */
 [[nodiscard]]
 bool parse_bot_list(const std::string_view list, const unsigned count, b::bot_profile &p)
 {
 	p.count = count;
+	for (unsigned i = 0; i < count; ++i)
+	{
+		auto &e{p.bots[i]};
+		e = {};
+		e.skill = p.default_skill;
+		e.style = p.default_style;
+		e.profile = p.default_profile;
+	}
 	std::string_view rest{list};
 	for (unsigned i = 0; i < count && !rest.empty(); ++i)
 	{
@@ -149,9 +157,8 @@ bool parse_bot_list(const std::string_view list, const unsigned count, b::bot_pr
 		const auto item{trim(rest.substr(0, comma))};
 		rest = comma == std::string_view::npos ? std::string_view{} : rest.substr(comma + 1);
 		auto &e{p.bots[i]};
-		e = {};
-		e.skill = p.default_skill;
-		e.style = p.default_style;
+		if (item.empty())
+			continue;
 		std::array<std::string_view, 3> field{};
 		std::string_view f{item};
 		for (auto &w : field)
@@ -181,6 +188,7 @@ bool parse_bot_list(const std::string_view list, const unsigned count, b::bot_pr
 				return false;
 			}
 			e.style = *st;
+			e.profile = {};
 		}
 		const auto n{std::min(field[2].size(), e.name.size() - 1)};
 		std::copy_n(field[2].data(), n, e.name.data());

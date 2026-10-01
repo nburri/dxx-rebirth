@@ -4701,7 +4701,7 @@ bool open_loopback_socket()
 	if (udp_open_socket(UDP_Socket[0], 0, true) != 0)
 		return false;
 	_sockaddr a{};
-	socklen_t len{sizeof(a)};
+	socklen_t len = sizeof(a);
 	if (getsockname(UDP_Socket[0], &a.sa, &len) == 0)
 		con_printf(CON_NORMAL, "net: game socket on the loopback address only, port %u", ntohs(
 #if DXX_USE_IPv6
