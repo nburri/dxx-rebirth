@@ -1,8 +1,8 @@
 # Movement recording (player styles for bots, steps 1 and 2)
 
-Status: step 1 (recording) and step 2 (the analysis tool and the bot style
-profile format, section 8) are implemented on `experimental-netcode`.
-Step 3 (bots that load a profile) is planned in section 8.6.
+Status: step 1 (recording), step 2 (the analysis tool and the bot style
+profile format, section 8) and step 3 (bots that fly a profile, section
+8.7) are implemented on `experimental-netcode`.
 
 ## 1. Goal
 
@@ -17,8 +17,8 @@ do, dodge and retreat like them. That takes three steps:
 2. **Analyse** (offline tool `movrec-analyse`, section 8, implemented): read
    many recordings of a player, reduce them to a movement profile, and
    propose the bot parameters that fit it as a `.botstyle` text file.
-3. **Profiles** (in game, planned): load those files, selectable in the bot
-   setup as "<player> style".
+3. **Profiles** (in game, implemented): load those files, selectable in
+   the bot setup as "<player> style".
 
 The recording is designed so that step 2 needs nothing but the files and the
 reader library (`common/main/movement_record_reader.h`), and so that the
@@ -487,8 +487,8 @@ Rules (`common/main/bot_style_profile.h`: `write_style_profile`,
   bot takes from it every value the profile leaves out.
 - `style.<field>`: a field of `style_params`. `skill.<field>`: a movement
   field of `skill_params` (the skill still decides aim, reaction and senses).
-  `tune.<name>`: a constant of the bot code that is the same for every bot
-  today; step 3 decides which of them become per-bot. `measured.<name>`:
+  `tune.<name>`: a constant of the bot code that was the same for every
+  bot; step 3 made each of them per-bot (§8.7). `measured.<name>`:
   plain statistics for people, not read by the game.
 - `confidence.<key>` is `low`, `medium` or `high` (high if absent). The
   loader goes the share 0.25, 0.7 or 1 of the way from the base value to the
@@ -515,7 +515,7 @@ The keys, their range, and what they are computed from:
 | `skill.dodge_prob` | 0–0.95 | the dodge probability, where measurable |
 | `tune.range_lo`, `tune.range_hi` | 15–400, 30–800 | the quartiles of the firing distance (`BOT_RANGE_LO`/`HI`) |
 | `tune.reverse_turn` | 0–1 | share of the large turns flown backwards (the bots' `turn_habits::reverse`, 0.12) |
-| `tune.reverse_turn_speed` | 0–1 | backward speed reached in them (`REVERSE_TURN_SPEED`) |
+| `tune.reverse_turn_speed` | 0.3–1 | backward speed reached in them (`REVERSE_TURN_SPEED`) |
 | `tune.turn_boost`, `tune.turn_boost_burn` | 0–1 | share of large turns followed by a push, and of those with the afterburner (`turn_habits::boost`, 0.8, `boost_burn`, 0.3) |
 | `tune.burn_retreat`, `tune.burn_roam` | 0–1 | share of the time fleeing / with no enemy in sight with the afterburner |
 | `tune.missile_interval_scale` | 0.3–4 | median time between volleys of one fight / the base skill's `missile_interval` (only with 3 such pairs or more) |
@@ -568,17 +568,21 @@ the network smooths a client's motion, and no human repeats a habit 18 times
 in a row. The thresholds of `analysis::limits` and the mapping of section
 8.5 are first guesses to be tuned against the first real recordings.
 
-### 8.7 Step 3: bots that fly a profile (planned)
+### 8.7 Step 3: bots that fly a profile
 
-The game loads the `.botstyle` files of `botstyles/` in the PhysFS write
-directory with `parse_style_profile`, lists them in the bot setup next to
-the built-in styles as "<name>", and gives a bot
-`apply_style_profile(profile, its skill)` in place of `style_of(style)` and
-`skill_of(skill)`; the profile's name travels with the bot's configuration
-like the built-in style (Documentation/multiplayer-bots.md section 9.7).
-The `tune.` keys need the constants they name to become per-bot values
-(`bot_tactics`, the reverse turn, the fight band, the missile interval, the
-pursuit); that is the larger part of step 3 and can go key by key.
+Put the `.botstyle` files into `botstyles/` in the PhysFS write
+directory (next to `recordings/` and the pilot files; the game makes the
+folder). The host reads them when the bot setup starts, when a Bots
+screen opens and when a game starts; they appear in every style slider
+after the four built-in styles, by name ("EC style"), and as a
+style word in the chat (`/bot add hot EC`, `/bot style all
+EC`). A bot gets `apply_style_profile(profile, its skill)` in place
+of `style_of(style)` and `skill_of(skill)`, every `style.`, `skill.` and
+`tune.` key included; the setup and the pilot's `.ngp` keep the
+profile's name (`BotStyle<n>=`) besides the base style, which a host
+without the file flies (with a console line). Only the host needs the
+files. Details, limits for untrusted files and the table of what each
+key sets: Documentation/multiplayer-bots.md §9.13.
 
 ## 9. Code
 
@@ -590,7 +594,8 @@ pursuit); that is the larger part of step 3 and can go key by key.
 | `common/tools/movrec_dump.cpp` | The dump tool |
 | `common/unittest/movement_record.cpp` | Tests: round trips, header, chunks, truncation at every byte, damaged chunks, unknown records, the tick schedule at 20 to 1000 fps, quantisation and frames, the minor 1 additions |
 | `common/main/movement_analysis.h` | Step 2: loading, sessions and clocks, merging, tracks and the control estimate, the movement profile, the proposal, the report (header-only) |
-| `common/main/bot_style_profile.h` | The `.botstyle` format: keys and ranges, write, parse, apply to `skill_params`/`style_params` (header-only, for the game too) |
+| `common/main/bot_style_profile.h` | The `.botstyle` format: keys and ranges, write, parse, apply to `skill_params`/`style_params`/`tune_params` (header-only, for the game too) |
+| `common/main/bot_style_library.h` | Step 3: the styles of `botstyles/`: names, chat words, limits (header-only) |
 | `common/tools/movrec_analyse.cpp` | The analysis tool |
 | `common/unittest/movement_analysis.cpp` | Tests: synthetic recordings of scripted pilots (section 8.6) |
 

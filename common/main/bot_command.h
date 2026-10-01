@@ -25,6 +25,8 @@
  *   command word.  No bot is called so, in the chat or on the Bots
  *   screens: `/bot add col ace` (style before skill) is an error, not a
  *   bot named "ace", and `/bot remove all` never meets a bot named "all".
+ *   Section 9.13: a style is also a loaded style profile's word (its
+ *   player's callsign: `/bot add hot EC`), in the style's place.
  * - which bot a name means (exact, else a unique prefix);
  * - whether the host may add a bot now, and why not.
  */
@@ -66,6 +68,10 @@ struct command
 	command_kind kind{command_kind::none};
 	std::optional<bot_skill> skill;
 	std::optional<bot_style> style;
+	/* Section 9.13: the style is the style profile of this index in the
+	 * words parse_command was given (and `style` is empty).
+	 */
+	std::optional<unsigned> profile;
 	/* add: the new bot's name (empty: the next built-in name);
 	 * remove, skill, style: the bot meant (unless `all`).  NUL-terminated,
 	 * cut to 8 characters.
@@ -227,9 +233,25 @@ constexpr std::array<char, BOT_COMMAND_NAME_LEN + 1> usable_name(const std::stri
 
 inline constexpr const char *BOT_NAME_RESERVED_TEXT{"Not a name: a skill, style or command word"};
 
-/* The chat line `s` as a /bot command (`none` if it is not one). */
+/* Section 9.13: `w` as the word of a loaded style profile (the index in
+ * `words`).
+ */
 [[nodiscard]]
-constexpr command parse_command(std::string_view s)
+constexpr std::optional<unsigned> parse_style_word(const std::string_view w, const std::span<const std::string_view> words)
+{
+	if (w.empty())
+		return std::nullopt;
+	for (std::size_t i = 0; i < words.size(); ++i)
+		if (!words[i].empty() && detail::iequal(w, words[i]))
+			return static_cast<unsigned>(i);
+	return std::nullopt;
+}
+
+/* The chat line `s` as a /bot command (`none` if it is not one);
+ * `style_words`: the words of the loaded style profiles.
+ */
+[[nodiscard]]
+constexpr command parse_command(std::string_view s, const std::span<const std::string_view> style_words = {})
 {
 	auto rest{s};
 	const auto head{detail::next_word(rest)};
@@ -261,11 +283,18 @@ constexpr command parse_command(std::string_view s)
 				w = detail::next_word(rest);
 			}
 		if (!w.empty())
+		{
 			if (const auto st{parse_style(w)})
 			{
 				c.style = st;
 				w = detail::next_word(rest);
 			}
+			else if (const auto pr{parse_style_word(w, style_words)})
+			{
+				c.profile = pr;
+				w = detail::next_word(rest);
+			}
+		}
 		if (!w.empty())
 		{
 			if (w.size() > BOT_COMMAND_NAME_LEN)
@@ -316,7 +345,11 @@ constexpr command parse_command(std::string_view s)
 		c.kind = command_kind::style;
 		c.style = parse_style(value);
 		if (!c.style)
-			return detail::error("Styles: balanced, aggressive, cautious, collector");
+		{
+			c.profile = parse_style_word(value, style_words);
+			if (!c.profile)
+				return detail::error("Styles: balanced, aggressive, cautious, collector, or a loaded style's word");
+		}
 	}
 	return c;
 }

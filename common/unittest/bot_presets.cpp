@@ -358,7 +358,7 @@ bot_profile sample_profile()
 
 bot_profile round_trip(const bot_profile &p, const bool with_noise)
 {
-	std::array<profile_line, 3 + BOT_PROFILE_MAX_BOTS> lines;
+	std::array<profile_line, BOT_PROFILE_MAX_LINES> lines;
 	const auto n{format_profile(p, lines)};
 	CHECK(n == 3 + p.count);
 	profile_reader r;
@@ -464,7 +464,7 @@ void test_profile()
 		src.count = 5;
 		std::strcpy(src.bots[3].name.data(), "omega");
 		src.bots[3].skill = bot_skill::insane;
-		std::array<profile_line, 3 + BOT_PROFILE_MAX_BOTS> lines;
+		std::array<profile_line, BOT_PROFILE_MAX_LINES> lines;
 		const auto n{format_profile(src, lines)};
 		CHECK(n == 8);
 		profile_reader r;
@@ -510,7 +510,7 @@ void test_profile()
 void test_profile_bot_lines_only()
 {
 	const auto p{sample_profile()};
-	std::array<profile_line, 3 + BOT_PROFILE_MAX_BOTS> lines;
+	std::array<profile_line, BOT_PROFILE_MAX_LINES> lines;
 	const auto n{format_profile(p, lines)};
 	CHECK(n == 3 + p.count);
 	std::string block;

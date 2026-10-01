@@ -1438,7 +1438,11 @@ void test_profile_format()
 	CHECK_RANGE(trainee.style.retreat_shields, 15.9, 16.1);
 	/* The brawler's profile on an Insane bot. */
 	const auto insane{bot::apply_style_profile(p, bot::bot_skill::insane)};
-	CHECK(insane.style.range_scale < 0.8 && insane.style.retreat_shields < 17 && insane.style.chase_memory > 1.1);
+	CHECK(insane.style.retreat_shields < 17 && insane.style.chase_memory > 1.1);
+	/* Section 9.13 of the bots' document: its band is its own (the
+	 * quartiles of its firing distance), not the base band scaled.
+	 */
+	CHECK(insane.style.range_scale == 1 && insane.tune.range_hi < 70 && insane.tune.range_lo < 50);
 	CHECK(!insane.skill.strafe);
 	/* It never dodged (medium confidence: 54 bursts): most of the way
 	 * down from Insane's 0.85.

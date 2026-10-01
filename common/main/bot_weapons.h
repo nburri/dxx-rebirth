@@ -1882,7 +1882,23 @@ struct volley_view
 	double target_lateral_speed{};
 	double target_seen_ago{1e9};
 	bool cloaked{};
+	/* Section 9.13: a style profile's missiles per volley
+	 * (tune.volley_size): the size of a good volley, in place of the
+	 * table; negative: the table.
+	 */
+	double mean{-1};
 };
+
+/* The rounds of a good volley of light missiles by weapon smarts and
+ * style (volley_size's table).
+ */
+[[nodiscard]]
+constexpr int volley_table_size(const unsigned smarts, const bot_style style)
+{
+	constexpr std::array<int, 5> by_smarts{{1, 1, 2, 3, 4}};
+	const int style_step{style == bot_style::aggressive ? 1 : style == bot_style::cautious ? -1 : 0};
+	return by_smarts[std::min<std::size_t>(smarts, by_smarts.size() - 1)] + style_step;
+}
 
 /* The rounds of the volley that starts with `v.s` now (1: a single
  * shot).  By weapon smarts (Rookie 1, Hotshot 2, Ace 3, Insane 4 light
@@ -1914,8 +1930,7 @@ constexpr unsigned volley_size(const volley_view &v)
 					n = 2;
 				break;
 			}
-			constexpr std::array<int, 5> by_smarts{{1, 1, 2, 3, 4}};
-			n = by_smarts[std::min<std::size_t>(v.smarts, by_smarts.size() - 1)] + style_step;
+			n = v.mean >= 1 ? static_cast<int>(std::min(v.mean, 8.0) + 0.5) : volley_table_size(v.smarts, v.style);
 			break;
 		}
 		case missile_role::smart:
@@ -1928,7 +1943,7 @@ constexpr unsigned volley_size(const volley_view &v)
 			if (!(cover || in_sight) || v.cloaked)
 				break;
 			constexpr std::array<int, 5> by_smarts{{1, 1, 2, 2, 3}};
-			n = std::min(by_smarts[std::min<std::size_t>(v.smarts, by_smarts.size() - 1)] + style_step, 3);
+			n = std::min(v.mean >= 1 ? static_cast<int>(std::min(v.mean, 8.0) + 0.5) : by_smarts[std::min<std::size_t>(v.smarts, by_smarts.size() - 1)] + style_step, 3);
 			break;
 		}
 		default:

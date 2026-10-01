@@ -101,7 +101,9 @@ constexpr unsigned BOT_NAV_NODE_LIMIT{4000};
 constexpr unsigned BOT_REVENGE_TICKS{3 * b::BOT_TICK_RATE};
 /* A cloaked player is seen only this close (section 4.2). */
 constexpr double BOT_CLOAK_SEE_DISTANCE{40};
-/* The engagement distance band before the style's range scale. */
+/* The engagement distance band before the style's range scale (the
+ * defaults of b::tune_params).
+ */
 constexpr double BOT_RANGE_LO{35};
 /* Section 9.5: backing off to a standoff, no closer to a wall behind. */
 constexpr double BOT_BACK_WALL_CLEARANCE{25};
@@ -293,8 +295,20 @@ struct bot_state
 	bot_config cfg;
 	/* Section 9.7: the bot's own skill and style (its setup line). */
 	b::bot_skill skill_level{b::BOT_DEFAULT_SKILL};
-	const b::skill_params *skill{&b::skill_of(b::BOT_DEFAULT_SKILL)};
-	const b::style_params *style{&b::style_of(b::bot_style::balanced)};
+	b::skill_params skill{b::skill_of(b::BOT_DEFAULT_SKILL)};
+	b::style_params style{b::style_of(b::bot_style::balanced)};
+	/* Section 9.13: the constants a style profile tunes (the defaults
+	 * for a built-in style), and the profile the bot flies, if any.
+	 */
+	b::tune_params tune;
+	bool profile_applied{};
+	/* The console said that the profile's file is missing. */
+	bool profile_missing_said{};
+	/* Section 9.13: long straight flights may light the afterburner
+	 * (b::tune_params::roam_burn, drawn until roam_roll_at).
+	 */
+	bool roam_burn_ok{true};
+	uint32_t roam_roll_at{};
 	/* The retreat threshold of the last strategy tick: the style's,
 	 * raised when outgunned (b::style_retreat_shields).
 	 */
@@ -548,13 +562,34 @@ struct bot_state
 		apply_config();
 		heavy_near_obj.fill(0xffff);
 	}
-	/* Section 9.7: the presets of the bot's skill and style. */
+	/* Section 9.7: the presets of the bot's skill and style; section
+	 * 9.13: or of its style profile at its skill (b::apply_style_profile),
+	 * the base style's without the profile's file.
+	 */
 	void apply_config()
 	{
 		skill_level = cfg.skill;
-		skill = &b::skill_of(cfg.skill);
-		style = &b::style_of(cfg.style);
-		retreat_shields = style->retreat_shields;
+		skill = b::skill_of(cfg.skill);
+		style = b::style_of(cfg.style);
+		tune = {};
+		profile_applied = false;
+		if (cfg.profile[0])
+		{
+			if (const auto ls{bots_style_library().find(cfg.profile.data())})
+			{
+				const auto p{b::apply_style_profile(ls->profile, cfg.skill)};
+				skill = p.skill;
+				style = p.style;
+				tune = p.tune;
+				profile_applied = true;
+			}
+			else if (!profile_missing_said)
+			{
+				profile_missing_said = true;
+				con_printf(CON_NORMAL, "bots: '%s': no style \"%s\" in %s/ (a .botstyle file): it flies %s", static_cast<const char *>(cfg.name), cfg.profile.data(), b::BOT_STYLE_FOLDER, b::bot_style_names[static_cast<unsigned>(cfg.style) % b::BOT_STYLE_COUNT]);
+			}
+		}
+		retreat_shields = style.retreat_shields;
 		risk = b::risk_profile_of(cfg.skill, cfg.style);
 	}
 	void reset_for_life(const uint32_t tick)
@@ -619,6 +654,8 @@ struct bot_state
 		lateral.reset();
 		fleeing = flee_turned = flee_burn = false;
 		flee_roll_at = 0;
+		roam_burn_ok = true;
+		roam_roll_at = 0;
 		aim_dir = {0, 0, 1};
 		powerup_phase = false;
 		third_parties = 0;
@@ -1138,7 +1175,7 @@ void choose_weapon(const bot_state &bs, object &obj, const std::optional<b::rang
 		return;
 	const auto active{pi.Primary_weapon.get_active()};
 	const auto current{static_cast<b::primary>(underlying_value(active))};
-	const auto wanted{bs.skill->weapon_smarts < 2
+	const auto wanted{bs.skill.weapon_smarts < 2
 		? b::choose_primary({
 			.owned = pi.primary_weapon_flags,
 			.energy = pi.energy / 65536.0,
@@ -1409,7 +1446,7 @@ void notice_heavy_holders(bot_state &bs, const object &obj, const uint32_t tick)
 				con_printf(CON_VERBOSE, "bots: '%s' saw P#%u pick up a heavy missile (%u known)", static_cast<const char *>(bs.cfg.name), i, bs.heavy_holding[i].count);
 		}
 	}
-	const double awareness{bs.skill->awareness};
+	const double awareness{bs.skill.awareness};
 	for (auto &&o : Objects.vcptridx)
 	{
 		if (o->type == object_type::OBJ_WEAPON && heavy_weapon_id(get_weapon_id(o)))
@@ -1454,7 +1491,7 @@ void notice_heavy_holders(bot_state &bs, const object &obj, const uint32_t tick)
 void perceive(bot_state &bs, const object &obj, const uint32_t tick)
 {
 	auto &Objects = LevelUniqueObjectState.Objects;
-	const auto &sk{*bs.skill};
+	const auto &sk{bs.skill};
 	const auto pos{to_vec(obj.pos)};
 	const auto frame{to_frame(obj.orient)};
 	/* Section 9.5: where the bot has been (exploring). */
@@ -1568,7 +1605,7 @@ void perceive(bot_state &bs, const object &obj, const uint32_t tick)
 	 * its flight for a moment, a reaction time later.  The bot's own shots
 	 * and, without friendly fire, its partners' are not dodged.
 	 */
-	const double dodge_prob{b::effective_dodge(*bs.skill, *bs.style)};
+	const double dodge_prob{b::effective_dodge(bs.skill, bs.style)};
 	if (dodge_prob > 0 && tick >= bs.dodge_until)
 	{
 		const double radius{obj.size / 65536.0 + 3};
@@ -1607,7 +1644,7 @@ void perceive(bot_state &bs, const object &obj, const uint32_t tick)
 			if (b::dodge_roll(bs.dodge_salt, static_cast<uint16_t>(o.signature)) >= b::dodge_chance(dodge_prob, homing_at_me))
 				continue;
 			bs.dodge_dir = *away;
-			bs.dodge_from = tick + b::ticks_from_ms(bs.skill->reaction_ms) / 2;
+			bs.dodge_from = tick + b::ticks_from_ms(bs.skill.reaction_ms) / 2;
 			bs.dodge_until = bs.dodge_from + BOT_DODGE_TICKS;
 			break;
 		}
@@ -1689,7 +1726,7 @@ const object *live_powerup(const b::known_powerup &k)
 void learn_powerups(bot_state &bs, const object &obj, const uint32_t tick)
 {
 	auto &Objects = LevelUniqueObjectState.Objects;
-	const auto &sk{*bs.skill};
+	const auto &sk{bs.skill};
 	const auto pos{to_vec(obj.pos)};
 	const auto frame{to_frame(obj.orient)};
 	unsigned budget{BOT_POWERUP_LOS_BUDGET};
@@ -2060,10 +2097,11 @@ b::pursuit_view pursuit_view_of(const bot_state &bs, const object &obj, const ui
 		.damage_seen = p.engaged_who == who ? std::max(0.0, p.engage_shields - target_shields) : 0,
 		.advantage = advantage,
 		.shields = res.shields,
-		.retreat_shields = b::style_retreat_shields(*bs.style, advantage),
+		.retreat_shields = b::style_retreat_shields(bs.style, advantage),
 		.invulnerable = res.invulnerable,
 		.stronger_near = stronger,
 		.target_heavy = bs.heavy_holding[who].held(tick),
+		.seconds = bs.tune.pursuit_seconds,
 	};
 }
 
@@ -2137,7 +2175,7 @@ void update_pursuit(bot_state &bs, const object &obj, const uint32_t tick, const
 	p.corner_done = false;
 	p.peek = false;
 	if (bot_log_on())
-		con_printf(CON_VERBOSE, "bots: '%s' pursues P#%u round a corner: %s (for %.1f s; last seen %.0f units away %.1f s ago at %.0f units/s; shields %.0f against %.0f, advantage %.2f)", static_cast<const char *>(bs.cfg.name), w, b::name_of(reason), b::pursuit_seconds(v.skill, v.style), b::distance(to_vec(obj.pos), m.pos), tick_seconds(tick - m.tick), b::length(m.vel), v.shields, v.target_shields, v.advantage);
+		con_printf(CON_VERBOSE, "bots: '%s' pursues P#%u round a corner: %s (for %.1f s; last seen %.0f units away %.1f s ago at %.0f units/s; shields %.0f against %.0f, advantage %.2f)", static_cast<const char *>(bs.cfg.name), w, b::name_of(reason), b::pursuit_limit(v), b::distance(to_vec(obj.pos), m.pos), tick_seconds(tick - m.tick), b::length(m.vel), v.shields, v.target_shields, v.advantage);
 }
 
 /* Section 9.10: where the pursued target probably is (b::predict_pursuit
@@ -2237,8 +2275,8 @@ std::optional<b::goal_kind> current_goal(const bot_state &bs, const bool target_
 void think(bot_state &bs, object &obj, const uint32_t tick)
 {
 	auto &Objects = LevelUniqueObjectState.Objects;
-	const auto &sk{*bs.skill};
-	const auto &st{*bs.style};
+	const auto &sk{bs.skill};
+	const auto &st{bs.style};
 	const auto pos{to_vec(obj.pos)};
 	std::array<b::target_candidate, MAX_PLAYERS> cand{};
 	unsigned n{0};
@@ -2446,6 +2484,7 @@ void think(bot_state &bs, object &obj, const uint32_t tick)
 		.engage_weight = st.engage_weight * b::style_engage_factor(st, advantage) * bs.tactics.engage_weight,
 		.collect_weight = st.collect_weight * bs.tactics.collect_weight,
 		.collector = bs.cfg.style == b::bot_style::collector,
+		.detour_scale = bs.tune.grab_detour_scale,
 		.pursuing = pursuing,
 		.current = current_goal(bs, target_visible),
 	};
@@ -2704,10 +2743,20 @@ void decide_afterburner(bot_state &bs, object &obj, const vec3 &wanted, const ui
 	const double max_speed{B.limits.max_speed};
 	bool chasing_far{false};
 	if (bs.target && (bs.goal == bot_goal::hunt) && bs.memory[*bs.target].valid)
-		chasing_far = b::distance(pos, bs.memory[*bs.target].pos) > bs.style->burn_chase_distance;
+		chasing_far = b::distance(pos, bs.memory[*bs.target].pos) > bs.style.burn_chase_distance;
 	bool long_straight{false};
 	if ((bs.goal == bot_goal::roam || bs.goal == bot_goal::collect) && bs.steer_index < bs.points.size())
 		long_straight = b::distance(pos, bs.points[bs.steer_index]) > b::BOT_LONG_STRAIGHT;
+	/* Section 9.13: the style profile's share of long flights burnt. */
+	if (long_straight)
+	{
+		if (tick >= bs.roam_roll_at)
+		{
+			bs.roam_burn_ok = bs.tune.roam_burn >= 1 || bs.rng.uniform() < bs.tune.roam_burn;
+			bs.roam_roll_at = tick + b::FLEE_ROLL_TICKS;
+		}
+		long_straight = bs.roam_burn_ok;
+	}
 	const bool dodging{tick >= bs.dodge_from && tick < bs.dodge_until};
 	const bool aligned{b::length(wanted) > max_speed * 0.5 && b::angle_between(frame.f, wanted) < b::radians(25)};
 	const bool burn{!bs.stuck.recovering() && b::want_afterburner({
@@ -2792,11 +2841,11 @@ double wall_distance(const object &obj, const vec3 &dir, const double limit)
  * Outside a fight (turning to an attacker it did not see).
  */
 [[nodiscard]]
-vec3 turn_velocity(const object &obj, const b::turn_phase turn, const vec3 &wanted, const double err, const vec3 &to, const vec3 &vel, const vec3 &hint, const double max_speed)
+vec3 turn_velocity(const object &obj, const b::turn_phase turn, const vec3 &wanted, const double err, const vec3 &to, const vec3 &vel, const vec3 &hint, const double max_speed, const double reverse_speed)
 {
 	if (turn == b::turn_phase::reversing || turn == b::turn_phase::boost)
 	{
-		const auto v{b::turn_round_velocity(turn, wanted, to, vel, hint, max_speed)};
+		const auto v{b::turn_round_velocity(turn, wanted, to, vel, hint, max_speed, reverse_speed)};
 		if (turn != b::turn_phase::reversing || b::reverse_turn_has_room(wall_distance(obj, b::normalized(v), b::REVERSE_TURN_CLEARANCE)))
 			return v;
 	}
@@ -3025,7 +3074,7 @@ b::blast_scene heavy_scene(const bot_state &bs, const object &obj, const vec3 &t
 		.target_vel = target_vel,
 		.target_visible = target_visible,
 		.unseen_for = unseen_for,
-		.aim_sigma = b::radians(bs.skill->aim_sigma_deg),
+		.aim_sigma = b::radians(bs.skill.aim_sigma_deg),
 		.shields = obj.shields / 65536.0,
 		.target_shields = target_shields,
 		.invulnerable_left = invulnerable_left,
@@ -3286,7 +3335,7 @@ vec3 corner_exit(const bot_state &bs, const vec3 &pos)
 void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept *const p)
 {
 	auto &Objects = LevelUniqueObjectState.Objects;
-	const auto &sk{*bs.skill};
+	const auto &sk{bs.skill};
 	auto &pi{obj.ctype.player_info};
 	if (bs.missile_fire)
 		return;
@@ -3442,8 +3491,9 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 				m.data[i] = missile_data_of(w);
 		}
 		m.smarts = sk.weapon_smarts;
-		m.mine_interval_scale = bs.style->mine_interval;
-		m.missile_interval_scale = b::missile_interval_scale(bs.cfg.style);
+		m.mine_interval_scale = bs.style.mine_interval;
+		/* Section 9.13: the style profile's, else the style's. */
+		m.missile_interval_scale = bs.tune.missile_interval_scale >= 0 ? bs.tune.missile_interval_scale : b::missile_interval_scale(bs.cfg.style);
 		m.accepted_damage = bs.risk.self_budget * std::clamp(obj.shields / 65536.0, 0.0, 200.0);
 		m.has_target = target_pos.has_value();
 		m.target_visible = target_visible;
@@ -3743,6 +3793,7 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 					.target_lateral_speed = lateral,
 					.target_seen_ago = bs.target && bs.memory[*bs.target].valid ? (tick - bs.memory[*bs.target].tick) / static_cast<double>(b::BOT_TICK_RATE) : 1e9,
 					.cloaked = res_cloaked,
+					.mean = bs.tune.volley_size,
 				})};
 				bs.volley_missile = s;
 				bs.volley_left = n > 1 ? n - 1 : 0;
@@ -3903,15 +3954,18 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 	auto &obj{ship_of(bs.pid)};
 	if (bs.life != bot_life::alive || obj.type != object_type::OBJ_PLAYER)
 		return;
-	const auto &sk{*bs.skill};
+	const auto &sk{bs.skill};
 	if (b::layer_due(tick, b::PERCEPTION_DIVISOR, bs.stagger))
 		perceive(bs, obj, tick);
 	if (b::layer_due(tick, b::STRATEGY_DIVISOR, bs.stagger))
 		think(bs, obj, tick);
 	bs.aim.update(bs.rng, b::radians(sk.aim_sigma_deg), b::ticks_from_ms(sk.aim_drift_ms));
 	bs.lead.update(bs.rng, sk.lead, b::ticks_from_ms(sk.aim_drift_ms));
-	const double range_scale{bs.style->range_scale * bs.tactics.range_scale};
-	double range_lo{BOT_RANGE_LO * range_scale}, range_hi{BOT_RANGE_HI * range_scale};
+	const double range_scale{bs.style.range_scale * bs.tactics.range_scale};
+	/* Section 9.13: the band of the bot's style profile, else
+	 * BOT_RANGE_LO/HI (b::tune_params).
+	 */
+	double range_lo{bs.tune.range_lo * range_scale}, range_hi{bs.tune.range_hi * range_scale};
 	/* Section 9.5: with a heavy missile ready, far enough for its blast. */
 	if (bs.standoff > range_lo)
 	{
@@ -3935,7 +3989,7 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 		if (!bs.fleeing || tick >= bs.flee_roll_at)
 		{
 			bs.flee_turned = bs.rng.uniform() < b::FLEE_TURNED_SHARE;
-			bs.flee_burn = bs.rng.uniform() < b::FLEE_BURN_SHARE;
+			bs.flee_burn = bs.rng.uniform() < bs.tune.flee_burn;
 			bs.flee_roll_at = tick + b::FLEE_ROLL_TICKS;
 		}
 		bs.fleeing = true;
@@ -4039,13 +4093,13 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 				 * burst there).
 				 */
 				const double band{range_hi - range_lo};
-				const double close{b::effective_close_speed(*bs.style)};
+				const double close{b::effective_close_speed(bs.style)};
 				const double forward{band < b::FIGHT_KEY_MIN_BAND
 					? b::approach_thrust(dist, bs.juke.range(), b::dot(vel, b::normalized(to)), close, max_speed)
 					: bs.approach.update(dist, bs.juke.range(), band) * close};
 				const bool no_closer{tick < bs.blast_hold_until};
 				const bool no_back{forward < 0 && bs.standoff > 0 && !bs.hugging && wall_distance(obj, -b::normalized(to), BOT_BACK_WALL_CLEARANCE) < BOT_BACK_WALL_CLEARANCE};
-				keys = b::fight_keys(bs.juke, forward, b::effective_strafe_speed(sk, *bs.style), no_closer, no_back);
+				keys = b::fight_keys(bs.juke, forward, b::effective_strafe_speed(sk, bs.style), no_closer, no_back);
 				use_keys = true;
 				break;
 			}
@@ -4067,7 +4121,7 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 		 * its own blast).
 		 */
 		const bool free_move{move_mode != b::engaged_move::path && move_mode != b::engaged_move::duck && !bs.hugging && !(tick < bs.blast_hold_until)};
-		const auto turn{free_move ? bs.turning.update(err, tick, dist, range_lo, bs.rng) : b::turn_phase::none};
+		const auto turn{free_move ? bs.turning.update(err, tick, dist, range_lo, bs.rng, bs.tune.turns) : b::turn_phase::none};
 		if (!free_move)
 		{
 			bs.turning.reset();
@@ -4078,7 +4132,7 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 			bool reversing{false};
 			if (turn == b::turn_phase::reversing || turn == b::turn_phase::boost)
 			{
-				const auto v{b::turn_round_velocity(turn, {}, to, vel, frame.r * static_cast<double>(bs.heading_pref), max_speed)};
+				const auto v{b::turn_round_velocity(turn, {}, to, vel, frame.r * static_cast<double>(bs.heading_pref), max_speed, bs.tune.turns.reverse_speed)};
 				if (turn != b::turn_phase::reversing || b::reverse_turn_has_room(wall_distance(obj, b::normalized(v), b::REVERSE_TURN_CLEARANCE)))
 				{
 					wanted = v;
@@ -4137,7 +4191,7 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 			 * from it (not on a path it must follow).
 			 */
 			const bool path_goal{bs.goal == bot_goal::collect || bs.goal == bot_goal::retreat || bs.goal == bot_goal::refuel};
-			auto turn{path_goal ? b::turn_phase::none : bs.turning.update(err, tick, b::length(to), range_lo, bs.rng)};
+			auto turn{path_goal ? b::turn_phase::none : bs.turning.update(err, tick, b::length(to), range_lo, bs.rng, bs.tune.turns)};
 			/* Out of sight, no boost toward a remembered place: the
 			 * turn ends there, so the afterburner (turn_boost) does not
 			 * fire for a boost that is not flown (the PR #38 review).
@@ -4147,7 +4201,7 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 				bs.turning.reset();
 				turn = b::turn_phase::none;
 			}
-			wanted = turn_velocity(obj, turn, wanted, err, to, vel, frame.r * static_cast<double>(bs.heading_pref), max_speed);
+			wanted = turn_velocity(obj, turn, wanted, err, to, vel, frame.r * static_cast<double>(bs.heading_pref), max_speed, bs.tune.turns.reverse_speed);
 		}
 		/* Section 9.10, corner clearing: to the peek point short of the
 		 * corner and wide of it, facing the corner's exit (strafing
@@ -4295,7 +4349,7 @@ void steer(bot_state &bs, const object &obj)
 		.move_cmd = bs.move_cmd,
 		.pitch_rate = rotvel.x * rev_to_rad,
 		.heading_rate = rotvel.y * rev_to_rad,
-	}, B.limits.turn, bs.skill->turn_cap, bs.heading_pref)};
+	}, B.limits.turn, bs.skill.turn_cap, bs.heading_pref)};
 	c = {out.pitch, out.heading, out.forward, out.sideways, out.vertical};
 }
 
@@ -4434,7 +4488,7 @@ void convert_frame(const bot_state &bs, object &obj)
 {
 #if DXX_BUILD_DESCENT == 2
 	auto &pi{obj.ctype.player_info};
-	if (!has_flag(pi, player_flag::converter) || !b::want_convert(obj.shields / 65536.0, pi.energy / 65536.0, bs.skill->weapon_smarts))
+	if (!has_flag(pi, player_flag::converter) || !b::want_convert(obj.shields / 65536.0, pi.energy / 65536.0, bs.skill.weapon_smarts))
 		return;
 	constexpr fix converter_rate{i2f(20)};
 	constexpr fix converter_scale{2};
@@ -4675,8 +4729,10 @@ unsigned bots_allocate_slots()
 	if (!(Game_mode & GM_NETWORK) || !multi_i_am_master())
 		return 0;
 	bots_setup_init();
+	/* Section 9.13: the style profiles as the folder has them now. */
+	bots_load_styles(true);
 	/* Section 6.4: the options of this game start as the setup's. */
-	Bot_game = {Bot_setup.default_skill, Bot_setup.default_style, Bot_setup.replace};
+	Bot_game = {Bot_setup.default_skill, Bot_setup.default_style, Bot_setup.default_profile, Bot_setup.replace};
 	if (!bots_allowed_in_mode(Netgame.gamemode))
 		return 0;
 	unsigned placed{0};
@@ -4723,7 +4779,7 @@ unsigned bots_allocate_slots()
 		if (slot >= N_players)
 			N_players = slot + 1;
 		++placed;
-		con_printf(CON_NORMAL, "bots: '%s' takes P#%u (%s, %s)", static_cast<const char *>(name), slot, b::bot_skill_names[static_cast<unsigned>(bs.skill_level) % b::BOT_SKILL_COUNT], b::bot_style_names[static_cast<unsigned>(bs.cfg.style) % b::BOT_STYLE_COUNT]);
+		con_printf(CON_NORMAL, "bots: '%s' takes P#%u (%s, %s)", static_cast<const char *>(name), slot, b::bot_skill_names[static_cast<unsigned>(bs.skill_level) % b::BOT_SKILL_COUNT], bs.cfg.profile[0] ? bs.cfg.profile.data() : b::bot_style_names[static_cast<unsigned>(bs.cfg.style) % b::BOT_STYLE_COUNT]);
 	}
 	Netgame.numplayers = N_players;
 	if (placed < Bot_setup.count)
@@ -5095,7 +5151,7 @@ bool bot_take_damage(object &ship, const icobjptridx_t killer, const fix damage,
 			const auto pos{to_vec(ship.pos)};
 			const auto frame{to_frame(ship.orient)};
 			const auto to_attacker{m.pos - pos};
-			const bool seen{bs->visible_now[who] && b::in_field_of_view(frame.f, to_attacker, bs->skill->fov_half_deg)};
+			const bool seen{bs->visible_now[who] && b::in_field_of_view(frame.f, to_attacker, bs->skill.fov_half_deg)};
 			const auto reaction{b::react_to_hit({
 				.attacker_seen = seen,
 				.shields = (ship.shields - damage) / 65536.0,
@@ -5110,12 +5166,12 @@ bool bot_take_damage(object &ship, const icobjptridx_t killer, const fix damage,
 				bs->dodge_from = tick;
 				bs->dodge_until = tick + BOT_EVADE_TICKS;
 				bs->turn_to = who;
-				bs->turn_from = tick + b::ticks_from_ms(bs->skill->reaction_ms);
+				bs->turn_from = tick + b::ticks_from_ms(bs->skill.reaction_ms);
 				bs->turn_until = bs->turn_from + BOT_TURN_TO_ATTACKER_TICKS;
 				if (!bs->target || !bs->visible_now[*bs->target])
 					bs->target = who;
 				if (bot_log_on())
-					con_printf(CON_VERBOSE, "bots: '%s' hit by unseen P#%u (%.0f units, %s): evades, turns in %u ms", static_cast<const char *>(bs->cfg.name), who, b::length(to_attacker), reaction == b::hit_reaction::evade_flee ? "weak, flees" : "fights", bs->skill->reaction_ms);
+					con_printf(CON_VERBOSE, "bots: '%s' hit by unseen P#%u (%.0f units, %s): evades, turns in %u ms", static_cast<const char *>(bs->cfg.name), who, b::length(to_attacker), reaction == b::hit_reaction::evade_flee ? "weak, flees" : "fights", bs->skill.reaction_ms);
 			}
 		}
 	}
@@ -5315,6 +5371,13 @@ const char *style_label(const b::bot_style st)
 	return b::bot_style_names[static_cast<unsigned>(st) % b::BOT_STYLE_COUNT];
 }
 
+/* Section 9.13: the style profile's name, else the built-in style's. */
+[[nodiscard]]
+const char *style_label(const bot_config &c)
+{
+	return c.profile[0] ? c.profile.data() : style_label(c.style);
+}
+
 }
 
 bool bots_manageable()
@@ -5413,7 +5476,7 @@ std::optional<playernum_t> bots_add(const bot_config &wanted, b::add_verdict &wh
 	respawn(bs, obj);
 	if (bs.life == bot_life::dead)
 		multi_make_player_ghost(slot);
-	con_printf(CON_NORMAL, "bots: '%s' joins the game as P#%u (%s, %s)", static_cast<const char *>(bs.cfg.name), slot, skill_label(bs.cfg.skill), style_label(bs.cfg.style));
+	con_printf(CON_NORMAL, "bots: '%s' joins the game as P#%u (%s, %s)", static_cast<const char *>(bs.cfg.name), slot, skill_label(bs.cfg.skill), style_label(bs.cfg));
 	return slot;
 }
 
@@ -5426,20 +5489,22 @@ bool bots_remove(const playernum_t pnum)
 	return remove_bot(pnum, kick_player_reason::quit);
 }
 
-bool bots_set_skill_style(const playernum_t pnum, const b::bot_skill skill, const b::bot_style style)
+bool bots_set_skill_style(const playernum_t pnum, const b::bot_skill skill, const b::bot_style style, const b::style_name &profile)
 {
 	const auto bs{find_bot(pnum)};
 	if (!bs || !bots_running())
 		return false;
-	if (bs->cfg.skill == skill && bs->cfg.style == style)
+	if (bs->cfg.skill == skill && bs->cfg.style == style && bs->cfg.profile == profile)
 		return true;
 	bs->cfg.skill = skill;
 	bs->cfg.style = style;
+	bs->cfg.profile = profile;
+	bs->profile_missing_said = false;
 	/* From its next tick on, not only from its next life. */
 	bs->apply_config();
-	con_printf(CON_NORMAL, "bots: '%s' (P#%u) now plays %s, %s", static_cast<const char *>(bs->cfg.name), pnum, skill_label(skill), style_label(style));
-	char msg[40];
-	std::snprintf(msg, sizeof(msg), "%s now %s %s", static_cast<const char *>(bs->cfg.name), skill_label(skill), style_label(style));
+	con_printf(CON_NORMAL, "bots: '%s' (P#%u) now plays %s, %s", static_cast<const char *>(bs->cfg.name), pnum, skill_label(skill), style_label(bs->cfg));
+	char msg[48];
+	std::snprintf(msg, sizeof(msg), "%s now %s %s", static_cast<const char *>(bs->cfg.name), skill_label(skill), style_label(bs->cfg));
 	multi_send_host_notice(msg);
 	return true;
 }
