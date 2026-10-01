@@ -1389,11 +1389,11 @@ void test_profile_format()
 	/* A skill that neither strafes nor dodges still does not. */
 	const auto trainee{bot::apply_style_profile(p, bot::bot_skill::trainee)};
 	CHECK(!trainee.skill.strafe && trainee.skill.dodge_prob == 0);
-	/* Medium confidence: most of the way from Aggressive's 20 to 10. */
-	CHECK_RANGE(trainee.style.retreat_shields, 12.9, 13.1);
+	/* Medium confidence: most of the way from Aggressive's 30 to 10. */
+	CHECK_RANGE(trainee.style.retreat_shields, 15.9, 16.1);
 	/* The brawler's profile on an Insane bot. */
 	const auto insane{bot::apply_style_profile(p, bot::bot_skill::insane)};
-	CHECK(insane.style.range_scale < 0.8 && insane.style.retreat_shields < 14 && insane.style.chase_memory > 1.1);
+	CHECK(insane.style.range_scale < 0.8 && insane.style.retreat_shields < 17 && insane.style.chase_memory > 1.1);
 	CHECK(!insane.skill.strafe);
 	/* It never dodged (medium confidence: 54 bursts): most of the way
 	 * down from Insane's 0.85.

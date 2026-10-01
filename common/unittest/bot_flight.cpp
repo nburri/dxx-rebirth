@@ -36,6 +36,7 @@
 
 #include "bot_brain.h"
 #include "bot_nav.h"
+#include "bot_flight_model.h"
 
 using namespace dcx::bot;
 
@@ -49,182 +50,7 @@ void check_failed(const char *const expr, const char *const file, const int line
 
 #define CHECK(cond)	do { if (!(cond)) check_failed(#cond, __FILE__, __LINE__); } while (0)
 
-using fix = int32_t;
-constexpr fix F1_0{65536};
-
-constexpr fix fixmul(const fix a, const fix b)
-{
-	return static_cast<fix>((static_cast<int64_t>(a) * b) >> 16);
-}
-
-constexpr fix fixdiv(const fix a, const fix b)
-{
-	return static_cast<fix>((static_cast<int64_t>(a) << 16) / b);
-}
-
-constexpr fix to_fix(const double d)
-{
-	return static_cast<fix>(d * F1_0 + (d < 0 ? -0.5 : 0.5));
-}
-
-/* physics.cpp: the drag model of the old code at 200 fps. */
-struct drag_model
-{
-	double decay_per_frame;
-	double steady_state_per_accel;
-};
-
-constexpr fix drag_reference_frametime{F1_0 / 200};
-constexpr fix drag_reference_fraction_of_step{20928};
-
-drag_model build_drag_model(const fix drag)
-{
-	const fix reference_drag{fixmul(drag_reference_fraction_of_step, drag)};
-	constexpr double accel_per_frame{static_cast<double>(drag_reference_fraction_of_step) / F1_0};
-	const double drag_per_frame{static_cast<double>(reference_drag) / F1_0};
-	const double retained_per_frame{1 - drag_per_frame};
-	return {-std::log(retained_per_frame), accel_per_frame * retained_per_frame / drag_per_frame};
-}
-
-/* physics.cpp: v = v * retained + accel * gain, for this frame. */
-struct drag_step
-{
-	double retained, gain;
-};
-
-drag_step drag_for_frame(const drag_model &m, const fix frametime)
-{
-	const double frames{static_cast<double>(frametime) / drag_reference_frametime};
-	const double retained{std::exp(-m.decay_per_frame * frames)};
-	return {retained, m.steady_state_per_accel * (1 - retained)};
-}
-
-/* The Pyro-GX. */
-constexpr fix ship_mass{to_fix(4.0)};
-constexpr fix ship_drag{to_fix(0.033)};
-constexpr fix ship_max_thrust{to_fix(7.8)};
-constexpr fix ship_max_rotthrust{to_fix(0.14)};
-constexpr double rev_to_rad{2 * std::numbers::pi};
-/* physics.cpp: turn roll. */
-constexpr double turnroll_scale{(0x4ec4 / 2) / 65536.0};
-constexpr double roll_rate{0x2000 / 65536.0};
-
-/* The limits bot.cpp's compute_limits takes from physics.cpp. */
-struct limits
-{
-	double max_speed;
-	turn_response turn;
-};
-
-limits ship_limits()
-{
-	const auto lin{build_drag_model(ship_drag)};
-	const auto rot{build_drag_model((ship_drag * 5) / 2)};
-	const double accel{static_cast<double>(fixmul(ship_max_thrust, fixdiv(F1_0, ship_mass)))};
-	const double rot_accel{static_cast<double>(fixmul(ship_max_rotthrust, fixdiv(F1_0, ship_mass)))};
-	return {
-		accel * lin.steady_state_per_accel / F1_0,
-		{
-			rot_accel * rot.steady_state_per_accel * rev_to_rad / F1_0,
-			(static_cast<double>(drag_reference_frametime) / F1_0) / rot.decay_per_frame,
-		},
-	};
-}
-
-/* The rotation by pitch `p`, heading `h` and bank `b` (radians) in the
- * frame `f`: vm_matrix_x_matrix(f, vm_angles_2_matrix({p, b, h})).
- */
-frame3 rotate(const frame3 &f, const double p, const double b, const double h)
-{
-	const double sp{std::sin(p)}, cp{std::cos(p)}, sh{std::sin(h)}, ch{std::cos(h)}, sb{std::sin(b)}, cb{std::cos(b)};
-	const vec3 lf{sh * cp, -sp, ch * cp};
-	const vec3 lr{cb * ch + sp * sb * sh, sb * cp, sp * sb * ch - cb * sh};
-	const vec3 lu{sp * cb * sh - sb * ch, cb * cp, sb * sh + sp * cb * ch};
-	frame3 n{f.to_world(lr), f.to_world(lu), f.to_world(lf)};
-	/* check_and_fix_matrix */
-	n.f = normalized(n.f);
-	n.r = normalized(cross(n.u, n.f));
-	n.u = cross(n.f, n.r);
-	return n;
-}
-
-struct ship
-{
-	frame3 orient;
-	vec3 pos, vel;
-	/* rotvel, in revolutions per second (fix / 65536). */
-	double pitch_rate{}, bank_rate{}, heading_rate{};
-	double turnroll{};
-	[[nodiscard]]
-	frame3 unrolled() const
-	{
-		return turnroll ? rotate(orient, 0, -turnroll, 0) : orient;
-	}
-	/* One frame of apply_pilot_controls and do_physics_sim. */
-	void step(const steer_output &c, const fix ft)
-	{
-		/* The production rounding (bot_apply_controls). */
-		const auto held{[ft](const double axis) {
-			return held_axis_time(axis, ft);
-		}};
-		const fix rot_scale{fixdiv(ship_max_rotthrust, ft)};
-		const fix thrust_scale{fixdiv(ship_max_thrust, ft)};
-		const fix inverse_mass{fixdiv(F1_0, ship_mass)};
-		const double dt{static_cast<double>(ft) / F1_0};
-		/* Rotation. */
-		const auto rot{drag_for_frame(build_drag_model((ship_drag * 5) / 2), ft)};
-		const double pitch_accel{static_cast<double>(fixmul(fixmul(held(c.pitch), rot_scale), inverse_mass))};
-		const double heading_accel{static_cast<double>(fixmul(fixmul(held(c.heading), rot_scale), inverse_mass))};
-		pitch_rate = pitch_rate * rot.retained + pitch_accel * rot.gain / F1_0;
-		heading_rate = heading_rate * rot.retained + heading_accel * rot.gain / F1_0;
-		bank_rate *= rot.retained;
-		auto f{unrolled()};
-		f = rotate(f, pitch_rate * dt * rev_to_rad, bank_rate * dt * rev_to_rad, heading_rate * dt * rev_to_rad);
-		const double desired_bank{-heading_rate * turnroll_scale * rev_to_rad};
-		const double max_roll{roll_rate * dt * rev_to_rad};
-		turnroll += std::clamp(desired_bank - turnroll, -max_roll, max_roll);
-		/* The thrust, in the rolled frame. */
-		const auto thrust_frame{rotate(f, 0, turnroll, 0)};
-		orient = thrust_frame;
-		const auto lin{drag_for_frame(build_drag_model(ship_drag), ft)};
-		const auto axis_accel{[&](const double axis) {
-			return static_cast<double>(fixmul(fixmul(held(axis), thrust_scale), inverse_mass)) / F1_0;
-		}};
-		const auto accel{thrust_frame.to_world({axis_accel(c.sideways), axis_accel(c.vertical), axis_accel(c.forward)})};
-		vel = vel * lin.retained + accel * lin.gain;
-		pos += vel * dt;
-	}
-};
-
-steer_output steer(const ship &s, const vec3 &face_dir, const vec3 &face_rate, const vec3 &move_cmd, const limits &lim, const double cap, int &heading_pref)
-{
-	return steer_controls({
-		.unrolled = s.unrolled(),
-		.thrust_frame = s.orient,
-		.face_dir = face_dir,
-		.face_rate = face_rate,
-		.move_cmd = move_cmd,
-		.pitch_rate = s.pitch_rate * rev_to_rad,
-		.heading_rate = s.heading_rate * rev_to_rad,
-	}, lim.turn, cap, heading_pref);
-}
-
-constexpr std::array<double, 4> frame_rates{{30, 60, 144, 500}};
-
-/* The 60 Hz brain tick of a frame loop: how many ticks this frame. */
-struct ticker
-{
-	int64_t elapsed{};
-	int64_t ticks{};
-	unsigned advance(const fix ft)
-	{
-		elapsed += ft;
-		const int64_t now{elapsed * BOT_TICK_RATE / F1_0};
-		const auto n{static_cast<unsigned>(now - ticks)};
-		ticks = now;
-		return n;
-	}
-};
+using namespace dcx::bot::flight_model;
 
 /* The held time of an axis (held_axis_time, as bot_apply_controls uses
  * it): full axes are FrameTime, the result is clamped, and small axes are
@@ -455,12 +281,14 @@ void test_waypoints()
 
 /* A fight in the open against a target that keeps still: the bot goes
  * round it, in and out, without shaking on one spot, and keeps it inside
- * the fire cone most of the time.
+ * the fire cone most of the time.  Section 9.12: with the keys of a
+ * human (fight_keys), fast.
  */
 void test_combat_movement()
 {
 	const auto lim{ship_limits()};
 	const auto &sk{skill_of(bot_skill::hotshot)};
+	const auto &st{style_of(bot_style::balanced)};
 	for (const double fps : frame_rates)
 	{
 		const fix ft{to_fix(1 / fps)};
@@ -469,6 +297,8 @@ void test_combat_movement()
 		int pref{1};
 		bot_rng rng{bot_seed(7, 2, 1)};
 		juke_state juke;
+		approach_key approach;
+		lateral_keys lateral;
 		const vec3 target{};
 		ticker tk;
 		vec3 face{0, 0, 1}, rate, move;
@@ -480,12 +310,12 @@ void test_combat_movement()
 		{
 			for (unsigned n{tk.advance(ft)}; n; --n)
 			{
-				juke.update(rng, ticks_from_ms(sk.strafe_min_ms), ticks_from_ms(sk.strafe_max_ms), 35, 95);
+				juke.update(rng, ticks_from_ms(sk.strafe_min_ms), ticks_from_ms(sk.strafe_max_ms), 35, 95, sk.strafe_vertical);
 				const auto to{target - s.pos};
 				face = normalized(to);
 				rate = line_of_sight_rate(to, -s.vel);
-				const auto wanted{combat_velocity(to, s.orient.r, s.orient.u, juke, sk.strafe_vertical, lim.max_speed * 0.8, lim.max_speed * 0.7)};
-				move = velocity_command(wanted, s.vel, lim.max_speed);
+				const auto k{fight_keys(juke, approach.update(length(to), juke.range(), 60) * effective_close_speed(st), effective_strafe_speed(sk, st))};
+				move = s.orient.to_world(lateral.apply(k.local(), ticks));
 				++ticks;
 				if (ticks > 60)
 				{
@@ -504,9 +334,12 @@ void test_combat_movement()
 		}
 		const unsigned samples{ticks - 60};
 		/* Keeps the band, roughly. */
-		CHECK(min_d > 20 && max_d < 120);
-		/* Moves: at half the top speed on average, over a wide area. */
-		CHECK(speed_sum / samples > lim.max_speed * 0.45);
+		CHECK(min_d > 15 && max_d < 130);
+		/* Moves: fast on average (B1-B6's velocity controller: half the
+		 * top speed), over a wide area.
+		 */
+		std::printf("test-bot-flight: fight at %.0f fps: distance %.0f to %.0f, mean speed %.1f, in the cone %.0f %%\n", fps, min_d, max_d, speed_sum / samples, 100.0 * in_cone / samples);
+		CHECK(speed_sum / samples > lim.max_speed * 0.6);
 		const auto span{hi - lo};
 		CHECK(span.x > 60 || span.z > 60);
 		CHECK(span.y > 15);
@@ -520,7 +353,6 @@ void test_combat_movement()
 		CHECK(in_cone > samples * 80 / 100);
 	}
 }
-
 
 /* Section 9.5: turning round to a target behind, under fire.  B1-B4
  * took the shortest rotation: for a target behind and above (or straight
@@ -609,7 +441,7 @@ void test_turn_round()
 			CHECK(b1.time > 0 && both.time > 0 && moving.time > 0);
 			/* Both axes at once: faster than B1's single axis. */
 			if (one_axis)
-				CHECK(both.time < b1.time * 0.9);
+				CHECK(both.time < b1.time * 0.93);
 			else
 				CHECK(both.time < b1.time * 1.03);
 			/* B1-B4 braked to a stop; now it never stands still while it
@@ -617,7 +449,10 @@ void test_turn_round()
 			 */
 			CHECK(b1.min_speed < lim.max_speed * 0.15);
 			CHECK(moving.min_speed > lim.max_speed * 0.4);
-			CHECK(moving.time < b1.time * (one_axis ? 1 : 1.1));
+			/* (Section 9.12: both at the large turn's reduced rate; the
+			 * slide moves the ship, so the target's direction moves.)
+			 */
+			CHECK(moving.time < b1.time * (one_axis ? 1.05 : 1.15));
 			/* The same at any frame rate. */
 			const auto ref{turn_round(target_local, true, true, 60)};
 			CHECK(std::abs(moving.time - ref.time) < 0.12);
@@ -672,6 +507,8 @@ reverse_turn_result reverse_turn(const vec3 &target_local, const double fps, con
 	int pref{1};
 	ticker tk;
 	turn_round_state tr;
+	bot_rng rng{5};
+	const turn_habits always{.reverse = 1, .boost = 1, .boost_burn = 0};
 	uint32_t tick{0};
 	vec3 face{0, 0, 1}, move;
 	double t{0};
@@ -685,7 +522,7 @@ reverse_turn_result reverse_turn(const vec3 &target_local, const double fps, con
 			const auto to{target_pos - s.pos};
 			face = normalized(to);
 			const double err{angle_between(s.orient.f, face)};
-			const auto phase{tr.update(err, tick, length(to), near_edge)};
+			const auto phase{tr.update(err, tick, length(to), near_edge, rng, always)};
 			if (phase != last_phase)
 			{
 				++r.phase_changes;
@@ -733,22 +570,50 @@ void test_reverse_turn()
 	 */
 	{
 		turn_round_state tr;
-		CHECK(tr.update(radians(90), 1, 100, 35) == turn_phase::none);
-		CHECK(tr.update(radians(150), 2, 100, 35) == turn_phase::reversing);
-		CHECK(tr.update(radians(60), 30, 100, 35) == turn_phase::reversing);
-		CHECK(tr.update(radians(20), 60, 100, 35) == turn_phase::boost);
-		CHECK(tr.update(radians(5), 60 + TURN_BOOST_TICKS - 1, 80, 35) == turn_phase::boost);
-		CHECK(tr.update(radians(5), 60 + TURN_BOOST_TICKS, 80, 35) == turn_phase::none);
-		CHECK(tr.update(radians(170), 200, 80, 35) == turn_phase::reversing);
-		CHECK(tr.update(radians(20), 230, 40, 35) == turn_phase::none);
+		bot_rng rng{3};
+		const turn_habits always{.reverse = 1, .boost = 1, .boost_burn = 1};
+		CHECK(tr.update(radians(90), 1, 100, 35, rng, always) == turn_phase::none);
+		CHECK(tr.update(radians(150), 2, 100, 35, rng, always) == turn_phase::reversing);
+		CHECK(tr.update(radians(60), 30, 100, 35, rng, always) == turn_phase::reversing);
+		CHECK(tr.update(radians(20), 60, 100, 35, rng, always) == turn_phase::boost);
+		CHECK(tr.update(radians(5), 60 + TURN_BOOST_TICKS - 1, 80, 35, rng, always) == turn_phase::boost);
+		CHECK(tr.update(radians(5), 60 + TURN_BOOST_TICKS, 80, 35, rng, always) == turn_phase::none);
+		CHECK(tr.update(radians(170), 200, 80, 35, rng, always) == turn_phase::reversing);
+		CHECK(tr.update(radians(20), 230, 40, 35, rng, always) == turn_phase::none);
 		/* A turn that never ends gives up. */
-		CHECK(tr.update(radians(170), 300, 80, 35) == turn_phase::reversing);
-		CHECK(tr.update(radians(120), 300 + REVERSE_TURN_MAX_TICKS + 1, 80, 35) == turn_phase::none);
+		CHECK(tr.update(radians(170), 300, 80, 35, rng, always) == turn_phase::reversing);
+		CHECK(tr.update(radians(120), 300 + REVERSE_TURN_MAX_TICKS + 1, 80, 35, rng, always) == turn_phase::none);
 		/* The boost stops at the near edge. */
 		tr.reset();
-		tr.update(radians(170), 1, 100, 35);
-		CHECK(tr.update(radians(10), 20, 100, 35) == turn_phase::boost);
-		CHECK(tr.update(radians(10), 21, 35, 35) == turn_phase::none);
+		tr.update(radians(170), 1, 100, 35, rng, always);
+		CHECK(tr.update(radians(10), 20, 100, 35, rng, always) == turn_phase::boost);
+		CHECK(tr.burn);
+		CHECK(tr.update(radians(10), 21, 35, 35, rng, always) == turn_phase::none);
+		CHECK(!tr.burn);
+		/* Section 9.12: the habits decide the kind of turn and the push:
+		 * never backwards, never a push; and their shares.
+		 */
+		const turn_habits never{.reverse = 0, .boost = 0, .boost_burn = 0};
+		tr.reset();
+		CHECK(tr.update(radians(170), 1, 100, 35, rng, never) == turn_phase::sliding);
+		CHECK(tr.update(radians(60), 30, 100, 35, rng, never) == turn_phase::sliding);
+		CHECK(tr.update(radians(10), 60, 100, 35, rng, never) == turn_phase::none);
+		const turn_habits human{};
+		unsigned reverse{0}, boost{0}, burn{0};
+		constexpr unsigned n{20000};
+		for (unsigned i = 0; i < n; ++i)
+		{
+			tr.reset();
+			reverse += tr.update(radians(170), 1, 100, 35, rng, human) == turn_phase::reversing;
+			if (tr.update(radians(10), 60, 100, 35, rng, human) == turn_phase::boost)
+			{
+				++boost;
+				burn += tr.burn;
+			}
+		}
+		CHECK(std::abs(reverse / double{n} - human.reverse) < 0.02);
+		CHECK(std::abs(boost / double{n} - human.boost) < 0.02);
+		CHECK(std::abs(burn / static_cast<double>(boost) - human.boost_burn) < 0.02);
 	}
 	/* The velocities: away from the target (and a little across) while
 	 * reversing, full speed at it in the boost.

@@ -2015,9 +2015,10 @@ inline bot::style_profile propose_profile(const player_stats &s, const bot::bot_
 				p.set("skill.strafe_max_ms", std::max(s.strafe_run_ms.p75, s.strafe_run_ms.p25 + 100), rc);
 			}
 			p.set("skill.strafe_vertical", s.strafe_vertical, c);
-			/* The speed the bot asks for: a pilot who holds full thrust
-			 * across asks for the top speed, whether or not the run is
-			 * long enough to reach it.
+			/* The thrust of the bot's strafe keys (section 9.12 of
+			 * Documentation/multiplayer-bots.md): the pilot's thrust
+			 * across, whether or not the run is long enough to reach
+			 * the top speed.
 			 */
 			p.set("skill.strafe_speed", std::max(s.strafe_thrust, 0.3), c);
 		}

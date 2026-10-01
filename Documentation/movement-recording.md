@@ -475,18 +475,18 @@ The keys, their range, and what they are computed from:
 | `style.collect_weight` | 0.5–2 | 0.7 + the share of pickups off course + 0.6 × the share in a fight |
 | `style.range_scale` | 0.5–3 | median distance when firing (else with the enemy in sight) / 65, the middle of the bots' 35–95 band |
 | `style.chase_memory` | 0.4–2.5 | median pursuit time / the base skill's `pursuit_seconds` |
-| `style.close_scale` | 0.5–1.25 | mean speed toward or away when moving so / `COMBAT_CLOSE_SPEED` |
+| `style.close_scale` | 0.5–1.25 | mean speed toward or away when moving so / `COMBAT_CLOSE_SPEED` (0.9 of the top speed since §9.12 of the bots' document; 0.8 before) |
 | `style.burn_chase_distance` | 40–1000 | the 10th percentile of the distance while chasing with the afterburner (not the push after a turn); 1000 if it does not |
 | `style.dodge_bonus`, `mine_interval`, `strafe_scale`, `behind_engage`, `outgunned_retreat` | | not measured: never written, the base style's |
 | `skill.strafe` | 0/1 | sideways or vertical thrust in 20 % or more of the fight time |
 | `skill.strafe_min_ms`, `strafe_max_ms` | 150–3000, 250–5000 | the quartiles of the run length |
 | `skill.strafe_vertical` | 0–1 | vertical / sideways thrust while strafing |
-| `skill.strafe_speed` | 0–0.9 | mean thrust across while strafing (a pilot holding full thrust asks for the top speed) |
+| `skill.strafe_speed` | 0–1 | mean thrust across while strafing: the thrust of the bot's strafe keys (Documentation/multiplayer-bots.md §9.12; 0.9 was the cap before) |
 | `skill.dodge_prob` | 0–0.95 | the dodge probability, where measurable |
 | `tune.range_lo`, `tune.range_hi` | 15–400, 30–800 | the quartiles of the firing distance (`BOT_RANGE_LO`/`HI`) |
-| `tune.reverse_turn` | 0–1 | share of the large turns flown backwards |
+| `tune.reverse_turn` | 0–1 | share of the large turns flown backwards (the bots' `turn_habits::reverse`, 0.12) |
 | `tune.reverse_turn_speed` | 0–1 | backward speed reached in them (`REVERSE_TURN_SPEED`) |
-| `tune.turn_boost`, `tune.turn_boost_burn` | 0–1 | share of large turns followed by a push, and of those with the afterburner |
+| `tune.turn_boost`, `tune.turn_boost_burn` | 0–1 | share of large turns followed by a push, and of those with the afterburner (`turn_habits::boost`, 0.8, `boost_burn`, 0.3) |
 | `tune.burn_retreat`, `tune.burn_roam` | 0–1 | share of the time fleeing / with no enemy in sight with the afterburner |
 | `tune.missile_interval_scale` | 0.3–4 | median time between volleys of one fight / the base skill's `missile_interval` (only with 3 such pairs or more) |
 | `tune.volley_size` | 1–8 | missiles per volley |
