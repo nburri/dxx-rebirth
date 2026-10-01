@@ -8,16 +8,12 @@ on:
     types: [opened, synchronize, reopened, labeled]
     branches:
       - master
-      - release-500hz
       - experimental-netcode
     paths-ignore:
       - 'Documentation/**'
       - 'contrib/gentoo/**'
       - 'contrib/rpm/**'
 
-concurrency:
-  group: ${{ github.workflow_ref }}-${{ github.ref }}
-  cancel-in-progress: true
 jobs:
   windows:
     name: Package Windows
@@ -27,4 +23,11 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       (contains(github.event.pull_request.labels.*.name, 'playtest') &&
        (github.event.action != 'labeled' || github.event.label.name == 'playtest'))
+    # The concurrency group belongs to the job, not to the workflow: a run
+    # whose job is skipped (such as the 'opened' event of a pull request
+    # created with the playtest label, which arrives next to its
+    # 'labeled' event) must not cancel the build that is running.
+    concurrency:
+      group: ${{ github.workflow_ref }}-${{ github.ref }}
+      cancel-in-progress: true
     uses: ./.github/workflows/package-windows.yml

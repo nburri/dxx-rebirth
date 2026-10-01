@@ -3132,7 +3132,8 @@ own random numbers (deterministic on the host), no protocol change:
 functions `bot_tick` calls) in the model of the ship of
 `test-bot-flight` against a scripted enemy that strafes round the bot
 and appears behind it, with retreats at low shields, out-of-sight and
-empty stretches (16 minutes per bot), writes the flight as the
+empty stretches (eight seeds of four minutes per bot, analysed
+together), writes the flight as the
 recorder writes it and reads it with the analysis of `movrec-analyse`.
 With the old code the simulation reproduced the recordings' speed
 (37–40), thrust across (68–79 %), vertical share (0.76–1.0) and turn
@@ -3156,6 +3157,11 @@ The simulation is open space: no walls to slide along, no pickups, no
 enemy fire to dodge, and an enemy that is no human; its numbers are for
 comparing the code before and after, and the next recordings of real
 games will tell how close the bots came.
+
+The test's ranges are statistical, not exact: another compiler or maths
+library changes the flight as another seed would, so each range lies at
+least 5 standard deviations (measured with `test-bot-fight-sim -survey
+30`, g++ and clang++, -O0 and -O2) from the measured mean.
 
 ### 9.13 Step 3 of the movement recordings: bots that fly a style profile
 
