@@ -449,12 +449,58 @@ deflection. The thresholds are the constants of `analysis::limits`.
 | Afterburner | share of the time; share while chasing (enemy in sight ahead, closing in, nose steady), fleeing (enemy behind, moving away), with no enemy in sight, otherwise; distance to the enemy while chasing with it | samples with the afterburner known (or estimated) |
 | Distance | to the enemy in sight: p10 … p90, seconds per band (35, 60, 95, 150, 250: the bots' fight band and weapon bands); distance at each primary shot | |
 | Approach and retreat | by shields (25 each): own speed toward the enemy; share closing in, backing off while facing it, flying away turned from it. The **retreat level**: the shields that split "flies away" below from "does not" above most clearly (at least 3 s of fight on each side, a difference of 15 percentage points) | fight samples |
-| Dodging | share of the enemy's bursts (first shot after a pause of 1 s, the enemy facing the player within 300 units) followed within 0.7 s by a change of the velocity across the line of fire of 30 % of the top speed; the same share in quiet moments (no shot 1.5 s before to 0.7 s after); the excess is the dodge probability; median time to the start of the sidestep | not measurable when the player moves across in more than half of the quiet moments too (a constant strafer); the report warns when the player took hits from other players but the recordings hold none of their shots (a recording of an older build without the bots' shots) |
+| Dodging | the enemy's bursts aimed at the player answered by a switch of its strafe beyond what its weave does anyway (below) | the share and its standard error, the reaction time; besides: how many of the switches turn against the sideways motion, the afterburner lit, hits after bursts with and without a switch; the report warns when the player took hits from other players but the recordings hold none of their shots (a recording of an older build without the bots' shots) |
 | Weapons | primary shots per weapon and range band (< 60, 60–150, > 150, as the bots' weapon table); secondary shots per weapon, distance | fire events with the enemy in sight |
 | Missile volleys | volleys (missiles at most 0.7 s apart), size, time between two volleys of one fight | mines are left out |
 | Pickups | per minute; share taken off course (the course 1.5 s before pointed more than 40° away from the pickup); share in a fight | |
 | Pursuit | how often the player follows an enemy that left its sight, and for how long (until it has not thrust toward it for 1 s, it is in sight again, or another enemy took its place in the record) | losses of sight while not already flying away |
 | Hits | dealt (direct, splash), taken, damage, direct hits per primary shot (an estimate of accuracy; a shot of several bolts can hit more than once; the hits are those the victim's or the recording machine saw) | hit events |
+
+**Dodging.** Most pilots weave all the time: humans and bots alike move
+across the line of fire in most moments with or without a shot, so "a
+sidestep after the shot" (the measure up to v0.61-exp-30) is as common
+in quiet moments and says nothing. The measure compares a burst with
+quiet moments *at the same point of the pilot's rhythm*:
+
+- A **burst** is a shooter's first shot after 1 s without one, fired
+  within 300 units with the player in its 30° cone: the enemy in sight
+  that faces the player (`me in its cone`), or another enemy whose own
+  samples (it was recorded) put its nose on the player.
+- A **switch** is the start of a run of sideways/vertical thrust (from none
+  or in another direction, more than 90° off; at least 60 ms long): what
+  a dodge on the strafe keys does. The **answer** is a switch 60 to 450 ms
+  after the shot.
+- The **quiet moments**: every 100 ms with a player enemy in sight within
+  300 units facing the player, and no shot aimed at the player from 1.5 s
+  before to 0.7 s after. Each is sorted by the **phase of the weave**: the
+  time since the last switch (50 ms bins up to 1 s, then one bin) and
+  whether a run is on. A phase with fewer than 8 quiet moments borrows
+  from its neighbours.
+- A burst at phase φ would have been followed by a switch with the chance
+  p0(φ) of the quiet moments at φ anyway. The **dodge share** is
+  (switches after bursts − Σ p0) / Σ (1 − p0): the answers beyond the
+  rhythm per burst that left room for one. Its standard error comes from
+  the bursts (binomial) and from the quiet moments behind each p0. It is
+  not measurable with fewer than 8 bursts, fewer than 8 quiet moments,
+  or less than 4 bursts' worth of room (Σ (1 − p0); a weave that switches
+  in the window nearly always).
+- The **reaction** is the middle of the first switches that came earlier
+  than the rhythm's (observed minus expected per 20 ms of delay).
+
+A strafer that switches every 500 ms on the clock, with the bursts right
+at its switches, gets 0.00 ± 0.04; one that weaves in runs of 225 to 675
+ms gets 0.18 ± 0.21 (nothing beyond chance); the same weaver turning its
+strafe round after 70 % of the bursts gets 0.71 ± 0.14 (section 8.6).
+
+On the first real recordings (Earth Shaker, EC against five bots, all
+recorded with their shots): EC 0.00 ± 0.10 over 99 bursts (a switch after
+39 % of them where the rhythm gives 42 %): EC does not answer a shot with
+its strafe beyond its weave. The bots (four Insane, `dodge_prob` 0.85, one
+Hotshot, 0.45) get 0.00 to 0.17 ± 0.13: a bot's dodge is a 350 ms push
+added to its strafe keys and only for a projectile on a hitting course
+within 150 units, which seldom changes its key pattern. The profile's
+value is therefore the share of bursts answered by a visible change of
+the strafe, not the bots' internal probability per projectile.
 
 ### 8.5 The bot style profile
 
@@ -516,7 +562,7 @@ The keys, their range, and what they are computed from:
 | `skill.strafe_min_ms`, `strafe_max_ms` | 150–3000, 250–5000 | the quartiles of the run length |
 | `skill.strafe_vertical` | 0–1 | vertical / sideways thrust while strafing |
 | `skill.strafe_speed` | 0–1 | mean thrust across while strafing: the thrust of the bot's strafe keys (Documentation/multiplayer-bots.md §9.12; 0.9 was the cap before) |
-| `skill.dodge_prob` | 0–0.95 | the dodge probability, where measurable |
+| `skill.dodge_prob` | 0–0.95 | the dodge share (section 8.4), where measurable; confidence high with a standard error up to 0.07 and 60 bursts, medium up to 0.15 and 15 bursts, else low (at most medium on estimated controls); `measured.dodge_prob_se` is the standard error |
 | `tune.range_lo`, `tune.range_hi` | 15–400, 30–800 | the quartiles of the firing distance (`BOT_RANGE_LO`/`HI`) |
 | `tune.reverse_turn` | 0–1 | share of the large turns flown backwards (the bots' `turn_habits::reverse`, 0.12) |
 | `tune.reverse_turn_speed` | 0.3–1 | backward speed reached in them (`REVERSE_TURN_SPEED`) |
@@ -553,8 +599,9 @@ the game would record. The analysis must find the scripted habits again:
 | reverse turner | turns round with reverse thrust, pushes forward after with the afterburner, chases with it beyond 150 units | 18 of 18 turns reverse, 1.4 s per 180°, push after 100 % (afterburner 100 %); `style.burn_chase_distance` 151 |
 | sniper | fights at 250 units, gauss at range, flees below 50 shields with the afterburner, single missiles | fires at a median of 250; `style.range_scale` 3 (the cap); gauss 100 % beyond 150; retreat level 50; afterburner 97 % of the fleeing time; base style Cautious |
 | brawler | fights at 40 units, never flees, follows a lost enemy for 6 s, volleys of three 4 s apart, leaves its course for pickups | fires at 40; `style.retreat_shields` 10; follows 18 of 18 for 6.0 s; volleys of 3.0, 4.0 s apart; 100 % of pickups off course; base style Aggressive |
-| dodger | sidesteps 80 % of the bursts (46 of 54 in this run) after 250 ms | dodge probability 0.82 (baseline 0.16), reaction 300 ms; the others 0 |
-
+| dodger | sidesteps 80 % of the bursts (46 of 54 in this run) after 250 ms, does not strafe otherwise | dodge share 0.85 ± 0.05 (the rhythm's chance 0), reaction 270 ms; the shooter hit after none of the bursts with a switch, after all of the others; from estimated controls 0.85, 230 ms; the brawler 0.00 |
+| strafer, weaver | strafe all the time (on the clock every 500 ms; runs of 225 to 675 ms), never dodge | 0.00 ± 0.04; 0.18 ± 0.21 (within two standard errors of nothing, low confidence) |
+| weaving dodger | the weaver, turning its strafe round after 70 % of the bursts (39 of 54), 250 ms late | 0.71 ± 0.14, reaction 263 ms |
 The same flights recorded by another machine (no controls) give the same
 picture from estimated thrust: shares within 0.06–0.08, the same turn
 classification and run lengths, confidence medium instead of high. A game

@@ -188,6 +188,10 @@ struct habits
 	double strafe{};
 	unsigned strafe_run_ms{600};
 	double strafe_vertical{};
+	/* The runs vary by this share of strafe_run_ms either way (0: the
+	 * runs follow the clock exactly).
+	 */
+	double strafe_jitter{};
 	turn_habit turn{turn_habit::forward};
 	/* The push forward after turning round. */
 	bool boost{};
@@ -203,6 +207,10 @@ struct habits
 	/* The share of the bursts it sidesteps, and how late. */
 	double dodge{};
 	unsigned reaction_ms{250};
+	/* The sidestep turns against the strafe of the moment (else a random
+	 * side).
+	 */
+	bool dodge_reverses{};
 	/* Primaries in the close, mid and distant band. */
 	std::array<std::uint8_t, 3> primary{{0, 0, 0}};
 	/* Missiles per volley (0: none) and seconds between volleys. */
@@ -273,6 +281,9 @@ flight fly(const habits &h, const unsigned cycles, const std::uint32_t seed = 12
 	std::uint32_t boost_until{};
 	std::uint32_t dodge_from{~0u}, dodge_until{};
 	double dodge_dir{1};
+	/* The strafe's direction, and (jittered runs) when it turns next. */
+	double strafe_sign{1};
+	std::uint32_t strafe_flip{};
 	std::uint32_t next_shot{}, next_volley{}, volley_left{}, next_missile{};
 	const auto add_event{[&out](const std::uint32_t ms, const record_type type, const unsigned pid, const unsigned other, const unsigned kind, const unsigned id, const unsigned value, const unsigned flags) {
 		out.events.push_back({ms, {type, ms, static_cast<std::uint8_t>(pid), static_cast<std::uint8_t>(other), static_cast<std::uint8_t>(kind), static_cast<std::uint8_t>(id), static_cast<std::uint16_t>(value), static_cast<std::uint8_t>(flags)}});
@@ -320,7 +331,17 @@ flight fly(const habits &h, const unsigned cycles, const std::uint32_t seed = 12
 			}
 			if (h.strafe > 0 && error < 60)
 			{
-				const double sign{(cycle_ms / h.strafe_run_ms) % 2 ? -1.0 : 1.0};
+				if (h.strafe_jitter > 0)
+				{
+					if (now >= strafe_flip)
+					{
+						strafe_sign = -strafe_sign;
+						strafe_flip = now + static_cast<std::uint32_t>(h.strafe_run_ms * (1 + h.strafe_jitter * (2 * random.next() - 1)));
+					}
+				}
+				else
+					strafe_sign = (cycle_ms / h.strafe_run_ms) % 2 ? -1.0 : 1.0;
+				const double sign{strafe_sign};
 				c[1] = sign * h.strafe;
 				c[2] = sign * h.strafe * h.strafe_vertical;
 			}
@@ -378,7 +399,8 @@ flight fly(const habits &h, const unsigned cycles, const std::uint32_t seed = 12
 						++out.dodges;
 						dodge_from = now + h.reaction_ms;
 						dodge_until = dodge_from + 600;
-						dodge_dir = random.next() < 0.5 ? -1 : 1;
+						const double side{random.next() < 0.5 ? -1.0 : 1.0};
+						dodge_dir = h.dodge_reverses ? -strafe_sign : side;
 					}
 					else
 					{
@@ -787,6 +809,33 @@ habits dodger()
 	return h;
 }
 
+/* Weaves all the time (runs of 225 to 675 ms) and answers 70 % of the
+ * bursts by turning its strafe round, 250 ms late: the dodge hides in
+ * the weave.
+ */
+habits weaving_dodger()
+{
+	habits h{};
+	h.name = "weaving dodger";
+	h.fight_distance = 80;
+	h.strafe = 1;
+	h.strafe_run_ms = 450;
+	h.strafe_jitter = 0.5;
+	h.dodge = 0.7;
+	h.dodge_reverses = true;
+	h.reaction_ms = 250;
+	return h;
+}
+
+/* The same weave without a dodge. */
+habits weaver()
+{
+	auto h{weaving_dodger()};
+	h.name = "weaver";
+	h.dodge = 0;
+	return h;
+}
+
 const ship_model M{pyro_gx()};
 
 void test_ship_model()
@@ -945,7 +994,11 @@ void test_brawler()
 	CHECK(sn.profile.base_style == bot::bot_style::cautious);
 }
 
-/* The dodger sidesteps 80 % of the bursts, 250 ms late. */
+/* The dodger sidesteps 80 % of the bursts, 250 ms late; pilots that
+ * weave all the time (on the clock, or in runs of varying length) and
+ * never dodge must not look like dodgers; one that weaves and dodges by
+ * turning its strafe round must.
+ */
 void test_dodger()
 {
 	const auto f{fly(dodger(), CYCLES)};
@@ -954,17 +1007,82 @@ void test_dodger()
 	const double truth{static_cast<double>(f.dodges) / f.bursts};
 	CHECK_RANGE(truth, 0.65, 0.95);
 	CHECK_RANGE(s.dodge_triggers, f.bursts - 3, f.bursts);
+	CHECK(s.dodge_measurable);
 	CHECK_RANGE(s.dodge_rate, truth - 0.08, truth + 0.08);
-	CHECK_RANGE(s.dodge_baseline, 0, 0.25);
-	CHECK_RANGE(s.dodge_prob, truth - 0.12, truth + 0.08);
-	CHECK_RANGE(s.dodge_reaction_ms, 250, 420);
-	CHECK_RANGE(value(r.profile, "skill.dodge_prob"), truth - 0.12, truth + 0.08);
-	CHECK_RANGE(value(r.profile, "measured.dodge_reaction_ms"), 250, 420);
+	CHECK_RANGE(s.dodge_baseline, 0, 0.1);
+	CHECK_RANGE(s.dodge_prob, truth - 0.1, truth + 0.08);
+	CHECK_RANGE(s.dodge_se, 0, 0.1);
+	CHECK_RANGE(s.dodge_reaction_ms, 240, 330);
+	CHECK_RANGE(value(r.profile, "skill.dodge_prob"), truth - 0.1, truth + 0.08);
+	CHECK(r.profile.find("skill.dodge_prob")->confidence != bot::style_confidence::low);
+	CHECK_RANGE(value(r.profile, "measured.dodge_reaction_ms"), 240, 330);
+	/* Its sidesteps cost the shooter its hits. */
+	CHECK(s.dodge_switch_n > 30 && s.dodge_none_n >= 5);
+	CHECK_RANGE(s.dodge_hit_after_switch, 0, 0.1);
+	CHECK_RANGE(s.dodge_hit_after_none, 0.9, 1.0);
+	const auto traits{describe_traits(s)};
+	CHECK(std::any_of(traits.begin(), traits.end(), [](const std::string &t) { return t.starts_with("Dodges incoming fire"); }));
+
+	/* Recorded by the host (the switches from the estimated thrust):
+	 * the same answer, no more than medium sure.
+	 */
+	{
+		view remote;
+		remote.local_pid = 1;
+		const auto e{analyse_flight(f, remote)};
+		if (verbose)
+			std::printf("dodger, estimated: prob %.2f se %.2f reaction %.0f\n", e.stats.dodge_prob, e.stats.dodge_se, e.stats.dodge_reaction_ms);
+		CHECK(e.stats.dodge_measurable);
+		CHECK_RANGE(e.stats.dodge_prob, truth - 0.15, truth + 0.08);
+		CHECK_RANGE(e.stats.dodge_reaction_ms, 220, 380);
+		CHECK(e.profile.find("skill.dodge_prob")->confidence == bot::style_confidence::medium);
+	}
 
 	const auto still{analyse_flight(fly(brawler(), CYCLES))};
 	CHECK_RANGE(still.stats.dodge_triggers, f.bursts - 3, f.bursts);
-	CHECK_RANGE(still.stats.dodge_prob, 0, 0.1);
-	CHECK_RANGE(value(still.profile, "skill.dodge_prob"), 0, 0.1);
+	CHECK(still.stats.dodge_measurable);
+	CHECK_RANGE(still.stats.dodge_prob, 0, 0.05);
+	CHECK_RANGE(value(still.profile, "skill.dodge_prob"), 0, 0.05);
+
+	/* The strafer switches every 500 ms on the clock, and the bursts
+	 * come right at its switches: the old measure saw a sidestep after
+	 * nearly every burst and every quiet moment alike.  At the same
+	 * phase of its rhythm the quiet moments switch just as often.
+	 */
+	for (const auto &h : {strafer(), weaver()})
+	{
+		const auto w{analyse_flight(fly(h, CYCLES))};
+		const auto &ws{w.stats};
+		if (verbose)
+			std::printf("%s: rate %.2f baseline %.2f room %.1f prob %.2f se %.2f\n", h.name, ws.dodge_rate, ws.dodge_baseline, ws.dodge_room, ws.dodge_prob, ws.dodge_se);
+		CHECK_RANGE(ws.dodge_weave_rate, 0.5, 1.0);
+		CHECK(ws.dodge_triggers >= f.bursts - 3);
+		/* Nothing beyond chance: within two standard errors of 0, and
+		 * a profile that does not trust it.
+		 */
+		CHECK(ws.dodge_prob - 2 * ws.dodge_se <= 0);
+		CHECK_RANGE(ws.dodge_prob, 0, 0.3);
+		if (const auto e{w.profile.find("skill.dodge_prob")}; e && e->value > 0.1)
+			CHECK(e->confidence == bot::style_confidence::low);
+		CHECK(!w.profile.find("measured.dodge_reaction_ms"));
+		const auto wt{describe_traits(ws)};
+		CHECK(std::none_of(wt.begin(), wt.end(), [](const std::string &t) { return t.starts_with("Dodges") || t.starts_with("Sometimes dodges"); }));
+	}
+
+	/* Weaves and dodges: found, though less sure than the plain dodger. */
+	{
+		const auto wf{fly(weaving_dodger(), CYCLES)};
+		const auto w{analyse_flight(wf)};
+		const auto &ws{w.stats};
+		const double wtruth{static_cast<double>(wf.dodges) / wf.bursts};
+		if (verbose)
+			std::printf("weaving dodger: truth %.2f rate %.2f baseline %.2f room %.1f prob %.2f se %.2f reaction %.0f\n", wtruth, ws.dodge_rate, ws.dodge_baseline, ws.dodge_room, ws.dodge_prob, ws.dodge_se, ws.dodge_reaction_ms);
+		CHECK(ws.dodge_measurable);
+		CHECK_RANGE(ws.dodge_prob, wtruth - 0.3, wtruth + 0.15);
+		CHECK(ws.dodge_prob - 2 * ws.dodge_se > 0);
+		CHECK_RANGE(ws.dodge_reaction_ms, 200, 360);
+		CHECK_RANGE(value(w.profile, "skill.dodge_prob"), wtruth - 0.3, wtruth + 0.15);
+	}
 
 	/* The enemy's shots: counted; no warning while they are there. */
 	CHECK(s.enemy_shots == 4 * f.bursts);
@@ -976,7 +1094,8 @@ void test_dodger()
 	auto blind{f};
 	std::erase_if(blind.events, [](const happening &h) { return h.e.type == record_type::fire && h.e.pid != 0; });
 	const auto b{analyse_flight(blind)};
-	CHECK(b.stats.enemy_shots == 0 && b.stats.dodge_triggers == 0);
+	CHECK(b.stats.enemy_shots == 0 && b.stats.dodge_triggers == 0 && !b.stats.dodge_measurable);
+	CHECK(!b.profile.find("skill.dodge_prob"));
 	CHECK(b.stats.hits_taken_from_players == s.hits_taken_from_players);
 	CHECK(write_report(b.stats, b.profile).find("warning: took") != std::string::npos);
 }
