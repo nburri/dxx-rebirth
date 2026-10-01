@@ -28,19 +28,40 @@
  * style's retreat level it retreats from the enemy along a path while
  * the enemy follows.  No walls: the reverse turn always has room.
  *
+ * Robustness.  The flight is a long floating-point simulation, and a
+ * tiny difference (another compiler, -O level, fused multiply-add, the
+ * maths library's sin/exp) changes a trajectory as another seed would;
+ * bit-exact results across platforms would need the bots' own maths
+ * (bot_brain.h) in fixed point.  So every measurement is statistical:
+ * one measurement flies FLIGHT_SEEDS seeds of six cycles each (every
+ * shield level once) and analyses them together, and every range lies
+ * at least 5 standard deviations of that measurement from its mean.
+ * The deviations come from `-survey 30` (30 disjoint sets of seeds),
+ * with g++ 15 (-O0, -O2, fused multiply-add on and off) and clang++ 21
+ * on 2026-10-01; the smallest margin then was 5.2 sd.  Measurements
+ * that are counts by construction (a Trainee never burns, a profile's
+ * turns are all reversed) have no spread.  When the bots' flying is
+ * tuned, rerun `-survey 30` and keep the margins.  The ranges still
+ * fail on the bots' flying before #63 (their strafe timings, vertical
+ * share and retreat levels): too few strafe reversals, too much
+ * vertical strafe.
+ *
  * Build and run with SCons:
  *
  *	scons sdl2=1 d1x=0 d2x=1 register_runtime_test_plain_link_targets=1 test-bot-fight-sim
- *	build/common/test-bot-fight-sim [-v]
+ *	build/common/test-bot-fight-sim [-v] [-survey N] [-f FILE]
  *
- * -v prints the analysis' report of every flight.
+ * -v prints the analysis' report of every flight; -survey N prints each
+ * measurement's spread over N sets of seeds and its margin.
  */
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <numbers>
 #include <string>
@@ -60,17 +81,6 @@ using namespace dcx::bot::flight_model;
 namespace {
 
 bool verbose;
-
-void check_range(const double v, const double lo, const double hi, const char *const what, const char *const file, const int line)
-{
-	if (!(v >= lo && v <= hi))
-	{
-		std::fprintf(stderr, "%s:%d: %s = %g, expected %g to %g\n", file, line, what, v, lo, hi);
-		std::exit(1);
-	}
-}
-
-#define CHECK_RANGE(v, lo, hi)	check_range((v), (lo), (hi), #v, __FILE__, __LINE__)
 
 void check_failed(const char *const expr, const char *const file, const int line)
 {
@@ -92,6 +102,8 @@ constexpr unsigned RECORD_RATE{30};
 constexpr std::size_t STYLE_FILE_MAX_BYTES_SIM{64 * 1024};
 constexpr unsigned CYCLE_S{40};
 constexpr std::array<double, 6> CYCLE_SHIELDS{{100, 80, 60, 45, 30, 15}};
+/* How many seeds one measurement flies (see the header comment). */
+constexpr unsigned FLIGHT_SEEDS{8};
 
 /* The enemy: a ship that strafes round the bot at its own distance, as
  * a human does, with a little up and down.  Moved as a point with the
@@ -159,7 +171,13 @@ struct pilot_setup
 {
 	bot_skill skill{bot_skill::hotshot};
 	bot_style style{bot_style::balanced};
-	unsigned cycles{24};
+	/* Each seed's flight: CYCLE_SHIELDS.size() cycles, every shield
+	 * level once.
+	 */
+	unsigned cycles{static_cast<unsigned>(CYCLE_SHIELDS.size())};
+	/* The first of the FLIGHT_SEEDS seeds flown; their flights are
+	 * analysed together, as the sessions of one player.
+	 */
 	uint32_t seed{1};
 	double fps{60};
 	/* Section 9.13: a style profile's parameters (apply_style_profile)
@@ -287,9 +305,10 @@ std::vector<uint8_t> write_recording(const std::vector<moment> &moments)
 }
 
 /* The bot's movement, as bot_tick (similar/main/bot.cpp) does it, in the
- * open: the tick's decisions and then the frame's steering.
+ * open: the tick's decisions and then the frame's steering.  One seed's
+ * flight; its counters are added to `out`, the recording returned.
  */
-flight_result fly(const pilot_setup &setup)
+std::vector<uint8_t> fly_one(const pilot_setup &setup, const uint32_t seed, flight_result &out)
 {
 	const auto lim{ship_limits()};
 	const style_profile_params prm{setup.params ? *setup.params : style_profile_params{skill_of(setup.skill), style_of(setup.style), {}}};
@@ -299,8 +318,8 @@ flight_result fly(const pilot_setup &setup)
 	const double max_speed{lim.max_speed};
 	const double FPS{setup.fps};
 	const fix ft{to_fix(1 / FPS)};
-	bot_rng rng{bot_seed(setup.seed, 1, 1)};
-	bot_rng world{bot_seed(setup.seed, 7, 3)};
+	bot_rng rng{bot_seed(seed, 1, 1)};
+	bot_rng world{bot_seed(seed, 7, 3)};
 	ship s;
 	enemy e;
 	juke_state juke;
@@ -315,7 +334,6 @@ flight_result fly(const pilot_setup &setup)
 	bool burning{};
 	double charge{1};
 	std::vector<moment> moments;
-	flight_result out;
 	ticker tk;
 	uint32_t tick{};
 	const unsigned frames{static_cast<unsigned>(setup.cycles * CYCLE_S * FPS)};
@@ -505,14 +523,25 @@ flight_result fly(const pilot_setup &setup)
 			moments.push_back(m);
 		}
 	}
-	const auto bytes{write_recording(moments)};
-	auto rec{an::load_recording(bytes, "sim")};
-	if (!rec)
+	return write_recording(moments);
+}
+
+/* FLIGHT_SEEDS flights, from setup.seed on, analysed together. */
+flight_result fly(const pilot_setup &setup)
+{
+	flight_result out;
+	std::vector<an::recording> files;
+	for (uint32_t i{}; i != FLIGHT_SEEDS; ++i)
 	{
-		std::fprintf(stderr, "the recording does not load\n");
-		std::exit(1);
+		const auto bytes{fly_one(setup, setup.seed + i, out)};
+		auto rec{an::load_recording(bytes, "sim")};
+		if (!rec)
+		{
+			std::fprintf(stderr, "the recording does not load\n");
+			std::exit(1);
+		}
+		files.push_back(std::move(*rec));
 	}
-	const std::array<an::recording, 1> files{{std::move(*rec)}};
 	const auto result{an::analyse_recordings(files, setup.skill)};
 	for (const auto &p : result.players)
 		if (p.stats.callsign == "pilot")
@@ -545,27 +574,40 @@ void print_reference()
 	std::puts("test-bot-fight-sim: bots before      speed 37-41 fast 24-36% | strafe 75-85% runs 367-433 ms 80-102 rev/min vert 0.71-1.0 thrust 75-79% across 45-48% | turns 180 in 1175-1457 ms at 80-99%, rev 24-45% slide 55-76% push 31-48% (burn 0-28%) | ab 0.1-2.3% flee 0-6% roam 0-3%");
 }
 
-}
 
-int main(const int argc, char **const argv)
+/* One measurement and the range it must lie in. */
+struct check
 {
-	for (int i{1}; i < argc; ++i)
-		if (!std::strcmp(argv[i], "-v"))
-			verbose = true;
-	print_reference();
+	std::string name;
+	double value, lo, hi;
+};
+
+constexpr double ANY{std::numeric_limits<double>::infinity()};
+
+/* Every measurement of the test, flown from seed `seed` on. */
+std::vector<check> measure(const uint32_t seed, const bool print)
+{
+	std::vector<check> c;
+	const auto add{[&c](std::string name, const double v, const double lo, const double hi) {
+		c.push_back({std::move(name), v, lo, hi});
+	}};
+	const auto row{[print](const char *const name, const flight_result &r) {
+		if (print)
+			print_row(name, r);
+	}};
 	std::array<flight_result, BOT_SKILL_COUNT> by_skill;
 	for (const auto skill : {bot_skill::trainee, bot_skill::rookie, bot_skill::hotshot, bot_skill::ace, bot_skill::insane})
 	{
 		auto &r{by_skill[static_cast<unsigned>(skill)]};
-		r = fly({.skill = skill});
-		print_row(bot_skill_names[static_cast<unsigned>(skill)], r);
+		r = fly({.skill = skill, .seed = seed});
+		row(bot_skill_names[static_cast<unsigned>(skill)], r);
 	}
 	for (const auto style : {bot_style::aggressive, bot_style::cautious, bot_style::collector})
 	{
-		const auto r{fly({.skill = bot_skill::hotshot, .style = style})};
+		const auto r{fly({.skill = bot_skill::hotshot, .style = style, .seed = seed})};
 		char name[32];
 		std::snprintf(name, sizeof(name), "Hotshot %s", bot_style_names[static_cast<unsigned>(style)]);
-		print_row(name, r);
+		row(name, r);
 	}
 	/* Hotshot (the default) to Insane: near the human, away from the
 	 * bots before.
@@ -573,46 +615,49 @@ int main(const int argc, char **const argv)
 	for (const auto skill : {bot_skill::hotshot, bot_skill::ace, bot_skill::insane})
 	{
 		const auto &s{by_skill[static_cast<unsigned>(skill)].stats};
-		CHECK_RANGE(s.speed.mean, 45, 60);
-		CHECK_RANGE(s.fast_share, 0.45, 0.8);
-		CHECK_RANGE(s.fight_strafe_share, 0.55, 0.9);
-		CHECK_RANGE(s.strafe_reversals_per_min, 30, 65);
-		CHECK_RANGE(s.strafe_vertical, 0.15, 0.5);
-		CHECK_RANGE(s.strafe_thrust, 0.8, 1);
-		CHECK_RANGE(s.strafe_speed, 0.62, 1);
-		CHECK_RANGE(s.slide_turn_share, 0.65, 1);
-		CHECK_RANGE(s.reverse_turn_share, 0, 0.3);
-		CHECK_RANGE(s.turn_rate, 0.6, 0.93);
-		CHECK_RANGE(s.turn_180_ms.p50, 1200, 1800);
-		CHECK_RANGE(s.turn_boost_share, 0.4, 1);
-		CHECK_RANGE(s.ab_share, 0.02, 0.1);
-		CHECK_RANGE(s.ab_situation_rate[1], 0.08, 0.45);
-		CHECK_RANGE(s.ab_situation_rate[2], 0.01, 0.1);
-		CHECK_RANGE(s.retreat_share, 0.1, 0.35);
+		const std::string n{bot_skill_names[static_cast<unsigned>(skill)]};
+		add(n + " speed", s.speed.mean, 45, 60);
+		add(n + " fast_share", s.fast_share, 0.45, 0.8);
+		add(n + " fight_strafe_share", s.fight_strafe_share, 0.55, 0.9);
+		add(n + " strafe_reversals_per_min", s.strafe_reversals_per_min, 30, 65);
+		add(n + " strafe_vertical", s.strafe_vertical, 0.15, 0.5);
+		add(n + " strafe_thrust", s.strafe_thrust, 0.8, 1);
+		add(n + " strafe_speed", s.strafe_speed, 0.62, 1);
+		add(n + " slide_turn_share", s.slide_turn_share, 0.65, 1);
+		add(n + " reverse_turn_share", s.reverse_turn_share, 0, 0.33);
+		add(n + " turn_rate", s.turn_rate, 0.6, 0.94);
+		add(n + " turn_180_ms", s.turn_180_ms.p50, 1200, 1800);
+		add(n + " turn_boost_share", s.turn_boost_share, 0.35, 1);
+		add(n + " ab_share", s.ab_share, 0.02, 0.1);
+		add(n + " ab_flee_rate", s.ab_situation_rate[1], 0.065, 0.45);
+		add(n + " ab_roam_rate", s.ab_situation_rate[2], 0.01, 0.1);
+		add(n + " retreat_share", s.retreat_share, 0.1, 0.35);
 	}
 	/* The skills stay apart: a Trainee does not strafe or burn and turns
 	 * slowest, an Insane bot turns fastest.
 	 */
 	{
 		const auto &t{by_skill[0].stats}, &h{by_skill[2].stats}, &i{by_skill[4].stats};
-		CHECK_RANGE(t.strafe_reversals_per_min, 0, 20);
-		CHECK_RANGE(t.ab_share, 0, 0);
-		CHECK(t.turn_180_ms.p50 > h.turn_180_ms.p50 && h.turn_180_ms.p50 > i.turn_180_ms.p50);
-		CHECK(t.speed.mean < i.speed.mean);
+		add("Trainee strafe_reversals_per_min", t.strafe_reversals_per_min, 0, 20);
+		add("Trainee ab_share", t.ab_share, 0, 0);
+		add("Trainee - Hotshot turn_180_ms", t.turn_180_ms.p50 - h.turn_180_ms.p50, 0, ANY);
+		add("Hotshot - Insane turn_180_ms", h.turn_180_ms.p50 - i.turn_180_ms.p50, 0, ANY);
+		add("Insane - Trainee speed", i.speed.mean - t.speed.mean, 0, ANY);
 	}
 	/* The same at another frame rate. */
 	{
 		const auto &ref{by_skill[2].stats};
 		for (const double fps : {30.0, 144.0})
 		{
-			const auto r{fly({.skill = bot_skill::hotshot, .fps = fps})};
+			const auto r{fly({.skill = bot_skill::hotshot, .seed = seed, .fps = fps})};
 			char name[32];
 			std::snprintf(name, sizeof(name), "Hotshot %.0f fps", fps);
-			print_row(name, r);
+			row(name, r);
 			const auto &s{r.stats};
-			CHECK_RANGE(s.speed.mean, ref.speed.mean - 3, ref.speed.mean + 3);
-			CHECK_RANGE(s.strafe_reversals_per_min, ref.strafe_reversals_per_min * 0.75, ref.strafe_reversals_per_min * 1.25);
-			CHECK_RANGE(s.turn_180_ms.p50, ref.turn_180_ms.p50 * 0.9, ref.turn_180_ms.p50 * 1.1);
+			const std::string n{name};
+			add(n + " - 60 fps speed", s.speed.mean - ref.speed.mean, -3, 3);
+			add(n + " / 60 fps strafe_reversals_per_min", s.strafe_reversals_per_min / ref.strafe_reversals_per_min, 0.75, 1.25);
+			add(n + " / 60 fps turn_180_ms", s.turn_180_ms.p50 / ref.turn_180_ms.p50, 0.9, 1.1);
 		}
 	}
 	/* Section 9.13: a style profile flies as it says.  A profile of a
@@ -629,10 +674,11 @@ int main(const int argc, char **const argv)
 			"tune.burn_retreat = 0\n")};
 		CHECK(profile);
 		const auto params{apply_style_profile(*profile, bot_skill::hotshot)};
-		const auto r{fly({.skill = bot_skill::hotshot, .params = &params})};
-		print_row("test style", r);
+		const auto r{fly({.skill = bot_skill::hotshot, .seed = seed, .params = &params})};
+		row("test style", r);
 		const auto &s{r.stats}, &h{by_skill[2].stats};
-		CHECK(s.strafe_vertical > 0.7 && s.strafe_vertical > h.strafe_vertical + 0.3);
+		add("test style strafe_vertical", s.strafe_vertical, 0.7, ANY);
+		add("test style - Hotshot strafe_vertical", s.strafe_vertical - h.strafe_vertical, 0.3, ANY);
 		/* Every large turn of its own backwards.  (The analysis counts a
 		 * turn as reverse only with reverse thrust in 40 % of it; the
 		 * bot's reverse turn holds its momentum away from the target,
@@ -640,10 +686,12 @@ int main(const int argc, char **const argv)
 		 * its second half, so the analysis' share hardly moves:
 		 * Documentation/multiplayer-bots.md section 9.13.)
 		 */
-		CHECK(r.turns_reversing > 20 && r.turns_sliding == 0);
+		add("test style reversing turns per minute", r.turns_reversing * 60 / r.total_s, 1.25, ANY);
+		add("test style sliding turns", r.turns_sliding, 0, 0);
 		const auto &hr{by_skill[2]};
-		CHECK(hr.turns_sliding > 3 * hr.turns_reversing);
-		CHECK_RANGE(s.ab_situation_rate[1], 0, 0.02);
+		/* A Hotshot's own large turns: mostly sliding. */
+		add("Hotshot reversing share of own turns", hr.turns_reversing / std::max(1.0, static_cast<double>(hr.turns_reversing + hr.turns_sliding)), -ANY, 0.4);
+		add("test style ab_flee_rate", s.ab_situation_rate[1], 0, 0.02);
 	}
 	{
 		const auto profile{parse_style_profile(
@@ -653,13 +701,72 @@ int main(const int argc, char **const argv)
 			"tune.range_hi = 170\n")};
 		CHECK(profile);
 		const auto params{apply_style_profile(*profile, bot_skill::hotshot)};
-		const auto r{fly({.skill = bot_skill::hotshot, .params = &params})};
-		print_row("far style", r);
+		const auto r{fly({.skill = bot_skill::hotshot, .seed = seed, .params = &params})};
+		row("far style", r);
 		/* The scripted enemy closes in faster than a bot backs off:
 		 * the bot keeps backing off.
 		 */
-		CHECK(r.stats.back_off_share > by_skill[2].stats.back_off_share + 0.2);
+		add("far style - Hotshot back_off_share", r.stats.back_off_share - by_skill[2].stats.back_off_share, 0.2, ANY);
 	}
+	return c;
+}
+
+/* `-survey N`: the test's measurements from N disjoint sets of seeds,
+ * with each one's spread and its distance from its range in standard
+ * deviations: how the ranges were checked (header comment).
+ */
+int survey(const unsigned n)
+{
+	std::vector<std::vector<check>> runs;
+	for (unsigned k{}; k != n; ++k)
+		runs.push_back(measure(1 + k * FLIGHT_SEEDS, false));
+	unsigned outside{};
+	double worst_margin{ANY};
+	std::printf("%-48s %10s %9s %10s %10s %10s %10s %7s\n", "measurement", "mean", "sd", "min", "max", "lo", "hi", "margin");
+	for (std::size_t i{}; i != runs.front().size(); ++i)
+	{
+		double sum{}, sq{}, lo_seen{ANY}, hi_seen{-ANY};
+		for (const auto &r : runs)
+		{
+			const auto &m{r[i]};
+			sum += m.value;
+			sq += m.value * m.value;
+			lo_seen = std::min(lo_seen, m.value);
+			hi_seen = std::max(hi_seen, m.value);
+			outside += !(m.value >= m.lo && m.value <= m.hi);
+		}
+		const auto &first{runs.front()[i]};
+		const double mean{sum / n};
+		const double sd{n > 1 ? std::sqrt(std::max(0.0, (sq - sum * mean) / (n - 1))) : 0};
+		const double room{std::min(mean - first.lo, first.hi - mean)};
+		const double margin{sd > 0 ? room / sd : (room >= 0 ? ANY : -ANY)};
+		worst_margin = std::min(worst_margin, margin);
+		std::printf("%-48s %10.4g %9.3g %10.4g %10.4g %10.4g %10.4g %7.1f\n", first.name.c_str(), mean, sd, lo_seen, hi_seen, first.lo, first.hi, margin);
+	}
+	std::printf("test-bot-fight-sim: survey of %u x %u seeds: %u measurements outside their range, smallest margin %.1f sd\n", n, FLIGHT_SEEDS, outside, worst_margin);
+	return outside != 0;
+}
+
+}
+
+int main(const int argc, char **const argv)
+{
+	for (int i{1}; i < argc; ++i)
+		if (!std::strcmp(argv[i], "-v"))
+			verbose = true;
+	for (int i{1}; i + 1 < argc; ++i)
+		if (!std::strcmp(argv[i], "-survey"))
+			return survey(static_cast<unsigned>(std::max(2L, std::strtol(argv[i + 1], nullptr, 10))));
+	print_reference();
+	unsigned failed{};
+	for (const auto &m : measure(1, true))
+		if (!(m.value >= m.lo && m.value <= m.hi))
+		{
+			std::fprintf(stderr, "test-bot-fight-sim: %s = %g, expected %g to %g\n", m.name.c_str(), m.value, m.lo, m.hi);
+			++failed;
+		}
+	if (failed)
+		return 1;
 	/* `-f FILE`: fly a style profile on a Hotshot bot. */
 	for (int i{1}; i + 1 < argc; ++i)
 		if (!std::strcmp(argv[i], "-f"))
