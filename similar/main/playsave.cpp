@@ -63,6 +63,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "partial_range.h"
 #if DXX_USE_MULTIPLAYER
 #include "bot.h"
+#include "bot_arena.h"
 #endif
 
 #define GameNameStr "game_name"
@@ -1497,6 +1498,12 @@ void write_player_file()
 	int errno_ret;
 
 	if ( Newdemo_state == ND_STATE_PLAYBACK )
+		return;
+	/* -botarena (bot_arena.h) changes the window and plays as a pilot of
+	 * its own: neither its configuration nor its pilot is the user's to
+	 * keep (leaving the game would write both).
+	 */
+	if (bot_arena_active())
 		return;
 
 	errno_ret = WriteConfigFile(CGameCfg, GameCfg);

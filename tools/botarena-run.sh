@@ -125,9 +125,15 @@ if [ -z "$recording" ]; then
 fi
 mkdir -p "$out/analysis"
 if [ -n "$missions" ]; then
-	"$analyse" --bots --missions "$missions" --out "$out/analysis" "$recording" > "$out/analysis.log" 2>&1
+	set -- --missions "$missions"
 else
-	"$analyse" --bots --out "$out/analysis" "$recording" > "$out/analysis.log" 2>&1
+	set --
 fi
+"$analyse" --bots "$@" --out "$out/analysis" "$recording" > "$out/analysis.log" 2>&1 || {
+	status=$?
+	tail -20 "$out/analysis.log" >&2
+	echo "botarena-run: movrec-analyse failed (status $status); its log is $out/analysis.log" >&2
+	exit 1
+}
 echo "botarena-run: recording $recording"
 echo "botarena-run: reports in $out/analysis (analysis log $out/analysis.log)"
