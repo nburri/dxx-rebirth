@@ -768,10 +768,15 @@ void check_occupant(const unsigned pid)
 		p.hit_by_ms[pid] = 0;
 	o.in_game = in_game;
 	if (!in_game)
+	{
 		/* Gone (or between two levels): if the same player returns, it
-		 * is still the same program.
+		 * is still the same program, which reports the afterburner.  It
+		 * may have been restarted without -sharemoves, though: sharing
+		 * is noted again from its next controls.
 		 */
+		o.shares_controls = false;
 		return;
+	}
 	if (bot != o.bot || !(cs == o.callsign))
 	{
 		o.afterburner_seen = false;
