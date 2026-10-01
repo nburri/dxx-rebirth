@@ -1398,6 +1398,19 @@ constexpr double POWER_KILL_DISTANCE{150};
  */
 constexpr unsigned POWER_SEEN_HOLD_MS{3000};
 constexpr unsigned POWER_COMMIT_MS{20000};
+/* The review of PR #71: a bot that has gone for one power pickup this
+ * long (POWER_MAX_PATH at a fair speed, and the turns) gives it up for a
+ * while; the stuck detector only catches a bot that makes no progress,
+ * not one that flies round and round without getting there.
+ */
+constexpr unsigned POWER_GIVE_UP_MS{40000};
+
+/* `since`: the tick the bot set out for it. */
+[[nodiscard]]
+constexpr bool power_gave_up(const uint32_t since, const uint32_t tick)
+{
+	return tick >= since && tick - since >= ticks_from_ms(POWER_GIVE_UP_MS);
+}
 
 /* `sighted`: the tick + 1 of the last sighting (known_powerup::sighted,
  * 0: never); `going_for_it`: the bot's collect goal is this powerup.
@@ -1501,7 +1514,13 @@ constexpr double power_goal_utility(const goal_inputs &in, const double fight)
 		return 0;
 	if (in_danger(in) && !in.power_invulnerability)
 		return 0;
-	if (fight > 0 && in.power_fight > 0 && !in.kill_imminent)
+	/* The review of PR #71: its utility without a fight (up to
+	 * POWER_BIG_UTILITY, more than most fights) broke off the fight for
+	 * a target about to die too; the kill goes first.
+	 */
+	if (fight > 0 && in.kill_imminent && !in.power_invulnerability)
+		return 0;
+	if (fight > 0 && in.power_fight > 0)
 		return std::max(in.power, fight * in.power_fight);
 	return in.power;
 }

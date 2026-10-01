@@ -1758,6 +1758,23 @@ void test_power_pickups()
 		g.kill_imminent = true;
 		CHECK(choose_goal(g) == goal_kind::engage);
 		CHECK(kill_imminent(true, 15, 80) && !kill_imminent(false, 15, 80) && !kill_imminent(true, 40, 80) && !kill_imminent(true, 15, 300));
+		/* Also for an earthshaker close by (its utility without the
+		 * fight above the fight's).
+		 */
+		auto n{far_shaker};
+		n.path = 50;
+		const auto nv{power_pickup_value(n)};
+		CHECK(nv.utility > 2 * in.target_score * GOAL_HYSTERESIS);
+		auto h{power_in(in, nv)};
+		CHECK(choose_goal(h) == goal_kind::collect);
+		h.kill_imminent = true;
+		CHECK(choose_goal(h) == goal_kind::engage);
+	}
+	/* Gone for too long: given up. */
+	{
+		CHECK(!power_gave_up(100, 100 + ticks_from_ms(POWER_GIVE_UP_MS) - 1));
+		CHECK(power_gave_up(100, 100 + ticks_from_ms(POWER_GIVE_UP_MS)));
+		CHECK(!power_gave_up(200, 100));
 	}
 	/* Shields critical (in danger): it retreats; invulnerability is
 	 * taken even so.

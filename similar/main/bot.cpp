@@ -143,6 +143,8 @@ constexpr unsigned BOT_POWERUP_LOS_BUDGET{8};
  */
 constexpr unsigned BOT_COLLECT_IGNORE_TICKS{5 * b::BOT_TICK_RATE};
 constexpr unsigned BOT_COLLECT_UNREACHABLE_TICKS{10 * b::BOT_TICK_RATE};
+/* Section 9.14: a power pickup given up (b::power_gave_up). */
+constexpr unsigned BOT_POWER_GIVE_UP_IGNORE_TICKS{30 * b::BOT_TICK_RATE};
 /* Fuel and repair centres give this much per second (Fuelcen_give_amount). */
 constexpr fix BOT_FUELCEN_RATE{i2f(25)};
 constexpr fix BOT_FUELCEN_SOUND_DELAY{F1_0 / 4};
@@ -475,6 +477,8 @@ struct bot_state
 	 */
 	bool power_going{};
 	uint8_t power_sight_turn{};
+	/* The tick it set out for that power pickup (b::power_gave_up). */
+	uint32_t power_since{};
 	/* Section 9.9: with no target, the enemy whose last known place the
 	 * bot flies to (b::seek_utility), and for each enemy the memory
 	 * tick + 1 of the place it searched already (reached, nobody there).
@@ -2512,6 +2516,16 @@ void think(bot_state &bs, object &obj, const uint32_t tick)
 	auto collect{best_collect(bs, res, tick)};
 	/* Section 9.5: a valuable powerup close by. */
 	const auto grab{best_grab(bs, obj, res, tick)};
+	/* Section 9.14: a power pickup the bot has gone for too long (it
+	 * does not get there: a door it cannot open after all, a fight on
+	 * the way again and again) is no goal for a while.
+	 */
+	if (bs.power_going && bs.goal == bot_goal::collect && b::power_gave_up(bs.power_since, tick))
+	{
+		bs.powerups.ignore_for(bs.collect_key, tick + BOT_POWER_GIVE_UP_IGNORE_TICKS);
+		bs.power_going = false;
+		con_printf(CON_VERBOSE, "bots: '%s' gives up power pickup %hu", static_cast<const char *>(bs.cfg.name), bs.collect_key);
+	}
 	/* Section 9.14: the best power pickup. */
 	const auto power{best_power(bs, obj, res, tick, memory_ticks)};
 	auto centre{best_centre(bs, res)};
@@ -2652,6 +2666,7 @@ void think(bot_state &bs, object &obj, const uint32_t tick)
 		const auto &t{*Objects.vcptr(vcplayerptr(*bs.target)->objnum)};
 		kill_soon = t.type == object_type::OBJ_PLAYER && b::kill_imminent(target_visible, t.shields / 65536.0, *target_distance);
 	}
+	const bool power_current{bs.power_going && bs.goal == bot_goal::collect && power.place.key == bs.collect_key && power.place.sig == bs.collect_sig};
 	const b::goal_inputs gin{
 		.has_target = bs.target.has_value() && !given_up,
 		.target_visible = target_visible,
@@ -2684,7 +2699,7 @@ void think(bot_state &bs, object &obj, const uint32_t tick)
 		.power_fight = power.value.fight,
 		.power_invulnerability = power.place.invulnerability,
 		.kill_imminent = kill_soon,
-		.power_current = bs.power_going && bs.goal == bot_goal::collect && power.place.key == bs.collect_key && power.place.sig == bs.collect_sig,
+		.power_current = power_current,
 		.current = current_goal(bs, target_visible),
 	};
 	const auto goal{b::choose_goal(gin)};
@@ -2695,6 +2710,8 @@ void think(bot_state &bs, object &obj, const uint32_t tick)
 	 */
 	bs.grabbing = goal == b::goal_kind::collect && u.collect_from == b::collect_source::grab;
 	bs.power_going = goal == b::goal_kind::collect && u.collect_from == b::collect_source::power;
+	if (bs.power_going && !power_current)
+		bs.power_since = tick;
 	if (bs.grabbing)
 		collect = grab;
 	else if (bs.power_going)
