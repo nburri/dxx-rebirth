@@ -18,6 +18,9 @@
  * the chat command `/bot`, which add, remove and change the bots of the
  * game being played (through bot.cpp); the setup is only touched by
  * "Save as default setup".
+ *
+ * Section 9.13: the style profiles (`.botstyle` files of `botstyles/`),
+ * offered after the built-in styles wherever a style is chosen.
  */
 
 #include "dxxsconf.h"
@@ -30,6 +33,9 @@
 #include <cstring>
 #include <random>
 #include <span>
+#include <string>
+#include <string_view>
+#include <vector>
 
 #include "bot.h"
 #include "args.h"
@@ -47,6 +53,8 @@
 #include "timer.h"
 #include "text.h"
 #include "partial_range.h"
+#include "physfsx.h"
+#include "physfs_list.h"
 
 namespace dcx {
 
@@ -57,6 +65,65 @@ namespace {
 
 std::array<bool, MAX_PLAYERS> Player_bot_flags{};
 
+/* Section 9.13: the style profiles. */
+bot::style_library Bot_styles;
+
+}
+
+const bot::style_library &bots_style_library()
+{
+	return Bot_styles;
+}
+
+void bots_load_styles(const bool report)
+{
+	namespace b = ::dcx::bot;
+	Bot_styles.clear();
+	/* The folder is made, so that a host sees where the files go. */
+	PHYSFS_mkdir(b::BOT_STYLE_FOLDER);
+	std::vector<std::string> files;
+	if (const auto list{PHYSFSX_uncounted_list{PHYSFS_enumerateFiles(b::BOT_STYLE_FOLDER)}})
+		for (const auto i : list)
+		{
+			const std::string_view n{i};
+			constexpr std::string_view ext{b::STYLE_PROFILE_EXTENSION};
+			if (n.size() > ext.size() && b::detail::iequal(n.substr(n.size() - ext.size()), ext))
+				files.emplace_back(n);
+		}
+	/* The same order on every host: the first of two files with one name
+	 * wins.
+	 */
+	std::ranges::sort(files);
+	for (const auto &f : files)
+	{
+		const std::string path{std::string{b::BOT_STYLE_FOLDER} + "/" + f};
+		const std::string_view stem{std::string_view{f}.substr(0, f.size() - b::STYLE_PROFILE_EXTENSION.size())};
+		RAIIPHYSFS_File fp{PHYSFS_openRead(path.c_str())};
+		if (!fp)
+		{
+			if (report)
+				con_printf(CON_NORMAL, "bots: style %s: cannot be read", path.c_str());
+			continue;
+		}
+		/* One byte more than a profile may have: a larger file is refused
+		 * without reading it all.
+		 */
+		std::string text(b::STYLE_FILE_MAX_BYTES + 1, '\0');
+		const auto got{PHYSFS_readBytes(fp, text.data(), text.size())};
+		if (got < 0)
+			continue;
+		text.resize(static_cast<std::size_t>(got));
+		const auto r{Bot_styles.add(stem, text)};
+		if (r == b::style_add_result::added)
+		{
+			const auto &ls{Bot_styles[Bot_styles.size() - 1]};
+			con_printf(report ? CON_NORMAL : CON_VERBOSE, "bots: style \"%s\" from %s (base %s%s%s)", ls.name.data(), path.c_str(), b::bot_style_names[static_cast<unsigned>(ls.profile.base_style) % b::BOT_STYLE_COUNT], ls.word[0] ? ", /bot word " : "", ls.word.data());
+		}
+		else if (report)
+			con_printf(CON_NORMAL, "bots: style %s: %s", path.c_str(), b::style_add_text(r));
+		if (r == b::style_add_result::full)
+			break;
+	}
 }
 
 bool player_is_bot(const unsigned pnum)
@@ -132,6 +199,7 @@ void set_count(const unsigned count)
 		auto &c{Bot_setup.bots[i]};
 		c.skill = Bot_setup.default_skill;
 		c.style = Bot_setup.default_style;
+		c.profile = Bot_setup.default_profile;
 		c.team = b::bot_team::automatic;
 		assign_next_name(i);
 	}
@@ -178,6 +246,65 @@ const char *style_short_name(const b::bot_style s)
 	return i < b::BOT_STYLE_COUNT ? style_short_names[i] : "?";
 }
 
+/* Section 9.13: a style as the sliders offer it (style_choice_count):
+ * the built-in styles, then the loaded profiles.  A profile that is not
+ * loaded shows as its base style.
+ */
+[[nodiscard]]
+unsigned style_choice(const b::bot_style style, const b::style_name &profile)
+{
+	if (profile[0])
+		if (const auto i{bots_style_library().index_of(profile.data())}; i < bots_style_library().size())
+			return b::BOT_STYLE_COUNT + static_cast<unsigned>(i);
+	return static_cast<unsigned>(style) % b::BOT_STYLE_COUNT;
+}
+
+[[nodiscard]]
+unsigned style_choice_max()
+{
+	return b::style_choice_count(bots_style_library().size()) - 1;
+}
+
+void set_style_choice(const unsigned v, b::bot_style &style, b::style_name &profile)
+{
+	const auto &lib{bots_style_library()};
+	if (v >= b::BOT_STYLE_COUNT && v - b::BOT_STYLE_COUNT < lib.size())
+	{
+		const auto &ls{lib[v - b::BOT_STYLE_COUNT]};
+		style = ls.profile.base_style;
+		profile = ls.name;
+	}
+	else
+	{
+		style = b::bot_style{static_cast<uint8_t>(std::min(v, b::BOT_STYLE_COUNT - 1))};
+		profile = {};
+	}
+}
+
+[[nodiscard]]
+const char *style_choice_name(const unsigned v)
+{
+	const auto &lib{bots_style_library()};
+	if (v >= b::BOT_STYLE_COUNT && v - b::BOT_STYLE_COUNT < lib.size())
+		return lib[v - b::BOT_STYLE_COUNT].name.data();
+	return style_name(b::bot_style{static_cast<uint8_t>(std::min(v, b::BOT_STYLE_COUNT - 1))});
+}
+
+/* A bot's style for a label: the profile's name (also when its file is
+ * gone), else the built-in style's.
+ */
+[[nodiscard]]
+const char *config_style_name(const b::bot_style style, const b::style_name &profile)
+{
+	return profile[0] ? profile.data() : style_name(style);
+}
+
+/* The same in the lists' short column (the profile's name cut). */
+void config_style_short(const b::bot_style style, const b::style_name &profile, std::array<char, 8> &out)
+{
+	std::snprintf(out.data(), out.size(), "%s", profile[0] ? profile.data() : style_short_name(style));
+}
+
 [[nodiscard]]
 const char *team_name(const b::bot_team t)
 {
@@ -211,13 +338,30 @@ struct bot_edit_menu
 	std::array<newmenu_item, count> m;
 	std::array<char, CALLSIGN_LEN + 1> name_text{};
 	char skill_text[40]{};
-	char style_text[40]{};
+	char style_text[56]{};
 	char team_text[40]{};
 	ntstring<NM_MAX_TEXT_LEN> skill_saved, style_saved, team_saved;
+	/* Section 9.13: the bot's style profile is not loaded (its file is
+	 * gone): the slider's first place stands for it.
+	 */
+	const char *missing_profile{};
+	unsigned missing_choice{};
+	void note_missing(const b::bot_style st, const b::style_name &profile)
+	{
+		missing_profile = nullptr;
+		if (profile[0] && !bots_style_library().find(profile.data()))
+		{
+			missing_profile = profile.data();
+			missing_choice = style_choice(st, profile);
+		}
+	}
 	void update_labels()
 	{
 		std::snprintf(skill_text, sizeof(skill_text), "Skill: %s", skill_name(b::bot_skill{static_cast<uint8_t>(m[skill].value)}));
-		std::snprintf(style_text, sizeof(style_text), "Style: %s", style_name(b::bot_style{static_cast<uint8_t>(m[style].value)}));
+		if (missing_profile && static_cast<unsigned>(m[style].value) == missing_choice)
+			std::snprintf(style_text, sizeof(style_text), "Style: %s (no file)", missing_profile);
+		else
+			std::snprintf(style_text, sizeof(style_text), "Style: %s", style_choice_name(static_cast<unsigned>(m[style].value)));
 		if (team_mode)
 			std::snprintf(team_text, sizeof(team_text), "Team: %s", team_name(b::bot_team{static_cast<uint8_t>(m[team].value)}));
 		else
@@ -260,7 +404,8 @@ void run_bot_edit(const unsigned i, const network_game_type mode)
 	nm_set_item_text(e.m[bot_edit_menu::label_name], "Name:");
 	nm_set_item_input(e.m[bot_edit_menu::name], e.name_text);
 	nm_set_item_slider(e.m[bot_edit_menu::skill], e.skill_text, static_cast<unsigned>(c.skill), 0, b::BOT_SKILL_COUNT - 1, e.skill_saved);
-	nm_set_item_slider(e.m[bot_edit_menu::style], e.style_text, static_cast<unsigned>(c.style), 0, b::BOT_STYLE_COUNT - 1, e.style_saved);
+	nm_set_item_slider(e.m[bot_edit_menu::style], e.style_text, style_choice(c.style, c.profile), 0, style_choice_max(), e.style_saved);
+	e.note_missing(c.style, c.profile);
 	if (e.team_mode)
 		nm_set_item_slider(e.m[bot_edit_menu::team], e.team_text, static_cast<unsigned>(c.team), 0, b::BOT_TEAM_COUNT - 1, e.team_saved);
 	else
@@ -276,7 +421,11 @@ void run_bot_edit(const unsigned i, const network_game_type mode)
 		return;
 	}
 	c.skill = b::bot_skill{static_cast<uint8_t>(e.m[bot_edit_menu::skill].value)};
-	c.style = b::bot_style{static_cast<uint8_t>(e.m[bot_edit_menu::style].value)};
+	/* Section 9.13: a style that is not loaded (its file is gone) stays
+	 * as it was unless the slider was moved.
+	 */
+	if (static_cast<unsigned>(e.m[bot_edit_menu::style].value) != style_choice(c.style, c.profile))
+		set_style_choice(static_cast<unsigned>(e.m[bot_edit_menu::style].value), c.style, c.profile);
 	if (e.team_mode)
 		c.team = b::bot_team{static_cast<uint8_t>(e.m[bot_edit_menu::team].value)};
 	/* An empty or taken name keeps the old one, and so does a word
@@ -305,14 +454,14 @@ struct bots_menu
 	std::array<newmenu_item, first_line + MAX_BOTS + 4> m;
 	char count_text[40]{};
 	char skill_text[40]{};
-	char style_text[40]{};
+	char style_text[56]{};
 	std::array<std::array<char, 64>, MAX_BOTS> lines{};
 	ntstring<NM_MAX_TEXT_LEN> count_saved, skill_saved, style_saved;
 	void update_labels()
 	{
 		std::snprintf(count_text, sizeof(count_text), "Number of bots: %u", Bot_setup.count);
 		std::snprintf(skill_text, sizeof(skill_text), "Default skill: %s", skill_name(Bot_setup.default_skill));
-		std::snprintf(style_text, sizeof(style_text), "Default style: %s", style_name(Bot_setup.default_style));
+		std::snprintf(style_text, sizeof(style_text), "Default style: %s", config_style_name(Bot_setup.default_style, Bot_setup.default_profile));
 	}
 	void build()
 	{
@@ -320,7 +469,7 @@ struct bots_menu
 		unsigned n{0};
 		nm_set_item_slider(m[n++], count_text, Bot_setup.count, 0, max_bots, count_saved);
 		nm_set_item_slider(m[n++], skill_text, static_cast<unsigned>(Bot_setup.default_skill), 0, b::BOT_SKILL_COUNT - 1, skill_saved);
-		nm_set_item_slider(m[n++], style_text, static_cast<unsigned>(Bot_setup.default_style), 0, b::BOT_STYLE_COUNT - 1, style_saved);
+		nm_set_item_slider(m[n++], style_text, style_choice(Bot_setup.default_style, Bot_setup.default_profile), 0, style_choice_max(), style_saved);
 		nm_set_item_checkbox(m[n++], "Humans replace bots when full", Bot_setup.replace);
 		nm_set_item_text(m[n++], "(new bots take the default skill and style)");
 		nm_set_item_text(m[n++], "");
@@ -328,7 +477,9 @@ struct bots_menu
 		for (unsigned i = 0; i < listed; ++i)
 		{
 			auto &c{Bot_setup.bots[i]};
-			std::snprintf(lines[i].data(), lines[i].size(), "%u. %-8s  %-7s %s", i + 1, static_cast<const char *>(c.name), skill_name(c.skill), style_short_name(c.style));
+			std::array<char, 8> st;
+			config_style_short(c.style, c.profile, st);
+			std::snprintf(lines[i].data(), lines[i].size(), "%u. %-8s  %-7s %s", i + 1, static_cast<const char *>(c.name), skill_name(c.skill), st.data());
 			nm_set_item_menu(m[n++], lines[i].data());
 		}
 		if (!Bot_setup.count)
@@ -370,7 +521,7 @@ int bots_menu_handler(newmenu *, const d_event &event, bots_menu *const bm)
 			if (citem == bm->opt_skill)
 				Bot_setup.default_skill = b::bot_skill{static_cast<uint8_t>(bm->m[bm->opt_skill].value)};
 			else if (citem == bm->opt_style)
-				Bot_setup.default_style = b::bot_style{static_cast<uint8_t>(bm->m[bm->opt_style].value)};
+				set_style_choice(static_cast<unsigned>(bm->m[bm->opt_style].value), Bot_setup.default_style, Bot_setup.default_profile);
 			else if (citem == bm->opt_replace)
 				Bot_setup.replace = bm->m[bm->opt_replace].value != 0;
 			bm->update_labels();
@@ -401,6 +552,7 @@ void bots_setup_init()
 	if (Bot_setup.initialized)
 		return;
 	Bot_setup.initialized = true;
+	bots_load_styles(true);
 	Bot_setup.count = 0;
 	set_count(std::min<unsigned>(CGameArg.MplBots, MAX_BOTS));
 }
@@ -411,6 +563,7 @@ void bots_setup_load(const b::bot_profile &p)
 	Bot_setup.initialized = true;
 	Bot_setup.default_skill = p.default_skill;
 	Bot_setup.default_style = p.default_style;
+	Bot_setup.default_profile = p.default_profile;
 	Bot_setup.replace = p.replace;
 	Bot_setup.count = std::min<unsigned>(p.count, MAX_BOTS);
 	for (unsigned i = 0; i < MAX_BOTS; ++i)
@@ -423,6 +576,7 @@ void bots_setup_load(const b::bot_profile &p)
 		c.skill = e.skill;
 		c.style = e.style;
 		c.team = e.team;
+		c.profile = e.profile;
 	}
 	/* Names after every line is in place, so that a missing or taken
 	 * one gets the next built-in name no other bot has.
@@ -456,6 +610,7 @@ b::bot_profile bots_setup_profile()
 	p.count = std::min<unsigned>(Bot_setup.count, b::BOT_PROFILE_MAX_BOTS);
 	p.default_skill = Bot_setup.default_skill;
 	p.default_style = Bot_setup.default_style;
+	p.default_profile = Bot_setup.default_profile;
 	p.replace = Bot_setup.replace;
 	for (unsigned i = 0; i < p.count; ++i)
 	{
@@ -465,6 +620,7 @@ b::bot_profile bots_setup_profile()
 		e.skill = c.skill;
 		e.style = c.style;
 		e.team = c.team;
+		e.profile = c.profile;
 	}
 	return p;
 }
@@ -486,18 +642,19 @@ void bots_setup_label(char *const buf, const std::size_t size, const network_gam
 		std::snprintf(buf, size, "Bots: none...");
 		return;
 	}
-	const auto first{Bot_setup.bots[0].skill};
-	const auto first_style{Bot_setup.bots[0].style};
-	const bool mixed{std::ranges::any_of(std::span(Bot_setup.bots.data(), Bot_setup.count), [first, first_style](const bot_config &c) { return c.skill != first || c.style != first_style; })};
+	const auto &first{Bot_setup.bots[0]};
+	const bool mixed{std::ranges::any_of(std::span(Bot_setup.bots.data(), Bot_setup.count), [&first](const bot_config &c) { return c.skill != first.skill || c.style != first.style || c.profile != first.profile; })};
 	if (mixed)
 		std::snprintf(buf, size, "Bots: %u (mixed)...", Bot_setup.count);
 	else
-		std::snprintf(buf, size, "Bots: %u (%s, %s)...", Bot_setup.count, skill_name(first), style_name(first_style));
+		std::snprintf(buf, size, "Bots: %u (%s, %s)...", Bot_setup.count, skill_name(first.skill), config_style_name(first.style, first.profile));
 }
 
 void bots_setup_menu(const network_game_type mode, const unsigned max_players)
 {
 	bots_setup_init();
+	/* Section 9.13: files added or changed since. */
+	bots_load_styles(false);
 	if (!bots_allowed_in_mode(mode))
 	{
 		nm_messagebox_str(menu_title{"BOTS"}, nm_messagebox_tie(TXT_OK), menu_subtitle{"Bots play anarchy, team anarchy\nand bounty for now."});
@@ -524,6 +681,7 @@ void bots_setup_menu(const network_game_type mode, const unsigned max_players)
 			{
 				Bot_setup.bots[i].skill = Bot_setup.default_skill;
 				Bot_setup.bots[i].style = Bot_setup.default_style;
+				Bot_setup.bots[i].profile = Bot_setup.default_profile;
 			}
 			citem = static_cast<int>(bm.opt_set_all);
 			continue;
@@ -665,7 +823,7 @@ bool run_ingame_edit(const bot_in_game *const existing)
 	ingame_edit e{};
 	if (existing)
 		e.existing = *existing;
-	const bot_config start{existing ? existing->cfg : bot_config{{}, Bot_game.default_skill, Bot_game.default_style, b::bot_team::automatic}};
+	const bot_config start{existing ? existing->cfg : bot_config{{}, Bot_game.default_skill, Bot_game.default_style, b::bot_team::automatic, Bot_game.default_profile}};
 	e.team_mode = (Game_mode & GM_TEAM) != game_mode_flags{};
 	std::snprintf(e.name_text.data(), e.name_text.size(), "%s", static_cast<const char *>(start.name));
 	/* A playing bot shows the team it is on. */
@@ -673,7 +831,8 @@ bool run_ingame_edit(const bot_in_game *const existing)
 	nm_set_item_text(e.m[bot_edit_menu::label_name], existing ? "Name:" : "Name (empty: the next built-in name):");
 	nm_set_item_input(e.m[bot_edit_menu::name], e.name_text);
 	nm_set_item_slider(e.m[bot_edit_menu::skill], e.skill_text, static_cast<unsigned>(start.skill), 0, b::BOT_SKILL_COUNT - 1, e.skill_saved);
-	nm_set_item_slider(e.m[bot_edit_menu::style], e.style_text, static_cast<unsigned>(start.style), 0, b::BOT_STYLE_COUNT - 1, e.style_saved);
+	nm_set_item_slider(e.m[bot_edit_menu::style], e.style_text, style_choice(start.style, start.profile), 0, style_choice_max(), e.style_saved);
+	e.note_missing(start.style, start.profile);
 	if (e.team_mode)
 		nm_set_item_slider(e.m[bot_edit_menu::team], e.team_text, static_cast<unsigned>(team), 0, b::BOT_TEAM_COUNT - 1, e.team_saved);
 	else
@@ -690,7 +849,8 @@ bool run_ingame_edit(const bot_in_game *const existing)
 		return true;
 	bot_config c{start};
 	c.skill = b::bot_skill{static_cast<uint8_t>(e.m[bot_edit_menu::skill].value)};
-	c.style = b::bot_style{static_cast<uint8_t>(e.m[bot_edit_menu::style].value)};
+	if (static_cast<unsigned>(e.m[bot_edit_menu::style].value) != style_choice(start.style, start.profile))
+		set_style_choice(static_cast<unsigned>(e.m[bot_edit_menu::style].value), c.style, c.profile);
 	if (e.team_mode)
 		c.team = b::bot_team{static_cast<uint8_t>(e.m[bot_edit_menu::team].value)};
 	if (!existing)
@@ -725,7 +885,7 @@ bool run_ingame_edit(const bot_in_game *const existing)
 		bots_remove(existing->pid);
 		return true;
 	}
-	bots_set_skill_style(existing->pid, c.skill, c.style);
+	bots_set_skill_style(existing->pid, c.skill, c.style, c.profile);
 	if (e.team_mode && c.team != team)
 		bots_set_team(existing->pid, c.team);
 	/* An empty name keeps the old one, as does an untouched one (a name
@@ -759,7 +919,7 @@ struct ingame_menu
 	unsigned listed{};
 	std::array<newmenu_item, first_line + MAX_BOTS + 6> m;
 	char skill_text[48]{};
-	char style_text[48]{};
+	char style_text[56]{};
 	char players_text[48]{};
 	std::array<std::array<char, 64>, MAX_BOTS> lines{};
 	ntstring<NM_MAX_TEXT_LEN> skill_saved, style_saved;
@@ -767,7 +927,7 @@ struct ingame_menu
 	void update_labels()
 	{
 		std::snprintf(skill_text, sizeof(skill_text), "New bots' skill: %s", skill_name(Bot_game.default_skill));
-		std::snprintf(style_text, sizeof(style_text), "New bots' style: %s", style_name(Bot_game.default_style));
+		std::snprintf(style_text, sizeof(style_text), "New bots' style: %s", config_style_name(Bot_game.default_style, Bot_game.default_profile));
 	}
 	void build()
 	{
@@ -776,14 +936,16 @@ struct ingame_menu
 		std::snprintf(players_text, sizeof(players_text), "Players: %u of %u, %u bot%s", bots_players_in_game(), static_cast<unsigned>(Netgame.max_numplayers), listed, listed == 1 ? "" : "s");
 		unsigned n{0};
 		nm_set_item_slider(m[n++], skill_text, static_cast<unsigned>(Bot_game.default_skill), 0, b::BOT_SKILL_COUNT - 1, skill_saved);
-		nm_set_item_slider(m[n++], style_text, static_cast<unsigned>(Bot_game.default_style), 0, b::BOT_STYLE_COUNT - 1, style_saved);
+		nm_set_item_slider(m[n++], style_text, style_choice(Bot_game.default_style, Bot_game.default_profile), 0, style_choice_max(), style_saved);
 		nm_set_item_checkbox(m[n++], "Humans replace bots when full", Bot_game.replace);
 		nm_set_item_text(m[n++], players_text);
 		nm_set_item_text(m[n++], "");
 		for (unsigned i = 0; i < listed; ++i)
 		{
 			const auto &bot{bots[i]};
-			std::snprintf(lines[i].data(), lines[i].size(), "%u. %-8s  %-7s %-4s %s", i + 1, static_cast<const char *>(bot.cfg.name), skill_name(bot.cfg.skill), style_short_name(bot.cfg.style), team_label(bot.pid));
+			std::array<char, 8> st;
+			config_style_short(bot.cfg.style, bot.cfg.profile, st);
+			std::snprintf(lines[i].data(), lines[i].size(), "%u. %-8s  %-7s %-7s %s", i + 1, static_cast<const char *>(bot.cfg.name), skill_name(bot.cfg.skill), st.data(), team_label(bot.pid));
 			nm_set_item_menu(m[n++], lines[i].data());
 		}
 		if (!listed)
@@ -831,7 +993,7 @@ int ingame_menu_handler(newmenu *, const d_event &event, ingame_menu *const im)
 			if (citem == ingame_menu::opt_skill)
 				Bot_game.default_skill = b::bot_skill{static_cast<uint8_t>(im->m[ingame_menu::opt_skill].value)};
 			else if (citem == ingame_menu::opt_style)
-				Bot_game.default_style = b::bot_style{static_cast<uint8_t>(im->m[ingame_menu::opt_style].value)};
+				set_style_choice(static_cast<unsigned>(im->m[ingame_menu::opt_style].value), Bot_game.default_style, Bot_game.default_profile);
 			else if (citem == ingame_menu::opt_replace)
 				Bot_game.replace = im->m[ingame_menu::opt_replace].value != 0;
 			im->update_labels();
@@ -877,7 +1039,7 @@ void command_list()
 		const auto &bot{bots[i]};
 		char line[80];
 		const auto team{team_label(bot.pid)};
-		std::snprintf(line, sizeof(line), "%u. %s: %s, %s%s%s", i + 1, static_cast<const char *>(bot.cfg.name), skill_name(bot.cfg.skill), style_name(bot.cfg.style), team[0] ? ", " : "", team);
+		std::snprintf(line, sizeof(line), "%u. %s: %s, %s%s%s", i + 1, static_cast<const char *>(bot.cfg.name), skill_name(bot.cfg.skill), config_style_name(bot.cfg.style, bot.cfg.profile), team[0] ? ", " : "", team);
 		reply(line);
 	}
 }
@@ -922,7 +1084,9 @@ unsigned command_targets(const b::command &c, const bot_list &bots, const unsign
 
 bool bots_chat_command(const char *const text)
 {
-	const auto c{b::parse_command(text)};
+	/* Section 9.13: a loaded style profile's word is a style. */
+	const auto words{bots_style_library().words()};
+	const auto c{b::parse_command(text, words)};
 	if (c.kind == b::command_kind::none)
 		return false;
 	if (!(Game_mode & GM_NETWORK) || !multi_i_am_master())
@@ -962,7 +1126,9 @@ bool bots_chat_command(const char *const text)
 			break;
 		case b::command_kind::add:
 		{
-			bot_config cfg{{}, c.skill.value_or(Bot_game.default_skill), c.style.value_or(Bot_game.default_style), b::bot_team::automatic};
+			bot_config cfg{{}, c.skill.value_or(Bot_game.default_skill), c.style.value_or(Bot_game.default_style), b::bot_team::automatic, c.style ? b::style_name{} : Bot_game.default_profile};
+			if (c.profile)
+				set_style_choice(b::BOT_STYLE_COUNT + *c.profile, cfg.style, cfg.profile);
 			set_name(cfg.name, c.name.data());
 			b::add_verdict why;
 			if (!bots_add(cfg, why))
@@ -986,7 +1152,17 @@ bool bots_chat_command(const char *const text)
 			for (unsigned i = 0; i < count; ++i)
 			{
 				const auto &bot{bots[targets[i]]};
-				bots_set_skill_style(bot.pid, c.skill.value_or(bot.cfg.skill), c.style.value_or(bot.cfg.style));
+				/* The skill command keeps the style (and its profile). */
+				auto style{bot.cfg.style};
+				auto profile{bot.cfg.profile};
+				if (c.style)
+				{
+					style = *c.style;
+					profile = {};
+				}
+				else if (c.profile)
+					set_style_choice(b::BOT_STYLE_COUNT + *c.profile, style, profile);
+				bots_set_skill_style(bot.pid, c.skill.value_or(bot.cfg.skill), style, profile);
 			}
 			break;
 		}
@@ -1002,6 +1178,7 @@ void bots_save_as_default()
 	Bot_setup.count = n;
 	Bot_setup.default_skill = Bot_game.default_skill;
 	Bot_setup.default_style = Bot_game.default_style;
+	Bot_setup.default_profile = Bot_game.default_profile;
 	Bot_setup.replace = Bot_game.replace;
 	for (unsigned i = 0; i < MAX_BOTS; ++i)
 		Bot_setup.bots[i] = i < n ? bots[i].cfg : bot_config{};
@@ -1015,6 +1192,8 @@ void bots_save_as_default()
 
 void bots_ingame_menu()
 {
+	/* Section 9.13: files added or changed since. */
+	bots_load_styles(false);
 	int citem{-1};
 	for (;;)
 	{
@@ -1035,7 +1214,7 @@ void bots_ingame_menu()
 		if (r == MENU_ADD_BOT)
 		{
 			b::add_verdict why;
-			if (!bots_add(bot_config{{}, Bot_game.default_skill, Bot_game.default_style, b::bot_team::automatic}, why))
+			if (!bots_add(bot_config{{}, Bot_game.default_skill, Bot_game.default_style, b::bot_team::automatic, Bot_game.default_profile}, why))
 			{
 				char msg[64];
 				say_add_failure(why, msg, sizeof(msg));

@@ -9,7 +9,7 @@
  * a small text file of `key = value` lines that says how a bot flies and
  * fights "in the style of" a player.  The analysis of the movement
  * recordings (movement_analysis.h, the tool movrec-analyse) writes one
- * per player; the game will load them (step 3).
+ * per player; the game loads them (step 3, bot_style_library.h).
  *
  * A profile names the values of `style_params` (`style.<field>`), of the
  * movement fields of `skill_params` (`skill.<field>`) and of constants of
@@ -17,7 +17,7 @@
  * today (`tune.<name>`), each with a confidence.  Keys a reader does not
  * know are kept and otherwise ignored, so the format can grow.
  *
- * Header-only, standard library and bot_brain.h only.
+ * Header-only, standard library and the bots' pure headers only.
  */
 
 #pragma once
@@ -33,6 +33,8 @@
 #include <vector>
 
 #include "bot_brain.h"
+#include "bot_goals.h"
+#include "bot_weapons.h"
 
 namespace dcx::bot {
 
@@ -106,7 +108,10 @@ inline constexpr std::array<style_profile_key, 30> style_profile_keys{{
 	{"tune.range_lo", 15, 400, "near edge of the fight band (BOT_RANGE_LO, 35)"},
 	{"tune.range_hi", 30, 800, "far edge of the fight band (BOT_RANGE_HI, 95)"},
 	{"tune.reverse_turn", 0, 1, "share of the large turns flown backwards (turn_habits::reverse, 0.12)"},
-	{"tune.reverse_turn_speed", 0, 1, "backward speed in such a turn, share of the top speed (REVERSE_TURN_SPEED, 0.8)"},
+	/* The review of PR #64: no less than 0.3, a reverse turn at no speed
+	 * is a bot that stands while its nose comes round.
+	 */
+	{"tune.reverse_turn_speed", 0.3, 1, "backward speed in such a turn, share of the top speed (REVERSE_TURN_SPEED, 0.8)"},
 	{"tune.turn_boost", 0, 1, "share of the large turns followed by a push forward (turn_habits::boost, 0.8)"},
 	{"tune.turn_boost_burn", 0, 1, "share of those pushes with the afterburner (turn_habits::boost_burn, 0.3)"},
 	{"tune.burn_retreat", 0, 1, "share of the time fleeing with the afterburner"},
@@ -298,12 +303,17 @@ inline std::string write_style_profile(const style_profile &p)
 
 /* The profile in `text`, or nothing if it is not one (no `format` line,
  * or a format newer than this reader).  Known keys are clamped to their
- * range; lines that are not understood are skipped.
+ * range; lines that are not understood are skipped.  The review of PR
+ * #64: a UTF-8 byte order mark (an editor's, on a hand-edited file) is
+ * skipped; it made the first line (`format`) unknown and the file no
+ * profile.
  */
 [[nodiscard]]
-inline std::optional<style_profile> parse_style_profile(const std::string_view text)
+inline std::optional<style_profile> parse_style_profile(std::string_view text)
 {
 	using namespace style_profile_detail;
+	if (constexpr std::string_view bom{"\xef\xbb\xbf"}; text.starts_with(bom))
+		text.remove_prefix(bom.size());
 	style_profile p;
 	p.format = 0;
 	std::vector<std::pair<std::string, style_confidence>> confidences;
@@ -370,38 +380,75 @@ inline std::optional<style_profile> parse_style_profile(const std::string_view t
  * of lower confidence goes only part of the way from the base to the
  * profile (style_confidence_weight).  `skill` decides the aim, the
  * reaction and the senses as before; only its movement fields change.
+ *
+ * Section 9.13 of Documentation/multiplayer-bots.md: every `style.`,
+ * `skill.` and `tune.` key drives the bot.  The `tune.` keys become the
+ * bot's tune_params:
+ *
+ * - `tune.range_lo`, `tune.range_hi`: the fight band; with either, the
+ *   band is the profile's own and `style.range_scale` (the same
+ *   measurement) is not applied on top (1);
+ * - `tune.reverse_turn`, `reverse_turn_speed`, `turn_boost`,
+ *   `turn_boost_burn`: the turn habits;
+ * - `tune.burn_retreat` (a share of the fleeing time) and
+ *   `tune.burn_roam` (of the time with no enemy in sight): the share of
+ *   the draws that light the afterburner, the measured share over what
+ *   a bot that burns at every draw reaches (FLEE_BURN_FULL_TIME,
+ *   ROAM_BURN_FULL_TIME);
+ * - `tune.missile_interval_scale`, `tune.volley_size`,
+ *   `tune.pursuit_seconds`: in place of the style's and the skill's
+ *   tables (0 seconds: it lets a lost enemy go);
+ * - `tune.grab_detour` (the share of pickups off course): a scale of the
+ *   detour a grab may take in a fight, over the share the bots took
+ *   with the scale 1 (GRAB_DETOUR_BASE_SHARE).
  */
 struct style_profile_params
 {
 	skill_params skill;
 	style_params style;
+	tune_params tune;
 };
+
+/* A bot that burns at every draw spends about this share of the time
+ * fleeing (the charge allows no more: 3 s of burning, then 8 s to
+ * recharge, relit at 30 %) with the afterburner (test-bot-fight-sim).
+ */
+constexpr double FLEE_BURN_FULL_TIME{0.4};
+/* ... and about this share of the time with no enemy in sight (only on
+ * long straight flights, above the charge reserve).
+ */
+constexpr double ROAM_BURN_FULL_TIME{0.05};
+/* The share of pickups taken off course by the bots of the recordings
+ * of 2026-09-30 (detour scale 1).
+ */
+constexpr double GRAB_DETOUR_BASE_SHARE{0.45};
 
 [[nodiscard]]
 inline style_profile_params apply_style_profile(const style_profile &p, const bot_skill skill)
 {
-	style_profile_params r{skill_of(skill), style_of(p.base_style)};
-	const auto blend{[&p](const std::string_view key, const double base) {
+	style_profile_params r{skill_of(skill), style_of(p.base_style), {}};
+	const auto blend{[&p](const std::string_view key, const double base, const auto map) {
 		const auto e{p.find(key)};
 		if (!e)
 			return base;
 		const auto k{find_style_profile_key(key)};
-		const double v{k ? std::clamp(e->value, k->lo, k->hi) : e->value};
+		const double v{map(k ? std::clamp(e->value, k->lo, k->hi) : e->value)};
 		return base + (v - base) * style_confidence_weight(e->confidence);
 	}};
+	const auto same{[](const double v) { return v; }};
 	auto &s{r.style};
-	s.retreat_shields = blend("style.retreat_shields", s.retreat_shields);
-	s.engage_weight = blend("style.engage_weight", s.engage_weight);
-	s.collect_weight = blend("style.collect_weight", s.collect_weight);
-	s.range_scale = blend("style.range_scale", s.range_scale);
-	s.chase_memory = blend("style.chase_memory", s.chase_memory);
-	s.dodge_bonus = blend("style.dodge_bonus", s.dodge_bonus);
-	s.mine_interval = blend("style.mine_interval", s.mine_interval);
-	s.strafe_scale = blend("style.strafe_scale", s.strafe_scale);
-	s.close_scale = blend("style.close_scale", s.close_scale);
-	s.behind_engage = blend("style.behind_engage", s.behind_engage);
-	s.outgunned_retreat = blend("style.outgunned_retreat", s.outgunned_retreat);
-	s.burn_chase_distance = blend("style.burn_chase_distance", s.burn_chase_distance);
+	s.retreat_shields = blend("style.retreat_shields", s.retreat_shields, same);
+	s.engage_weight = blend("style.engage_weight", s.engage_weight, same);
+	s.collect_weight = blend("style.collect_weight", s.collect_weight, same);
+	s.range_scale = blend("style.range_scale", s.range_scale, same);
+	s.chase_memory = blend("style.chase_memory", s.chase_memory, same);
+	s.dodge_bonus = blend("style.dodge_bonus", s.dodge_bonus, same);
+	s.mine_interval = blend("style.mine_interval", s.mine_interval, same);
+	s.strafe_scale = blend("style.strafe_scale", s.strafe_scale, same);
+	s.close_scale = blend("style.close_scale", s.close_scale, same);
+	s.behind_engage = blend("style.behind_engage", s.behind_engage, same);
+	s.outgunned_retreat = blend("style.outgunned_retreat", s.outgunned_retreat, same);
+	s.burn_chase_distance = blend("style.burn_chase_distance", s.burn_chase_distance, same);
 	auto &k{r.skill};
 	/* A skill that does not strafe or dodge at all (Trainee) keeps that:
 	 * the profile is a style, not a skill.
@@ -411,13 +458,40 @@ inline style_profile_params apply_style_profile(const style_profile &p, const bo
 		if (const auto e{p.find("skill.strafe")}; e && e->confidence != style_confidence::low)
 			k.strafe = e->value >= 0.5;
 		const auto ms{[](const double v) { return static_cast<unsigned>(std::max(v, 0.0) + 0.5); }};
-		k.strafe_min_ms = ms(blend("skill.strafe_min_ms", k.strafe_min_ms));
-		k.strafe_max_ms = std::max(k.strafe_min_ms, ms(blend("skill.strafe_max_ms", k.strafe_max_ms)));
-		k.strafe_vertical = blend("skill.strafe_vertical", k.strafe_vertical);
-		k.strafe_speed = blend("skill.strafe_speed", k.strafe_speed);
+		k.strafe_min_ms = ms(blend("skill.strafe_min_ms", k.strafe_min_ms, same));
+		k.strafe_max_ms = std::max(k.strafe_min_ms, ms(blend("skill.strafe_max_ms", k.strafe_max_ms, same)));
+		k.strafe_vertical = blend("skill.strafe_vertical", k.strafe_vertical, same);
+		k.strafe_speed = blend("skill.strafe_speed", k.strafe_speed, same);
 	}
 	if (k.dodge_prob > 0)
-		k.dodge_prob = std::clamp(blend("skill.dodge_prob", k.dodge_prob), 0.0, 0.95);
+		k.dodge_prob = std::clamp(blend("skill.dodge_prob", k.dodge_prob, same), 0.0, 0.95);
+	/* Section 9.13: the tuned constants. */
+	auto &t{r.tune};
+	t.range_lo = blend("tune.range_lo", t.range_lo, same);
+	t.range_hi = std::max(t.range_lo + 10, blend("tune.range_hi", t.range_hi, same));
+	/* The review of PR #64: with either edge (a hand-written file may
+	 * give one), the band is the profile's: the range scale on top would
+	 * take a band of 400 units to 1200.
+	 */
+	if (p.find("tune.range_lo") || p.find("tune.range_hi"))
+		s.range_scale = 1;
+	auto &h{t.turns};
+	h.reverse = blend("tune.reverse_turn", h.reverse, same);
+	h.reverse_speed = blend("tune.reverse_turn_speed", h.reverse_speed, same);
+	h.boost = blend("tune.turn_boost", h.boost, same);
+	h.boost_burn = blend("tune.turn_boost_burn", h.boost_burn, same);
+	const auto share{[](const double full) {
+		return [full](const double v) { return std::clamp(v / full, 0.0, 1.0); };
+	}};
+	t.flee_burn = blend("tune.burn_retreat", t.flee_burn, share(FLEE_BURN_FULL_TIME));
+	t.roam_burn = blend("tune.burn_roam", t.roam_burn, share(ROAM_BURN_FULL_TIME));
+	if (p.find("tune.missile_interval_scale"))
+		t.missile_interval_scale = blend("tune.missile_interval_scale", missile_interval_scale(p.base_style), same);
+	if (p.find("tune.volley_size"))
+		t.volley_size = blend("tune.volley_size", std::max(1, volley_table_size(k.weapon_smarts, p.base_style)), same);
+	if (p.find("tune.pursuit_seconds"))
+		t.pursuit_seconds = blend("tune.pursuit_seconds", pursuit_seconds(skill, p.base_style), same);
+	t.grab_detour_scale = blend("tune.grab_detour", t.grab_detour_scale, [](const double v) { return std::clamp(v / GRAB_DETOUR_BASE_SHARE, 0.25, 3.0); });
 	return r;
 }
 

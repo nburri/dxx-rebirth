@@ -43,8 +43,15 @@ struct bot_config
 {
 	callsign_t name{};
 	bot::bot_skill skill{bot::BOT_DEFAULT_SKILL};
+	/* With a style profile: its base style (what the bot flies when the
+	 * profile's file is gone).
+	 */
 	bot::bot_style style{bot::bot_style::balanced};
 	bot::bot_team team{bot::bot_team::automatic};
+	/* Section 9.13: the style profile the bot flies, by name (empty: the
+	 * built-in `style`).
+	 */
+	bot::style_name profile{};
 };
 
 /* The host's bot setup, from the setup menu (section 6.2).  Bots take
@@ -55,6 +62,7 @@ struct bot_setup
 	unsigned count{};
 	bot::bot_skill default_skill{bot::BOT_DEFAULT_SKILL};
 	bot::bot_style default_style{bot::bot_style::balanced};
+	bot::style_name default_profile{};
 	std::array<bot_config, MAX_BOTS> bots{};
 	/* Section 2.3: a human who finds the game full replaces the most
 	 * recently added bot.
@@ -76,10 +84,21 @@ struct bot_game_options
 {
 	bot::bot_skill default_skill{bot::BOT_DEFAULT_SKILL};
 	bot::bot_style default_style{bot::bot_style::balanced};
+	bot::style_name default_profile{};
 	bool replace{true};
 };
 
 extern bot_game_options Bot_game;
+
+/* Section 9.13: the style profiles the host has (the `.botstyle` files
+ * of `botstyles/` in the write directory), read by bots_load_styles.
+ */
+[[nodiscard]]
+const bot::style_library &bots_style_library();
+/* Read the folder again: at the first setup, when a Bots screen opens,
+ * and when a game starts.  With `report`, one console line per file.
+ */
+void bots_load_styles(bool report);
 
 /* Section 2.2: the slot's player is (or, after it left, was) a bot: on
  * the host from the setup, on a client from the PLAYER_LIST flag.  For
@@ -178,8 +197,10 @@ std::optional<playernum_t> bots_add(const bot_config &wanted, ::dcx::bot::add_ve
  * once, "has left the game" for everyone, the slot free).
  */
 bool bots_remove(playernum_t pnum);
-/* Bot `pnum` plays `skill` and `style` from now on. */
-bool bots_set_skill_style(playernum_t pnum, ::dcx::bot::bot_skill skill, ::dcx::bot::bot_style style);
+/* Bot `pnum` plays `skill` and `style` (with a style profile: its name
+ * in `profile`, `style` its base) from now on.
+ */
+bool bots_set_skill_style(playernum_t pnum, ::dcx::bot::bot_skill skill, ::dcx::bot::bot_style style, const ::dcx::bot::style_name &profile = {});
 /* Bot `pnum`'s team (team modes; automatic keeps its team). */
 bool bots_set_team(playernum_t pnum, ::dcx::bot::bot_team team);
 /* Bot `pnum` is called `name` (made unique) from now on. */

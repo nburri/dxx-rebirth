@@ -50,6 +50,7 @@
 #include "bot_goals.h"
 #include "bot_nav.h"
 #include "bot_flight_model.h"
+#include "bot_style_profile.h"
 
 namespace mr = dcx::movrec;
 namespace an = dcx::movrec::analysis;
@@ -88,6 +89,7 @@ mr::vec3 to_mr(const vec3 &v)
 
 
 constexpr unsigned RECORD_RATE{30};
+constexpr std::size_t STYLE_FILE_MAX_BYTES_SIM{64 * 1024};
 constexpr unsigned CYCLE_S{40};
 constexpr std::array<double, 6> CYCLE_SHIELDS{{100, 80, 60, 45, 30, 15}};
 
@@ -148,6 +150,8 @@ struct flight_result
 	an::player_stats stats;
 	/* Seconds with the afterburner, and all. */
 	double burn_s{}, total_s{};
+	/* The bot's own large turns: flown backwards, sliding. */
+	unsigned turns_reversing{}, turns_sliding{};
 };
 
 /* What the bot is set to. */
@@ -158,6 +162,10 @@ struct pilot_setup
 	unsigned cycles{24};
 	uint32_t seed{1};
 	double fps{60};
+	/* Section 9.13: a style profile's parameters (apply_style_profile)
+	 * in place of the skill's and the style's.
+	 */
+	const style_profile_params *params{};
 };
 
 std::vector<uint8_t> write_recording(const std::vector<moment> &moments)
@@ -284,8 +292,10 @@ std::vector<uint8_t> write_recording(const std::vector<moment> &moments)
 flight_result fly(const pilot_setup &setup)
 {
 	const auto lim{ship_limits()};
-	const auto &sk{skill_of(setup.skill)};
-	const auto &st{style_of(setup.style)};
+	const style_profile_params prm{setup.params ? *setup.params : style_profile_params{skill_of(setup.skill), style_of(setup.style), {}}};
+	const auto &sk{prm.skill};
+	const auto &st{prm.style};
+	const auto &tune{prm.tune};
 	const double max_speed{lim.max_speed};
 	const double FPS{setup.fps};
 	const fix ft{to_fix(1 / FPS)};
@@ -362,7 +372,7 @@ flight_result fly(const pilot_setup &setup)
 		{
 			++tick;
 			aim.update(rng, radians(sk.aim_sigma_deg), ticks_from_ms(sk.aim_drift_ms));
-			const double range_lo{35 * st.range_scale}, range_hi{95 * st.range_scale};
+			const double range_lo{tune.range_lo * st.range_scale}, range_hi{tune.range_hi * st.range_scale};
 			juke.update(rng, ticks_from_ms(sk.strafe_min_ms), ticks_from_ms(sk.strafe_max_ms), range_lo, range_hi, sk.strafe_vertical);
 			const auto to{e.pos - s.pos};
 			const double dist{length(to)};
@@ -389,7 +399,7 @@ flight_result fly(const pilot_setup &setup)
 					if (!retreat_goal_before || tick >= flee_roll_at)
 					{
 						flee_turned = rng.uniform() < FLEE_TURNED_SHARE;
-						flee_burn = rng.uniform() < FLEE_BURN_SHARE;
+						flee_burn = rng.uniform() < tune.flee_burn;
 						flee_roll_at = tick + FLEE_ROLL_TICKS;
 					}
 					retreat_goal = true;
@@ -407,9 +417,15 @@ flight_result fly(const pilot_setup &setup)
 				else
 				{
 					const double err{angle_between(frame3_now.f, face)};
-					const auto turn{turning.update(err, tick, dist, range_lo, rng)};
+					const auto before{turning.phase};
+					const auto turn{turning.update(err, tick, dist, range_lo, rng, tune.turns)};
+					if (turn != before)
+					{
+						out.turns_reversing += turn == turn_phase::reversing;
+						out.turns_sliding += turn == turn_phase::sliding;
+					}
 					if (turn == turn_phase::reversing || turn == turn_phase::boost)
-						wanted = turn_round_velocity(turn, {}, to, s.vel, frame3_now.r * static_cast<double>(heading_pref), max_speed);
+						wanted = turn_round_velocity(turn, {}, to, s.vel, frame3_now.r * static_cast<double>(heading_pref), max_speed, tune.turns.reverse_speed);
 					else
 					{
 						keys = true;
@@ -599,6 +615,73 @@ int main(const int argc, char **const argv)
 			CHECK_RANGE(s.turn_180_ms.p50, ref.turn_180_ms.p50 * 0.9, ref.turn_180_ms.p50 * 1.1);
 		}
 	}
+	/* Section 9.13: a style profile flies as it says.  A profile of a
+	 * pilot who turns backwards, bobs as much as he strafes and never
+	 * burns fleeing, and one who fights far off, on a Hotshot bot.
+	 */
+	{
+		const auto profile{parse_style_profile(
+			"format = 1\n"
+			"name = test style\n"
+			"base_style = Balanced\n"
+			"skill.strafe_vertical = 1\n"
+			"tune.reverse_turn = 1\n"
+			"tune.burn_retreat = 0\n")};
+		CHECK(profile);
+		const auto params{apply_style_profile(*profile, bot_skill::hotshot)};
+		const auto r{fly({.skill = bot_skill::hotshot, .params = &params})};
+		print_row("test style", r);
+		const auto &s{r.stats}, &h{by_skill[2].stats};
+		CHECK(s.strafe_vertical > 0.7 && s.strafe_vertical > h.strafe_vertical + 0.3);
+		/* Every large turn of its own backwards.  (The analysis counts a
+		 * turn as reverse only with reverse thrust in 40 % of it; the
+		 * bot's reverse turn holds its momentum away from the target,
+		 * forward thrust while the nose points away, reverse only in
+		 * its second half, so the analysis' share hardly moves:
+		 * Documentation/multiplayer-bots.md section 9.13.)
+		 */
+		CHECK(r.turns_reversing > 20 && r.turns_sliding == 0);
+		const auto &hr{by_skill[2]};
+		CHECK(hr.turns_sliding > 3 * hr.turns_reversing);
+		CHECK_RANGE(s.ab_situation_rate[1], 0, 0.02);
+	}
+	{
+		const auto profile{parse_style_profile(
+			"format = 1\n"
+			"name = far style\n"
+			"tune.range_lo = 110\n"
+			"tune.range_hi = 170\n")};
+		CHECK(profile);
+		const auto params{apply_style_profile(*profile, bot_skill::hotshot)};
+		const auto r{fly({.skill = bot_skill::hotshot, .params = &params})};
+		print_row("far style", r);
+		/* The scripted enemy closes in faster than a bot backs off:
+		 * the bot keeps backing off.
+		 */
+		CHECK(r.stats.back_off_share > by_skill[2].stats.back_off_share + 0.2);
+	}
+	/* `-f FILE`: fly a style profile on a Hotshot bot. */
+	for (int i{1}; i + 1 < argc; ++i)
+		if (!std::strcmp(argv[i], "-f"))
+		{
+			std::FILE *const f{std::fopen(argv[i + 1], "rb")};
+			if (!f)
+				return 1;
+			std::string text;
+			for (int c; (c = std::fgetc(f)) != EOF && text.size() < STYLE_FILE_MAX_BYTES_SIM;)
+				text += static_cast<char>(c);
+			std::fclose(f);
+			const auto profile{parse_style_profile(text)};
+			if (!profile)
+				return 1;
+			for (const auto skill : {bot_skill::hotshot, bot_skill::insane})
+			{
+				const auto params{apply_style_profile(*profile, skill)};
+				char name[48];
+				std::snprintf(name, sizeof(name), "%.24s %s", profile->name.c_str(), bot_skill_names[static_cast<unsigned>(skill)]);
+				print_row(name, fly({.skill = skill, .params = &params}));
+			}
+		}
 	std::puts("test-bot-fight-sim: all checks passed");
 	return 0;
 }
