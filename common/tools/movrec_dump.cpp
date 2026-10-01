@@ -44,6 +44,8 @@ struct player_summary
 	std::string callsign;
 	std::uint8_t flags{};
 	std::uint64_t samples{}, alive{}, with_controls{};
+	/* Of them, shared by the player's machine (-sharemoves). */
+	std::uint64_t shared_controls{};
 	double speed_sum{};
 	std::uint64_t reversing{}, strafing{}, climbing{};
 	std::uint64_t ab_known{}, ab_on{};
@@ -309,12 +311,14 @@ int dump(const char *const path, const options &opt)
 		if (!p.samples || !wanted(pid))
 			continue;
 		const double dt{1.0 / h.tick_rate};
-		std::printf("  player %u \"%s\"%s%s: %" PRIu64 " samples, alive %.1f s\n", pid, p.callsign.c_str(), (p.flags & player_flag::bot) ? " (bot)" : "", (p.flags & player_flag::local) ? " (local)" : "", p.samples, p.alive * dt);
+		std::printf("  player %u \"%s\"%s%s%s: %" PRIu64 " samples, alive %.1f s\n", pid, p.callsign.c_str(), (p.flags & player_flag::bot) ? " (bot)" : "", (p.flags & player_flag::local) ? " (local)" : "", (p.flags & player_flag::shares_controls) ? " (shares controls)" : "", p.samples, p.alive * dt);
 		std::printf("    mean speed %.1f, reversing %.0f%%, strafing %.0f%%, climbing/diving %.0f%% of the time alive\n", p.alive ? p.speed_sum / p.alive : 0.0, pct(p.reversing, p.alive), pct(p.strafing, p.alive), pct(p.climbing, p.alive));
 		if (p.ab_known)
 			std::printf("    afterburner %.1f%% of %" PRIu64 " known samples\n", pct(p.ab_on, p.ab_known), p.ab_known);
 		if (p.with_controls)
-			std::printf("    controls in %" PRIu64 " samples; turning hard %.0f%%, of which reverse thrust %.0f%%\n", p.with_controls, pct(p.turning, p.with_controls), pct(p.turning_reverse, p.turning));
+			std::printf("    controls in %" PRIu64 " samples (%.0f%% of the time alive: %" PRIu64 " flown here, %" PRIu64 " shared by the player's machine); turning hard %.0f%%, of which reverse thrust %.0f%%\n", p.with_controls, pct(p.with_controls, p.alive), p.with_controls - p.shared_controls, p.shared_controls, pct(p.turning, p.with_controls), pct(p.turning_reverse, p.turning));
+		else if (p.alive)
+			std::printf("    no controls (estimated from the motion by movrec-analyse)\n");
 		std::printf("    enemy in sight %.0f%% (mean distance %.0f), under attack %.0f%%, aimed at %.0f%%\n", pct(p.enemy_seen, p.alive), p.enemy_seen ? p.enemy_dist_sum / p.enemy_seen : 0.0, pct(p.attacked, p.alive), pct(p.aimed_at, p.alive));
 		std::printf("    fired %" PRIu64 " primary, %" PRIu64 " secondary; hits dealt %" PRIu64 " (%.0f), taken %" PRIu64 " (%.0f; %u splash); kills %" PRIu64 ", deaths %" PRIu64 " (%" PRIu64 " suicides), respawns %" PRIu64 "; pickups %" PRIu64 ", weapon switches %" PRIu64 "\n",
 			p.fire_primary, p.fire_secondary,

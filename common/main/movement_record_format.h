@@ -43,10 +43,12 @@ constexpr std::uint16_t FORMAT_VERSION{1};
  * fields appended to the header): 0 for the first release (exp-25), 1
  * for the sync record, splash hits, the scaled relative vectors, the
  * afterburner "known once seen" rule and slot reuse
- * (Documentation/movement-recording.md section 4).  Appended to the
- * header; a header without it is minor 0.
+ * (Documentation/movement-recording.md section 4); 2 for the shared
+ * controls (-sharemoves: sample_flag2::controls_shared,
+ * player_flag::shares_controls).  Appended to the header; a header
+ * without it is minor 0.
  */
-constexpr std::uint16_t FORMAT_MINOR{1};
+constexpr std::uint16_t FORMAT_MINOR{2};
 /* "MRCK" as bytes in the file. */
 constexpr std::uint32_t CHUNK_MAGIC{0x4b43524du};
 /* magic, sequence, payload size, payload CRC-32 */
@@ -112,6 +114,11 @@ constexpr std::uint8_t local{1 << 3};		/* flown on the recording machine */
 constexpr std::uint8_t guided{1 << 4};		/* steering a guided missile */
 constexpr std::uint8_t headlight{1 << 5};
 constexpr std::uint8_t buttons_known{1 << 6};	/* fire_primary/fire_secondary are meaningful */
+/* Minor 2: the controls are exact, but come from the machine that flies
+ * the ship, which shared them over the network (-sharemoves on a
+ * client); not `local`.  Only with sample_flag::controls.
+ */
+constexpr std::uint8_t controls_shared{1 << 7};
 }
 
 /* sample::context: bits 0-1 the kind of `enemy_id`, then flags. */
@@ -137,6 +144,10 @@ constexpr std::uint8_t connected{1 << 0};
 constexpr std::uint8_t bot{1 << 1};
 constexpr std::uint8_t local{1 << 2};
 constexpr std::uint8_t recorded{1 << 3};
+/* Minor 2: the player shares its controls (-sharemoves): set on the
+ * host once its controls arrived, and on the sharing client for itself.
+ */
+constexpr std::uint8_t shares_controls{1 << 4};
 }
 
 /* event_record::kind for fire */
@@ -243,6 +254,29 @@ inline std::int8_t quantise_control(const double v)
 {
 	const double q{std::round(v * quant::CONTROL_SCALE)};
 	return static_cast<std::int8_t>(std::clamp(q, -127.0, 127.0));
+}
+
+/* The controls as stored: forward, sideways, vertical, pitch, heading,
+ * bank, 1/60 of full deflection (sample::controls).
+ */
+using control_array = std::array<std::int8_t, 6>;
+/* Full deflection, and the forward thrust of a full afterburner (the
+ * game's afterburner scale goes up to 2).  What a pilot can give.
+ */
+constexpr std::int8_t CONTROL_FULL{60};
+constexpr std::int8_t CONTROL_FORWARD_MAX{120};
+
+/* Controls from another machine (untrusted) limited to what a pilot can
+ * give: forward -1 to 2, the other axes -1 to 1.
+ */
+[[nodiscard]]
+constexpr control_array clamp_controls(const control_array &c)
+{
+	constexpr std::int8_t lowest{-CONTROL_FULL};
+	control_array r{};
+	for (std::size_t i{}; i != r.size(); ++i)
+		r[i] = std::clamp(c[i], lowest, i == 0 ? CONTROL_FORWARD_MAX : CONTROL_FULL);
+	return r;
 }
 
 /* The rotation as a unit quaternion (w, x, y, z), w >= 0, from the
@@ -559,9 +593,26 @@ struct sample
 	 * 1.0 = full deflection = 60; forward reaches 2.0 with afterburner.
 	 * Present when flags has sample_flag::controls.
 	 */
-	std::array<std::int8_t, 6> controls{};
+	control_array controls{};
 	constexpr bool operator==(const sample &) const = default;
 };
+
+/* A sample of a ship flown on another machine that shared its exact
+ * controls (-sharemoves): the controls, clamped, marked shared, and the
+ * afterburner from them as for a ship flown here (forward thrust above
+ * full).
+ */
+constexpr void set_shared_controls(sample &s, const control_array &c)
+{
+	s.controls = clamp_controls(c);
+	s.flags |= sample_flag::controls;
+	s.flags2 |= sample_flag2::controls_shared | sample_flag2::afterburner_known;
+	s.flags2 &= static_cast<std::uint8_t>(~sample_flag2::local);
+	if (s.controls[0] > CONTROL_FULL)
+		s.flags |= sample_flag::afterburner;
+	else
+		s.flags &= static_cast<std::uint8_t>(~sample_flag::afterburner);
+}
 
 constexpr std::size_t SAMPLE_BASE_SIZE{54};
 constexpr std::size_t SAMPLE_CONTROLS_SIZE{6};

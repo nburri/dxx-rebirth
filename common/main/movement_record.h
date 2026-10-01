@@ -13,6 +13,7 @@
 
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include "dxxsconf.h"
 #include "dsx-ns.h"
@@ -53,6 +54,14 @@ void movement_record_damage(unsigned victim, unsigned attacker, std::uint8_t att
 void movement_record_kill(const object &victim, const object *killer);
 /* Player `pnum` picked up a powerup of type `powerup`. */
 void movement_record_pickup(unsigned pnum, unsigned powerup);
+/* -sharemoves on a client: the local player's controls this frame as the
+ * recording stores them (forward, sideways, vertical, pitch, heading,
+ * bank; 60 = full deflection), for its INPUT chunk.  False while there
+ * are none to share (not alive, steering a guided missile, not
+ * -sharemoves).
+ */
+[[nodiscard]]
+bool movement_record_shared_controls(std::array<std::int8_t, 6> &controls);
 
 }
 #endif

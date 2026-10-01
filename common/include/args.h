@@ -139,9 +139,11 @@ struct CArg : prohibit_void_ptr<>
 	/* -recordmoves: record how the players move
 	 * (Documentation/movement-recording.md); -recordmoves-rate N the
 	 * samples per second (10-60, 0 = 30); -recordmoves-bots also records
-	 * the bots.
+	 * the bots.  -sharemoves (implies -recordmoves): a client also sends
+	 * its exact controls to the host for the host's recording.
 	 */
 	bool SysRecordMoves;
+	bool SysShareMoves;
 	bool SysRecordMovesBots;
 	uint8_t SysRecordMovesRate;
 #if DXX_USE_TRACKER

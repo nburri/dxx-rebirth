@@ -809,6 +809,10 @@ struct track_point
 	std::array<double, 6> ctl{};
 	bool has_ctl{};
 	bool exact{};
+	/* Exact, shared over the network by the player's machine
+	 * (-sharemoves, format minor 2).
+	 */
+	bool shared{};
 	/* The estimate from the motion (smoothed over three samples), for
 	 * every point that has one: compared with the exact controls, it is
 	 * the estimator's own test.
@@ -920,6 +924,7 @@ inline track build_track(const merged_session &ms, const std::size_t player, con
 			p.est_valid = true;
 		}
 		p.exact = p.alive && (p.m.s.flags & sample_flag::controls);
+		p.shared = p.exact && (p.m.s.flags2 & sample_flag2::controls_shared);
 		p.has_ctl = p.exact || p.est_valid;
 		if (p.exact)
 			p.ctl = p.u.controls;
@@ -1019,6 +1024,10 @@ struct player_stats
 	unsigned sessions{};
 	/* Seconds: recorded, alive, with exact controls, with estimated. */
 	double recorded_s{}, alive_s{}, exact_s{}, estimated_s{};
+	/* Of the exact: shared by the player's machine over the network
+	 * (-sharemoves), not recorded there.
+	 */
+	double shared_s{};
 	/* The estimator against the exact controls, where both exist: root
 	 * mean square error of the three thrust axes (share of full thrust).
 	 */
@@ -1145,7 +1154,7 @@ namespace detail {
 
 struct accum
 {
-	double recorded_s{}, alive_s{}, exact_s{}, estimated_s{};
+	double recorded_s{}, alive_s{}, exact_s{}, estimated_s{}, shared_s{};
 	double est_err2{};
 	std::size_t est_n{};
 	std::vector<double> speed;
@@ -1235,6 +1244,8 @@ inline void scan_samples(const track &tr, accum &a, const ship_model &ship, cons
 		if (p.has_ctl)
 		{
 			(p.exact ? a.exact_s : a.estimated_s) += w;
+			if (p.shared)
+				a.shared_s += w;
 			a.ctl_s += w;
 			const bool fwd{p.ctl[0] > CONTROL_USED}, rev{p.ctl[0] < -CONTROL_USED};
 			const bool side{std::abs(p.ctl[1]) > CONTROL_USED}, vert{std::abs(p.ctl[2]) > CONTROL_USED};
@@ -1743,6 +1754,7 @@ inline player_stats analyse(const std::span<const track> tracks, const ship_mode
 	s.recorded_s = a.recorded_s;
 	s.alive_s = a.alive_s;
 	s.exact_s = a.exact_s;
+	s.shared_s = a.shared_s;
 	s.estimated_s = a.estimated_s;
 	s.estimator_n = a.est_n;
 	s.estimator_rms = a.est_n ? std::sqrt(a.est_err2 / (3.0 * static_cast<double>(a.est_n))) : 0;
@@ -2101,6 +2113,8 @@ inline bot::style_profile propose_profile(const player_stats &s, const bot::bot_
 	info("measured.alive_minutes", s.alive_s / 60);
 	info("measured.fight_minutes", s.fight_s / 60);
 	info("measured.estimated_controls_share", s.estimated_share());
+	if (s.shared_s > 0)
+		info("measured.shared_controls_share", s.shared_s / (s.exact_s + s.estimated_s));
 	info("measured.speed_mean", s.speed.mean);
 	if (s.los_distance.n)
 		info("measured.enemy_distance_median", s.los_distance.p50);
@@ -2252,7 +2266,10 @@ inline std::string write_report(const player_stats &s, const bot::style_profile 
 	std::string o;
 	appendf(o, "== %s%s ==\n", s.callsign.c_str(), s.bot ? " (bot)" : "");
 	appendf(o, "data: %u game%s, %.1f min recorded, %.1f min alive, %.1f min in fights; kills %u, deaths %u (%u suicides)\n", s.sessions, s.sessions == 1 ? "" : "s", s.recorded_s / 60, s.alive_s / 60, s.fight_s / 60, s.kills, s.deaths, s.suicides);
-	appendf(o, "controls: exact %.1f min, estimated from the motion %.1f min (%.0f%%)", s.exact_s / 60, s.estimated_s / 60, pct(s.estimated_share()));
+	appendf(o, "controls: exact %.1f min", s.exact_s / 60);
+	if (s.shared_s > 0)
+		appendf(o, " (%.1f min of it shared by the player's machine)", s.shared_s / 60);
+	appendf(o, ", estimated from the motion %.1f min (%.0f%%)", s.estimated_s / 60, pct(s.estimated_share()));
 	if (s.estimator_n)
 		appendf(o, "; the estimate is off by %.2f of full thrust (rms) where both exist", s.estimator_rms);
 	o += '\n';

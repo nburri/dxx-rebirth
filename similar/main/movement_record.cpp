@@ -23,6 +23,7 @@
 #include <cmath>
 #include <cstdio>
 #include <ctime>
+#include <optional>
 #include <string>
 
 #include "movement_record.h"
@@ -136,6 +137,10 @@ struct slot_occupant
 	 * send 0, which is no information).
 	 */
 	bool afterburner_seen{};
+	/* Host: the client shares its controls (-sharemoves): they arrived in
+	 * its INPUT at least once.
+	 */
+	bool shares_controls{};
 };
 
 struct recorder
@@ -283,6 +288,19 @@ std::uint8_t player_team(const unsigned pid)
 	return 0xff;
 }
 
+/* The player shares its controls (-sharemoves): the host knows it from
+ * its INPUT, a sharing client of itself.
+ */
+[[nodiscard]]
+bool shares_controls(const unsigned pid)
+{
+	if (!mode_multi() || !player_in_game(pid))
+		return false;
+	if (pid == Player_num)
+		return CGameArg.SysShareMoves && !multi_i_am_master();
+	return R.occupants[pid].in_game && R.occupants[pid].shares_controls;
+}
+
 [[nodiscard]]
 std::uint8_t player_flags(const unsigned pid)
 {
@@ -295,6 +313,8 @@ std::uint8_t player_flags(const unsigned pid)
 		f |= mr::player_flag::local;
 	if (player_recorded(pid))
 		f |= mr::player_flag::recorded;
+	if (shares_controls(pid))
+		f |= mr::player_flag::shares_controls;
 	return f;
 }
 
@@ -581,6 +601,33 @@ void fill_context(mr::sample &s, const unsigned pid, const object &me, const d_r
 	s.enemy_rel_vel = rel_vel;
 }
 
+/* The controls of a ship flown here, from the thrust it was given this
+ * frame (apply_pilot_controls), normalised to the ship's maximum; the
+ * forward thrust unquantised (the afterburner).  Nothing without a ship
+ * model.
+ */
+[[nodiscard]]
+std::optional<double> ship_controls(const object &obj, mr::control_array &out)
+{
+	const auto &phys{obj.mtype.phys_info};
+	const auto fwd{to_d(obj.orient.fvec)}, right{to_d(obj.orient.rvec)}, up{to_d(obj.orient.uvec)};
+	const auto thrust{to_d(phys.thrust)};
+	const double max_thrust{Player_ship->max_thrust / 65536.0};
+	const double max_rot{Player_ship->max_rotthrust / 65536.0};
+	if (!(max_thrust > 0 && max_rot > 0))
+		return std::nullopt;
+	const double forward{dot(thrust, fwd) / max_thrust};
+	out = {{
+		mr::quantise_control(forward),
+		mr::quantise_control(dot(thrust, right) / max_thrust),
+		mr::quantise_control(dot(thrust, up) / max_thrust),
+		mr::quantise_control(phys.rotthrust.x / 65536.0 / max_rot),
+		mr::quantise_control(phys.rotthrust.y / 65536.0 / max_rot),
+		mr::quantise_control(phys.rotthrust.z / 65536.0 / max_rot),
+	}};
+	return forward;
+}
+
 void sample_player(const unsigned pid, const d_robot_info_array &Robot_info)
 {
 	auto &Objects = LevelUniqueObjectState.Objects;
@@ -637,25 +684,12 @@ void sample_player(const unsigned pid, const d_robot_info_array &Robot_info)
 	 */
 	if (local && alive && !guided)
 	{
-		const auto fwd{to_d(obj.orient.fvec)}, right{to_d(obj.orient.rvec)}, up{to_d(obj.orient.uvec)};
-		const auto thrust{to_d(phys.thrust)};
-		const double max_thrust{Player_ship->max_thrust / 65536.0};
-		const double max_rot{Player_ship->max_rotthrust / 65536.0};
-		if (max_thrust > 0 && max_rot > 0)
+		if (const auto forward{ship_controls(obj, s.controls)})
 		{
-			const double forward{dot(thrust, fwd) / max_thrust};
 			s.flags |= mr::sample_flag::controls;
-			s.controls = {{
-				mr::quantise_control(forward),
-				mr::quantise_control(dot(thrust, right) / max_thrust),
-				mr::quantise_control(dot(thrust, up) / max_thrust),
-				mr::quantise_control(phys.rotthrust.x / 65536.0 / max_rot),
-				mr::quantise_control(phys.rotthrust.y / 65536.0 / max_rot),
-				mr::quantise_control(phys.rotthrust.z / 65536.0 / max_rot),
-			}};
 			/* The afterburner scales the forward thrust above 1. */
 			s.flags2 |= mr::sample_flag2::afterburner_known;
-			if (forward > 1.01)
+			if (*forward > 1.01)
 				s.flags |= mr::sample_flag::afterburner;
 		}
 	}
@@ -670,20 +704,29 @@ void sample_player(const unsigned pid, const d_robot_info_array &Robot_info)
 #if DXX_USE_MULTIPLAYER
 	else if (!local && mode_multi() && multi_i_am_master())
 	{
+		auto &o{R.occupants[pid]};
 		/* A client's own report (INPUT, section 5.3 bit 1); known only
 		 * once the client has set the bit (older clients never do).
 		 */
-		if (const auto ab{net_v2::host_input_afterburner(pid)}; ab >= 0)
+		const auto ab{net_v2::host_input_afterburner(pid)};
+		if (ab > 0)
+			o.afterburner_seen = true;
+		/* A client with -sharemoves sends its exact controls in INPUT
+		 * (section 5.3, protocol 107): recorded as shared while they are
+		 * fresh; in a gap the sample has none and the analysis
+		 * estimates.  They never touch the ship.
+		 */
+		if (mr::control_array shared; net_v2::host_input_controls(pid, shared))
 		{
-			auto &o{R.occupants[pid]};
+			o.shares_controls = true;
+			if (alive && !guided)
+				mr::set_shared_controls(s, shared);
+		}
+		if (!(s.flags & mr::sample_flag::controls) && ab >= 0 && o.afterburner_seen)
+		{
+			s.flags2 |= mr::sample_flag2::afterburner_known;
 			if (ab)
-				o.afterburner_seen = true;
-			if (o.afterburner_seen)
-			{
-				s.flags2 |= mr::sample_flag2::afterburner_known;
-				if (ab)
-					s.flags |= mr::sample_flag::afterburner;
-			}
+				s.flags |= mr::sample_flag::afterburner;
 		}
 	}
 #endif
@@ -725,12 +768,20 @@ void check_occupant(const unsigned pid)
 		p.hit_by_ms[pid] = 0;
 	o.in_game = in_game;
 	if (!in_game)
+	{
 		/* Gone (or between two levels): if the same player returns, it
-		 * is still the same program.
+		 * is still the same program, which reports the afterburner.  It
+		 * may have been restarted without -sharemoves, though: sharing
+		 * is noted again from its next controls.
 		 */
+		o.shares_controls = false;
 		return;
+	}
 	if (bot != o.bot || !(cs == o.callsign))
+	{
 		o.afterburner_seen = false;
+		o.shares_controls = false;
+	}
 	o.bot = bot;
 	o.callsign = cs;
 }
@@ -937,6 +988,26 @@ void movement_record_kill(const object &victim, const object *const killer)
 	if (vpid == mr::PLAYER_NONE)
 		return;
 	put_event(mr::record_type::kill, vpid, killer ? player_of(*killer) : mr::PLAYER_NONE, killer ? kind_of(*killer) : mr::attacker_kind::none, 0, 0, 0);
+}
+
+bool movement_record_shared_controls(std::array<std::int8_t, 6> &controls)
+{
+	/* Consent: only with -sharemoves, only a client's own ship. */
+	if (!CGameArg.SysShareMoves || !mode_multi() || multi_i_am_master() || Newdemo_state == ND_STATE_PLAYBACK)
+		return false;
+	if (Player_dead_state != player_dead_state::no)
+		return false;
+#if DXX_BUILD_DESCENT == 2
+	if (LevelUniqueObjectState.Guided_missile.get_player_active_guided_missile(Player_num) != object_none)
+		return false;
+#endif
+	const auto objnum{vcplayerptr(Player_num)->objnum};
+	if (objnum == object_none)
+		return false;
+	const object &plr{*LevelUniqueObjectState.Objects.vcptr(objnum)};
+	if (plr.type != object_type::OBJ_PLAYER)
+		return false;
+	return ship_controls(plr, controls).has_value();
 }
 
 void movement_record_pickup(const unsigned pnum, const unsigned powerup)

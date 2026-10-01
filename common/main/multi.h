@@ -182,8 +182,10 @@ static inline player_ship_color get_team_color(const team_number tnum)
  * 105: host-assigned spawns (SPAWN_REQUEST, SPAWN_SITE).
  * 106: stage 4 (FIRE, WEAPON_HIT, DAMAGE, PLAYER_KILLED, PLAYER_SPAWN; the
  * host decides hits, damage and kills with lag compensation).
+ * 107: the pilot's controls in INPUT (-sharemoves, for the host's
+ * movement recording).
  */
-constexpr std::uint16_t MULTI_PROTO_VERSION{106};
+constexpr std::uint16_t MULTI_PROTO_VERSION{107};
 // PROTOCOL VARIABLES AND DEFINES - END
 
 /* The network tick rate (positions per second, and the pacing of every

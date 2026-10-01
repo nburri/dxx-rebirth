@@ -498,6 +498,8 @@ struct view
 	unsigned remote_lag{};
 	/* The client's afterburner bit reaches the host. */
 	bool remote_afterburner{true};
+	/* The pilot, flown elsewhere, shares its controls (-sharemoves). */
+	bool shared_controls{};
 	const char *pilot_name{"Pilot"};
 	const char *enemy_name{"Target"};
 	const char *mission{"Test Mission"};
@@ -530,7 +532,7 @@ std::vector<std::uint8_t> record(const flight &f, const view &v)
 	h.level_num = 1;
 	h.num_players = 2;
 	const std::uint8_t recorded{player_flag::connected | player_flag::recorded};
-	h.players[0] = {0, static_cast<std::uint8_t>(recorded | (v.local_pid == 0 ? player_flag::local : 0)), 0xff, v.pilot_name};
+	h.players[0] = {0, static_cast<std::uint8_t>(recorded | (v.local_pid == 0 ? player_flag::local : v.shared_controls ? player_flag::shares_controls : 0)), 0xff, v.pilot_name};
 	h.players[1] = {1, static_cast<std::uint8_t>(recorded | (v.local_pid == 1 ? player_flag::local : 0)), 0xff, v.enemy_name};
 	if (!v.sync)
 		h.minor = 0;
@@ -597,9 +599,17 @@ std::vector<std::uint8_t> record(const flight &f, const view &v)
 				for (std::size_t i{}; i != 6; ++i)
 					s.controls[i] = quantise_control(mp.ctl[i]);
 			}
+			else if (v.shared_controls)
+			{
+				/* What the host records of a client with -sharemoves. */
+				control_array c{};
+				for (std::size_t i{}; i != 6; ++i)
+					c[i] = quantise_control(mp.ctl[i]);
+				set_shared_controls(s, c);
+			}
 			else if (v.remote_afterburner)
 				s.flags2 |= sample_flag2::afterburner_known;
-			if (mp.burner && (s.flags2 & sample_flag2::afterburner_known))
+			if (mp.burner && (s.flags2 & sample_flag2::afterburner_known) && !(s.flags2 & sample_flag2::controls_shared))
 				s.flags |= sample_flag::afterburner;
 			s.segment = 1;
 			s.pos = q_pos(mp.pilot.pos);
@@ -1047,6 +1057,41 @@ void test_estimated_controls()
 	CHECK(guessed.profile.find("tune.burn_roam")->confidence == bot::style_confidence::medium);
 }
 
+/* The same flights as a host records a client that shares its controls
+ * (-sharemoves): exact, marked shared, nothing estimated, the same
+ * picture as the pilot's own recording.
+ */
+void test_shared_controls()
+{
+	view shared;
+	shared.local_pid = 1;
+	shared.shared_controls = true;
+	for (const auto &h : {strafer(), reverse_turner()})
+	{
+		const auto f{fly(h, CYCLES)};
+		const auto own{analyse_flight(f)};
+		const auto sh{analyse_flight(f, shared)};
+		const auto &a{own.stats};
+		const auto &b{sh.stats};
+		CHECK(a.shared_s == 0);
+		CHECK(b.estimated_s == 0 && b.exact_s > 600);
+		CHECK_RANGE(b.shared_s, b.exact_s, b.exact_s);
+		CHECK_RANGE(b.exact_s, a.exact_s - 0.1, a.exact_s + 0.1);
+		CHECK_RANGE(b.forward_share, a.forward_share, a.forward_share);
+		CHECK_RANGE(b.reverse_share, a.reverse_share, a.reverse_share);
+		CHECK_RANGE(b.fight_strafe_share, a.fight_strafe_share, a.fight_strafe_share);
+		CHECK_RANGE(b.reverse_turn_share, a.reverse_turn_share, a.reverse_turn_share);
+		CHECK_RANGE(b.ab_share, a.ab_share - 0.02, a.ab_share + 0.02);
+		CHECK(b.ab_estimated_s == 0);
+		/* As sure as from the pilot's own machine. */
+		CHECK(sh.profile.find("skill.strafe")->confidence == bot::style_confidence::high);
+		CHECK(value(sh.profile, "skill.strafe") == value(own.profile, "skill.strafe"));
+		CHECK_RANGE(value(sh.profile, "measured.shared_controls_share"), 1, 1);
+		CHECK(!own.profile.find("measured.shared_controls_share"));
+		CHECK(write_report(b, sh.profile).find("shared by the player's machine") != std::string::npos);
+	}
+}
+
 /* Two recordings of one game: the host's (the pilot flown there) and
  * the client's (the enemy flown there, joined later, left earlier).
  */
@@ -1465,6 +1510,7 @@ int main(const int argc, char **const argv)
 	test_dodger();
 	test_afterburner();
 	test_estimated_controls();
+	test_shared_controls();
 	test_merge_by_sync();
 	test_merge_by_trajectory();
 	test_several_games();
