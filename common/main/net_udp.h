@@ -55,6 +55,15 @@ using udp::dispatch;
 }
 
 window_event_result net_udp_setup_game(const d_select_event &);
+/* -botarena (Documentation/multiplayer-bots.md section 8.2), without the
+ * menus, the lobby and the network (net_v2::open_loopback_socket):
+ * prepare an anarchy game of the current mission's level `level` for
+ * `bots` bots (the pilot's netgame profile, read here, may change the
+ * bot setup), then host it with the bot setup, its randomness from
+ * `seed`.  False if it could not start.
+ */
+void net_udp_arena_prepare(unsigned level, unsigned bots);
+bool net_udp_arena_start(uint32_t seed);
 /* Sizes of the network session's queues, for the -verbose frame probe. */
 void net_udp_probe_report();
 }

@@ -38,6 +38,7 @@
 #include <vector>
 
 #include "bot.h"
+#include "bot_arena.h"
 #include "bot_goals.h"
 #include "bot_nav.h"
 #include "bot_weapons.h"
@@ -1353,6 +1354,8 @@ void plan_path(bot_state &bs, const object &obj, const uint32_t goal_seg, const 
 			bs.points.back() = *goal_pos;
 	}
 	bs.stuck.restart_window();
+	if (bot_arena_active() && !bs.points.empty())
+		bot_arena_note_path(bs.pid, b::remaining_length(bs.points, 0, to_vec(obj.pos)));
 }
 
 void set_goal(bot_state &bs, const object &obj, const bot_goal g, const uint32_t seg, const std::optional<vec3> pos, const uint32_t tick)
@@ -2681,6 +2684,7 @@ vec3 follow_path(bot_state &bs, object &obj, const bool engaged)
 			const double side{bs.rng.uniform() < 0.5 ? -1.0 : 1.0};
 			bs.recover_dir = b::normalized(frame.f * -0.7 + frame.r * (0.7 * side) + frame.u * bs.rng.uniform(-0.3, 0.3));
 			con_printf(CON_VERBOSE, "bots: '%s' stuck in segment %hu", static_cast<const char *>(bs.cfg.name), static_cast<uint16_t>(obj.segnum));
+			bot_arena_note_stuck(bs.pid);
 			break;
 		}
 		case b::stuck_event::give_up:

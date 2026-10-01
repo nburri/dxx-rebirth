@@ -253,6 +253,11 @@ struct mission_entry_predicate
 //loads the named mission if it exists.
 //Returns nullptr if mission loaded ok, else error string.
 const char *load_mission_by_name (mission_entry_predicate mission_name, mission_name_type);
+/* -botarena: load the mission of file name `name` (without folder or
+ * extension, case ignored), else the one titled `name`.  Returns nullptr
+ * if it was loaded, else an error string.
+ */
+const char *load_mission_by_file_or_title(const char *name);
 
 #if DXX_USE_EDITOR
 void create_new_mission(void);

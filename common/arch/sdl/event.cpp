@@ -391,6 +391,8 @@ window_event_result event_process(void)
 		wind = window_get_next(*wind);
 	}
 
+	/* -botarena (timer.h): nobody watches, nothing to show. */
+	if (!timer_simulated())
 	{
 		const frame_probe::scope probe{frame_probe::phase::swap};
 		gr_flip();

@@ -1965,14 +1965,13 @@ static int net_udp_game_param_handler( newmenu *menu,const d_event &event, param
 
 namespace dsx {
 
-window_event_result net_udp_setup_game(const d_select_event &)
+namespace {
+
+/* A new game hosted here: the defaults, then the pilot's netgame
+ * profile, for the current mission.
+ */
+static void net_udp_setup_defaults()
 {
-	param_opt opt;
-	auto &m = opt.m;
-	char level_text[32];
-
-	net_udp_init();
-
 	multi_new_game();
 
 	change_playernum_to(0);
@@ -2021,7 +2020,18 @@ window_event_result net_udp_setup_game(const d_select_event &)
 
 	Netgame.mission_name.copy_if(&*Current_mission->filename, Netgame.mission_name.size());
 	Netgame.mission_title = Current_mission->mission_name;
+}
 
+}
+
+window_event_result net_udp_setup_game(const d_select_event &)
+{
+	param_opt opt;
+	auto &m = opt.m;
+	char level_text[32];
+
+	net_udp_init();
+	net_udp_setup_defaults();
 	Netgame.levelnum = 1;
 
 	unsigned optnum{0};
@@ -2231,6 +2241,24 @@ static int net_udp_send_sync(void)
 }
 namespace dsx {
 namespace {
+/* The host is player 0. */
+static void net_udp_host_takes_slot0()
+{
+	auto &Objects = LevelUniqueObjectState.Objects;
+	auto &vmobjptr = Objects.vmptr;
+	auto &host = Netgame.players[0];
+	host.callsign = InterfaceUniqueState.PilotName;
+	host.protocol.udp.addr = {};
+	host.rank = GetMyNetRanking();
+	host.connected = player_connection_status::playing;
+	host.LastPacketTime = timer_query();
+	vmobjptr(vcplayerptr(0u)->objnum)->ctype.player_info.KillGoalCount = 0;
+	vmplayerptr(0u)->connected = player_connection_status::playing;
+	N_players = 1;
+	Netgame.numplayers = N_players;
+	net_v2::host_send_netgame_update();
+}
+
 static int net_udp_select_players()
 {
 	int j;
@@ -2261,22 +2289,7 @@ static int net_udp_select_players()
 		Netgame.ShufflePowerupSeed = seed;
 	}
 
-	/* The host is player 0. */
-	{
-		auto &Objects = LevelUniqueObjectState.Objects;
-		auto &vmobjptr = Objects.vmptr;
-		auto &host = Netgame.players[0];
-		host.callsign = InterfaceUniqueState.PilotName;
-		host.protocol.udp.addr = {};
-		host.rank = GetMyNetRanking();
-		host.connected = player_connection_status::playing;
-		host.LastPacketTime = timer_query();
-		vmobjptr(vcplayerptr(0u)->objnum)->ctype.player_info.KillGoalCount = 0;
-		vmplayerptr(0u)->connected = player_connection_status::playing;
-		N_players = 1;
-		Netgame.numplayers = N_players;
-		net_v2::host_send_netgame_update();
-	}
+	net_udp_host_takes_slot0();
 	start_poll_menu_items spd;
 		
 	for (int i=0; i< MAX_PLAYERS+4; i++ ) {
@@ -2421,6 +2434,68 @@ static int net_udp_start_game()
 
 	return 1;	// don't keep params menu or mission listbox (may want to join a game next time)
 }
+
+}
+
+namespace dsx {
+
+void net_udp_arena_prepare(const unsigned level, const unsigned bots)
+{
+#if DXX_USE_TRACKER
+	/* No tracker: not even its address is looked up (net_udp_init). */
+	CGameArg.MplTrackerAddr.clear();
+#endif
+	net_udp_init();
+	net_udp_setup_defaults();
+	/* The pilot's profile gave the game options (powerups, invulnerability
+	 * after a respawn, tick rate...).  The arena plays anarchy on its
+	 * level, without end, unannounced.
+	 */
+	Netgame.gamemode = network_game_type::anarchy;
+	Netgame.levelnum = level;
+	Netgame.max_numplayers = std::min<unsigned>(bots + 1, MAX_PLAYERS);
+	Netgame.KillGoal = 0;
+	Netgame.PlayTimeAllowed = {};
+	Netgame.MPGameplayOptions.AutosaveInterval = {};
+#if DXX_USE_TRACKER
+	Netgame.Tracker = 0;
+#endif
+}
+
+bool net_udp_arena_start(const uint32_t seed)
+{
+	const unsigned bots{Bot_setup.count};
+	if (Netgame.ShufflePowerupSeed)
+		Netgame.ShufflePowerupSeed = seed;
+	if (!net_v2::open_loopback_socket())
+		return false;
+	net_v2::host_open_session(seed);
+	N_players = 0;
+	Netgame.game_status = network_state::starting;
+	Netgame.numplayers = 0;
+	Network_status = network_state::starting;
+	net_udp_set_game_mode(Netgame.gamemode);
+	Netgame.protocol.udp.your_index = 0;
+
+	net_udp_host_takes_slot0();
+	range_for (auto &i, partial_range(Netgame.players, N_players, Netgame.players.size()))
+	{
+		i.callsign = {};
+		i.rank = netplayer_info::player_rank::None;
+	}
+	if (const auto placed{bots_allocate_slots()}; placed < bots)
+		con_printf(CON_URGENT, "botarena: only %u of %u bots fit", placed, bots);
+	if (StartNewLevel(Netgame.levelnum) == window_event_result::close)
+	{
+		Game_mode = {};
+		return false;
+	}
+	return true;
+}
+
+}
+
+namespace {
 
 /* Level start, client side (section 4.3): tell the host the level is
  * loaded and wait for LEVEL_GO.
