@@ -2484,7 +2484,10 @@ inline bot::style_profile propose_profile(const player_stats &s, const bot::bot_
 		info("measured.enemy_distance_median", s.los_distance.p50);
 	if (s.turn_180_ms.n)
 		info("measured.turn_180_ms", s.turn_180_ms.p50);
-	if (s.dodge_measurable && s.dodge_prob >= 0.2 && s.dodge_reaction_ms > 0)
+	/* The reaction only of a dodge that clearly is one (two standard
+	 * errors above nothing).
+	 */
+	if (s.dodge_measurable && s.dodge_prob >= 0.2 && s.dodge_prob - 2 * s.dodge_se > 0 && s.dodge_reaction_ms > 0)
 		info("measured.dodge_reaction_ms", s.dodge_reaction_ms);
 	if (s.dodge_measurable)
 		info("measured.dodge_prob_se", s.dodge_se);

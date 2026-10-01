@@ -1064,6 +1064,7 @@ void test_dodger()
 		CHECK_RANGE(ws.dodge_prob, 0, 0.3);
 		if (const auto e{w.profile.find("skill.dodge_prob")}; e && e->value > 0.1)
 			CHECK(e->confidence == bot::style_confidence::low);
+		CHECK(!w.profile.find("measured.dodge_reaction_ms"));
 		const auto wt{describe_traits(ws)};
 		CHECK(std::none_of(wt.begin(), wt.end(), [](const std::string &t) { return t.starts_with("Dodges") || t.starts_with("Sometimes dodges"); }));
 	}
