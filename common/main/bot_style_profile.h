@@ -83,7 +83,7 @@ struct style_profile_key
 	std::string_view text;
 };
 
-inline constexpr std::array<style_profile_key, 30> style_profile_keys{{
+inline constexpr std::array<style_profile_key, 31> style_profile_keys{{
 	/* style_params */
 	{"style.retreat_shields", 5, 90, "shields below which the bot retreats"},
 	{"style.engage_weight", 0.5, 1.8, "weight of fighting against everything else"},
@@ -120,6 +120,7 @@ inline constexpr std::array<style_profile_key, 30> style_profile_keys{{
 	{"tune.volley_size", 1, 8, "missiles per volley"},
 	{"tune.pursuit_seconds", 0, 30, "how long a target is followed after it left the sight (pursuit_seconds)"},
 	{"tune.grab_detour", 0, 1, "share of the pickups taken by leaving the course (grab_is_detour)"},
+	{"tune.power_pickup", 0, 1, "share of the power pickups in sight the bot goes for (power_pickup_weight)"},
 }};
 
 [[nodiscard]]
@@ -400,7 +401,10 @@ inline std::optional<style_profile> parse_style_profile(std::string_view text)
  *   tables (0 seconds: it lets a lost enemy go);
  * - `tune.grab_detour` (the share of pickups off course): a scale of the
  *   detour a grab may take in a fight, over the share the bots took
- *   with the scale 1 (GRAB_DETOUR_BASE_SHARE).
+ *   with the scale 1 (GRAB_DETOUR_BASE_SHARE);
+ * - `tune.power_pickup` (the share of the power pickups in sight the
+ *   pilot went for): the bot's power weight, in place of the skill's
+ *   and the style's (power_pickup_weight, section 9.14).
  */
 struct style_profile_params
 {
@@ -492,6 +496,8 @@ inline style_profile_params apply_style_profile(const style_profile &p, const bo
 	if (p.find("tune.pursuit_seconds"))
 		t.pursuit_seconds = blend("tune.pursuit_seconds", pursuit_seconds(skill, p.base_style), same);
 	t.grab_detour_scale = blend("tune.grab_detour", t.grab_detour_scale, [](const double v) { return std::clamp(v / GRAB_DETOUR_BASE_SHARE, 0.25, 3.0); });
+	if (p.find("tune.power_pickup"))
+		t.power_pickup = blend("tune.power_pickup", power_pickup_weight(skill, p.base_style), same);
 	return r;
 }
 

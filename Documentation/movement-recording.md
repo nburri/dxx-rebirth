@@ -465,6 +465,7 @@ deflection. The thresholds are the constants of `analysis::limits`.
 | Weapons | primary shots per weapon and range band (< 60, 60–150, > 150, as the bots' weapon table); secondary shots per weapon, distance | fire events with the enemy in sight |
 | Missile volleys | volleys (missiles at most 0.7 s apart), size, time between two volleys of one fight | mines are left out |
 | Pickups | per minute; share taken off course (the course 1.5 s before pointed more than 40° away from the pickup); share in a fight | |
+| Pickups in sight | per class (power pickups: smart, mega, earthshaker missiles and the omega cannon; other): the share taken and gone for of those in sight, in a fight and outside one; distance and time from the first sight, the way flown, off course | section 8.9 |
 | Pursuit | how often the player follows an enemy that left its sight, and for how long (until it has not thrust toward it for 1 s, it is in sight again, or another enemy took its place in the record) | losses of sight while not already flying away |
 | Hits | dealt (direct, splash), taken, damage, direct hits per primary shot (an estimate of accuracy; a shot of several bolts can hit more than once; the hits are those the victim's or the recording machine saw) | hit events |
 
@@ -584,6 +585,7 @@ The keys, their range, and what they are computed from:
 | `tune.volley_size` | 1–8 | missiles per volley |
 | `tune.pursuit_seconds` | 0–30 | median pursuit time (0: lets the enemy go) |
 | `tune.grab_detour` | 0–1 | share of pickups off course |
+| `tune.power_pickup` | 0–1 | share of the power pickups in sight the player went for (section 8.9) |
 
 A value the recordings say nothing about is left out; the confidence of the
 others comes from how much evidence there is (for example fights: low below
@@ -723,6 +725,48 @@ therefore no more than medium sure when all the shots are on one level.
 (Taking only the shots along long lines of fire as the pilot's free choice
 does not work: the enemies seen along a long line are far ones, and the
 bots, whose band ends at 119, then fire from 120 to 207.)
+
+### 8.9 Pickups in sight: power pickups
+
+Does a pilot go for what it sees? The recording has no powerups, only
+the pickups (who, which, when). Every pickup of every recorded player
+says where a powerup lay: at the picker's place then. It lay there at
+most 15 s before (`SIGHT_LOOK_BACK_MS`), or since a ship blew up within
+40 units of it (its drop, `DROP_RADIUS`). A player **had it in sight**
+when, in that time, it was within 45° of its nose (`VIEW_HALF_DEG`: on
+the screen) with a free line to it through the level (section 8.8; the
+ray may end 5 units short), checked every third sample; without the
+level's geometry, within 150 units (`SIGHT_NO_GEOMETRY`). It **went for
+it** when afterwards (in the same life, until it was taken) it came
+within 25 units of it or half the distance of the first sight, and
+at least 10 units closer than then (`GO_FOR_NEAR`, `GO_FOR_SHARE`,
+`GO_FOR_MIN_CLOSE`); it took it, or lost the race.
+
+Per class (power pickups: the smart missile, mega, earthshaker and the
+omega cannon, ids 20, 21, 45 and 31 of Descent 2; every other pickup) the report gives the
+powerups in sight, the share taken and gone for, the same for those
+first seen in a fight and outside one, and of those taken the distance
+at the first sight, the time to the pickup, the way flown beyond that
+distance and the share first seen off the course (more than 40° from
+where it flew). `tune.power_pickup` is the share of the power pickups
+gone for (section 8.5).
+
+**Limits.** Powerups nobody took are not known, nor those of players not
+recorded, nor where one lay before a pickup but for the drops; walls are
+not read, so a closed door counts as open (section 8.8); the screen is a
+cone of 45°, not the real field of view; a pilot whose way passes a
+powerup it does not want counts as going for it. The other pickups are
+measured the same way, so the difference between the two classes is the
+pilot's choice.
+
+**The Corona recording** (2026-10-01, EC against five bots, geometry
+from the missions; nobody took the omega cannon, so these are the
+missiles): EC had 43 power pickups in sight, went for 86 % (77
+% of the 22 seen in a fight), took 70 %, from a median 136 units (p90
+268) 2.7 s after the first sight; other pickups: went for 75 %, took 27
+%. The bots: 23–28 power pickups in sight each, went for 29–39 %, took
+12–32 %; other pickups 44–51 % and 18–22 %. Bots' behaviour since:
+Documentation/multiplayer-bots.md §9.14.
 
 ## 9. Code
 

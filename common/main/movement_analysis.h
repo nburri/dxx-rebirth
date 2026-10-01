@@ -798,6 +798,26 @@ constexpr std::int64_t VOLLEY_SAME_FIGHT_MS{15000};
  */
 constexpr std::int64_t DETOUR_LOOK_BACK_MS{1500};
 constexpr double DETOUR_DEG{40};
+/* Section 8.9, the power pickups: the pickups of every recorded
+ * player give where a powerup lay; it lay there at most SIGHT_LOOK_BACK_MS
+ * before it was taken (or since a ship blew up within DROP_RADIUS of it:
+ * its drop).  A player had it in sight with it within VIEW_HALF_DEG of
+ * the nose (on the screen) and a free line to it through the level
+ * (section 8.8; SIGHT_SLACK short of it is enough), checked every
+ * SIGHT_STRIDE samples; without the level's geometry, within
+ * SIGHT_NO_GEOMETRY.  It went for it when it came within GO_FOR_NEAR of
+ * it, or GO_FOR_SHARE of the distance at the first sight, and at least
+ * GO_FOR_MIN_CLOSE closer than then.
+ */
+constexpr std::int64_t SIGHT_LOOK_BACK_MS{15000};
+constexpr double DROP_RADIUS{40};
+constexpr double VIEW_HALF_DEG{45};
+constexpr double SIGHT_SLACK{5};
+constexpr std::size_t SIGHT_STRIDE{3};
+constexpr double SIGHT_NO_GEOMETRY{150};
+constexpr double GO_FOR_NEAR{25};
+constexpr double GO_FOR_SHARE{0.5};
+constexpr double GO_FOR_MIN_CLOSE{10};
 /* After losing sight: a pursuit ends when the player has not moved
  * toward the enemy for this long; one counts from this length.
  */
@@ -890,6 +910,22 @@ struct track
 		vec3 pos{}, forward{};
 	};
 	std::vector<shooter_pose> enemy_fire_from;
+	/* Section 8.9: every pickup of the session (by any recorded player):
+	 * where the powerup lay (the picker's place then), what it was, from
+	 * when it lay there at the earliest (limits::SIGHT_LOOK_BACK_MS, or a
+	 * drop), the level (the picker's file and level, and its geometry if
+	 * known), and whether this player took it.
+	 */
+	struct powerup_spot
+	{
+		std::int64_t t{}, since{};
+		std::uint8_t id{};
+		vec3 pos{};
+		std::uint16_t file{}, level{};
+		const geometry::level_geometry *geo{};
+		bool own{};
+	};
+	std::vector<powerup_spot> spots;
 	/* The point nearest to time `t`, within `tolerance_ms`. */
 	[[nodiscard]]
 	std::optional<std::size_t> at(const std::int64_t t, const std::int64_t tolerance_ms) const
@@ -1054,6 +1090,73 @@ inline track build_track(const merged_session &ms, const std::size_t player, con
 			tr.enemy_fire_from.push_back(pose);
 		}
 	}
+	/* Section 8.9: the pickups, and the deaths (their drops). */
+	{
+		const auto sample_at{[&ms](const int who, const std::int64_t t, const std::int64_t tolerance) -> const merged_sample * {
+			if (who < 0 || static_cast<std::size_t>(who) >= ms.players.size())
+				return nullptr;
+			const auto &their{ms.players[static_cast<std::size_t>(who)].samples};
+			auto i{std::lower_bound(their.begin(), their.end(), t, [](const merged_sample &m, const std::int64_t v) { return m.t < v; })};
+			/* The last one at or before `t` that lived. */
+			if (i == their.end() || i->t > t)
+			{
+				if (i == their.begin())
+					return nullptr;
+				--i;
+			}
+			for (;; --i)
+			{
+				if (t - i->t > tolerance)
+					return nullptr;
+				if (i->s.flags & sample_flag::alive)
+					return &*i;
+				if (i == their.begin())
+					return nullptr;
+			}
+		}};
+		const auto geo_of{[&](const merged_sample &m) -> const geometry::level_geometry * {
+			if (!geo || !ses || m.file >= ses->files.size())
+				return nullptr;
+			const auto f{ses->files[m.file].file};
+			return f < geo->size() && m.level < (*geo)[f].size() ? (*geo)[f][m.level] : nullptr;
+		}};
+		struct drop
+		{
+			std::int64_t t;
+			vec3 pos;
+		};
+		std::vector<drop> drops;
+		for (const auto &e : ms.events)
+			if (e.e.type == record_type::death)
+				if (const auto m{sample_at(e.who, e.t, 500)})
+					drops.push_back({e.t, to_units(m->s).pos});
+		for (const auto &e : ms.events)
+		{
+			if (e.e.type != record_type::pickup)
+				continue;
+			const auto m{sample_at(e.who, e.t, 150)};
+			if (!m)
+				continue;
+			track::powerup_spot sp;
+			sp.t = e.t;
+			sp.since = e.t - limits::SIGHT_LOOK_BACK_MS;
+			sp.id = e.e.id;
+			sp.pos = to_units(m->s).pos;
+			sp.file = m->file;
+			sp.level = m->level;
+			sp.geo = geo_of(*m);
+			sp.own = e.who == me;
+			for (const auto &d : drops)
+			{
+				if (d.t > e.t)
+					break;
+				const vec3 off{{d.pos[0] - sp.pos[0], d.pos[1] - sp.pos[1], d.pos[2] - sp.pos[2]}};
+				if (d.t > sp.since && length(off) <= limits::DROP_RADIUS)
+					sp.since = d.t;
+			}
+			tr.spots.push_back(sp);
+		}
+	}
 	return tr;
 }
 
@@ -1118,6 +1221,19 @@ constexpr std::size_t DODGE_LATENCY_BINS{limits::DODGE_WINDOW_MS / DODGE_LATENCY
 inline constexpr std::array<const char *, WEAPON_SLOTS> primary_names{{"laser", "vulcan", "spreadfire", "plasma", "fusion", "super laser", "gauss", "helix", "phoenix", "omega"}};
 inline constexpr std::array<const char *, WEAPON_SLOTS> secondary_names{{"concussion", "homing", "proximity bomb", "smart", "mega", "flash", "guided", "smart mine", "mercury", "earthshaker"}};
 inline constexpr std::array<const char *, bot::BOT_RANGE_BANDS> band_names{{"close (< 60)", "mid (60-150)", "distant (> 150)"}};
+/* Section 8.9: the power pickups (the bots' power_class missiles and
+ * the omega cannon: the game's POW_SMARTBOMB_WEAPON 20, POW_MEGA_WEAPON
+ * 21, POW_OMEGA_WEAPON 31, POW_EARTHSHAKER_MISSILE 45 of Descent 2) and
+ * every other pickup.
+ */
+constexpr std::size_t PICKUP_CLASSES{2};
+inline constexpr std::array<const char *, PICKUP_CLASSES> pickup_class_names{{"power pickups", "other pickups"}};
+
+[[nodiscard]]
+constexpr std::size_t pickup_class_of(const std::uint8_t powerup_id)
+{
+	return powerup_id == 20 || powerup_id == 21 || powerup_id == 31 || powerup_id == 45 ? 0 : 1;
+}
 
 struct shield_bucket
 {
@@ -1267,6 +1383,28 @@ struct player_stats
 	double pickups_per_min{}, pickup_detour_share{}, pickup_in_fight_share{};
 	unsigned pickup_detour_n{};
 
+	/* Section 8.9: how the player goes for what it sees, per pickup
+	 * class (pickup_class_of): the powerups it had in sight before
+	 * someone took them; of those, the share it took, went for (came
+	 * close, limits::GO_FOR_NEAR / GO_FOR_SHARE) and went for but lost
+	 * to another; the same for those first seen in a fight and outside
+	 * one; of the ones it took, the distance at the first sight, the time
+	 * from it to the pickup, the way flown beyond that distance, and the
+	 * share it saw off its course (more than DETOUR_DEG from where it
+	 * flew); and its pickups it never had in sight before.
+	 */
+	struct pickup_sight
+	{
+		unsigned seen{}, taken{}, went{}, lost{}, fight_seen{}, fight_went{}, calm_seen{}, calm_went{}, unseen_taken{};
+		double taken_share{}, went_share{}, fight_went_share{}, calm_went_share{}, off_course_share{};
+		summary sight_distance, take_s, extra_path;
+	};
+	std::array<pickup_sight, PICKUP_CLASSES> pickup_sight{};
+	/* The share of the sightings judged with the level's geometry (else
+	 * by distance alone, SIGHT_NO_GEOMETRY).
+	 */
+	double pickup_sight_geometry_share{};
+
 	/* After losing sight of an enemy. */
 	unsigned sight_losses{};
 	double pursue_share{};
@@ -1378,6 +1516,13 @@ struct accum
 	std::array<unsigned, WEAPON_SLOTS> secondary_count{};
 	std::vector<double> volley_sizes, volley_gap_s;
 	unsigned pickups{}, pickup_detour_n{}, pickup_detours{}, pickup_in_fight{};
+	struct pickup_sight_acc
+	{
+		unsigned seen{}, taken{}, went{}, lost{}, fight_seen{}, fight_went{}, calm_seen{}, calm_went{}, unseen_taken{}, off_course{}, off_course_n{};
+		std::vector<double> sight_distance, take_s, extra_path;
+	};
+	std::array<pickup_sight_acc, PICKUP_CLASSES> pickup_sight{};
+	unsigned sightings{}, sightings_geo{};
 	unsigned sight_losses{}, pursuits{};
 	std::vector<double> pursuit_s;
 	unsigned hits_dealt{}, splash_dealt{}, hits_taken{}, kills{}, deaths{}, suicides{};
@@ -2049,6 +2194,106 @@ inline void scan_events(const track &tr, accum &a)
 	}
 }
 
+/* Section 8.9: the powerups the player had in sight before someone took
+ * them, and what it did about them.
+ */
+inline void scan_pickup_sight(const track &tr, accum &a)
+{
+	const auto &pts{tr.pts};
+	const double cone{std::cos(bot::radians(limits::VIEW_HALF_DEG))};
+	const auto same_level{[](const track_point &p, const track::powerup_spot &sp) {
+		return (sp.geo && p.geo == sp.geo) || (p.m.file == sp.file && p.m.level == sp.level);
+	}};
+	const auto off{[](const vec3 &from, const vec3 &to) {
+		return vec3{{to[0] - from[0], to[1] - from[1], to[2] - from[2]}};
+	}};
+	for (const auto &sp : tr.spots)
+	{
+		auto &c{a.pickup_sight[pickup_class_of(sp.id)]};
+		auto i{static_cast<std::size_t>(std::lower_bound(pts.begin(), pts.end(), sp.since, [](const track_point &p, const std::int64_t v) { return p.m.t < v; }) - pts.begin())};
+		/* The first sight. */
+		std::optional<std::size_t> first;
+		bool by_geo{};
+		for (std::size_t k{0}; i < pts.size() && pts[i].m.t <= sp.t; ++i)
+		{
+			const auto &p{pts[i]};
+			if (!p.alive || !same_level(p, sp) || k++ % limits::SIGHT_STRIDE)
+				continue;
+			const auto to{off(p.u.pos, sp.pos)};
+			const double d{length(to)};
+			if (d < 1)
+			{
+				first = i;
+				break;
+			}
+			if (dot(to, p.u.orient.forward) / d < cone)
+				continue;
+			if (p.geo)
+			{
+				const vec3 dir{{to[0] / d, to[1] / d, to[2] / d}};
+				if (geometry::free_distance(p.geo->mesh, p.m.s.segment, p.u.pos, dir, d + 1) < d - limits::SIGHT_SLACK)
+					continue;
+				by_geo = true;
+			}
+			else if (d > limits::SIGHT_NO_GEOMETRY)
+				continue;
+			first = i;
+			break;
+		}
+		if (!first)
+		{
+			if (sp.own)
+				++c.unseen_taken;
+			continue;
+		}
+		++a.sightings;
+		a.sightings_geo += by_geo;
+		const auto &p0{pts[*first]};
+		const double d0{length(off(p0.u.pos, sp.pos))};
+		/* Came close to it afterwards (in the same life, until it was
+		 * taken), and the way flown.
+		 */
+		double nearest{d0}, flown{};
+		for (std::size_t k{*first + 1}; k < pts.size() && pts[k].m.t <= sp.t + 100 && pts[k].alive; ++k)
+		{
+			nearest = std::min(nearest, length(off(pts[k].u.pos, sp.pos)));
+			if (pts[k].dt > 0)
+				flown += length(off(pts[k - 1].u.pos, pts[k].u.pos));
+		}
+		/* Closer by GO_FOR_MIN_CLOSE at least: one seen right next to the
+		 * ship and left there is not gone for.
+		 */
+		const bool went{sp.own || (nearest <= std::max(limits::GO_FOR_NEAR, limits::GO_FOR_SHARE * d0) && d0 - nearest >= limits::GO_FOR_MIN_CLOSE)};
+		++c.seen;
+		c.taken += sp.own;
+		c.went += went;
+		c.lost += went && !sp.own;
+		if (p0.fight)
+		{
+			++c.fight_seen;
+			c.fight_went += went;
+		}
+		else
+		{
+			++c.calm_seen;
+			c.calm_went += went;
+		}
+		if (sp.own)
+		{
+			c.sight_distance.push_back(d0);
+			c.take_s.push_back(static_cast<double>(sp.t - p0.m.t) / 1000.0);
+			c.extra_path.push_back(std::max(flown - d0, 0.0));
+			if (p0.u.speed >= 10 && d0 >= 5)
+			{
+				++c.off_course_n;
+				const auto to{off(p0.u.pos, sp.pos)};
+				if (dot(to, p0.u.vel) / (d0 * p0.u.speed) < std::cos(bot::radians(limits::DETOUR_DEG)))
+					++c.off_course;
+			}
+		}
+	}
+}
+
 /* What the player does when the enemy it fought leaves its sight. */
 inline void scan_pursuit(const track &tr, accum &a, const ship_model &ship)
 {
@@ -2338,6 +2583,7 @@ inline player_stats analyse(const std::span<const track> tracks, const ship_mode
 		detail::scan_strafe(tr, a);
 		detail::scan_dodge(tr, a, ship);
 		detail::scan_events(tr, a);
+		detail::scan_pickup_sight(tr, a);
 		detail::scan_pursuit(tr, a, ship);
 		detail::scan_rooms(tr, a);
 	}
@@ -2462,6 +2708,30 @@ inline player_stats analyse(const std::span<const track> tracks, const ship_mode
 	s.pickup_detour_n = a.pickup_detour_n;
 	s.pickup_detour_share = ratio(a.pickup_detours, a.pickup_detour_n);
 	s.pickup_in_fight_share = ratio(a.pickup_in_fight, a.pickups);
+
+	for (std::size_t c{}; c != PICKUP_CLASSES; ++c)
+	{
+		const auto &f{a.pickup_sight[c]};
+		auto &o{s.pickup_sight[c]};
+		o.seen = f.seen;
+		o.taken = f.taken;
+		o.went = f.went;
+		o.lost = f.lost;
+		o.fight_seen = f.fight_seen;
+		o.fight_went = f.fight_went;
+		o.calm_seen = f.calm_seen;
+		o.calm_went = f.calm_went;
+		o.unseen_taken = f.unseen_taken;
+		o.taken_share = ratio(f.taken, f.seen);
+		o.went_share = ratio(f.went, f.seen);
+		o.fight_went_share = ratio(f.fight_went, f.fight_seen);
+		o.calm_went_share = ratio(f.calm_went, f.calm_seen);
+		o.off_course_share = ratio(f.off_course, f.off_course_n);
+		o.sight_distance = summarise(f.sight_distance);
+		o.take_s = summarise(f.take_s);
+		o.extra_path = summarise(f.extra_path);
+	}
+	s.pickup_sight_geometry_share = ratio(a.sightings_geo, a.sightings);
 
 	s.sight_losses = a.sight_losses;
 	s.pursue_share = ratio(a.pursuits, a.sight_losses);
@@ -2700,6 +2970,18 @@ inline bot::style_profile propose_profile(const player_stats &s, const bot::bot_
 	if (s.pickup_detour_n >= 5)
 		p.set("tune.grab_detour", s.pickup_detour_share, confidence_of(s, s.pickup_detour_n, 10, 40));
 
+	/* Section 8.9: tune.power_pickup, the share of the power pickups in
+	 * sight the player went for; no more than medium when most sightings
+	 * were judged without the level's geometry.
+	 */
+	if (const auto &pw{s.pickup_sight[0]}; pw.seen >= 5)
+	{
+		auto c{confidence_of(s, pw.seen, 8, 25)};
+		if (s.pickup_sight_geometry_share < 0.5)
+			c = std::min(c, style_confidence::medium);
+		p.set("tune.power_pickup", pw.went_share, c);
+	}
+
 	/* The built-in style nearest to what was measured: the bot takes
 	 * from it what the profile leaves out.
 	 */
@@ -2760,6 +3042,17 @@ inline bot::style_profile propose_profile(const player_stats &s, const bot::bot_
 		info("measured.afterburner_share", s.ab_share);
 	if (s.primary_shots)
 		info("measured.hits_per_shot", s.hits_per_shot);
+	if (const auto &pw{s.pickup_sight[0]}; pw.seen)
+	{
+		info("measured.power_seen", pw.seen);
+		info("measured.power_taken_share", pw.taken_share);
+		if (pw.fight_seen)
+			info("measured.power_fight_went_share", pw.fight_went_share);
+		if (pw.sight_distance.n)
+			info("measured.power_sight_distance_median", pw.sight_distance.p50);
+	}
+	if (const auto &ot{s.pickup_sight[1]}; ot.seen)
+		info("measured.other_pickup_went_share", ot.went_share);
 	return p;
 }
 
@@ -2937,6 +3230,19 @@ inline std::vector<std::string> describe_traits(const player_stats &s, const shi
 	}
 	if (s.pickups >= 5)
 		appendf(line(), "Pickups: %.1f per minute, %.0f%% by leaving the course, %.0f%% in a fight.", s.pickups_per_min, pct(s.pickup_detour_share), pct(s.pickup_in_fight_share));
+	if (const auto &pw{s.pickup_sight[0]}, &ot{s.pickup_sight[1]}; pw.seen >= 3)
+	{
+		auto &l{line()};
+		const char *const kind{pw.went_share >= 0.7 ? "Goes for every power pickup it sees" : pw.went_share >= 0.4 ? "Often goes for the power pickups it sees" : "Lets most power pickups go"};
+		appendf(l, "%s: of %u smart, mega, earthshaker missiles and omega cannons in sight it went for %.0f%% and took %.0f%%", kind, pw.seen, pct(pw.went_share), pct(pw.taken_share));
+		if (pw.fight_seen >= 3)
+			appendf(l, "; %.0f%% of the %u seen in a fight%s", pct(pw.fight_went_share), pw.fight_seen, pw.fight_went_share >= 0.5 ? " (breaks off for them)" : "");
+		if (pw.sight_distance.n >= 3)
+			appendf(l, "; taken from %.0f units away (median, up to %.0f), %.1f s after the first sight", pw.sight_distance.p50, pw.sight_distance.p90, pw.take_s.p50);
+		if (ot.seen >= 5)
+			appendf(l, "; other pickups in sight: went for %.0f%%", pct(ot.went_share));
+		l += '.';
+	}
 	appendf(line(), "Speed: mean %.0f, median %.0f units/s (top speed %.0f); above 85%% of it %.0f%% of the time, nearly still %.0f%%.", s.speed.mean, s.speed.p50, ship.max_speed, pct(s.fast_share), pct(s.slow_share));
 	return out;
 }
@@ -3031,6 +3337,15 @@ inline std::string write_report(const player_stats &s, const bot::style_profile 
 		appendf(o, "; %u volleys of %.1f (max %u), %.1f s apart (median); distance median %.0f", s.volleys, s.volley_size, s.volley_max, s.volley_gap_s.p50, s.secondary_distance.p50);
 	o += '\n';
 	appendf(o, "  pickups: %u (%.1f/min), off course %.0f%% of %u, in a fight %.0f%%\n", s.pickups, s.pickups_per_min, pct(s.pickup_detour_share), s.pickup_detour_n, pct(s.pickup_in_fight_share));
+	for (std::size_t c{}; c != PICKUP_CLASSES; ++c)
+	{
+		const auto &k{s.pickup_sight[c]};
+		appendf(o, "  %s in sight before taken: %u; took %.0f%%, went for %.0f%% (lost the race %u); in a fight %u, went for %.0f%%; outside %u, went for %.0f%%; taken unseen %u\n", pickup_class_names[c], k.seen, pct(k.taken_share), pct(k.went_share), k.lost, k.fight_seen, pct(k.fight_went_share), k.calm_seen, pct(k.calm_went_share), k.unseen_taken);
+		if (k.sight_distance.n)
+			appendf(o, "    taken: from %.0f units at the first sight (p25 %.0f, p90 %.0f), %.1f s later (p90 %.1f), %.0f units flown beyond that (median), off course at the sight %.0f%%\n", k.sight_distance.p50, k.sight_distance.p25, k.sight_distance.p90, k.take_s.p50, k.take_s.p90, k.extra_path.p50, pct(k.off_course_share));
+	}
+	if (s.pickup_sight[0].seen + s.pickup_sight[1].seen)
+		appendf(o, "    (sight judged with the level's geometry: %.0f%% of the sightings)\n", pct(s.pickup_sight_geometry_share));
 	appendf(o, "  lost sight of the enemy %u times, followed %.0f%%; for %.1f s (median), p90 %.1f s\n", s.sight_losses, pct(s.pursue_share), s.pursuit_s.p50, s.pursuit_s.p90);
 	appendf(o, "  hits: dealt %u direct and %u splash (%.0f shields), taken %u (%.0f shields); %.2f direct hits per primary shot\n", s.hits_dealt, s.splash_dealt, s.damage_dealt, s.hits_taken, s.damage_taken, s.hits_per_shot);
 	if (!s.levels.empty())

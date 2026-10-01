@@ -1643,6 +1643,10 @@ struct tune_params
 	 * (grab_is_detour).
 	 */
 	double grab_detour_scale{1};
+	/* Section 9.14: the power weight (power_pickup_weight); negative:
+	 * the skill's and the style's.
+	 */
+	double power_pickup{-1};
 };
 
 /* The evasion: across the line from the attacker, the side the ship
