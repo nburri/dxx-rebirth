@@ -1760,13 +1760,25 @@ void test_level_geometry()
 		const std::size_t at{20 + 5 + 48 * 12 + 1 + 2};
 		bad[at] = 200;
 		CHECK(!geo::read_level(bad));
-		/* Segment 0's child at the back: no such segment.  The game
-		 * takes it for none and then reads that side's texture, which
-		 * the file does not have: nothing.
+		/* Segment 0's child at the back (segment 1, so no texture for
+		 * that side in the file) made one past the level's segments but
+		 * below the game's 9000: the game keeps it and reads no texture
+		 * either (gamemine.cpp, read_children); the level reads, without
+		 * the neighbour.
 		 */
 		auto child{bytes};
 		child[20 + 5 + 48 * 12 + 1] = 77;
-		CHECK(!geo::read_level(child));
+		const auto c{geo::read_level(child)};
+		CHECK(c && c->segments[0].children[4] == geo::SEGMENT_NONE);
+		/* Past 9000: the game takes it for none and reads a texture the
+		 * file does not have; whatever comes of the rest, no neighbour
+		 * that is not there.
+		 */
+		auto far_child{bytes};
+		far_child[20 + 5 + 48 * 12 + 1] = 0x00;
+		far_child[20 + 5 + 48 * 12 + 2] = 0x24;
+		if (const auto fc{geo::read_level(far_child)})
+			CHECK(fc->segments[0].children[4] == geo::SEGMENT_NONE);
 		/* The exit (0xfffe) is a way out, not a neighbour. */
 		auto to_exit{bytes};
 		to_exit[20 + 5 + 48 * 12 + 1] = 0xfe;

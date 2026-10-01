@@ -303,17 +303,21 @@ inline std::optional<level> read_level(const std::span<const std::uint8_t> bytes
 		if (mask & (1u << 6))
 			r.skip(4);
 	}};
-	const auto children{[&r, ns](segment &s, const unsigned mask) {
+	/* Which sides have a texture is decided by the children as the game
+	 * keeps them (gamemine.cpp, read_children: one past its MAX_SEGMENTS
+	 * becomes none, one past the level's segments does not); for the
+	 * rays a child that is no segment of the level is no neighbour.
+	 */
+	constexpr std::uint16_t GAME_MAX_SEGMENTS{9000};
+	std::array<std::uint16_t, 6> game_children{};
+	const auto children{[&r, ns, &game_children](segment &s, const unsigned mask) {
 		for (unsigned k{}; k != 6; ++k)
 		{
 			auto c{SEGMENT_NONE};
 			if (mask & (1u << k))
-			{
 				c = r.u16();
-				if (c != SEGMENT_EXIT && c >= ns)
-					c = SEGMENT_NONE;
-			}
-			s.children[k] = c;
+			game_children[k] = c != SEGMENT_EXIT && c >= GAME_MAX_SEGMENTS ? SEGMENT_NONE : c;
+			s.children[k] = c != SEGMENT_EXIT && c >= ns ? SEGMENT_NONE : c;
 		}
 	}};
 	const auto verts{[&r, nv](segment &s) {
@@ -352,7 +356,7 @@ inline std::optional<level> read_level(const std::span<const std::uint8_t> bytes
 				wall[k] = r.u8() != 255;
 		for (unsigned k{}; k != 6; ++k)
 		{
-			if (s.children[k] != SEGMENT_NONE && !wall[k])
+			if (game_children[k] != SEGMENT_NONE && !wall[k])
 				continue;
 			const auto tmap{r.u16()};
 			if (!new_format || (tmap & 0x8000))
@@ -627,7 +631,7 @@ inline std::string level_geometry::character() const
 		: tight >= 0.5 ? (long_views ? "tight corridors with long sight lines" : "tight corridors")
 		: medium >= 0.5 ? (long_views ? "wide tunnels and rooms with long sight lines" : "wide corridors and small rooms")
 		: "a mix of tight corridors and open rooms"};
-	const unsigned segments = mesh.segments.size();
+	const auto segments{static_cast<unsigned>(mesh.segments.size())};
 	std::array<char, 256> buf;
 	std::snprintf(buf.data(), buf.size(), "%s: %.0f%% of the volume open, %.0f%% medium, %.0f%% tight; room %.0f units (volume-weighted median), the longest free line from a segment %.0f units (90th percentile); %u segments, %.0f thousand cubic units",
 		kind, 100 * open_share, 100 * medium, 100 * tight, median_room, long_lines, segments, volume / 1000);
