@@ -11,7 +11,7 @@
  * fly besides the four built-in ones.  The game reads the files
  * (bot_menu.cpp); this is the game-independent part: which files make a
  * style, under which name (the bot setup's, the pilot's netgame
- * profile's) and which chat word (`/bot add hot evilcow`).
+ * profile's) and which chat word (`/bot add hot EC`).
  *
  * The files come from anywhere (a friend's analysis, the internet): a
  * file is read only up to STYLE_FILE_MAX_BYTES, at most
@@ -44,7 +44,7 @@ namespace dcx::bot {
  * (under 50 characters) hold it.
  */
 constexpr std::size_t BOT_STYLE_NAME_LEN{31};
-/* A style's chat word (`/bot add hot evilcow`). */
+/* A style's chat word (`/bot add hot EC`). */
 constexpr std::size_t BOT_STYLE_WORD_LEN{16};
 constexpr std::size_t STYLE_LIBRARY_MAX{24};
 constexpr std::size_t STYLE_FILE_MAX_BYTES{64 * 1024};

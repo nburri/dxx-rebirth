@@ -27,8 +27,8 @@
  * profile's base style (what the bot flies when the file is gone, and
  * what an older build reads):
  *
- *	BotDefaultStyle=evilcow style
- *	BotStyle1=evilcow style
+ *	BotDefaultStyle=EC style
+ *	BotStyle1=EC style
  */
 
 #pragma once

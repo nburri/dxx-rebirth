@@ -718,10 +718,10 @@ bots, in the modes bots play (anarchy, team anarchy, bounty).
   holds 33 characters, so a long command needs the short words
   (`/bot add hot agg ravager`).
   Section 9.13: in a style's place a loaded style profile's word (its
-  player's callsign, `/bot add hot evilcow`) chooses that profile; in
+  player's callsign, `/bot add hot EC`) chooses that profile; in
   `/bot add` a word in the style's place is read as a profile's word
-  before it is read as a name (`/bot add hot bal evilcow` names a bot
-  "evilcow").
+  before it is read as a name (`/bot add hot bal EC` names a bot
+  "EC").
 - **Limits.** A bot is added only while a level is played (not between
   levels, not during the reactor countdown), and not while the host
   serves a human's join (a moment later it works). It takes the slot a
@@ -3170,8 +3170,8 @@ Rebirth/botstyles/`, Windows the game's folder). The game makes the
 folder. It reads every `*.botstyle` file there when the setup starts,
 whenever a Bots screen opens (a file dropped in meanwhile appears) and
 when a game starts, in the order of the file names; the console lists
-what it loaded (`bots: style "evilcow style" from
-botstyles/evilcow.botstyle (base Balanced, /bot word evilcow)`) and why
+what it loaded (`bots: style "EC style" from
+botstyles/EC.botstyle (base Balanced, /bot word EC)`) and why
 a file was refused. Only the host needs the files: the bots are flown on
 the host, the clients see ordinary players, nothing goes over the
 network but the notices' text.
@@ -3192,7 +3192,7 @@ word `/bot` reads otherwise or another style has it.
 **Choosing it.** Every style slider (the Bots screen's default, the
 per-bot screen, the in-game screen's "new bots' style" and a bot's own
 screen) offers the four built-in styles, then the loaded profiles by
-name ("evilcow style"). The lists show the first seven letters. `/bot
+name ("EC style"). The lists show the first seven letters. `/bot
 add [skill] <word> [name]` and `/bot style <name|all> <word>` take the
 profile's word. A bot keeps the profile by name (`bot_config::profile`),
 with its base style as `style`; `.ngp` keeps both (§6.5).
@@ -3200,7 +3200,7 @@ with its base style as `style`; `.ngp` keeps both (§6.5).
 **The file is gone.** A bot whose profile is not loaded (the file was
 removed or renamed, or the setup came from another machine) flies the
 profile's base style, and the console says so once per bot (`bots:
-'ravager': no style "evilcow style" in botstyles/ (a .botstyle file): it
+'ravager': no style "EC style" in botstyles/ (a .botstyle file): it
 flies Balanced`). Its setup line keeps the name, so the bot flies the
 profile again once the file is back; moving its style slider replaces
 it.
@@ -3232,7 +3232,7 @@ flies every turn backwards still measures about the share of the others
 the bot's share, which makes its turns what they were measured to be
 only as far as the two definitions agree.
 
-**The real profile.** `evilcow.botstyle` (both evenings) on a Hotshot
+**The real profile.** `EC.botstyle` (both evenings) on a Hotshot
 bot: strafe runs 200–700 ms, vertical 0.33, strafe thrust 0.9; engage
 0.95, collect 1.38, hunt memory × 0.4, closing × 0.87, no afterburner
 chase; band 41–97; turns reversed 0.11 at 0.71 of the top speed, pushes

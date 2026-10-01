@@ -544,9 +544,9 @@ Put the `.botstyle` files into `botstyles/` in the PhysFS write
 directory (next to `recordings/` and the pilot files; the game makes the
 folder). The host reads them when the bot setup starts, when a Bots
 screen opens and when a game starts; they appear in every style slider
-after the four built-in styles, by name ("evilcow style"), and as a
-style word in the chat (`/bot add hot evilcow`, `/bot style all
-evilcow`). A bot gets `apply_style_profile(profile, its skill)` in place
+after the four built-in styles, by name ("EC style"), and as a
+style word in the chat (`/bot add hot EC`, `/bot style all
+EC`). A bot gets `apply_style_profile(profile, its skill)` in place
 of `style_of(style)` and `skill_of(skill)`, every `style.`, `skill.` and
 `tune.` key included; the setup and the pilot's `.ngp` keep the
 profile's name (`BotStyle<n>=`) besides the base style, which a host

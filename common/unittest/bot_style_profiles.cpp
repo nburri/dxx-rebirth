@@ -60,14 +60,14 @@ bool close_to(const double a, const double b, const double eps = 1e-4)
 	return std::abs(a - b) <= eps;
 }
 
-/* forclaude/analysis/both/evilcow.botstyle, as movrec-analyse wrote it:
+/* the profile of a strong human player (callsign EC), as movrec-analyse wrote it:
  * two evenings, 27.7 minutes alive, controls exact.
  */
-constexpr std::string_view EVILCOW{
+constexpr std::string_view ec{
 	"# D2X-Rebirth bot style profile (Documentation/movement-recording.md, section 8.5)\n"
 	"format = 1\n"
-	"name = evilcow style\n"
-	"callsign = evilcow\n"
+	"name = EC style\n"
+	"callsign = EC\n"
 	"source = 2 games, 27.7 min alive, 13.9 min in fights, controls 100% exact\n"
 	"base_skill = Hotshot\n"
 	"base_style = Balanced\n"
@@ -143,9 +143,9 @@ void print_bot(const char *const what, const style_profile_params &b)
 /* The real profile, parsed, and a Hotshot bot that flies it. */
 void test_real_profile()
 {
-	const auto p{parse_style_profile(EVILCOW)};
+	const auto p{parse_style_profile(ec)};
 	CHECK(p);
-	CHECK(p->name == "evilcow style" && p->callsign == "evilcow");
+	CHECK(p->name == "EC style" && p->callsign == "EC");
 	CHECK(p->base_skill == bot_skill::hotshot && p->base_style == bot_style::balanced);
 	/* 6 style, 5 skill, 12 tune, 8 measured keys. */
 	CHECK(p->entries.size() == 31);
@@ -156,7 +156,7 @@ void test_real_profile()
 	const auto base_skill{skill_of(bot_skill::hotshot)};
 	const auto balanced{style_of(bot_style::balanced)};
 	const auto b{apply_style_profile(*p, bot_skill::hotshot)};
-	print_bot("evilcow style, Hotshot", b);
+	print_bot("EC style, Hotshot", b);
 	/* skill.*: the strafe. */
 	CHECK(b.skill.strafe);
 	CHECK(b.skill.strafe_min_ms == 200 && b.skill.strafe_max_ms == 700);
@@ -404,15 +404,15 @@ void test_untrusted()
 void test_library()
 {
 	style_library lib;
-	CHECK(lib.add("evilcow", EVILCOW) == style_add_result::added);
+	CHECK(lib.add("EC", ec) == style_add_result::added);
 	CHECK(lib.size() == 1);
-	CHECK(std::string_view(lib[0].name.data()) == "evilcow style");
-	CHECK(std::string_view(lib[0].word.data()) == "evilcow");
-	CHECK(lib.find("EvilCow Style") == &lib[0] && lib.index_of("evilcow style") == 0);
-	CHECK(lib.find_word("EVILCOW") == &lib[0]);
+	CHECK(std::string_view(lib[0].name.data()) == "EC style");
+	CHECK(std::string_view(lib[0].word.data()) == "ec");
+	CHECK(lib.find("Ec Style") == &lib[0] && lib.index_of("EC style") == 0);
+	CHECK(lib.find_word("ec") == &lib[0]);
 	CHECK(!lib.find("nobody style") && lib.index_of("") == lib.size());
 	/* The same name again: the first file wins. */
-	CHECK(lib.add("evilcow2", EVILCOW) == style_add_result::duplicate);
+	CHECK(lib.add("EC2", ec) == style_add_result::duplicate);
 	/* Not a profile; too large. */
 	CHECK(lib.add("x", "name = x\n") == style_add_result::not_a_profile);
 	CHECK(lib.add("x", std::string(STYLE_FILE_MAX_BYTES + 1, '#')) == style_add_result::too_large);
@@ -428,10 +428,10 @@ void test_library()
 	CHECK(std::string_view(lib[3].name.data()) == "J?rgen  the     very long name");
 	CHECK(!lib[3].word[0]);
 	/* A word taken already: none. */
-	CHECK(lib.add("b", "format = 1\nname = other\ncallsign = evilcow\n") == style_add_result::added);
+	CHECK(lib.add("b", "format = 1\nname = other\ncallsign = EC\n") == style_add_result::added);
 	CHECK(!lib[4].word[0]);
 	const auto words{lib.words()};
-	CHECK(words.size() == 5 && words[0] == "evilcow" && words[3].empty());
+	CHECK(words.size() == 5 && words[0] == "ec" && words[3].empty());
 	/* At most STYLE_LIBRARY_MAX. */
 	for (unsigned i = lib.size(); i < STYLE_LIBRARY_MAX; ++i)
 	{
@@ -451,9 +451,9 @@ void test_netgame_profile()
 	p.count = 3;
 	p.default_skill = bot_skill::ace;
 	p.default_style = bot_style::balanced;
-	p.default_profile = make_style_name("evilcow style");
+	p.default_profile = make_style_name("EC style");
 	std::strcpy(p.bots[0].name.data(), "ravager");
-	p.bots[0].profile = make_style_name("evilcow style");
+	p.bots[0].profile = make_style_name("EC style");
 	std::strcpy(p.bots[1].name.data(), "havoc");
 	p.bots[1].style = bot_style::cautious;
 	std::strcpy(p.bots[2].name.data(), "sparky");
@@ -484,15 +484,15 @@ void test_netgame_profile()
 		CHECK(q.parse("BotStyle9", "far away"));
 		CHECK(q.parse("BotCount", "3"));
 		CHECK(q.parse("BotDefault", "2,1"));
-		CHECK(q.parse("BotDefaultStyle", " evilcow style "));
+		CHECK(q.parse("BotDefaultStyle", " EC style "));
 		CHECK(q.parse("Bot0", "a,2,0,0"));
 		CHECK(q.parse("Bot1", "b,2,0,0"));
 		CHECK(!q.parse("BotStylex", "x"));
 		const auto g{q.result()};
 		CHECK(!g.bots[0].profile[0]);
 		CHECK(std::string_view(g.bots[1].profile.data()) == "Nico style");
-		CHECK(std::string_view(g.bots[2].profile.data()) == "evilcow style" && g.bots[2].style == bot_style::aggressive);
-		CHECK(std::string_view(g.default_profile.data()) == "evilcow style");
+		CHECK(std::string_view(g.bots[2].profile.data()) == "EC style" && g.bots[2].style == bot_style::aggressive);
+		CHECK(std::string_view(g.default_profile.data()) == "EC style");
 	}
 	{
 		profile_reader q;
@@ -504,7 +504,7 @@ void test_netgame_profile()
 	/* Save as default during a game: the style lines are bot lines. */
 	{
 		const auto text{replace_profile_bot_lines("Foo=1\nBotCount=1\nBot0=x,1,1,1\nBotStyle0=old\nNGPVersion=1\n", p, "NGPVersion")};
-		CHECK(text.find("BotStyle0=evilcow style\n") != std::string::npos);
+		CHECK(text.find("BotStyle0=EC style\n") != std::string::npos);
 		CHECK(text.find("BotStyle0=old") == std::string::npos);
 		CHECK(text.starts_with("Foo=1\nBotCount=3\n") && text.ends_with("NGPVersion=1\n"));
 	}
@@ -513,9 +513,9 @@ void test_netgame_profile()
 /* `/bot` with a loaded profile's word in a style's place. */
 void test_chat()
 {
-	const std::array<std::string_view, 3> words{{"evilcow", "", "nico"}};
+	const std::array<std::string_view, 3> words{{"EC", "", "nico"}};
 	{
-		const auto c{parse_command("/bot add hot evilcow", words)};
+		const auto c{parse_command("/bot add hot EC", words)};
 		CHECK(c.kind == command_kind::add && c.skill == bot_skill::hotshot && !c.style && c.profile == 0u && !c.name[0]);
 	}
 	{
@@ -524,11 +524,11 @@ void test_chat()
 	}
 	{
 		/* After a built-in style, the word is a name. */
-		const auto c{parse_command("/bot add ace bal evilcow", words)};
-		CHECK(c.kind == command_kind::add && c.style == bot_style::balanced && !c.profile && std::string_view(c.name.data()) == "evilcow");
+		const auto c{parse_command("/bot add ace bal EC", words)};
+		CHECK(c.kind == command_kind::add && c.style == bot_style::balanced && !c.profile && std::string_view(c.name.data()) == "ec");
 	}
 	{
-		const auto c{parse_command("/bot style all evilcow", words)};
+		const auto c{parse_command("/bot style all EC", words)};
 		CHECK(c.kind == command_kind::style && c.all && c.profile == 0u && !c.style);
 	}
 	{
@@ -537,8 +537,8 @@ void test_chat()
 	}
 	CHECK(parse_command("/bot style all nobody", words).kind == command_kind::error);
 	/* Without profiles, as before. */
-	CHECK(parse_command("/bot add hot evilcow").kind == command_kind::add && std::string_view(parse_command("/bot add hot evilcow").name.data()) == "evilcow");
-	CHECK(parse_command("/bot style all evilcow").kind == command_kind::error);
+	CHECK(parse_command("/bot add hot EC").kind == command_kind::add && std::string_view(parse_command("/bot add hot EC").name.data()) == "ec");
+	CHECK(parse_command("/bot style all EC").kind == command_kind::error);
 }
 
 int test_file(const char *const path)

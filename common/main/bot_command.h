@@ -26,7 +26,7 @@
  *   screens: `/bot add col ace` (style before skill) is an error, not a
  *   bot named "ace", and `/bot remove all` never meets a bot named "all".
  *   Section 9.13: a style is also a loaded style profile's word (its
- *   player's callsign: `/bot add hot evilcow`), in the style's place.
+ *   player's callsign: `/bot add hot EC`), in the style's place.
  * - which bot a name means (exact, else a unique prefix);
  * - whether the host may add a bot now, and why not.
  */
