@@ -1,7 +1,7 @@
 # Movement recording (player styles for bots, steps 1 and 2)
 
 Status: step 1 (recording), step 2 (the analysis tool and the bot style
-profile format, section 8) and step 3 (bots that fly a profile, section
+profile format, section 8; levels and rooms, section 8.8) and step 3 (bots that fly a profile, section
 8.7) are implemented on `experimental-netcode`.
 
 ## 1. Goal
@@ -190,14 +190,17 @@ recordings of one game made on several machines can be put on one time line
 (section 8.2).
 
 `level` and `player` records describe the context: a `level` record at the
-start of every level (number, name, mission, segment count, game mode) and a
+start of every level (number, name, mission, segment count, game mode, and
+since minor 3 the mission's file name without extension, the stem of its
+`.hog` and `.mn2`, and the level's file, `.rl2`, so that the analysis can
+find the level's geometry, section 8.8) and a
 `player` record for every slot at the level start and whenever a slot's
 callsign, team or flags (connected, bot, flown here, recorded, shares its
 controls) change.
 
 ## 4. File format
 
-All integers little-endian. Version 1, minor 2. The minor counts additions
+All integers little-endian. Version 1, minor 3. The minor counts additions
 that an older reader skips without harm (new record types, new flag bits,
 fields appended to the header); the version changes only when old fields
 change. Minor 0 is the first release (v0.61-exp-25); minor 1 adds the
@@ -207,7 +210,12 @@ for the afterburner, missile flags and slots. Minor 2 adds the shared
 controls (`-sharemoves`): sample flags2 bit 7 `controls shared` and player
 flag 16 `shares controls`; the layout is unchanged (a shared sample is a
 sample with controls), so a minor 1 reader reads a minor 2 file and takes
-the shared controls for exact ones, which they are. A minor 0 file reads as
+the shared controls for exact ones, which they are. Minor 3 appends the
+mission's file name (without extension) and the level's file name to the
+`level` record and, after `minor`, to the header (each at most 20 bytes); a
+minor 2 reader reads the fields it knows and skips them, a minor 3 reader
+reads an older file without them (empty), and a damaged name costs the
+names, not the record. A minor 0 file reads as
 before (its header has no `minor` field: 0).
 
 ```
@@ -219,6 +227,7 @@ header  = magic "DXXMOVES" (8)
           program str8 | mission str8 | level_name str8 | level_num i8
           player_count u8, player_count × { pid u8, flags u8, team u8, callsign str8 }
           minor u16 (absent in minor 0)
+          mission_file str8 | level_file str8 (minor 3)
           crc32 u32 (of all header bytes before it)
 chunk   = magic "MRCK" (u32 0x4b43524d) | sequence u32 | payload_size u32 | crc32 u32 (of payload)
           payload: whole records, at most 32752 bytes
@@ -230,7 +239,7 @@ Record payloads (sizes without the 2 byte record header):
 
 | Type | Payload |
 |---|---|
-| 1 `level` | level_num i8, segments u16, game_mode u32, mission str8, level_name str8 |
+| 1 `level` | level_num i8, segments u16, game_mode u32, mission str8, level_name str8, [mission_file str8, level_file str8 (minor 3)] |
 | 2 `player` | pid u8, flags u8 (1 connected, 2 bot, 4 flown here, 8 recorded, 16 shares its controls (minor 2)), team u8 (255 no teams), callsign str8 |
 | 3 `tick` (8) | tick u32 (counts from 0 at the session start at `tick_rate`), time_ms u32 (game time since the session start) |
 | 4 `sample` (54, 60 with controls) | pid u8, flags u8, flags2 u8, segment u16, position 3 × i24, quaternion 4 × i16, velocity 3 × i16, rotvel 3 × i16, weapons u8, shields u8, energy u8, attacked u8, aimed_at u8, context u8, enemy_id u16, enemy_rel_pos 3 × i16, enemy_rel_vel 3 × i16, [controls 6 × i8] |
@@ -294,7 +303,8 @@ scons sdl2=1 d1x=0 d2x=1 register_runtime_test_plain_link_targets=1 movrec-dump
 build/common/movrec-dump [--csv DIR] [--player N] [--records] FILE...
 ```
 
-Without options it prints the header, the file's health, the levels, and per
+Without options it prints the header, the file's health, the levels (with
+their files, minor 3), and per
 player: time alive, mean speed, share of time reversing / strafing /
 climbing, afterburner share, the samples with controls (flown here, or
 shared by the player's machine), turning hard and the share of that with
@@ -337,7 +347,8 @@ proposed bot style:
 ```
 scons sdl2=1 d1x=0 d2x=1 register_runtime_test_plain_link_targets=1 movrec-analyse
 build/common/movrec-analyse [--out DIR] [--player CALLSIGN]... [--bots]
-                            [--skill NAME] [--min-seconds N] FILE...
+                            [--skill NAME] [--min-seconds N]
+                            [--missions DIR] FILE...
 ```
 
 | Option | Meaning |
@@ -347,6 +358,7 @@ build/common/movrec-analyse [--out DIR] [--player CALLSIGN]... [--bots]
 | `--bots` | Also the recorded bots (`-recordmoves-bots`); their files end in `-bot`. |
 | `--skill NAME` | The skill the profile's skill-relative values are scaled for (Trainee … Insane; default Hotshot). |
 | `--min-seconds N` | Skip players alive for less than N seconds (default 20). |
+| `--missions DIR` | The folder of the missions (`.hog` and `.mn2`, as in the game's `missions/`): find every recorded level's geometry and report the traits per level and room (section 8.8). |
 
 Give it every recording you have of a player: all files of all evenings, the
 host's and the clients'. It first lists the files (format, length, host or
@@ -635,6 +647,83 @@ without the file flies (with a console line). Only the host needs the
 files. Details, limits for untrusted files and the table of what each
 key sets: Documentation/multiplayer-bots.md §9.13.
 
+### 8.8 Levels and rooms
+
+How a pilot flies depends on the map: in a tight corridor nobody fights at
+200 units, in a long tunnel everybody sees the enemy from far. With
+`--missions DIR` the tool finds the geometry of every recorded level and
+measures the room the player had.
+
+**Finding the level.** A recording of format minor 3 names the mission's
+file and the level's file: the tool takes `DIR/<mission>.hog` and the level
+in it. An older recording has the mission's name, the level number and the
+segment count: the tool takes every `.mn2` of that name (the game keeps 25
+characters of it), its level of that number (`num_levels`, or a secret
+level for a negative number), and keeps those with the recorded number of
+segments. Several missions that fit with the same geometry are one (a
+note names them); with different geometry the level is **ambiguous** and
+left out, with a note (two missions both named "OMIKRON PRIME (Sny)", for
+example, would be told apart by their segment counts, else not). The tool
+lists per recorded level how it was found or why not.
+
+**Reading it** (`common/main/level_geometry.h`, standard C++ only): the
+HOG directory, the `.mn2` lines, and of the level the vertices and the
+segments (their 8 vertices and 6 neighbours) as `gamemine.cpp` reads the
+mine (Descent 2 levels, the Descent 2 shareware's version 5 and Descent 1
+`.rdl`). The files are untrusted: every count, offset and index is checked
+(at most 20000 segments, 65536 vertices, 4096 HOG entries, files up to 256
+MiB); a vertex index out of range rejects the level, a neighbour out of
+range is no neighbour (as in the game). Walls are not read: a side with a
+neighbour is open (doors, grates and force fields count as open).
+
+**The room.** A ray walks through the segments: it leaves each one by the
+side it meets furthest along (so a point a little outside its segment
+still finds its way), into the neighbour behind it, until a side without
+one; a side that is not flat is tried split both ways. Per segment, the
+**room** is the median free distance from (near) its centre over 26
+directions spread over the sphere (not along the axes or diagonals: in a
+level built of cubes those run exactly through vertices and edges); it
+is about half the width of the space: a corridor of standard 20 unit
+segments gives 10 to 15. **Room classes**: tight below 15, medium 15 to
+35, open from 35. Per sample (where the level is known): the class of the
+ship's segment, the free distance ahead, behind, right, left, up and down
+from the ship, and the **line of fire**: the free distance toward the
+enemy (through it, to the wall behind it) plus away from it.
+
+**The level's character** (in the tool's level list and at the top of each
+player's report): the shares of the volume by room class, the
+volume-weighted median room, the 90th percentile of the segments' longest
+free line, and a few words. The two levels of the first recordings:
+
+| Level | Character |
+|---|---|
+| Pyroglyphic (PYGL.HOG, pygl_132.rl2, 253 segments) | wide tunnels and rooms with long sight lines: 30 % of the volume open, 64 % medium, 6 % tight; room 29; longest lines 201 |
+| Earth Shaker (ESHAKER.HOG, eshaker.rl2, 250 segments) | wide corridors and small rooms: 99 % medium (27 unit square corridors); room 21; longest lines 177 |
+
+**Per level and room** the report gives the time, speed, strafe share in
+fights, the free room to the nearer side, the distance to the enemy in
+sight and the line of fire it had (and the share of it), and the large
+turns by how they were flown; the traits get a line "Rooms: ...". The
+distance when firing is also given by the length of the line of fire
+(below 100, 100 to 200, 200 to 400, 400 and more), and the profile notes
+`measured.line_share_median`, the distance as a share of the line of fire:
+the fight distance normalised by what the map offers.
+
+**What the first recordings show.** EC flies the same on both maps: speed
+51 (Pyroglyphic) and 54 (Earth Shaker), sideways or vertical thrust in 67 %
+of the fight time on both, 86 % and 85 % of the large turns sliding. The
+distance is set by the map: EC fires from 38, 65 and 102 units with a line
+of fire below 100, 100 to 200 and 200 to 400 units on Pyroglyphic, and 32,
+60, 105 on Earth Shaker; the five bots, whose styles ask for distances from
+0.75 to 1.25 times the 35 to 95 band, fire from 23 to 37, 60 to 69 and 91
+to 107 there, and the enemy is at 43 to 45 % of the line for every bot
+(EC: 47 to 48 %). On one map the fight distance is mostly the map's:
+the profile's `style.range_scale`, `tune.range_lo` and `tune.range_hi` are
+therefore no more than medium sure when all the shots are on one level.
+(Taking only the shots along long lines of fire as the pilot's free choice
+does not work: the enemies seen along a long line are far ones, and the
+bots, whose band ends at 119, then fire from 120 to 207.)
+
 ## 9. Code
 
 | File | Content |
@@ -645,10 +734,11 @@ key sets: Documentation/multiplayer-bots.md §9.13.
 | `common/tools/movrec_dump.cpp` | The dump tool |
 | `common/unittest/movement_record.cpp` | Tests: round trips, header, chunks, truncation at every byte, damaged chunks, unknown records, the tick schedule at 20 to 1000 fps, quantisation and frames, the minor 1 additions |
 | `common/main/movement_analysis.h` | Step 2: loading, sessions and clocks, merging, tracks and the control estimate, the movement profile, the proposal, the report (header-only) |
+| `common/main/level_geometry.h` | Section 8.8: the mission files (HOG, MN2), the level's segments and vertices, rays through them, the room of a segment, the level's character, finding a recorded level among the missions (header-only, standard C++) |
 | `common/main/bot_style_profile.h` | The `.botstyle` format: keys and ranges, write, parse, apply to `skill_params`/`style_params`/`tune_params` (header-only, for the game too) |
 | `common/main/bot_style_library.h` | Step 3: the styles of `botstyles/`: names, chat words, limits (header-only) |
 | `common/tools/movrec_analyse.cpp` | The analysis tool |
-| `common/unittest/movement_analysis.cpp` | Tests: synthetic recordings of scripted pilots (section 8.6) |
+| `common/unittest/movement_analysis.cpp` | Tests: synthetic recordings of scripted pilots (section 8.6); a tiny synthetic level (a tunnel into a room) written as the game's files: reading, rays, rooms, the mission files, finding the level, damaged files; a flight in a level of one room |
 
 Hooks in the game (one call each): `GameProcessFrame` (sample, after the
 bots fired), the game window's close (end of the session),
