@@ -8,7 +8,6 @@ on:
     types: [opened, synchronize, reopened, labeled]
     branches:
       - master
-      - release-500hz
       - experimental-netcode
     paths-ignore:
       - 'Documentation/**'
