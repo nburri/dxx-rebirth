@@ -536,12 +536,12 @@ void print_row(const char *const name, const flight_result &r)
 }
 
 /* What a strong human flew (the recordings of 2026-09-30, both games,
- * evilcow.report.txt) and what the bots flew then (five bots, Hotshot
+ * EC.report.txt) and what the bots flew then (five bots, Hotshot
  * and Insane), for the table in the output.
  */
 void print_reference()
 {
-	std::puts("test-bot-fight-sim: human (evilcow)  speed 51.8 fast  63% | strafe  67% runs  367 ms  44.8 rev/min vert 0.33 thrust  98% across  77% | turns 180 in 1633 ms at 73%, rev 11% slide 86% push 74% (burn 26%) | ab 6.2% flee 21% roam 6%");
+	std::puts("test-bot-fight-sim: human (EC)  speed 51.8 fast  63% | strafe  67% runs  367 ms  44.8 rev/min vert 0.33 thrust  98% across  77% | turns 180 in 1633 ms at 73%, rev 11% slide 86% push 74% (burn 26%) | ab 6.2% flee 21% roam 6%");
 	std::puts("test-bot-fight-sim: bots before      speed 37-41 fast 24-36% | strafe 75-85% runs 367-433 ms 80-102 rev/min vert 0.71-1.0 thrust 75-79% across 45-48% | turns 180 in 1175-1457 ms at 80-99%, rev 24-45% slide 55-76% push 31-48% (burn 0-28%) | ab 0.1-2.3% flee 0-6% roam 0-3%");
 }
 

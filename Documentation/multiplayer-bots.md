@@ -3035,7 +3035,7 @@ and hoard (B7).
 ### 9.12 After the first recordings (2026-09-30): flying like a human
 
 The movement recordings (Documentation/movement-recording.md) of a
-strong human ("evilcow") against five bots (one Hotshot, four Insane)
+strong human ("EC") against five bots (one Hotshot, four Insane)
 on two evenings, analysed with `movrec-analyse --bots`, put numbers on
 how differently they flew. Fight distance, missile volleys and pickups
 were already close; the flight itself was not:
