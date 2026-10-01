@@ -753,20 +753,39 @@ constexpr double TURN_THRUST_SHARE{0.4};
 /* The push after a turn: the mean forward thrust in this time. */
 constexpr double BOOST_MS{800};
 constexpr double BOOST_THRUST{0.6};
-/* A dodge: the velocity across the line to the shooter changes by this
- * share of the top speed within DODGE_WINDOW_MS of the shot; the
- * reaction is the time to REACT_SHARE.  Shots within FIRE_ONSET_MS of
- * the shooter's last one are the same burst.
+/* Dodging (scan_dodge): a burst is the first shot of a shooter after
+ * FIRE_ONSET_MS without one, fired within DODGE_RANGE with the player
+ * in its 30 degree cone.  The player's answer is a switch of its
+ * sideways/vertical thrust (a run of the strafe starts, from none or in
+ * another direction) between REACT_FROM_MS and REACT_TO_MS after the
+ * shot.  The same is looked at every BASELINE_STRIDE_MS of the quiet
+ * moments in the same situation (no shot aimed at the player
+ * QUIET_BEFORE_MS before to DODGE_WINDOW_MS after); those are sorted by the phase of the weave
+ * (the time since its last switch, PHASE_BIN_MS bins up to PHASE_BINS,
+ * and whether a run is on), so a burst is compared with quiet moments
+ * at the same point of the player's rhythm.  A phase with fewer than
+ * MIN_PHASE_N quiet moments borrows from its neighbours.
  */
-constexpr double DODGE_SHARE{0.3};
-constexpr double REACT_SHARE{0.12};
-constexpr std::int64_t DODGE_WINDOW_MS{700};
 constexpr std::int64_t FIRE_ONSET_MS{1000};
 constexpr double DODGE_RANGE{300};
-/* With sidesteps in more than this share of the quiet moments, dodges
- * cannot be told apart.
+constexpr std::int64_t REACT_FROM_MS{60};
+constexpr std::int64_t REACT_TO_MS{450};
+constexpr std::int64_t DODGE_WINDOW_MS{700};
+constexpr std::int64_t QUIET_BEFORE_MS{1500};
+constexpr std::int64_t BASELINE_STRIDE_MS{100};
+constexpr std::int64_t PHASE_BIN_MS{50};
+constexpr std::size_t PHASE_BINS{20};
+constexpr unsigned MIN_PHASE_N{8};
+/* A switch counts when its run lasts at least this long (a control
+ * that hovers about CONTROL_USED is no switch).
  */
-constexpr double DODGE_BASELINE_MAX{0.5};
+constexpr double SWITCH_MIN_S{0.06};
+/* A hit of the shooter this long after the burst is its hit. */
+constexpr std::int64_t BURST_HIT_MS{1500};
+/* The room the measure needs: the bursts' chances of a switch the
+ * weave would not have made, summed (with fewer, a dodge cannot show).
+ */
+constexpr double DODGE_MIN_ROOM{4};
 /* Missiles at most this far apart are one volley. */
 constexpr std::int64_t VOLLEY_GAP_MS{700};
 /* Two volleys further apart than this are not of one fight: the time
@@ -840,6 +859,15 @@ struct track
 	 * others.
 	 */
 	std::vector<merged_event> own, dealt, enemy_fire;
+	/* Per shot of `enemy_fire`: where the shooter was and where its nose
+	 * pointed, if the session has a sample of it then (it was recorded).
+	 */
+	struct shooter_pose
+	{
+		bool known{};
+		vec3 pos{}, forward{};
+	};
+	std::vector<shooter_pose> enemy_fire_from;
 	/* The point nearest to time `t`, within `tolerance_ms`. */
 	[[nodiscard]]
 	std::optional<std::size_t> at(const std::int64_t t, const std::int64_t tolerance_ms) const
@@ -949,7 +977,23 @@ inline track build_track(const merged_session &ms, const std::size_t player, con
 		else if (e.other == me && (e.e.type == record_type::hit || e.e.type == record_type::kill))
 			tr.dealt.push_back(e);
 		if (e.who != me && e.e.type == record_type::fire)
+		{
 			tr.enemy_fire.push_back(e);
+			track::shooter_pose pose;
+			if (e.who >= 0 && static_cast<std::size_t>(e.who) < ms.players.size())
+			{
+				const auto &their{ms.players[static_cast<std::size_t>(e.who)].samples};
+				auto i{std::lower_bound(their.begin(), their.end(), e.t, [](const merged_sample &m, const std::int64_t v) { return m.t < v; })};
+				if (i != their.begin() && (i == their.end() || e.t - std::prev(i)->t < i->t - e.t))
+					--i;
+				if (i != their.end() && std::abs(i->t - e.t) <= 100 && (i->s.flags & sample_flag::alive))
+				{
+					const auto u{to_units(i->s)};
+					pose = {true, u.pos, u.orient.forward};
+				}
+			}
+			tr.enemy_fire_from.push_back(pose);
+		}
 	}
 	return tr;
 }
@@ -1001,6 +1045,13 @@ inline constexpr std::array<double, 5> DISTANCE_EDGES{{35, 60, 95, 150, 250}};
 constexpr std::size_t DISTANCE_BINS{DISTANCE_EDGES.size() + 1};
 constexpr std::size_t SHIELD_BUCKETS{5};	/* 25 shields each, the last 100 and more */
 constexpr std::size_t WEAPON_SLOTS{10};
+/* Dodging: the phases of the weave (the time since its last switch in
+ * PHASE_BINS bins and one open bin; idle or in a run), and the bins of
+ * the time to the first switch.
+ */
+constexpr std::size_t DODGE_PHASES{2 * (limits::PHASE_BINS + 1)};
+constexpr std::int64_t DODGE_LATENCY_BIN_MS{20};
+constexpr std::size_t DODGE_LATENCY_BINS{limits::DODGE_WINDOW_MS / DODGE_LATENCY_BIN_MS};
 
 inline constexpr std::array<const char *, WEAPON_SLOTS> primary_names{{"laser", "vulcan", "spreadfire", "plasma", "fusion", "super laser", "gauss", "helix", "phoenix", "omega"}};
 inline constexpr std::array<const char *, WEAPON_SLOTS> secondary_names{{"concussion", "homing", "proximity bomb", "smart", "mega", "flash", "guided", "smart mine", "mercury", "earthshaker"}};
@@ -1096,18 +1147,42 @@ struct player_stats
 	/* |speed toward or away| when moving so, share of the top speed. */
 	double close_speed{};
 
-	/* Dodging incoming fire. */
+	/* Dodging incoming fire (scan_dodge): the bursts aimed at the
+	 * player that could be judged.
+	 */
 	unsigned dodge_triggers{};
-	/* Shares of the shots (of the quiet moments) followed by a sidestep. */
+	/* The share of them followed by a switch of the strafe within the
+	 * reaction window; the share the quiet moments at the same phase of
+	 * the weave give (what the rhythm alone would have done); the quiet
+	 * moments looked at, and the share of all of them with a switch (how
+	 * much the player weaves anyway).
+	 */
 	double dodge_rate{}, dodge_baseline{};
 	std::size_t dodge_baseline_n{};
-	/* The excess over the baseline.  Not measurable when the player
-	 * moves across the line in most quiet moments too (a constant
-	 * strafer): a dodge cannot be told from its usual weaving.
+	double dodge_weave_rate{};
+	/* The switches beyond the rhythm, per burst that left room for one:
+	 * (switches - expected) / (bursts - expected), and its standard error.
+	 * Not measurable with too little room (DODGE_MIN_ROOM: a weave that
+	 * switches in the window nearly always).
 	 */
-	double dodge_prob{};
+	double dodge_prob{}, dodge_se{};
+	double dodge_room{};
 	bool dodge_measurable{};
+	/* The median time from the shot to the extra switches (ms). */
 	double dodge_reaction_ms{};
+	/* Of the switches in the window: the share that reverse the sideways
+	 * motion (against a shooter that leads), after bursts and in quiet
+	 * moments; how many after bursts.
+	 */
+	double dodge_reverse_share{}, dodge_reverse_baseline{};
+	unsigned dodge_reverse_n{};
+	/* The afterburner lit in the window: after bursts, in quiet moments. */
+	double dodge_burn_rate{}, dodge_burn_baseline{};
+	/* The shooter hit within BURST_HIT_MS: after the bursts answered by a
+	 * switch, after the others, and how many of each.
+	 */
+	double dodge_hit_after_switch{}, dodge_hit_after_none{};
+	unsigned dodge_switch_n{}, dodge_none_n{};
 	/* The shots of the other players in the recordings, and the hits
 	 * they dealt to this player.  Hits without any shot: the recording
 	 * lacks the enemies' fire (older recorders left out the shots of
@@ -1176,8 +1251,26 @@ struct accum
 	std::array<double, 256> shield_s{}, shield_retreat_s{};
 	std::array<double, SHIELD_BUCKETS> bucket_s{}, bucket_approach_sum{}, bucket_approach_s{}, bucket_back_s{}, bucket_retreat_s{};
 	std::vector<double> close_speed;
-	unsigned dodge_triggers{}, dodged{}, baseline_n{}, baseline_dodged{};
-	std::vector<double> dodge_reaction_ms;
+	/* Dodging: the quiet moments per phase of the weave, and the bursts. */
+	struct phase_cell
+	{
+		unsigned n{}, switched{};
+		/* The first switch after the moment, per DODGE_LATENCY_BIN_MS. */
+		std::array<unsigned, DODGE_LATENCY_BINS> first{};
+	};
+	std::array<phase_cell, DODGE_PHASES> quiet{};
+	struct burst
+	{
+		std::size_t phase{};
+		bool switched{};
+		/* The first switch (ms after the shot), -1: none in DODGE_WINDOW_MS. */
+		std::int64_t first{-1};
+		bool hit{};
+	};
+	std::vector<burst> bursts;
+	unsigned quiet_n{}, quiet_switched{};
+	unsigned reverse_n{}, reverse{}, quiet_reverse_n{}, quiet_reverse{};
+	unsigned burn_n{}, burn{}, quiet_burn_n{}, quiet_burn{};
 	unsigned enemy_shots{}, hits_taken_from_players{};
 	unsigned primary_shots{}, secondary_shots{};
 	std::array<std::array<unsigned, WEAPON_SLOTS>, bot::BOT_RANGE_BANDS> primary_by_band{};
@@ -1459,77 +1552,210 @@ inline std::vector<bool> scan_turns(const track &tr, accum &a, const ship_model 
 	return after_turn;
 }
 
-/* The sidestep after time `pts[i0]`: whether the velocity across the
- * line to the enemy changed by a dodge's worth within the window, and
- * when it began to.  Nothing if the track ends inside the window.
+/* The switches of the strafe: the moments a run of sideways/vertical
+ * thrust starts, from none or in another direction (the runs of
+ * scan_strafe, in a fight or not), with the run's direction (ship
+ * frame: right, up).  A run shorter than SWITCH_MIN_S is no switch.
  */
+struct strafe_switch
+{
+	std::int64_t t{};
+	std::array<double, 2> dir{};
+};
+
+struct weave
+{
+	std::vector<strafe_switch> switches;
+	/* Per point: in a run (of at least SWITCH_MIN_S); the time of the
+	 * first point of its stretch without a gap (a death, a level, a
+	 * hole in the recording).
+	 */
+	std::vector<bool> in_run;
+	std::vector<std::int64_t> stretch_start;
+};
+
 [[nodiscard]]
-inline std::optional<std::pair<bool, double>> sidestep(const track &tr, const std::size_t i0, const ship_model &ship)
+inline weave weave_of(const track &tr)
+{
+	weave w;
+	const auto &pts{tr.pts};
+	w.in_run.assign(pts.size(), false);
+	w.stretch_start.assign(pts.size(), 0);
+	bool in_run{};
+	std::array<double, 2> dir{};
+	std::size_t run_first{};
+	double run_s{};
+	std::int64_t stretch{};
+	const auto end_run{[&](const std::size_t end) {
+		if (!in_run)
+			return;
+		in_run = false;
+		if (run_s < limits::SWITCH_MIN_S)
+			return;
+		w.switches.push_back({pts[run_first].m.t, dir});
+		for (std::size_t k{run_first}; k != end; ++k)
+			w.in_run[k] = true;
+	}};
+	for (std::size_t i{}; i != pts.size(); ++i)
+	{
+		const auto &p{pts[i]};
+		if (!i || p.dt <= 0)
+			stretch = p.m.t;
+		w.stretch_start[i] = stretch;
+		const double l{std::hypot(p.ctl[1], p.ctl[2])};
+		const bool active{p.alive && p.has_ctl && l >= limits::CONTROL_USED};
+		if (in_run && (!active || p.dt <= 0 || p.ctl[1] * dir[0] + p.ctl[2] * dir[1] <= 0))
+			end_run(i);
+		if (!active)
+			continue;
+		if (!in_run)
+		{
+			in_run = true;
+			run_first = i;
+			run_s = 0;
+			dir = {{p.ctl[1] / l, p.ctl[2] / l}};
+		}
+		run_s += p.w;
+	}
+	end_run(pts.size());
+	return w;
+}
+
+/* What the player did after the moment `pts[i0]`, and the phase of its
+ * weave then.  Nothing if the track has a gap within DODGE_WINDOW_MS, or
+ * the rhythm before the moment is not known (a stretch that began less
+ * than PHASE_BINS bins before, without a switch since).
+ */
+struct moment_look
+{
+	std::size_t phase{};
+	/* A switch in the reaction window. */
+	bool switched{};
+	/* The first switch after the moment (ms), -1: none in DODGE_WINDOW_MS. */
+	std::int64_t first{-1};
+	/* The switch in the window turns against the sideways motion of the
+	 * moment (known if the ship moved sideways then).
+	 */
+	std::optional<bool> reverse;
+	/* The afterburner lit in the window (known if it was off then). */
+	std::optional<bool> burn;
+};
+
+[[nodiscard]]
+inline std::optional<moment_look> look_after(const track &tr, const weave &w, const std::size_t i0, const ship_model &ship)
 {
 	const auto &pts{tr.pts};
 	const auto &p0{pts[i0]};
-	if (!(p0.u.enemy_distance > 0))
+	const auto t0{p0.m.t};
+	if (!p0.alive)
 		return std::nullopt;
-	vec3 line;
-	for (std::size_t k{}; k != 3; ++k)
-		line[k] = p0.u.enemy_rel_pos[k] / p0.u.enemy_distance;
-	const auto across{[&line](const vec3 &v) {
-		const double along{dot(v, line)};
-		return vec3{{v[0] - line[0] * along, v[1] - line[1] * along, v[2] - line[2] * along}};
-	}};
-	const auto start{across(p0.u.vel)};
-	double most{}, reaction{-1};
-	std::int64_t reached{};
-	for (std::size_t i{i0 + 1}; i < pts.size() && pts[i].dt > 0; ++i)
+	std::size_t j{i0};
+	bool burn{};
+	while (j + 1 < pts.size() && pts[j + 1].dt > 0 && pts[j + 1].m.t - t0 <= limits::DODGE_WINDOW_MS)
 	{
-		const auto elapsed{pts[i].m.t - p0.m.t};
-		if (elapsed > limits::DODGE_WINDOW_MS)
-			break;
-		reached = elapsed;
-		const auto now{across(pts[i].u.vel)};
-		const double change{length(vec3{{now[0] - start[0], now[1] - start[1], now[2] - start[2]}})};
-		if (change >= limits::REACT_SHARE * ship.max_speed && reaction < 0)
-			reaction = static_cast<double>(elapsed);
-		most = std::max(most, change);
+		++j;
+		const auto after{pts[j].m.t - t0};
+		if (after > limits::REACT_FROM_MS && after <= limits::REACT_TO_MS && pts[j].ab_known && pts[j].ab)
+			burn = true;
 	}
-	if (reached < limits::DODGE_WINDOW_MS * 3 / 4)
+	if (pts[j].m.t - t0 < limits::DODGE_WINDOW_MS - 50)
 		return std::nullopt;
-	return std::pair{most >= limits::DODGE_SHARE * ship.max_speed, reaction};
+	const auto &sw{w.switches};
+	const auto next{std::upper_bound(sw.begin(), sw.end(), t0, [](const std::int64_t v, const strafe_switch &s) { return v < s.t; })};
+	const auto stretch{w.stretch_start[i0]};
+	const bool known{next != sw.begin() && std::prev(next)->t >= stretch};
+	const std::int64_t since{t0 - (known ? std::prev(next)->t : stretch)};
+	constexpr std::int64_t open_from{static_cast<std::int64_t>(limits::PHASE_BINS) * limits::PHASE_BIN_MS};
+	if (!known && since < open_from)
+		return std::nullopt;
+	moment_look m;
+	m.phase = (w.in_run[i0] ? limits::PHASE_BINS + 1 : 0) + static_cast<std::size_t>(std::min(since, open_from) / limits::PHASE_BIN_MS);
+	if (next != sw.end() && next->t - t0 <= limits::DODGE_WINDOW_MS)
+		m.first = next->t - t0;
+	for (auto k{next}; k != sw.end() && k->t - t0 <= limits::REACT_TO_MS; ++k)
+	{
+		if (k->t - t0 <= limits::REACT_FROM_MS)
+			continue;
+		m.switched = true;
+		if (std::hypot(p0.u.vel_ship[0], p0.u.vel_ship[1]) > 0.2 * ship.max_speed)
+			m.reverse = k->dir[0] * p0.u.vel_ship[0] + k->dir[1] * p0.u.vel_ship[1] < 0;
+		break;
+	}
+	if (p0.ab_known && !p0.ab)
+		m.burn = burn;
+	return m;
 }
 
-/* Reactions to incoming fire, against the quiet moments of a fight. */
+/* Reactions to incoming fire, against the quiet moments of the same
+ * situation and phase of the weave.
+ */
 inline void scan_dodge(const track &tr, accum &a, const ship_model &ship)
 {
 	const auto &pts{tr.pts};
+	const auto w{weave_of(tr)};
+	const double cone{std::cos(bot::radians(30))};
 	std::map<int, std::int64_t> last_shot;
 	std::vector<std::int64_t> shots;
 	a.enemy_shots += static_cast<unsigned>(tr.enemy_fire.size());
-	for (const auto &e : tr.enemy_fire)
+	const auto tally{[&a](const moment_look &m, const bool quiet) {
+		if (m.reverse)
+		{
+			++(quiet ? a.quiet_reverse_n : a.reverse_n);
+			if (*m.reverse)
+				++(quiet ? a.quiet_reverse : a.reverse);
+		}
+		if (m.burn)
+		{
+			++(quiet ? a.quiet_burn_n : a.burn_n);
+			if (*m.burn)
+				++(quiet ? a.quiet_burn : a.burn);
+		}
+	}};
+	for (std::size_t n{}; n != tr.enemy_fire.size(); ++n)
 	{
-		shots.push_back(e.t);
+		const auto &e{tr.enemy_fire[n]};
 		const auto last{last_shot.find(e.who)};
 		const bool onset{last == last_shot.end() || e.t - last->second > limits::FIRE_ONSET_MS};
 		last_shot[e.who] = e.t;
-		if (!onset)
-			continue;
 		const auto i{tr.at(e.t, 100)};
-		if (!i)
+		if (!i || !pts[*i].alive)
 			continue;
 		const auto &p{pts[*i]};
-		/* The shooter is the enemy in sight, it faces me, and it is near. */
-		if (!p.fight || p.enemy_key != e.who || !(p.m.s.context & context_flag::me_in_its_cone) || p.u.enemy_distance > limits::DODGE_RANGE)
-			continue;
-		if (const auto s{sidestep(tr, *i, ship)})
+		/* Aimed at me: the shooter is the enemy in sight and faces me,
+		 * or (another one, recorded too) its nose points at me; near.
+		 * A shot of an enemy that is neither (not recorded) may have
+		 * been: it is no quiet moment, but no burst to judge either.
+		 */
+		bool aimed{}, known{true};
+		if (p.los && p.enemy_key == e.who)
+			aimed = (p.m.s.context & context_flag::me_in_its_cone) && !p.u.enemy_distance_scaled && p.u.enemy_distance <= limits::DODGE_RANGE;
+		else if (const auto &from{tr.enemy_fire_from[n]}; from.known)
 		{
-			++a.dodge_triggers;
-			if (s->first)
-			{
-				++a.dodged;
-				a.dodge_reaction_ms.push_back(s->second);
-			}
+			const vec3 to_me{{p.u.pos[0] - from.pos[0], p.u.pos[1] - from.pos[1], p.u.pos[2] - from.pos[2]}};
+			const double d{length(to_me)};
+			aimed = d > 0 && d <= limits::DODGE_RANGE && dot(from.forward, to_me) >= cone * d;
 		}
+		else
+			known = false;
+		if (aimed || !known)
+			shots.push_back(e.t);
+		if (!onset || !aimed)
+			continue;
+		const auto m{look_after(tr, w, *i, ship)};
+		if (!m)
+			continue;
+		accum::burst b{m->phase, m->switched, m->first, false};
+		/* tr.own is sorted by time: the events are. */
+		for (auto h{std::lower_bound(tr.own.begin(), tr.own.end(), e.t, [](const merged_event &x, const std::int64_t v) { return x.t < v; })}; h != tr.own.end() && h->t <= e.t + limits::BURST_HIT_MS; ++h)
+			if (h->e.type == record_type::hit && h->other == e.who)
+			{
+				b.hit = true;
+				break;
+			}
+		a.bursts.push_back(b);
+		tally(*m, false);
 	}
-	/* shots is sorted: the events are. */
+	/* shots is sorted: the events are.  Quiet: no shot aimed at me. */
 	const auto shot_between{[&shots](const std::int64_t from, const std::int64_t to) {
 		const auto i{std::lower_bound(shots.begin(), shots.end(), from)};
 		return i != shots.end() && *i <= to;
@@ -1539,18 +1765,28 @@ inline void scan_dodge(const track &tr, accum &a, const ship_model &ship)
 	for (std::size_t i{}; i != pts.size(); ++i)
 	{
 		const auto &p{pts[i]};
-		if (!p.fight || p.u.enemy_distance > limits::DODGE_RANGE || (any && p.m.t < next))
+		if ((any && p.m.t < next) || !p.alive || !p.los || p.enemy_key < 0 || p.enemy_key >= 1000)
 			continue;
-		if (shot_between(p.m.t - 1500, p.m.t + limits::DODGE_WINDOW_MS))
+		if (!(p.m.s.context & context_flag::me_in_its_cone) || p.u.enemy_distance_scaled || p.u.enemy_distance > limits::DODGE_RANGE)
 			continue;
-		if (const auto s{sidestep(tr, i, ship)})
+		if (shot_between(p.m.t - limits::QUIET_BEFORE_MS, p.m.t + limits::DODGE_WINDOW_MS))
+			continue;
+		const auto m{look_after(tr, w, i, ship)};
+		if (!m)
+			continue;
+		any = true;
+		next = p.m.t + limits::BASELINE_STRIDE_MS;
+		auto &c{a.quiet[m->phase]};
+		++c.n;
+		++a.quiet_n;
+		if (m->switched)
 		{
-			any = true;
-			next = p.m.t + 500;
-			++a.baseline_n;
-			if (s->first)
-				++a.baseline_dodged;
+			++c.switched;
+			++a.quiet_switched;
 		}
+		if (m->first >= 0)
+			++c.first[std::min(static_cast<std::size_t>(m->first / DODGE_LATENCY_BIN_MS), DODGE_LATENCY_BINS - 1)];
+		tally(*m, true);
 	}
 }
 
@@ -1732,6 +1968,137 @@ inline unsigned count(const std::size_t n)
 	return r;
 }
 
+/* The quiet moments of a phase of the weave; with fewer than
+ * MIN_PHASE_N, with those of the neighbouring phases of the same kind
+ * (idle or in a run), nearest first; with still too few, all.
+ */
+[[nodiscard]]
+inline accum::phase_cell quiet_near(const accum &a, const std::size_t phase)
+{
+	constexpr std::size_t per_kind{limits::PHASE_BINS + 1};
+	const std::size_t kind{phase / per_kind}, bin{phase % per_kind};
+	accum::phase_cell sum;
+	const auto add{[&sum](const accum::phase_cell &c) {
+		sum.n += c.n;
+		sum.switched += c.switched;
+		for (std::size_t k{}; k != DODGE_LATENCY_BINS; ++k)
+			sum.first[k] += c.first[k];
+	}};
+	add(a.quiet[phase]);
+	for (std::size_t r{1}; sum.n < limits::MIN_PHASE_N && r != per_kind; ++r)
+	{
+		if (bin >= r)
+			add(a.quiet[kind * per_kind + bin - r]);
+		if (bin + r < per_kind)
+			add(a.quiet[kind * per_kind + bin + r]);
+	}
+	if (sum.n < limits::MIN_PHASE_N)
+	{
+		sum = {};
+		for (const auto &c : a.quiet)
+			add(c);
+	}
+	return sum;
+}
+
+/* Section 8.4, dodging: the bursts against the quiet moments at the
+ * same phase of the weave.  Every burst would have been followed by a
+ * switch with the chance p0 its phase has in the quiet moments; the
+ * switches beyond those chances, per chance left (1 - p0), are the
+ * share of the bursts the player answered.
+ */
+inline void finish_dodge(const accum &a, player_stats &s)
+{
+	s.dodge_triggers = count(a.bursts.size());
+	s.dodge_baseline_n = a.quiet_n;
+	s.dodge_weave_rate = ratio(a.quiet_switched, a.quiet_n);
+	s.dodge_reverse_n = a.reverse_n;
+	s.dodge_reverse_share = ratio(a.reverse, a.reverse_n);
+	s.dodge_reverse_baseline = ratio(a.quiet_reverse, a.quiet_reverse_n);
+	s.dodge_burn_rate = ratio(a.burn, a.burn_n);
+	s.dodge_burn_baseline = ratio(a.quiet_burn, a.quiet_burn_n);
+	unsigned hit_switch{}, hit_none{};
+	for (const auto &b : a.bursts)
+	{
+		(b.switched ? s.dodge_switch_n : s.dodge_none_n) += 1;
+		if (b.hit)
+			++(b.switched ? hit_switch : hit_none);
+	}
+	s.dodge_hit_after_switch = ratio(hit_switch, s.dodge_switch_n);
+	s.dodge_hit_after_none = ratio(hit_none, s.dodge_none_n);
+	if (a.bursts.empty() || a.quiet_n < limits::MIN_PHASE_N)
+		return;
+	double switched{}, expected{}, room{};
+	std::array<double, DODGE_PHASES> per_phase{};
+	std::array<double, DODGE_LATENCY_BINS> seen{}, due{};
+	std::vector<double> p0s;
+	for (const auto &b : a.bursts)
+	{
+		const auto c{quiet_near(a, b.phase)};
+		const double p0{ratio(c.switched, c.n)};
+		p0s.push_back(p0);
+		per_phase[b.phase] += 1;
+		if (b.switched)
+			++switched;
+		expected += p0;
+		room += 1 - p0;
+		if (b.first >= 0)
+			seen[std::min(static_cast<std::size_t>(b.first / DODGE_LATENCY_BIN_MS), DODGE_LATENCY_BINS - 1)] += 1;
+		for (std::size_t k{}; k != DODGE_LATENCY_BINS; ++k)
+			due[k] += ratio(c.first[k], c.n);
+	}
+	s.dodge_rate = switched / static_cast<double>(a.bursts.size());
+	s.dodge_baseline = expected / static_cast<double>(a.bursts.size());
+	s.dodge_room = room;
+	if (room <= 0)
+		return;
+	const double excess{(switched - expected) / room};
+	s.dodge_prob = std::clamp(excess, 0.0, 1.0);
+	/* The standard error: the bursts' own chance (binomial, at the
+	 * measured excess) and that of the quiet moments' shares.
+	 */
+	double var{};
+	for (const double p0 : p0s)
+	{
+		const double q{std::clamp(p0 + s.dodge_prob * (1 - p0), 0.0, 1.0)};
+		var += q * (1 - q);
+	}
+	for (std::size_t ph{}; ph != DODGE_PHASES; ++ph)
+		if (per_phase[ph] > 0)
+		{
+			const auto c{quiet_near(a, ph)};
+			const double p0{ratio(c.switched, c.n)};
+			var += per_phase[ph] * per_phase[ph] * p0 * (1 - p0) / c.n;
+		}
+	s.dodge_se = std::sqrt(var) / room;
+	s.dodge_measurable = a.bursts.size() >= 8 && room >= limits::DODGE_MIN_ROOM;
+	/* The reaction: the middle of the first switches that came earlier
+	 * than the rhythm's, within the window.
+	 */
+	double mass{};
+	std::array<double, DODGE_LATENCY_BINS> extra{};
+	for (std::size_t k{}; k != DODGE_LATENCY_BINS; ++k)
+	{
+		const auto from{static_cast<std::int64_t>(k) * DODGE_LATENCY_BIN_MS};
+		if (from + DODGE_LATENCY_BIN_MS <= limits::REACT_FROM_MS || from >= limits::REACT_TO_MS)
+			continue;
+		extra[k] = std::max(0.0, seen[k] - due[k]);
+		mass += extra[k];
+	}
+	if (s.dodge_measurable && s.dodge_prob >= 0.1 && mass >= 2)
+	{
+		double cum{};
+		for (std::size_t k{}; k != DODGE_LATENCY_BINS; ++k)
+			if (extra[k] > 0 && (cum += extra[k]) >= mass / 2)
+			{
+				/* Within the bin, where the half is reached. */
+				const double into{1 - (cum - mass / 2) / extra[k]};
+				s.dodge_reaction_ms = (static_cast<double>(k) + into) * static_cast<double>(DODGE_LATENCY_BIN_MS);
+				break;
+			}
+	}
+}
+
 }
 
 /* The movement profile of one player from its tracks (one per session). */
@@ -1849,13 +2216,7 @@ inline player_stats analyse(const std::span<const track> tracks, const ship_mode
 	}
 	s.close_speed = summarise(a.close_speed).mean;
 
-	s.dodge_triggers = a.dodge_triggers;
-	s.dodge_rate = ratio(a.dodged, a.dodge_triggers);
-	s.dodge_baseline = ratio(a.baseline_dodged, a.baseline_n);
-	s.dodge_baseline_n = a.baseline_n;
-	s.dodge_measurable = a.dodge_triggers && s.dodge_baseline <= limits::DODGE_BASELINE_MAX;
-	s.dodge_prob = s.dodge_measurable ? std::clamp((s.dodge_rate - s.dodge_baseline) / (1 - s.dodge_baseline), 0.0, 1.0) : 0;
-	s.dodge_reaction_ms = s.dodge_measurable ? summarise(a.dodge_reaction_ms).p50 : 0;
+	detail::finish_dodge(a, s);
 	s.enemy_shots = a.enemy_shots;
 	s.hits_taken_from_players = a.hits_taken_from_players;
 
@@ -2036,12 +2397,15 @@ inline bot::style_profile propose_profile(const player_stats &s, const bot::bot_
 		}
 	}
 
-	/* skill.dodge_prob */
-	if (s.dodge_triggers >= 8 && s.dodge_measurable)
+	/* skill.dodge_prob: the share of the bursts answered beyond the
+	 * weave's rhythm.  How sure: the standard error and the bursts; at
+	 * most medium on estimated controls (the switches are read from
+	 * them).
+	 */
+	if (s.dodge_measurable)
 	{
-		auto c{confidence_of(s, s.dodge_triggers, 15, 60)};
-		if (s.dodge_baseline_n < 10)
-			/* Nothing to compare with: the rate may be its usual weaving. */
+		auto c{s.dodge_se <= 0.07 && s.dodge_triggers >= 60 ? style_confidence::high : s.dodge_se <= 0.15 && s.dodge_triggers >= 15 ? style_confidence::medium : style_confidence::low};
+		if (s.estimated_share() > 0.5)
 			c = std::min(c, style_confidence::medium);
 		p.set("skill.dodge_prob", s.dodge_prob, c);
 	}
@@ -2120,8 +2484,13 @@ inline bot::style_profile propose_profile(const player_stats &s, const bot::bot_
 		info("measured.enemy_distance_median", s.los_distance.p50);
 	if (s.turn_180_ms.n)
 		info("measured.turn_180_ms", s.turn_180_ms.p50);
-	if (s.dodge_measurable && s.dodge_prob >= 0.2 && s.dodge_reaction_ms > 0)
+	/* The reaction only of a dodge that clearly is one (two standard
+	 * errors above nothing).
+	 */
+	if (s.dodge_measurable && s.dodge_prob >= 0.2 && s.dodge_prob - 2 * s.dodge_se > 0 && s.dodge_reaction_ms > 0)
 		info("measured.dodge_reaction_ms", s.dodge_reaction_ms);
+	if (s.dodge_measurable)
+		info("measured.dodge_prob_se", s.dodge_se);
 	if (s.ab_known_s > 0)
 		info("measured.afterburner_share", s.ab_share);
 	if (s.primary_shots)
@@ -2222,14 +2591,23 @@ inline std::vector<std::string> describe_traits(const player_stats &s, const shi
 		l += '.';
 	}
 	if (s.dodge_triggers >= 8 && !s.dodge_measurable)
-		appendf(line(), "Dodging cannot be told from its usual weaving: it moves across the line of fire in %.0f%% of the quiet moments too (after %.0f%% of %u bursts aimed at it).", pct(s.dodge_baseline), pct(s.dodge_rate), s.dodge_triggers);
-	else if (s.dodge_triggers >= 8)
+	{
+		if (s.dodge_baseline_n < limits::MIN_PHASE_N)
+			appendf(line(), "Dodging cannot be measured: %u bursts aimed at it, but only %.0f quiet moments with an enemy facing it to compare with.", s.dodge_triggers, static_cast<double>(s.dodge_baseline_n));
+		else
+			appendf(line(), "Dodging cannot be told from its weave: its strafe switches in the reaction window after %.0f%% of the quiet moments, which leaves no room to see an answer to %u bursts.", pct(s.dodge_weave_rate), s.dodge_triggers);
+	}
+	else if (s.dodge_measurable)
 	{
 		auto &l{line()};
-		const char *const kind{s.dodge_prob >= 0.5 ? "Dodges incoming fire" : s.dodge_prob >= 0.2 ? "Sometimes dodges incoming fire" : "Does not react to incoming fire with a sidestep"};
-		appendf(l, "%s: sidesteps after %.0f%% of %u bursts aimed at it, against %.0f%% of quiet moments", kind, pct(s.dodge_rate), s.dodge_triggers, pct(s.dodge_baseline));
-		if (s.dodge_prob >= 0.2 && s.dodge_reaction_ms > 0)
-			appendf(l, "; reacts after about %.0f ms", s.dodge_reaction_ms);
+		/* Clearly above nothing: two standard errors. */
+		const bool shown{s.dodge_prob - 2 * s.dodge_se > 0};
+		const char *const kind{!shown ? "No clear reaction to incoming fire" : s.dodge_prob >= 0.5 ? "Dodges incoming fire" : s.dodge_prob >= 0.2 ? "Sometimes dodges incoming fire" : "Rarely dodges incoming fire"};
+		appendf(l, "%s: answers %.0f%% (+-%.0f) of %u bursts aimed at it with a switch of its strafe the weave would not have made (a switch after %.0f%% of them, where its rhythm gives %.0f%%)", kind, pct(s.dodge_prob), pct(s.dodge_se), s.dodge_triggers, pct(s.dodge_rate), pct(s.dodge_baseline));
+		if (shown && s.dodge_reaction_ms > 0)
+			appendf(l, "; after about %.0f ms", s.dodge_reaction_ms);
+		if (s.dodge_switch_n >= 5 && s.dodge_none_n >= 5)
+			appendf(l, "; hit after %.0f%% of the bursts with a switch, %.0f%% of the others", pct(s.dodge_hit_after_switch), pct(s.dodge_hit_after_none));
 		l += '.';
 	}
 	if (s.sight_losses >= 5)
@@ -2317,7 +2695,8 @@ inline std::string write_report(const player_stats &s, const bot::style_profile 
 			appendf(o, "    %3u-%-3u ", detail::count(b) * 25u, detail::count(b) * 25u + 24u);
 		appendf(o, "%6.0f s  %+6.1f units/s  %3.0f%% / %3.0f%% / %3.0f%%\n", k.seconds, k.approach_mean, pct(k.approach), pct(k.back_off), pct(k.retreat));
 	}
-	appendf(o, "  dodging: %u bursts aimed at it, sidestep after %.0f%%; quiet moments %.0f (sidestep %.0f%%); excess %.2f%s; reaction %.0f ms\n", s.dodge_triggers, pct(s.dodge_rate), static_cast<double>(s.dodge_baseline_n), pct(s.dodge_baseline), s.dodge_prob, s.dodge_measurable ? "" : " (not measurable)", s.dodge_reaction_ms);
+	appendf(o, "  dodging: %u bursts aimed at it, a strafe switch %.0f-%.0f ms after %.0f%%, the rhythm's chance %.0f%% (%.0f quiet moments, switch in %.0f%%); room %.1f; excess %.2f +- %.2f%s; reaction %.0f ms\n", s.dodge_triggers, static_cast<double>(limits::REACT_FROM_MS), static_cast<double>(limits::REACT_TO_MS), pct(s.dodge_rate), pct(s.dodge_baseline), static_cast<double>(s.dodge_baseline_n), pct(s.dodge_weave_rate), s.dodge_room, s.dodge_prob, s.dodge_se, s.dodge_measurable ? "" : " (not measurable)", s.dodge_reaction_ms);
+	appendf(o, "    of the switches %.0f%% reverse the sideways motion (%u; quiet moments %.0f%%); afterburner lit after %.0f%% (quiet %.0f%%); hit within %.1f s after %.0f%% of %u bursts with a switch, %.0f%% of %u without\n", pct(s.dodge_reverse_share), s.dodge_reverse_n, pct(s.dodge_reverse_baseline), pct(s.dodge_burn_rate), pct(s.dodge_burn_baseline), static_cast<double>(limits::BURST_HIT_MS) / 1000, pct(s.dodge_hit_after_switch), s.dodge_switch_n, pct(s.dodge_hit_after_none), s.dodge_none_n);
 	if (!s.enemy_shots && s.hits_taken_from_players)
 		appendf(o, "  warning: took %u hits from other players but the recordings hold no shot of theirs; dodging cannot be measured (a recording of an older build, whose bots' shots were left out without -recordmoves-bots?)\n", s.hits_taken_from_players);
 	appendf(o, "  primary shots: %u", s.primary_shots);
