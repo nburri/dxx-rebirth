@@ -106,7 +106,11 @@ clamps them to what a pilot can give (forward −1 to 2, the other axes −1
 to 1) and uses only controls that arrived within the last 100 ms; in a gap
 (lost packets, a guided missile being steered, dead) the sample has no
 controls and step 2 estimates them from the motion (§8.3), as it does for
-every client without `-sharemoves`. Without the switch a client sends
+every client without `-sharemoves`. The host records the newest controls
+next to the pose it shows of that ship, which its interpolation shows a
+little in the past (about one or two network ticks), so a shared sample's
+controls lead its motion by that much, as the client's afterburner bit
+does; a client's own recording has no such lag. Without the switch a client sends
 nothing extra: sharing is each player's own choice. The host marks a
 client that shares in its `player` record (flag 16) from the first
 controls that arrive, and a sharing client marks itself in its own file.
