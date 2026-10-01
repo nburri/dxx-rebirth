@@ -48,10 +48,11 @@ constexpr std::uint16_t FORMAT_VERSION{1};
  * player_flag::shares_controls); 3 for the mission's and the level's file
  * names (the mission's .hog/.mn2 stem, the level's .rl2), appended to
  * the level record and the header, so that the analysis finds the
- * level's geometry.  Appended to the header; a header without it is
- * minor 0.
+ * level's geometry; 4 for a bot's movement mode and goal appended to
+ * its samples (sample::bot_known).  Appended to the header; a header
+ * without it is minor 0.
  */
-constexpr std::uint16_t FORMAT_MINOR{3};
+constexpr std::uint16_t FORMAT_MINOR{4};
 /* The file names are cut to this length (the level record has room for
  * the names and two of these).
  */
@@ -155,6 +156,62 @@ constexpr std::uint8_t recorded{1 << 3};
  * host once its controls arrived, and on the sharing client for itself.
  */
 constexpr std::uint8_t shares_controls{1 << 4};
+}
+
+/* Minor 4: sample::bot_mode, how a bot moved at its last brain tick
+ * (bot_movement.h, bot::move_mode; the values are the same).  The keys
+ * are fight, path_keys, turn and slide: a bot flying as a human does,
+ * with keys; path and duck are the velocity controller.
+ */
+namespace bot_modes {
+constexpr std::uint8_t none{0};
+constexpr std::uint8_t path{1};
+constexpr std::uint8_t fight{2};
+constexpr std::uint8_t path_keys{3};
+constexpr std::uint8_t turn{4};
+constexpr std::uint8_t slide{5};
+constexpr std::uint8_t duck{6};
+constexpr std::uint8_t recover{7};
+constexpr std::uint8_t count{8};
+}
+
+inline constexpr std::array<const char *, bot_modes::count> bot_mode_names{{
+	"none", "path", "fight", "path-keys", "turn", "slide", "duck", "recover",
+}};
+
+[[nodiscard]]
+constexpr bool bot_mode_is_keys(const std::uint8_t m)
+{
+	return m == bot_modes::fight || m == bot_modes::path_keys || m == bot_modes::turn || m == bot_modes::slide;
+}
+
+/* Minor 4: sample::bot_goal, the bot's goal (similar/main/bot.cpp,
+ * bot_goal; the values are the same).
+ */
+namespace bot_goals {
+constexpr std::uint8_t none{0};
+constexpr std::uint8_t roam{1};
+constexpr std::uint8_t hunt{2};
+constexpr std::uint8_t collect{3};
+constexpr std::uint8_t retreat{4};
+constexpr std::uint8_t refuel{5};
+constexpr std::uint8_t count{6};
+}
+
+inline constexpr std::array<const char *, bot_goals::count> bot_goal_names{{
+	"none", "roam", "hunt", "collect", "retreat", "refuel",
+}};
+
+[[nodiscard]]
+constexpr const char *bot_mode_name(const std::uint8_t m)
+{
+	return m < bot_modes::count ? bot_mode_names[m] : "?";
+}
+
+[[nodiscard]]
+constexpr const char *bot_goal_name(const std::uint8_t g)
+{
+	return g < bot_goals::count ? bot_goal_names[g] : "?";
 }
 
 /* event_record::kind for fire */
@@ -601,6 +658,14 @@ struct sample
 	 * Present when flags has sample_flag::controls.
 	 */
 	control_array controls{};
+	/* Minor 4: a bot flown on the recording machine (the host) appends
+	 * its movement mode (bot_modes) and goal (bot_goals), after the
+	 * controls; an older file or another player has none.  Written only
+	 * with sample_flag2::bot.
+	 */
+	bool bot_known{};
+	std::uint8_t bot_mode{};
+	std::uint8_t bot_goal{};
 	constexpr bool operator==(const sample &) const = default;
 };
 
@@ -623,6 +688,7 @@ constexpr void set_shared_controls(sample &s, const control_array &c)
 
 constexpr std::size_t SAMPLE_BASE_SIZE{54};
 constexpr std::size_t SAMPLE_CONTROLS_SIZE{6};
+constexpr std::size_t SAMPLE_BOT_SIZE{2};
 
 /* Events: one layout for all, the meaning of the fields by type
  * (Documentation/movement-recording.md section 3.4).
@@ -766,6 +832,11 @@ inline std::span<const std::uint8_t> encode(record_buffer &buf, const sample &s)
 	if (s.flags & sample_flag::controls)
 		for (const auto v : s.controls)
 			w.i8(v);
+	if (s.bot_known && (s.flags2 & sample_flag2::bot))
+	{
+		w.u8(s.bot_mode);
+		w.u8(s.bot_goal);
+	}
 	return detail::finish_record(w);
 }
 
@@ -872,6 +943,16 @@ inline std::optional<sample> decode_sample(const std::span<const std::uint8_t> p
 			v = r.i8();
 	if (!r.ok())
 		return std::nullopt;
+	/* Minor 4: a bot's mode and goal, if appended (only a bot's sample
+	 * has them; trailing bytes of any other sample are a later
+	 * version's).
+	 */
+	if ((s.flags2 & sample_flag2::bot) && r.remaining() >= SAMPLE_BOT_SIZE)
+	{
+		s.bot_known = true;
+		s.bot_mode = r.u8();
+		s.bot_goal = r.u8();
+	}
 	return s;
 }
 

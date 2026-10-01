@@ -398,6 +398,12 @@ constexpr double energy_need(const resource_view &r)
  * spare, and it is dropped when the bot dies).
  */
 constexpr double VALUE_SPARE_PRIMARY{1};
+/* Section 9.15: the afterburner.  At 2 (B3) the bots of exp-31 held one
+ * 39-54 % of their lives; the human runs for it after a respawn, and the
+ * fight's speed and the flight away need it.  Above a cloak (2.5), below
+ * invulnerability (4).
+ */
+constexpr double VALUE_AFTERBURNER{3};
 constexpr double BETTER_MARGIN{0.2};
 /* An upgrade that makes the armament this much stronger (x 1.5: the
  * laser to anything but phoenix, the lasers' level 1 to super) is
@@ -543,7 +549,7 @@ constexpr double item_value(const item_desc &d, const resource_view &r)
 		case item::secondary:
 			return secondary_value(d.secondary);
 		case item::afterburner:
-			return r.afterburner ? 0 : 2;
+			return r.afterburner ? 0 : VALUE_AFTERBURNER;
 		case item::converter:
 			return 0.8;
 		case item::ammo_rack:

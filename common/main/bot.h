@@ -218,6 +218,11 @@ void bots_apply_team_preferences(unsigned &team_vector, unsigned num_players);
  */
 [[nodiscard]]
 bool bot_is_local(playernum_t pnum);
+/* Section 9.15: the movement mode (bot::move_mode) and the goal of bot
+ * `pnum` at its last brain tick, for the movement recorder; false if it
+ * is no bot this machine flies.
+ */
+bool bot_movement_state(playernum_t pnum, uint8_t &mode, uint8_t &goal);
 /* Slot `pnum` was disconnected or given to a human: forget its bot. */
 void bot_slot_released(playernum_t pnum);
 /* `/kick` of player `pnum`: if it is a bot, remove it from the game (the
@@ -275,6 +280,10 @@ void bot_cloak_expired(playernum_t pnum);
 #else
 [[nodiscard]]
 static inline bool bot_is_local(playernum_t)
+{
+	return false;
+}
+static inline bool bot_movement_state(playernum_t, uint8_t &, uint8_t &)
 {
 	return false;
 }

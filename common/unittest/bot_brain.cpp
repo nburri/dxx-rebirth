@@ -11,7 +11,8 @@
  * target memory and scoring, the steering and velocity controllers at
  * different frame lengths, the tick schedule (the decisions are the same
  * for frame times from 2 ms to 100 ms), the skill and style tables and
- * the primary choice, and the slot a bot takes (section 2.3).
+ * the primary choice, and the slot a bot takes (section 2.3); the
+ * movement of a fight on a real level (bot_movement.h, section 9.15).
  *
  * Build and run with SCons:
  *
@@ -27,6 +28,7 @@
 #include <vector>
 
 #include "bot_brain.h"
+#include "bot_movement.h"
 #include "net_interp.h"
 
 using namespace dcx::bot;
@@ -1137,6 +1139,249 @@ void test_pursuit_target_and_corner()
 }
 }
 
+/* Section 9.15: the fight's movement. */
+void test_fight_movement()
+{
+	/* The modes: keys or not, path or not. */
+	CHECK(is_keys(move_mode::fight_keys) && is_keys(move_mode::path_keys) && is_keys(move_mode::turn_keys) && is_keys(move_mode::slide));
+	CHECK(!is_keys(move_mode::path) && !is_keys(move_mode::duck) && !is_keys(move_mode::recover) && !is_keys(move_mode::none));
+	CHECK(follows_path(move_mode::path) && follows_path(move_mode::path_keys) && follows_path(move_mode::duck));
+	CHECK(!follows_path(move_mode::fight_keys) && !follows_path(move_mode::slide) && !follows_path(move_mode::turn_keys));
+	for (unsigned i{}; i != MOVE_MODE_COUNT; ++i)
+		CHECK(name_of(static_cast<move_mode>(i))[0] != '?');
+	/* The hold: the first choice at once, a change after MODE_HOLD_MS. */
+	{
+		mode_hold h;
+		const uint32_t hold{ticks_from_ms(MODE_HOLD_MS)};
+		CHECK(h.update(true, 100));
+		CHECK(h.combat());
+		CHECK(h.update(false, 101));
+		CHECK(h.update(false, 100 + hold - 1));
+		CHECK(!h.update(false, 100 + hold));
+		CHECK(!h.update(true, 101 + hold));
+		CHECK(h.update(true, 100 + 2 * hold));
+		/* Released: the next engagement chooses afresh. */
+		h.release();
+		CHECK(!h.combat());
+		CHECK(!h.update(false, 100 + 2 * hold + 1));
+	}
+	/* A blocked line of fire: the fight goes on FIRE_BLOCKED_MS. */
+	{
+		fire_blocked f;
+		const uint32_t ms{ticks_from_ms(FIRE_BLOCKED_MS)};
+		CHECK(f.fight_on(true, 10));
+		CHECK(f.fight_on(false, 11));
+		CHECK(f.fight_on(false, 10 + ms));
+		CHECK(!f.fight_on(false, 11 + ms));
+		CHECK(f.fight_on(true, 12 + ms));
+		CHECK(f.fight_on(false, 13 + ms));
+	}
+	/* The path's keys: on beyond the threshold, off below the release,
+	 * held at least PATH_KEY_HOLD_MS; up and down need more.
+	 */
+	{
+		path_keys k;
+		uint32_t t{1000};
+		auto out{k.update({0.5, 0.5, 0.9}, t)};
+		CHECK(out.sideways == 1 && out.vertical == 0 && out.forward == 1);
+		/* Between the thresholds: held. */
+		out = k.update({0.2, 0.5, 0.2}, ++t);
+		CHECK(out.sideways == 1 && out.forward == 1);
+		/* Below the release, but held too short a time. */
+		out = k.update({0.05, 0, 0.05}, ++t);
+		CHECK(out.sideways == 1 && out.forward == 1);
+		t += ticks_from_ms(PATH_KEY_HOLD_MS);
+		out = k.update({0.05, 0, 0.05}, t);
+		CHECK(out.sideways == 0 && out.forward == 0);
+		/* The other way at once from a free key. */
+		out = k.update({-0.9, -0.9, -0.5}, ++t);
+		CHECK(out.sideways == -1 && out.vertical == -1 && out.forward == -1);
+		/* Facing the path: the strafe keys need PATH_KEY_ON_FACING. */
+		path_keys f;
+		out = f.update({0.6, 0.6, 1}, 1, true);
+		CHECK(out.sideways == 0 && out.vertical == 0 && out.forward == 1);
+		out = f.update({0.8, 0.9, 1}, 2, true);
+		CHECK(out.sideways == 1 && out.vertical == 1);
+		/* The command: the wanted velocity and a part of its error. */
+		const auto c{path_key_command({20, 0, 0}, {10, 0, 0}, 40)};
+		CHECK(std::abs(c.x - (20 + 10 * PATH_KEY_GAIN) / 40) < 1e-12 && c.y == 0 && c.z == 0);
+		CHECK(path_key_command({1, 1, 1}, {}, 0) == vec3{});
+	}
+	/* The walls round a fight: a run toward a near wall turns at its
+	 * start (if the other side has more room), a key toward a very near
+	 * one is let go, and the reverse key with a wall behind.
+	 */
+	{
+		const fight_room open{};
+		const double near_wall{JUKE_WALL_ROOM / 2}, close{JUKE_RELEASE_ROOM / 2}, far_off{JUKE_WALL_ROOM * 2};
+		juke_state j;
+		bot_rng rng{9};
+		bool tested{};
+		for (unsigned i{}; i != 400 && !tested; ++i)
+		{
+			j.update(rng, 20, 20, 35, 95, 1);
+			if (j.started() && j.side() && j.vertical())
+			{
+				const int s0{j.side()}, v0{j.vertical()};
+				fight_room r;
+				r.left = s0 < 0 ? near_wall : far_off;
+				r.right = s0 > 0 ? near_wall : far_off;
+				r.down = v0 < 0 ? near_wall : far_off;
+				r.up = v0 > 0 ? near_wall : far_off;
+				juke_turn_from_walls(j, r);
+				CHECK(j.side() == -s0 && j.vertical() == -v0);
+				/* Mid-run nothing turns. */
+				j.update(rng, 20, 20, 35, 95, 1);
+				if (!j.started())
+				{
+					const int s1{j.side()};
+					juke_turn_from_walls(j, r);
+					CHECK(j.side() == s1);
+				}
+				tested = true;
+			}
+		}
+		CHECK(tested);
+		/* Both sides near (a corridor): no turn to a side with less room. */
+		{
+			juke_state c;
+			bot_rng r3{3};
+			for (unsigned i{}; i != 400; ++i)
+			{
+				c.update(r3, 20, 20, 35, 95, 0);
+				if (c.started() && c.side())
+					break;
+			}
+			const int s0{c.side()};
+			fight_room r;
+			r.left = r.right = near_wall;
+			juke_turn_from_walls(c, r);
+			CHECK(c.side() == s0);
+		}
+		thrust_keys k;
+		k.sideways = 1;
+		k.vertical = -1;
+		k.forward = -1;
+		CHECK(keys_off_walls(k, open).sideways == 1 && keys_off_walls(k, open).forward == -1);
+		fight_room r;
+		r.right = close;
+		r.down = close;
+		r.back = close;
+		const auto off{keys_off_walls(k, r)};
+		CHECK(off.sideways == 0 && off.vertical == 0 && off.forward == 0);
+		r = {};
+		r.left = close;
+		r.up = close;
+		CHECK(keys_off_walls(k, r).sideways == 1 && keys_off_walls(k, r).vertical == -1);
+		k.forward = 1;
+		r.back = close;
+		CHECK(keys_off_walls(k, r).forward == 1);
+	}
+	/* The dodge: one key, the strafe kept when it already goes away. */
+	{
+		thrust_keys k;
+		k.sideways = 0.9;
+		k.forward = 1;
+		auto d{dodge_key(k, {0.8, 0.1, 0.1})};
+		CHECK(d.sideways == 1 && d.forward == 1 && d.vertical == 0);
+		d = dodge_key(k, {-0.8, 0.1, 0.1});
+		CHECK(d.sideways == -1 && d.forward == 1);
+		d = dodge_key(k, {0.1, -0.9, 0.1});
+		CHECK(d.sideways == 0.9 && d.vertical == -1);
+		d = dodge_key({}, {0.1, 0.1, -0.9});
+		CHECK(d.forward == -1 && d.sideways == 0 && d.vertical == 0);
+		d = dodge_key(k, {});
+		CHECK(d.sideways == 0.9 && d.forward == 1);
+	}
+	/* The push off a wall: a key into it let go, or turned (and only
+	 * that axis immediate) when the push is strong; a free key pushes.
+	 */
+	{
+		constexpr double vmax{58};
+		thrust_keys k;
+		k.sideways = 1;
+		k.vertical = -1;
+		auto a{avoid_keys(k, {-0.3 * vmax, 0, 0}, vmax)};
+		CHECK(a.keys.sideways == 0 && a.keys.vertical == -1 && !a.immediate[0] && !a.immediate[1]);
+		a = avoid_keys(k, {-0.7 * vmax, 0, 0}, vmax);
+		CHECK(a.keys.sideways == -1 && a.immediate[0] && !a.immediate[1]);
+		a = avoid_keys(k, {0, 0.2 * vmax, 0}, vmax);
+		CHECK(a.keys.vertical == 0 && a.keys.sideways == 1);
+		a = avoid_keys({}, {0, 0.2 * vmax, -0.2 * vmax}, vmax);
+		CHECK(a.keys.vertical == 1 && a.keys.forward == -1);
+		/* A small push changes nothing. */
+		a = avoid_keys(k, {-0.1 * vmax, 0.1 * vmax, 0}, vmax);
+		CHECK(a.keys.sideways == 1 && a.keys.vertical == -1);
+		CHECK(avoid_keys(k, {-vmax, 0, 0}, 0).keys.sideways == 1);
+	}
+	/* The corner speed: none below CORNER_SLOW_FROM or far off, then the
+	 * more the sharper, never below CORNER_SLOWEST.
+	 */
+	{
+		constexpr double vmax{58};
+		CHECK(corner_speed(radians(50), 5, vmax) == vmax);
+		CHECK(corner_speed(radians(170), CORNER_SLOW_DISTANCE + 1, vmax) == vmax);
+		const double mid{corner_speed(radians(90), 1, vmax)};
+		const double sharp{corner_speed(radians(170), 1, vmax)};
+		CHECK(sharp < mid && mid < vmax);
+		CHECK(std::abs(sharp - vmax * CORNER_SLOWEST) < 1e-9);
+		/* Far enough from the point, the distance's speed. */
+		CHECK(corner_speed(radians(170), 25, vmax) == std::min(vmax, 50.0));
+	}
+	/* The string pulled far ahead, a few probes a tick. */
+	{
+		const std::size_t n{40};
+		std::size_t at{};
+		unsigned probes{};
+		const auto all{[&probes](std::size_t) {
+			++probes;
+			return true;
+		}};
+		at = pull_string_ahead(0, 0, n, all);
+		CHECK(at == PULL_PROBES && probes == PULL_PROBES);
+		probes = 0;
+		at = pull_string_ahead(0, at, n, all);
+		CHECK(at == 2 * PULL_PROBES - 1 && probes == PULL_PROBES);
+		for (unsigned i{}; i != 20; ++i)
+			at = pull_string_ahead(0, at, n, all);
+		CHECK(at == PULL_AHEAD - 1);
+		/* Beyond a wall at point 6: stops before it. */
+		const auto wall6{[](const std::size_t k) {
+			return k < 6;
+		}};
+		at = pull_string_ahead(0, 0, n, wall6);
+		at = pull_string_ahead(0, at, n, wall6);
+		CHECK(at == 5);
+		/* The string broke (the point steered at is not reachable): the
+		 * nearest points, from the furthest down.
+		 */
+		const auto near2{[](const std::size_t k) {
+			return k <= 2;
+		}};
+		CHECK(pull_string_ahead(0, 10, n, near2) == 2);
+		CHECK(pull_string_ahead(5, 3, n, wall6) == 5);
+		CHECK(pull_string_ahead(n, 0, n, all) == n);
+		/* The last point is the end. */
+		CHECK(pull_string_ahead(n - 2, n - 2, n, all) == n - 1);
+	}
+	/* The straight flight ahead: along the path while it stays straight. */
+	{
+		const std::array<vec3, 5> pts{{{0, 0, 10}, {0, 0, 20}, {0, 0, 30}, {0, 10, 30}, {0, 20, 30}}};
+		CHECK(std::abs(straight_ahead(pts, 0, {0, 0, 0}) - 30) < 1e-9);
+		CHECK(std::abs(straight_ahead(pts, 2, {0, 0, 0}) - 30) < 1e-9);
+		CHECK(std::abs(straight_ahead(pts, 3, {0, 0, 30}) - 20) < 1e-9);
+		CHECK(straight_ahead(pts, 5, {}) == 0);
+	}
+	/* lateral_keys: immediate per axis. */
+	{
+		lateral_keys l;
+		auto v{l.apply({1, 1, 0}, 10)};
+		CHECK(v.x == 1 && v.y == 1);
+		v = l.apply({-1, -1, 0}, 11, std::array<bool, 2>{{true, false}});
+		CHECK(v.x == -1 && v.y == 0);
+	}
+}
+
 int main()
 {
 	test_pursuit_target_and_corner();
@@ -1155,6 +1400,7 @@ int main()
 	test_dodge_and_bend_rules();
 	test_unseen_hit();
 	test_keep_moving_in_turn();
+	test_fight_movement();
 	std::puts("test-bot-brain: all checks passed");
 	return 0;
 }

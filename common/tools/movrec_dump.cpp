@@ -21,6 +21,7 @@
  * Binary: build/common/movrec-dump
  */
 
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <cstdlib>
@@ -60,6 +61,15 @@ struct player_summary
 	 * on the recording machine.
 	 */
 	std::uint64_t turning{}, turning_reverse{};
+	/* Format minor 4: a bot's movement modes in a fight (an enemy in
+	 * sight within 400 units, as movrec-analyse counts a fight) and
+	 * overall, its mode changes and its goals.
+	 */
+	std::uint64_t bot_known{}, bot_fight{};
+	std::array<std::uint64_t, bot_modes::count> mode_fight{}, mode_all{};
+	std::array<std::uint64_t, bot_goals::count> goal_all{};
+	std::uint64_t mode_changes{};
+	std::uint8_t last_mode{0xff};
 };
 
 struct options
@@ -212,6 +222,23 @@ int dump(const char *const path, const options &opt)
 					++ps.enemy_seen;
 					ps.enemy_dist_sum += u.enemy_distance;
 				}
+				if (s->bot_known)
+				{
+					++ps.bot_known;
+					const bool fight{u.has_enemy && (s->context & context_flag::line_of_sight) && u.enemy_distance < 400 && !u.enemy_distance_scaled};
+					if (s->bot_mode < bot_modes::count)
+					{
+						++ps.mode_all[s->bot_mode];
+						if (fight)
+							++ps.mode_fight[s->bot_mode];
+					}
+					ps.bot_fight += fight;
+					if (s->bot_goal < bot_goals::count)
+						++ps.goal_all[s->bot_goal];
+					if (ps.last_mode != 0xff && s->bot_mode != ps.last_mode)
+						++ps.mode_changes;
+					ps.last_mode = s->bot_mode;
+				}
 				if (s->attacked_mask)
 					++ps.attacked;
 				if (s->aimed_at_mask)
@@ -322,6 +349,20 @@ int dump(const char *const path, const options &opt)
 		else if (p.alive)
 			std::printf("    no controls (estimated from the motion by movrec-analyse)\n");
 		std::printf("    enemy in sight %.0f%% (mean distance %.0f), under attack %.0f%%, aimed at %.0f%%\n", pct(p.enemy_seen, p.alive), p.enemy_seen ? p.enemy_dist_sum / p.enemy_seen : 0.0, pct(p.attacked, p.alive), pct(p.aimed_at, p.alive));
+		if (p.bot_known)
+		{
+			std::uint64_t keys{};
+			for (std::uint8_t m{}; m != bot_modes::count; ++m)
+				if (bot_mode_is_keys(m))
+					keys += p.mode_fight[m];
+			std::printf("    bot movement: keys %.0f%% of the fight time (", pct(keys, p.bot_fight));
+			for (std::uint8_t m{1}; m != bot_modes::count; ++m)
+				std::printf("%s%s %.0f%%", m == 1 ? "" : ", ", bot_mode_name(m), pct(p.mode_fight[m], p.bot_fight));
+			std::printf("), %.1f mode changes a minute; goals", p.mode_changes * 60.0 / std::max(1e-9, p.bot_known * dt));
+			for (std::uint8_t g{}; g != bot_goals::count; ++g)
+				std::printf("%s %s %.0f%%", g ? "," : "", bot_goal_name(g), pct(p.goal_all[g], p.bot_known));
+			std::puts("");
+		}
 		std::printf("    fired %" PRIu64 " primary, %" PRIu64 " secondary; hits dealt %" PRIu64 " (%.0f), taken %" PRIu64 " (%.0f; %u splash); kills %" PRIu64 ", deaths %" PRIu64 " (%" PRIu64 " suicides), respawns %" PRIu64 "; pickups %" PRIu64 ", weapon switches %" PRIu64 "\n",
 			p.fire_primary, p.fire_secondary,
 			p.hits_dealt, p.damage_dealt, p.hits_taken, p.damage_taken, p.splash_taken,
