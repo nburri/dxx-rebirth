@@ -101,13 +101,8 @@ constexpr unsigned BOT_NAV_NODE_LIMIT{4000};
 constexpr unsigned BOT_REVENGE_TICKS{3 * b::BOT_TICK_RATE};
 /* A cloaked player is seen only this close (section 4.2). */
 constexpr double BOT_CLOAK_SEE_DISTANCE{40};
-/* The engagement distance band before the style's range scale (the
- * defaults of b::tune_params).
- */
-constexpr double BOT_RANGE_LO{35};
 /* Section 9.5: backing off to a standoff, no closer to a wall behind. */
 constexpr double BOT_BACK_WALL_CLEARANCE{25};
-constexpr double BOT_RANGE_HI{95};
 /* A roaming bot flies at least this far (section 4.3). */
 constexpr double BOT_ROAM_MIN_DISTANCE{120};
 /* A hunt toward a target that moves to another segment is planned again
