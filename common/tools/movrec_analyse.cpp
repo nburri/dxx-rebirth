@@ -78,7 +78,13 @@ public:
 	{
 		std::error_code ec;
 		std::vector<std::filesystem::path> mn2s;
-		for (const auto &e : std::filesystem::directory_iterator(folder, ec))
+		std::filesystem::directory_iterator it{folder, ec};
+		if (ec)
+		{
+			std::fprintf(stderr, "%s: cannot read the folder: %s\n", folder, ec.message().c_str());
+			return 0;
+		}
+		for (const auto &e : it)
 		{
 			if (!e.is_regular_file(ec))
 				continue;

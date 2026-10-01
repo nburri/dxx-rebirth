@@ -1768,10 +1768,10 @@ void test_level_geometry()
 		child[20 + 5 + 48 * 12 + 1] = 77;
 		CHECK(!geo::read_level(child));
 		/* The exit (0xfffe) is a way out, not a neighbour. */
-		auto exit{bytes};
-		exit[20 + 5 + 48 * 12 + 1] = 0xfe;
-		exit[20 + 5 + 48 * 12 + 2] = 0xff;
-		const auto e{geo::read_level(exit)};
+		auto to_exit{bytes};
+		to_exit[20 + 5 + 48 * 12 + 1] = 0xfe;
+		to_exit[20 + 5 + 48 * 12 + 2] = 0xff;
+		const auto e{geo::read_level(to_exit)};
 		CHECK(e && e->segments[0].children[4] == geo::SEGMENT_EXIT);
 		CHECK_RANGE(geo::free_distance(*e, 0, {{0, 0, 8}}, {{0, 0, 1}}), 7.9, 8.1);
 	}
@@ -1804,34 +1804,34 @@ void test_level_geometry()
 		missions.push_back(e);
 	}
 	unsigned opened{};
-	const auto open{[&](geo::mission_entry &e) {
+	const auto load_hog{[&](geo::mission_entry &e) {
 		++opened;
 		e.hog = e.stem == "TUNSHIFT" ? other_hog : hog;
 		e.dir = *geo::read_hog(e.hog);
 	}};
 	{
-		const auto f{geo::find_level(missions, {"Test Tunnels", "tuncopy", "", 1, 6}, open)};
+		const auto f{geo::find_level(missions, {"Test Tunnels", "tuncopy", "", 1, 6}, load_hog)};
 		CHECK(f.mesh && f.mission == &missions[1] && f.level_file == "tunnel.rl2" && f.note.starts_with("by the mission file"));
 	}
 	{
-		const auto f{geo::find_level(missions, {"test tunnels", "", "", 1, 6}, open)};
+		const auto f{geo::find_level(missions, {"test tunnels", "", "", 1, 6}, load_hog)};
 		CHECK(!f.mesh && f.note.starts_with("ambiguous: TUNNEL, TUNCOPY, TUNSHIFT"));
 	}
 	{
 		auto two{missions};
 		two.pop_back();
-		const auto f{geo::find_level(two, {"Test Tunnels", "", "", 1, 6}, open)};
+		const auto f{geo::find_level(two, {"Test Tunnels", "", "", 1, 6}, load_hog)};
 		CHECK(f.mesh && f.note.starts_with("the same level in TUNNEL, TUNCOPY"));
 	}
 	{
-		const auto f{geo::find_level(missions, {"Test Tunnels", "tunshift", "tunnel.rl2", 1, 7}, open)};
+		const auto f{geo::find_level(missions, {"Test Tunnels", "tunshift", "tunnel.rl2", 1, 7}, load_hog)};
 		CHECK(!f.mesh && f.note.find("has 6 segments, the recording 7") != std::string::npos);
-		const auto g2{geo::find_level(missions, {"Test Tunnels", "tunnel", "", 3, 6}, open)};
+		const auto g2{geo::find_level(missions, {"Test Tunnels", "tunnel", "", 3, 6}, load_hog)};
 		CHECK(!g2.mesh && g2.note.find("has no level 3") != std::string::npos);
-		const auto g3{geo::find_level(missions, {"No Such Mission", "", "", 1, 6}, open)};
+		const auto g3{geo::find_level(missions, {"No Such Mission", "", "", 1, 6}, load_hog)};
 		CHECK(!g3.mesh && g3.note.starts_with("no mission named"));
 		/* The second level of the list is not in the hog. */
-		const auto g4{geo::find_level(missions, {"", "tunnel", "", 2, 0}, open)};
+		const auto g4{geo::find_level(missions, {"", "tunnel", "", 2, 0}, load_hog)};
 		CHECK(!g4.mesh && g4.note.find("has no other.rl2") != std::string::npos);
 	}
 	/* Each hog read once. */

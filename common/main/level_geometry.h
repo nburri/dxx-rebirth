@@ -620,17 +620,17 @@ inline level_geometry measure(level mesh, std::string name = {}, std::string sou
 inline std::string level_geometry::character() const
 {
 	const auto share{[this](const room_class c) { return volume_share[static_cast<std::size_t>(c)]; }};
-	const double open{share(room_class::open)}, tight{share(room_class::tight)};
+	const double open_share{share(room_class::open)}, tight{share(room_class::tight)};
 	const double medium{share(room_class::medium)};
 	const bool long_views{long_lines >= LONG_SIGHT};
-	const char *const kind{open >= 0.5 ? (long_views ? "large open spaces with long sight lines" : "large open spaces")
+	const char *const kind{open_share >= 0.5 ? (long_views ? "large open spaces with long sight lines" : "large open spaces")
 		: tight >= 0.5 ? (long_views ? "tight corridors with long sight lines" : "tight corridors")
 		: medium >= 0.5 ? (long_views ? "wide tunnels and rooms with long sight lines" : "wide corridors and small rooms")
 		: "a mix of tight corridors and open rooms"};
 	const unsigned segments = mesh.segments.size();
 	std::array<char, 256> buf;
 	std::snprintf(buf.data(), buf.size(), "%s: %.0f%% of the volume open, %.0f%% medium, %.0f%% tight; room %.0f units (volume-weighted median), the longest free line from a segment %.0f units (90th percentile); %u segments, %.0f thousand cubic units",
-		kind, 100 * open, 100 * medium, 100 * tight, median_room, long_lines, segments, volume / 1000);
+		kind, 100 * open_share, 100 * medium, 100 * tight, median_room, long_lines, segments, volume / 1000);
 	return buf.data();
 }
 
@@ -639,7 +639,8 @@ inline std::string level_geometry::character() const
  */
 
 /* A mission of the folder: its .mn2 (or .msn) and its .hog, which
- * `open` reads when a level of it is asked for (it may stay empty).
+ * find_level's `load_hog` reads when a level of it is asked for (it may
+ * stay empty).
  */
 struct mission_entry
 {
@@ -677,11 +678,11 @@ constexpr std::size_t MISSION_NAME_KEPT{25};
  * by the mission's name and the level number; it must have the
  * recorded number of segments.  Several missions that fit with the same
  * geometry are one; with different geometry, ambiguous: nothing.
- * `open` reads a mission's .hog into `hog` and `dir` (once).
+ * `load_hog` reads a mission's .hog into `hog` and `dir` (once).
  */
-template <typename open_hog>
+template <typename hog_loader>
 [[nodiscard]]
-inline level_match find_level(std::vector<mission_entry> &missions, const level_query &q, open_hog &&open, const std::size_t file_name_kept = 20)
+inline level_match find_level(std::vector<mission_entry> &missions, const level_query &q, hog_loader &&load_hog, const std::size_t file_name_kept = 20)
 {
 	level_match out;
 	std::vector<mission_entry *> candidates;
@@ -730,7 +731,7 @@ inline level_match find_level(std::vector<mission_entry> &missions, const level_
 		if (!m->hog_read)
 		{
 			m->hog_read = true;
-			open(*m);
+			load_hog(*m);
 		}
 		if (m->dir.empty())
 		{
