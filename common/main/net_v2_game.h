@@ -75,6 +75,12 @@ namespace net_v2 {
  */
 [[nodiscard]]
 bool open_socket(unsigned index, uint16_t port);
+/* -botarena (Documentation/multiplayer-bots.md section 8.2): the game
+ * socket on the loopback address only, any free port, no broadcasts:
+ * nothing this machine sends leaves it.
+ */
+[[nodiscard]]
+bool open_loopback_socket();
 void close_sockets();
 void flush_sockets();
 [[nodiscard]]
@@ -139,8 +145,10 @@ void client_send_leave(kick_player_reason reason);
 bool client_sync_timed_out();
 
 /* Host side. */
-/* Choose a session id and become the host of a new session. */
-void host_open_session();
+/* Choose a session id (or take `fixed_id`, if not 0: -botarena) and
+ * become the host of a new session.
+ */
+void host_open_session(uint32_t fixed_id = 0);
 /* Send GAME_SETTINGS and PLAYER_LIST to every peer and broadcast
  * GAME_INFO_LITE (the v1 "netgame update").
  */

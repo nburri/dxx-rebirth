@@ -855,6 +855,90 @@ it is the main tuning tool:
   with 7 bots. The pass criteria are zero asserts, stuck events below 1 per
   bot-minute, and every bot scoring at least one kill.
 
+**As implemented** (`similar/main/bot_arena.cpp`, `common/main/bot_arena.h`):
+
+```
+d2x-rebirth -hogdir DATA -botarena <mission> <level> <bots> <seconds>
+            [-fixedfps N] [-botarena-bots "skill:style[:name],..."]
+            [-botarena-seed N] [-pilot NAME] [-recordmoves -recordmoves-bots]
+tools/botarena-run.sh [-n bots] [-b list] [-s seconds] [-f fps] [-o dir] DATA <mission> [<level>]
+```
+
+- **Start.** Instead of the main menu: the mission is found by its file
+  name (`Corona`, `ESHAKER.MN2`) or its title (`Earth Shaker`); the game is
+  set up like the host setup menu (`net_udp_setup_defaults`: the defaults,
+  then the pilot's `.ngp` with its game options), then anarchy on the given
+  level with `<bots> + 1` players, no kill goal, no time limit, no autosave.
+  The bots are those of `-botarena-bots` (skill and style by the names of
+  `/bot`, an optional name; a bot the list leaves out plays the default),
+  else the pilot's bot setup cut or filled to `<bots>`. Without `-pilot` a
+  pilot "arena" of defaults, written nowhere. The lobby is skipped
+  (`net_udp_arena_start`: slot 0, `bots_allocate_slots`, `StartNewLevel`).
+- **No network.** The game socket is bound to the loopback address on a
+  free port, without `SO_BROADCAST` (`net_v2::open_loopback_socket`), so
+  nothing the game sends can leave the machine; `GAME_INFO_LITE`
+  broadcasts are skipped and the tracker is off before its address would be
+  looked up. The rest of the host (sessions, ticks, the state bundle, the
+  host's damage and pickup decisions) runs as in a real game.
+- **The host** is player 0 and becomes a ghost on the first frame (as a
+  player who left: `OBJ_GHOST`, nothing renders, moves or collides). The
+  bots do not see it (they only target `OBJ_PLAYER`); the recording
+  analysis skips it (alive 0 s).
+- **Simulated clock** (`timer_use_simulated_clock`, `timer.h`): from the
+  start the game timer is no longer the wall clock; it starts at 1 s and
+  jumps by `1/N` s (`-fixedfps`, default 200) whenever a frame waits for it,
+  so every frame is exactly `1/N` s and the game runs as fast as the
+  machine can. The same seed (default 1; the session id and the powerup
+  shuffle come from it, `d_srand` from the simulated clock) plays the same
+  game: two runs give identical summaries. Nothing is drawn and the buffer
+  is not swapped while the clock is simulated. SDL still needs a video
+  driver: without a display `SDL_VIDEODRIVER=offscreen` (EGL, e.g. Mesa)
+  gives the OpenGL context the level loading needs; audio `-nosound`.
+- **End.** After `<seconds>` of game time the summary goes to the log (and
+  stdout on Linux/macOS), the game window closes (the recording is closed
+  as usual) and the program exits with status 0 (1 if the game did not
+  start or ended early). A line every 60 game seconds shows the progress.
+- **Summary.** Per bot: kills (of others), deaths, suicides, primary shots,
+  direct hits on others and hits per primary shot (as movrec-analyse counts
+  them: each bolt of a volley and a missile's direct hit is a hit), splash
+  hits, damage dealt, missiles fired, stuck events (total and per minute),
+  and the average length of the paths it planned; per skill: kills, deaths,
+  kills per death and hits per shot; the wall time, game seconds per wall
+  second, and the bots' code (`bots_frame` + `bots_fire`) in ms per game
+  second. The counters are fed by the movement recorder's fire and damage
+  hooks and two lines in `bot.cpp` (stuck, `plan_path`); they do nothing
+  outside an arena run.
+- **`tools/botarena-run.sh`** runs one arena game with `-recordmoves
+  -recordmoves-bots` in a fresh user folder (the data folder is only read)
+  and `movrec-analyse --bots --missions DATA/missions` on its recording.
+
+Measured on the sandbox (aarch64, one core used): 5 bots run at about 100
+to 150 (Corona, 805 segments) and 160 to 270 (Earth Shaker) game seconds
+per wall second at 200 fps, depending on the machine's load; a 10-minute
+game takes 3 to 6 s plus about 4 s to start.
+The bots' code takes 1 to 4 ms per game second for five bots.
+
+First comparison (2026-10-02, exp-31 bots: Hotshot/Balanced and Insane
+Balanced/Aggressive/Cautious/Collector, 10 minutes, mean of the five bots,
+against the five bots of the group's exp-31 games with one human, Corona
+23:22 and Earth Shaker 23:40):
+
+| | Corona real | Corona arena | Shaker real | Shaker arena |
+|---|---|---|---|---|
+| speed, mean (units/s) | 37.1 | 37.9 | 40.7 | 42.2 |
+| strafe reversals / min | 74.9 | 75.2 | 85.2 | 85.1 |
+| vertical share | 0.62 | 0.63 | 0.58 | 0.63 |
+| speed across (% of top) | 57 | 58 | 46 | 47 |
+| push after large turns (%) | 39 | 34 | 43 | 46 |
+| afterburner when fleeing (%) | 6.2 | 7.2 | 3.2 | 2.0 |
+| fight share of the time alive (%) | 80 | 82 | 47 | 42 |
+| direct hits per primary shot | 0.15 | 0.17 | 0.39 | 0.34 |
+
+The arena reproduces the bots' flying within the noise of one game; it has
+no human, so the fights are bot against bot only (in the real Corona game
+the human made a quarter of the kills); the Hotshot's hits per shot differ
+most (Corona 0.05 against 0.16), a single Hotshot, so that may be chance.
+
 ### 8.3 Play-test checklist (real network game)
 
 - A client sees bots move, fire and die exactly like humans: engine glow,

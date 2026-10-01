@@ -92,6 +92,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 
 #include "multi.h"
 #include "bot.h"
+#include "bot_arena.h"
 #include "movement_record.h"
 #include "cntrlcen.h"
 #include "pcx.h"
@@ -1804,7 +1805,8 @@ window_event_result game_window::event_handler(const d_event &event)
 				result = GameProcessFrame(LevelSharedRobotInfoState);
 			}
 
-			if (!Automap_active)		// efficiency hack
+			/* -botarena (timer.h): nobody watches. */
+			if (!Automap_active && !timer_simulated())		// efficiency hack
 			{
 				if (force_cockpit_redraw) {			//screen need redrawing?
 					init_cockpit();
@@ -2100,7 +2102,10 @@ window_event_result GameProcessFrame(const d_level_shared_robot_info_state &Leve
 		/* The bots' brains and controls for this frame, before anything
 		 * moves (Documentation/multiplayer-bots.md section 3.3).
 		 */
-		bots_frame(LevelSharedRobotInfoState.Robot_info);
+		{
+			const bot_arena_cpu_scope cpu;
+			bots_frame(LevelSharedRobotInfoState.Robot_info);
+		}
 		{
 			const frame_probe::scope probe{frame_probe::phase::objects};
 			result = std::max(game_move_all_objects(LevelSharedRobotInfoState), result);
@@ -2140,8 +2145,17 @@ window_event_result GameProcessFrame(const d_level_shared_robot_info_state &Leve
 		if (laser_firing_count)
 			do_laser_firing_player(Local_pilot, Objects.vmptridx(get_local_player().objnum));
 		delayed_autoselect(player_info, Controls);
-		bots_fire();
+		{
+			const bot_arena_cpu_scope cpu;
+			bots_fire();
+		}
 		movement_record_frame(LevelSharedRobotInfoState.Robot_info);
+		if (bot_arena_active())
+		{
+			result = std::max(bot_arena_frame(), result);
+			if (result == window_event_result::close)
+				return result;
+		}
 	}
 
 	if (Do_appearance_effect) {

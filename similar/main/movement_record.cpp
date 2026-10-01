@@ -28,6 +28,7 @@
 #include <string>
 
 #include "movement_record.h"
+#include "bot_arena.h"
 #include "movement_record_format.h"
 #include "args.h"
 #include "bm.h"
@@ -907,6 +908,8 @@ void movement_record_end_session()
 
 void movement_record_fire(const object &shooter, const bool secondary, const unsigned weapon, const unsigned flags)
 {
+	if (bot_arena_active())
+		bot_arena_note_fire(player_of(shooter), secondary);
 	if (!R.file)
 		return;
 	/* Every player's shot, also of a player whose samples are not
@@ -1004,6 +1007,8 @@ void movement_record_splash(const object &victim, const object *const origin, co
 
 void movement_record_damage(const unsigned victim, const unsigned attacker, const std::uint8_t attacker_kind, const unsigned weapon, const fix damage, const bool splash)
 {
+	if (bot_arena_active() && attacker_kind == mr::attacker_kind::player)
+		bot_arena_note_damage(victim, attacker, damage, splash);
 	if (!R.file || victim >= MAX_PLAYERS)
 		return;
 	record_damage(victim, attacker < MAX_PLAYERS ? attacker : mr::PLAYER_NONE, attacker_kind, weapon, damage, splash ? mr::hit_flag::splash : 0u);

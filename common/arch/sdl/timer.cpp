@@ -28,6 +28,9 @@ static fix64 F64_RunTime = 0;
 
 namespace {
 
+/* -botarena: the simulated clock (timer.h); 0 = the wall clock. */
+static fix simulated_step;
+
 #if SDL_MAJOR_VERSION == 1
 /* SDL1 only offers a millisecond clock. */
 static fix64 timer_read_clock()
@@ -63,6 +66,8 @@ static fix64 timer_read_clock()
 
 fix64 timer_update()
 {
+	if (simulated_step)
+		return F64_RunTime;
 	static bool already_initialized;
 	static fix64 last_tv;
 	const fix64 cur_tv = timer_read_clock();
@@ -81,6 +86,17 @@ fix64 timer_update()
 fix64 timer_query(void)
 {
 	return (F64_RunTime);
+}
+
+void timer_use_simulated_clock(const fix64 start, const fix step)
+{
+	F64_RunTime = start;
+	simulated_step = step > 0 ? step : 1;
+}
+
+bool timer_simulated()
+{
+	return simulated_step != 0;
 }
 
 void timer_delay_ms(unsigned milliseconds)
@@ -124,11 +140,20 @@ constexpr int vsync_maximum_fps{MAXIMUM_FPS + MAXIMUM_FPS / 10};
 
 fix timer_get_frame_bound()
 {
+	if (simulated_step)
+		return simulated_step;
 	return F1_0 / (CGameCfg.VSync ? vsync_maximum_fps : CGameArg.SysMaxFPS);
 }
 
 fix64 timer_wait_frame(const fix64 deadline)
 {
+	/* The simulated clock does not wait: it is at the deadline at once. */
+	if (simulated_step)
+	{
+		if (F64_RunTime < deadline)
+			F64_RunTime = deadline;
+		return F64_RunTime;
+	}
 	const auto multiplayer{+(Game_mode & GM_MULTI)};
 	/* Also sleep with vsync: the swap usually blocks, so the wait is
 	 * short and the margin below prevents sleeping, but if the swap

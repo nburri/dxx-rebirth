@@ -295,7 +295,7 @@ void udp_traffic_stat()
 }
 
 // Open socket
-int udp_open_socket(RAIIsocket &sock, int port)
+int udp_open_socket(RAIIsocket &sock, int port, const bool loopback = false)
 {
 	int bcast{1};
 
@@ -313,7 +313,10 @@ int udp_open_socket(RAIIsocket &sock, int port)
 	sAddr.sa.sa_family = sAddr.address_family;
 #if DXX_USE_IPv6
 	sAddr.sin6.sin6_port = htons (port); // short, network byte order
-	sAddr.sin6.sin6_addr = IN6ADDR_ANY_INIT; // automatically fill with my IP
+	if (loopback)
+		sAddr.sin6.sin6_addr = in6addr_loopback;
+	else
+		sAddr.sin6.sin6_addr = IN6ADDR_ANY_INIT; // automatically fill with my IP
 	{
 		/* Accept and send IPv4 traffic on the IPv6 socket, using
 		 * IPv4-mapped addresses (::ffff:a.b.c.d), which udp_dns_filladdr
@@ -331,7 +334,7 @@ int udp_open_socket(RAIIsocket &sock, int port)
 	}
 #else
 	sAddr.sin.sin_port = htons (port); // short, network byte order
-	sAddr.sin.sin_addr.s_addr = INADDR_ANY; // automatically fill with my IP
+	sAddr.sin.sin_addr.s_addr = htonl(loopback ? INADDR_LOOPBACK : INADDR_ANY); // automatically fill with my IP
 #endif
 
 	if (bind(sock, &sAddr.sa, sizeof(sAddr)) < 0)
@@ -341,6 +344,8 @@ int udp_open_socket(RAIIsocket &sock, int port)
 		sock.reset();
 		return -1;
 	}
+	if (loopback)
+		return 0;
 #ifdef _WIN32
 	setsockopt(sock, SOL_SOCKET, SO_BROADCAST, reinterpret_cast<const char *>(&bcast), sizeof(bcast));
 #else
@@ -4691,6 +4696,23 @@ bool open_socket(const unsigned index, const uint16_t port)
 	return udp_open_socket(UDP_Socket[index], port) == 0;
 }
 
+bool open_loopback_socket()
+{
+	if (udp_open_socket(UDP_Socket[0], 0, true) != 0)
+		return false;
+	_sockaddr a{};
+	socklen_t len = sizeof(a);
+	if (getsockname(UDP_Socket[0], &a.sa, &len) == 0)
+		con_printf(CON_NORMAL, "net: game socket on the loopback address only, port %u", ntohs(
+#if DXX_USE_IPv6
+			a.sin6.sin6_port
+#else
+			a.sin.sin_port
+#endif
+		));
+	return true;
+}
+
 void close_sockets()
 {
 	/* A LEAVE or HOST_SHUTDOWN queued just before leaves with this frame. */
@@ -4850,10 +4872,10 @@ void client_send_leave(const kick_player_reason reason)
 	p.close_at = timer_query() + ::dcx::net_v2::NET_V2_CLOSE_LINGER;
 }
 
-void host_open_session()
+void host_open_session(const uint32_t fixed_id)
 {
 	session_reset();
-	S.session_id = random_nonzero_u32();
+	S.session_id = fixed_id ? fixed_id : random_nonzero_u32();
 	Netgame.protocol.udp.session_id = S.session_id;
 	S.last_broadcast = 0;
 #if DXX_USE_TRACKER
@@ -4865,7 +4887,8 @@ void host_open_session()
 
 void host_broadcast_game_info_lite()
 {
-	if (!UDP_Socket[0])
+	/* -botarena: nobody to tell. */
+	if (!UDP_Socket[0] || CGameArg.DbgBotArenaSeconds)
 		return;
 	net_udp_update_netgame();
 	std::array<uint8_t, 128> buf;

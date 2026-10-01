@@ -1181,6 +1181,51 @@ static const char *load_mission(const mle *const mission)
 
 }
 
+namespace {
+
+/* The mission titled `title` (case ignored), under `list`. */
+static const mle *find_mission_by_title(const mission_list_type &list, const char *const title)
+{
+	for (auto &i : list)
+	{
+		if (!i.directory.empty())
+		{
+			if (const auto r{find_mission_by_title(i.directory, title)})
+				return r;
+		}
+		else if (!d_stricmp(i.mission_name, title))
+			return &i;
+	}
+	return nullptr;
+}
+
+}
+
+const char *load_mission_by_file_or_title(const char *const name)
+{
+	/* A file name without its extension or folder: "Corona", "Corona.mn2",
+	 * "missions/Corona".
+	 */
+	std::string file{name};
+	if (const auto slash{file.find_last_of("/\\")}; slash != std::string::npos)
+		file.erase(0, slash + 1);
+	if (const auto dot{file.rfind('.')}; dot != std::string::npos)
+		file.erase(dot);
+	if (!file.empty() && !load_mission_by_name(mission_entry_predicate{
+		.filesystem_name = file.c_str(),
+#if DXX_BUILD_DESCENT == 2
+		.check_version = false,
+		.descent_version = {},
+#endif
+	}, mission_name_type::guess))
+		return nullptr;
+	/* Its title: "CORONA (Sny)". */
+	auto &&mission_list = build_mission_list(mission_filter_mode::include_anarchy);
+	if (const auto m{find_mission_by_title(mission_list, name)})
+		return load_mission(m);
+	return "No mission of that file name or title";
+}
+
 //loads the named mission if exists.
 //Returns nullptr if mission loaded ok, else error string.
 const char *load_mission_by_name (const mission_entry_predicate mission_name, const mission_name_type name_match_mode)

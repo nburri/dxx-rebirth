@@ -106,6 +106,7 @@ char copyright[] = "DESCENT II  COPYRIGHT (C) 1994-1996 PARALLAX SOFTWARE CORPOR
 #if DXX_USE_UDP
 #include "net_udp.h"
 #endif
+#include "bot_arena.h"
 #include "dsx-ns.h"
 
 #if DXX_USE_SDLIMAGE
@@ -266,6 +267,10 @@ static void print_commandline_help()
 	VERB("  -safelog                      Write gamelog.txt unbuffered.\n\t\t\t\tUse to keep helpful output to trace program crashes.\n")	\
 	VERB("  -frametimes                   Show the frame time and where it went\n\t\t\t\tnext to the FPS counter, and log long frames\n\t\t\t\tto gamelog.txt (-verbose logs every second).\n")	\
 	VERB("  -lagtest <ms>                 As network host, delay your own pickups as a\n\t\t\t\tclient with a round trip of <ms> feels them (0-500)\n")	\
+	VERB("  -botarena <m> <l> <n> <s>     Headless test: <n> bots (1-7) fight on level <l>\n\t\t\t\tof mission <m> (name or file) for <s> game\n\t\t\t\tseconds, then print a summary and quit\n")	\
+	VERB("  -fixedfps <n>                 -botarena: <n> frames per game second (10-1000,\n\t\t\t\tdefault 200), as fast as the machine runs\n")	\
+	VERB("  -botarena-bots <list>         -botarena: the bots, skill:style[:name] by commas\n\t\t\t\t(default: the pilot's bot setup)\n")	\
+	VERB("  -botarena-seed <n>            -botarena: the game's random seed (default 1)\n")	\
 	VERB("  -norun                        Bail out after initialization\n")	\
 	VERB("  -no-grab                      Never grab keyboard/mouse\n")	\
 	VERB("  -renderstats                  Enable renderstats info by default\n")	\
@@ -606,6 +611,12 @@ static int main(int argc, char *argv[])
 	}
 	
 	ReadConfigFile(CGameCfg, GameCfg);
+	if (bot_arena_active())
+	{
+		/* -botarena: nobody watches; a small window costs least. */
+		Game_screen_mode = screen_mode(640, 480);
+		CGameCfg.WindowMode = true;
+	}
 
 	PHYSFSX_addArchiveContent();
 
@@ -751,7 +762,14 @@ static int main(int argc, char *argv[])
 #endif
 	{
 		Game_mode = {};
-		DoMenu();
+		if (bot_arena_active())
+		{
+			/* -botarena: no menus; the program ends with the game. */
+			if (!bot_arena_start())
+				return 1;
+		}
+		else
+			DoMenu();
 	}
 
 	while (window_get_front())
@@ -766,6 +784,9 @@ static int main(int argc, char *argv[])
 		while ((wind = window_get_front()))
 			window_close(wind);
 	}
+
+	if (bot_arena_active())
+		return bot_arena_exit_status();
 
 	WriteConfigFile(CGameCfg, GameCfg);
 

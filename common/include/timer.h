@@ -44,5 +44,18 @@ static inline void timer_delay2(int fps)
 	timer_delay_bound(1000u / fps);
 }
 
+/* The simulated clock of -botarena (Documentation/multiplayer-bots.md
+ * section 8.2): from now on the game timer no longer follows the wall
+ * clock.  It starts at `start` and moves only when a frame waits for it
+ * (timer_wait_frame jumps to the deadline at once), by `step` per frame
+ * of the game (timer_get_frame_bound).  There is no way back.  Nobody
+ * watches a simulated game: the game draws no frames then (game.cpp,
+ * event.cpp).
+ */
+void timer_use_simulated_clock(fix64 start, fix step);
+/* The game timer is the simulated clock. */
+[[nodiscard]]
+bool timer_simulated();
+
 }
 #endif

@@ -161,6 +161,8 @@ static void InitGameArg()
 #endif
 #endif
 	CGameArg.DbgVerbose = CON_NORMAL;
+	CGameArg.DbgBotArenaFps = 200;
+	CGameArg.DbgBotArenaSeed = 1;
 	CGameArg.DbgBpp = 32;
 #if DXX_USE_OGL
 	CGameArg.OglSyncMethod = OGL_SYNC_METHOD_DEFAULT;
@@ -415,6 +417,26 @@ static void ReadCmdArgs(Inilist &ini, Arglist &&Args)
 			CGameArg.DbgFrameTimeHud = true;
 		else if (!d_stricmp(p, "-lagtest"))
 			CGameArg.DbgLagTestMs = static_cast<uint16_t>(std::clamp<long>(arg_integer(pp, end), 0, 500));
+		else if (!d_stricmp(p, "-botarena"))
+		{
+			CGameArg.DbgBotArenaMission = arg_string(pp, end);
+			CGameArg.DbgBotArenaLevel = static_cast<uint8_t>(std::clamp<long>(arg_integer(pp, end), 1, 255));
+			CGameArg.DbgBotArenaBots = static_cast<uint8_t>(std::clamp<long>(arg_integer(pp, end), 1, 7));
+			CGameArg.DbgBotArenaSeconds = static_cast<uint32_t>(std::clamp<long>(arg_integer(pp, end), 1, 86400));
+			/* Nobody watches or listens (a movie or a title would wait
+			 * for a key).
+			 */
+			GameArg.SysNoMovies = true;
+			CGameArg.SysNoTitles = true;
+			CGameArg.SndNoSound = true;
+			CGameArg.SndNoMusic = true;
+		}
+		else if (!d_stricmp(p, "-fixedfps"))
+			CGameArg.DbgBotArenaFps = static_cast<uint16_t>(std::clamp<long>(arg_integer(pp, end), 10, 1000));
+		else if (!d_stricmp(p, "-botarena-bots"))
+			CGameArg.DbgBotArenaSpec = arg_string(pp, end);
+		else if (!d_stricmp(p, "-botarena-seed"))
+			CGameArg.DbgBotArenaSeed = static_cast<uint32_t>(std::clamp<long>(arg_integer(pp, end), 1, 0x7fffffff));
 		else if (!d_stricmp(p, "-norun"))
 			CGameArg.DbgNoRun = true;
 		else if (!d_stricmp(p, "-renderstats"))

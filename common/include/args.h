@@ -126,6 +126,20 @@ struct CArg : prohibit_void_ptr<>
 	 * client's with that round trip do (net_objects.cpp).
 	 */
 	uint16_t DbgLagTestMs;
+	/* -botarena <mission> <level> <bots> <seconds> (Documentation/
+	 * multiplayer-bots.md section 8.2): a headless anarchy game of bots
+	 * on this machine, run for <seconds> of game time, then a summary
+	 * and exit.  -fixedfps N its frames per game second (10-1000,
+	 * default 200), -botarena-bots "skill:style[:name],..." the bots,
+	 * -botarena-seed N its randomness (default 1).
+	 */
+	uint8_t DbgBotArenaLevel;
+	uint8_t DbgBotArenaBots;
+	uint16_t DbgBotArenaFps;
+	uint32_t DbgBotArenaSeconds;
+	uint32_t DbgBotArenaSeed;
+	std::string DbgBotArenaMission;
+	std::string DbgBotArenaSpec;
 #if DXX_USE_SHAREPATH
 	bool SysNoHogDir;
 #endif
