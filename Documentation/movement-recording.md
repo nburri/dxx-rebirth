@@ -33,6 +33,7 @@ Command line or `d2x.ini` (one option per line):
 | `-recordmoves` | Record. Off by default. |
 | `-recordmoves-rate <n>` | Samples per second, 10 to 60 (default 30). |
 | `-recordmoves-bots` | Also record the bots (default: humans only). |
+| `-sharemoves` | Record (implies `-recordmoves`), and as a client also send your exact controls to the host, so that the host's recording has them (section 3.1). |
 
 There is no menu toggle (the setting is read once at start, like
 `-auto-record-demo`); adding `-recordmoves` to `d2x.ini` makes it permanent.
@@ -71,7 +72,7 @@ and then one `sample` per recorded player:
 |---|---|---|
 | player | player number | |
 | flags | alive, dying, controls present, afterburner, fire primary held, fire secondary held, cloaked, invulnerable | |
-| flags2 | shields/energy exact here, afterburner known, bot, flown here, steering a guided missile, headlight, fire buttons known | |
+| flags2 | shields/energy exact here, afterburner known, bot, flown here, steering a guided missile, headlight, fire buttons known, controls shared (minor 2) | |
 | segment | segment the ship is in | |
 | position | world, x y z | 1/256 unit |
 | orientation | unit quaternion (w ≥ 0) | 1/32767 |
@@ -90,13 +91,30 @@ and then one `sample` per recorded player:
 given in the frame of the sample (`apply_pilot_controls`), normalised to the
 ship's maximum; they are *exact for every ship flown on the recording
 machine* (the local player, and the host's bots) and include keyboard, mouse
-and joystick alike. For ships flown elsewhere (the clients, on the host) the
-network does not carry controls; their samples have no controls field, and
-step 2 estimates them from the motion (§8.3). A client that records itself
-(`-recordmoves` on the client) records its own controls exactly.
+and joystick alike. A client that records itself (`-recordmoves` on the
+client) records its own controls exactly.
 
-**Afterburner.** Exact for ships flown here (the forward thrust exceeds 1);
-for clients the host reads bit 1 of the client's `INPUT` chunk (§5.3 of the
+For ships flown elsewhere (the clients, on the host) the controls are only
+known when the client shares them: a client started with `-sharemoves`
+appends its controls of the frame to every `INPUT` chunk it sends the host
+(6 bytes, the same values and units as the recording; protocol 107,
+Documentation/network-protocol-v2.md §5.3). The host records them for that
+client's samples, marked `controls shared` (flags2 bit 7), and takes the
+afterburner from them as for a ship flown here. The host uses them for
+nothing else: they never reach the flight, the checks or other players. It
+clamps them to what a pilot can give (forward −1 to 2, the other axes −1
+to 1) and uses only controls that arrived within the last 100 ms; in a gap
+(lost packets, a guided missile being steered, dead) the sample has no
+controls and step 2 estimates them from the motion (§8.3), as it does for
+every client without `-sharemoves`. Without the switch a client sends
+nothing extra: sharing is each player's own choice. The host marks a
+client that shares in its `player` record (flag 16) from the first
+controls that arrive, and a sharing client marks itself in its own file.
+`movrec-dump` prints per player how many samples have controls and how
+many of them were shared.
+
+**Afterburner.** Exact for ships flown here and for shared controls (the
+forward thrust exceeds 1); for other clients the host reads bit 1 of the client's `INPUT` chunk (§5.3 of the
 protocol), which clients since v0.61-exp-25 set while the afterburner
 pushes. Older clients always send 0 there, which would read as "never
 burns"; so a client's afterburner is `known` only from the first time its
@@ -170,17 +188,22 @@ recordings of one game made on several machines can be put on one time line
 `level` and `player` records describe the context: a `level` record at the
 start of every level (number, name, mission, segment count, game mode) and a
 `player` record for every slot at the level start and whenever a slot's
-callsign, team or flags (connected, bot, flown here, recorded) change.
+callsign, team or flags (connected, bot, flown here, recorded, shares its
+controls) change.
 
 ## 4. File format
 
-All integers little-endian. Version 1, minor 1. The minor counts additions
+All integers little-endian. Version 1, minor 2. The minor counts additions
 that an older reader skips without harm (new record types, new flag bits,
 fields appended to the header); the version changes only when old fields
 change. Minor 0 is the first release (v0.61-exp-25); minor 1 adds the
 `minor` field itself, the `sync` record, splash hits (`hit` flag bit 1), the
 scaled relative vectors (context bits 6 and 7) and the rules of section 3
-for the afterburner, missile flags and slots. A minor 0 file reads as
+for the afterburner, missile flags and slots. Minor 2 adds the shared
+controls (`-sharemoves`): sample flags2 bit 7 `controls shared` and player
+flag 16 `shares controls`; the layout is unchanged (a shared sample is a
+sample with controls), so a minor 1 reader reads a minor 2 file and takes
+the shared controls for exact ones, which they are. A minor 0 file reads as
 before (its header has no `minor` field: 0).
 
 ```
@@ -204,7 +227,7 @@ Record payloads (sizes without the 2 byte record header):
 | Type | Payload |
 |---|---|
 | 1 `level` | level_num i8, segments u16, game_mode u32, mission str8, level_name str8 |
-| 2 `player` | pid u8, flags u8 (1 connected, 2 bot, 4 flown here, 8 recorded), team u8 (255 no teams), callsign str8 |
+| 2 `player` | pid u8, flags u8 (1 connected, 2 bot, 4 flown here, 8 recorded, 16 shares its controls (minor 2)), team u8 (255 no teams), callsign str8 |
 | 3 `tick` (8) | tick u32 (counts from 0 at the session start at `tick_rate`), time_ms u32 (game time since the session start) |
 | 4 `sample` (54, 60 with controls) | pid u8, flags u8, flags2 u8, segment u16, position 3 × i24, quaternion 4 × i16, velocity 3 × i16, rotvel 3 × i16, weapons u8, shields u8, energy u8, attacked u8, aimed_at u8, context u8, enemy_id u16, enemy_rel_pos 3 × i16, enemy_rel_vel 3 × i16, [controls 6 × i8] |
 | 5–12 events (11) | time_ms u32, pid u8, other u8, kind u8, id u8, value u16, flags u8 |
@@ -269,13 +292,15 @@ build/common/movrec-dump [--csv DIR] [--player N] [--records] FILE...
 
 Without options it prints the header, the file's health, the levels, and per
 player: time alive, mean speed, share of time reversing / strafing /
-climbing, afterburner share, turning hard and the share of that with reverse
-thrust (players with controls), enemy in sight and mean distance, under
+climbing, afterburner share, the samples with controls (flown here, or
+shared by the player's machine), turning hard and the share of that with
+reverse thrust (players with controls), enemy in sight and mean distance, under
 attack, aimed at, shots, hits dealt and taken with damage (and how many of
 them splash), kills, deaths, suicides, respawns, pickups, weapon switches;
 for a network game the session id and the number of `sync` records. `--csv DIR` writes
 `DIR/<file>-p<N>-<callsign>.csv` (one row per sample, in game units and in
-the ship's frame) and `DIR/<file>-events.csv`, ready for a spreadsheet,
+the ship's frame; the last column `controls_shared` tells shared controls)
+and `DIR/<file>-events.csv`, ready for a spreadsheet,
 Python or R. `--records` prints every record.
 
 ## 6. Privacy
@@ -283,7 +308,8 @@ Python or R. `--records` prints every record.
 A recording contains the callsigns of everyone in the game, when they
 played, and how they flew; nothing else (no chat, no addresses, no system
 data). It is written only on a machine where `-recordmoves` is set, and it
-never leaves that machine by itself. A host that records should tell the
+never leaves that machine by itself. A player's exact controls reach
+another machine only when that player starts with `-sharemoves`. A host that records should tell the
 players (for example in the game name or the chat). Anyone can be left out
 of an analysis (`movrec-dump --player`, `movrec-analyse --player`), and a
 recording can simply be deleted. A `.botstyle` profile holds a callsign and
@@ -324,7 +350,8 @@ client, cut short or damaged) and the games it found in them, then per player
 (most time alive first):
 
 - **data**: games, minutes recorded, alive and in fights, kills and deaths,
-  how much of the controls is exact and how much estimated;
+  how much of the controls is exact (and how much of that was shared by the
+  player's machine over the network) and how much estimated;
 - **Traits**: the key habits in plain words with the numbers that carry them
   ("Heavy strafer: sideways or vertical thrust in 84% of the fight time, a
   run in one direction lasts 0.5 s …");
@@ -375,9 +402,12 @@ and games; a bot and a human of the same name are two players.
 
 ### 8.3 Controls: exact or estimated
 
-Samples of ships flown on the recording machine carry the controls. For the
-others (a client, recorded by the host only) the analysis estimates them from
-the motion. The ship's flight model is known (`physics.cpp`): under a thrust
+Samples of ships flown on the recording machine carry the controls, and so
+do the host's samples of a client with `-sharemoves` (shared controls count
+as exact; the profile notes their share as
+`measured.shared_controls_share`). For the others (a client, recorded by the
+host only) and for the gaps in the shared controls the analysis estimates
+them from the motion. The ship's flight model is known (`physics.cpp`): under a thrust
 `c` (a share of the maximum per axis) the velocity goes toward
 `c × max_speed` at a fixed rate,
 
@@ -571,7 +601,9 @@ bots fired), the game window's close (end of the session),
 `object_create_explosion_with_damage` (splash hit), `multi_compute_kill`
 (kill), `do_powerup` and the host's pickup grant log (pickup). `net_v2.cpp`:
 clients set the afterburner bit of `INPUT`; `host_input_afterburner` reads
-it on the host; `recording_clock` gives the session id and the host's clock
+it on the host; a client with `-sharemoves` appends its controls
+(`movement_record_shared_controls`) and `host_input_controls` gives the
+host the fresh ones; `recording_clock` gives the session id and the host's clock
 for the `sync` records.
 
 The recording tick is its own schedule of game time (`tick_scheduler`): tick

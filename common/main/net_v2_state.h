@@ -26,6 +26,7 @@
 #include <span>
 
 #include "net_v2.h"
+#include "movement_record_format.h"
 
 namespace dcx {
 
@@ -51,9 +52,12 @@ constexpr std::size_t NET_V2_PINGS_SIZE{NET_V2_MAX_PLAYERS};
 constexpr std::size_t NET_V2_MAX_STATE_SIZE{NET_V2_STATE_HEADER_SIZE + NET_V2_MAX_PLAYERS * NET_V2_PLAYER_RECORD_SIZE + NET_V2_MAX_GUIDED_RECORDS * NET_V2_GUIDED_RECORD_SIZE + NET_V2_MAX_ROBOT_RECORDS * NET_V2_ROBOT_RECORD_SIZE + NET_V2_PINGS_SIZE};
 static_assert(NET_V2_MAX_STATE_SIZE <= NET_V2_MAX_STATE_PART, "a full bundle must fit in one part");
 
-/* Section 5.3 */
+/* Section 5.3.  Protocol 107 appends the pilot's controls (6 bytes, a
+ * client with -sharemoves): see input_chunk::controls.
+ */
 constexpr std::size_t NET_V2_INPUT_SIZE{46};
-constexpr std::size_t NET_V2_MAX_INPUT_SIZE{NET_V2_INPUT_SIZE + NET_V2_GUIDED_RECORD_SIZE};
+constexpr std::size_t NET_V2_INPUT_CONTROLS_SIZE{6};
+constexpr std::size_t NET_V2_MAX_INPUT_SIZE{NET_V2_INPUT_SIZE + NET_V2_GUIDED_RECORD_SIZE + NET_V2_INPUT_CONTROLS_SIZE};
 
 /* Section 5.1: quantisation shifts. */
 constexpr unsigned NET_V2_VELOCITY_SHIFT{10};
@@ -94,6 +98,8 @@ enum class input_flag : std::uint8_t
 	has_guided = 1 << 4,
 	/* The ship exists but is in its death sequence (stage 2). */
 	dying = 1 << 5,
+	/* Protocol 107: the pilot's controls follow (input_chunk::controls). */
+	controls = 1 << 6,
 };
 
 [[nodiscard]]
@@ -251,6 +257,15 @@ struct input_chunk
 	net_pose pose;
 	std::uint8_t weapon{};
 	std::optional<guided_record> guided;
+	/* Protocol 107: the pilot's controls of this frame, for the host's
+	 * movement recording only (Documentation/movement-recording.md,
+	 * -sharemoves): forward, sideways, vertical thrust, pitch, heading,
+	 * bank, 60 = full deflection, forward up to 120 with the
+	 * afterburner.  Sent only by a client that opted in, while its ship
+	 * is alive and not steering a guided missile.  Never used by the
+	 * simulation.  The reader clamps them to that range.
+	 */
+	std::optional<::dcx::movrec::control_array> controls;
 	[[nodiscard]]
 	constexpr bool has_flag(const input_flag f) const
 	{
@@ -522,8 +537,9 @@ constexpr std::optional<state_bundle> read_state(const std::span<const std::uint
 	return s;
 }
 
-/* Serialise an INPUT chunk into `out`.  Returns the size (46, or 78 with
- * a guided record; `has_guided` in `flags` follows `guided`).
+/* Serialise an INPUT chunk into `out`.  Returns the size (46, 78 with a
+ * guided record, 6 more with the controls; `has_guided` and `controls` in
+ * `flags` follow `guided` and `controls`).
  */
 [[nodiscard]]
 constexpr std::size_t write_input(const std::span<std::uint8_t, NET_V2_MAX_INPUT_SIZE> out, const input_chunk &in)
@@ -532,7 +548,12 @@ constexpr std::size_t write_input(const std::span<std::uint8_t, NET_V2_MAX_INPUT
 	w.u16(in.seq);
 	w.u32(in.sample_time);
 	w.u32(in.view_time);
-	w.u8(static_cast<std::uint8_t>(in.guided ? (in.flags | flag_bit(input_flag::has_guided)) : (in.flags & ~flag_bit(input_flag::has_guided))));
+	std::uint8_t flags{static_cast<std::uint8_t>(in.flags & ~(flag_bit(input_flag::has_guided) | flag_bit(input_flag::controls)))};
+	if (in.guided)
+		flags |= flag_bit(input_flag::has_guided);
+	if (in.controls)
+		flags |= flag_bit(input_flag::controls);
+	w.u8(flags);
 	w.quat(in.pose.orient);
 	w.vec(in.pose.pos);
 	w.u16(in.pose.segment);
@@ -541,6 +562,9 @@ constexpr std::size_t write_input(const std::span<std::uint8_t, NET_V2_MAX_INPUT
 	w.u8(in.weapon);
 	if (in.guided)
 		detail::write_guided(w, *in.guided);
+	if (in.controls)
+		for (const auto c : *in.controls)
+			w.u8(static_cast<std::uint8_t>(c));
 	return w.pos;
 }
 
@@ -561,6 +585,14 @@ constexpr std::optional<input_chunk> read_input(const std::span<const std::uint8
 	in.weapon = r.u8();
 	if (in.has_flag(input_flag::has_guided))
 		in.guided = detail::read_guided(r);
+	if (in.has_flag(input_flag::controls))
+	{
+		::dcx::movrec::control_array c{};
+		for (auto &v : c)
+			v = static_cast<std::int8_t>(r.u8());
+		/* Untrusted: at most what a pilot can give. */
+		in.controls = ::dcx::movrec::clamp_controls(c);
+	}
 	if (!r.ok || r.pos != bytes.size())
 		return std::nullopt;
 	return in;

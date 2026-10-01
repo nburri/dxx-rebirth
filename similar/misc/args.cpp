@@ -254,6 +254,9 @@ static void ReadCmdArgs(Inilist &ini, Arglist &&Args)
 			CGameArg.SysAutoDemo = true;
 		else if (!d_stricmp(p, "-recordmoves"))
 			CGameArg.SysRecordMoves = true;
+		else if (!d_stricmp(p, "-sharemoves"))
+			/* Sharing implies recording (the player's own file). */
+			CGameArg.SysShareMoves = CGameArg.SysRecordMoves = true;
 		else if (!d_stricmp(p, "-recordmoves-bots"))
 			CGameArg.SysRecordMovesBots = true;
 		else if (!d_stricmp(p, "-recordmoves-rate"))

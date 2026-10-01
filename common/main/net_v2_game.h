@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <optional>
@@ -174,6 +175,13 @@ bool host_slot_has_peer(playernum_t slot);
  */
 [[nodiscard]]
 int host_input_afterburner(playernum_t slot);
+/* Host: the pilot's controls of the newest INPUT from the client in
+ * `slot` (protocol 107, a client with -sharemoves; clamped, the movement
+ * recording's units), if it carried them and arrived within the last
+ * 100 ms.  Only for the movement recording; never for the simulation.
+ */
+[[nodiscard]]
+bool host_input_controls(playernum_t slot, std::array<std::int8_t, 6> &controls);
 /* The session id and the host's clock now (net time units; on a client
  * its estimate of the host's), for the movement recording's sync
  * records.  False while the clock is not known (the id is set anyway).

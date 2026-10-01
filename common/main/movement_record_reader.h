@@ -360,7 +360,7 @@ inline void write_sample_csv_header(std::FILE *const f)
 		"primary,secondary,shields,energy,vitals_exact,"
 		"enemy_kind,enemy_id,enemy_los,enemy_in_my_cone,me_in_enemy_cone,enemy_dist,"
 		"enemy_right,enemy_up,enemy_ahead,enemy_off_nose_deg,enemy_closing_speed,"
-		"attacked_mask,aimed_at_mask\n", f);
+		"attacked_mask,aimed_at_mask,controls_shared\n", f);
 }
 
 inline void write_sample_csv_row(std::FILE *const f, const tick_record &t, const int level, const sample &s)
@@ -391,7 +391,7 @@ inline void write_sample_csv_row(std::FILE *const f, const tick_record &t, const
 			u.enemy_rel_pos_ship[0], u.enemy_rel_pos_ship[1], u.enemy_rel_pos_ship[2], u.enemy_off_nose_deg, u.enemy_closing_speed);
 	else
 		std::fputs("0,,,,,,,,,,,", f);
-	std::fprintf(f, "%u,%u\n", s.attacked_mask, s.aimed_at_mask);
+	std::fprintf(f, "%u,%u,%d\n", s.attacked_mask, s.aimed_at_mask, ctl ? fl2(sample_flag2::controls_shared) : 0);
 }
 
 inline void write_event_csv_header(std::FILE *const f)

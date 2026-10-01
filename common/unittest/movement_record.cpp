@@ -21,6 +21,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -588,6 +589,70 @@ void test_minor_1()
 	static_assert((context_flag::rel_pos_scaled & (context_flag::kind_mask | context_flag::line_of_sight | context_flag::in_my_cone | context_flag::me_in_its_cone | context_flag::enemy_cloaked)) == 0);
 }
 
+/* Minor 2: controls shared by a client (-sharemoves) and recorded on
+ * the host, as the recorder stores them (set_shared_controls).
+ */
+void test_minor_2()
+{
+	static_assert(FORMAT_MINOR == 2);
+	static_assert((sample_flag2::controls_shared & (sample_flag2::vitals_exact | sample_flag2::afterburner_known | sample_flag2::bot | sample_flag2::local | sample_flag2::guided | sample_flag2::headlight | sample_flag2::buttons_known)) == 0);
+	static_assert((player_flag::shares_controls & (player_flag::connected | player_flag::bot | player_flag::local | player_flag::recorded)) == 0);
+	/* Clamping untrusted controls: forward -60..120, the others -60..60. */
+	{
+		constexpr control_array wild{{127, -128, 61, -61, 127, -128}};
+		constexpr control_array tame{{120, -60, 60, -60, 60, -60}};
+		static_assert(clamp_controls(wild) == tame);
+		constexpr control_array fine{{-60, 60, -1, 0, 1, 59}};
+		static_assert(clamp_controls(fine) == fine);
+		/* What the game quantises for a pilot is never clamped away. */
+		CHECK(clamp_controls({{quantise_control(2.0), quantise_control(-1.0), quantise_control(1.0), 0, 0, 0}})[0] == 120);
+	}
+	/* The recorder's sample of a client with shared controls. */
+	{
+		sample s{make_sample(3, false)};
+		s.flags2 = sample_flag2::local;
+		s.flags &= static_cast<std::uint8_t>(~sample_flag::afterburner);
+		set_shared_controls(s, {{90, -128, 30, 0, 127, -5}});
+		CHECK(s.flags & sample_flag::controls);
+		CHECK((s.flags2 & sample_flag2::controls_shared) && (s.flags2 & sample_flag2::afterburner_known));
+		/* Not flown on the recording machine. */
+		CHECK(!(s.flags2 & sample_flag2::local));
+		/* Forward above full: the afterburner. */
+		CHECK(s.flags & sample_flag::afterburner);
+		const control_array want{{90, -60, 30, 0, 60, -5}};
+		CHECK(s.controls == want);
+		/* Full thrust is not the afterburner. */
+		sample t{s};
+		set_shared_controls(t, {{60, 0, 0, 0, 0, 0}});
+		CHECK(!(t.flags & sample_flag::afterburner));
+		/* The record: the size of a sample with controls; a reader of
+		 * minor 1 reads the same fields (flags2 is one byte), the shared
+		 * bit is only new.
+		 */
+		record_buffer buf;
+		const auto bytes{encode(buf, s)};
+		CHECK(bytes.size() == RECORD_HEADER_SIZE + SAMPLE_BASE_SIZE + SAMPLE_CONTROLS_SIZE);
+		const auto d{decode_sample(bytes.subspan(RECORD_HEADER_SIZE))};
+		CHECK(d && *d == s);
+		const auto u{to_units(*d)};
+		CHECK(std::fabs(u.controls[0] - 1.5) < 1e-9 && std::fabs(u.controls[1] + 1) < 1e-9);
+		/* The CSV says so in its last column. */
+		if (const auto f{std::tmpfile()})
+		{
+			write_sample_csv_header(f);
+			write_sample_csv_row(f, tick_record{1, 33}, 1, s);
+			std::fflush(f);
+			const auto size{std::ftell(f)};
+			std::rewind(f);
+			std::string text(static_cast<std::size_t>(size), '\0');
+			CHECK(std::fread(text.data(), 1, text.size(), f) == text.size());
+			std::fclose(f);
+			CHECK(text.find("aimed_at_mask,controls_shared\n") != std::string::npos);
+			CHECK(text.ends_with(",1\n"));
+		}
+	}
+}
+
 void test_crc()
 {
 	/* The standard check value. */
@@ -611,6 +676,7 @@ int main()
 	test_tick_scheduler();
 	test_quantisation();
 	test_minor_1();
+	test_minor_2();
 	std::puts("test-movement-record: all checks passed");
 	return 0;
 }

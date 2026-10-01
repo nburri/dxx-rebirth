@@ -74,6 +74,7 @@
 #include "byteutil.h"
 #include "kconfig.h"
 #include "controls.h"
+#include "movement_record.h"
 
 #include "compiler-range_for.h"
 #include "d_enumerate.h"
@@ -652,6 +653,12 @@ struct accepted_input
 	::dcx::net_interp::host_clock time{};
 	fix64 arrival{};
 };
+
+/* Host: the shared controls of an INPUT (section 5.3, protocol 107) are
+ * recorded only while they are this fresh; after a longer gap the
+ * movement recording leaves them out and the analysis estimates.
+ */
+constexpr fix64 HOST_INPUT_CONTROLS_MAX_AGE{F1_0 / 10};
 
 struct session_state
 {
@@ -1777,6 +1784,12 @@ void set_input_for_host(peer &p)
 #if DXX_BUILD_DESCENT == 2
 	in.guided = local_guided_record(Player_num);
 #endif
+	/* -sharemoves: the pilot's controls for the host's movement
+	 * recording (section 5.3, protocol 107).  Nothing without consent.
+	 */
+	if (Player_dead_state == player_dead_state::no && local_ship_in_level())
+		if (::dcx::movrec::control_array ctl; movement_record_shared_controls(ctl))
+			in.controls = ctl;
 	std::array<uint8_t, ::dcx::net_v2::NET_V2_MAX_INPUT_SIZE> buf;
 	const auto n{::dcx::net_v2::write_input(buf, in)};
 	c.set_unreliable_state(chunk_type::input, std::span<const uint8_t>(buf).first(n));
@@ -5008,6 +5021,20 @@ int host_input_afterburner(const playernum_t slot)
 	if (!st.valid)
 		return -1;
 	return st.input.has_flag(input_flag::afterburner) ? 1 : 0;
+}
+
+bool host_input_controls(const playernum_t slot, std::array<std::int8_t, 6> &controls)
+{
+	if (!multi_i_am_master() || slot >= MAX_PLAYERS || slot == Player_num)
+		return false;
+	const auto &st{S.inputs[slot]};
+	/* A gap in the client's INPUTs: the analysis estimates rather than
+	 * repeat old controls.
+	 */
+	if (!st.valid || !st.input.controls || S.now - st.arrival > HOST_INPUT_CONTROLS_MAX_AGE)
+		return false;
+	controls = *st.input.controls;
+	return true;
 }
 
 bool host_join_in_progress()

@@ -939,14 +939,14 @@ missiles 439. Only robot games can exceed one packet (18 + 328 + 12 × 31 =
 718 still fits; the cap of 12 robots keeps it so). Records for players that
 are `disconnected` are omitted from the mask.
 
-### 5.3 Client state (`INPUT` chunk, client → host, every tick), 46 bytes (+31)
+### 5.3 Client state (`INPUT` chunk, client → host, every tick), 46 bytes (+31, +6)
 
 | Offset | Size | Field |
 |---|---|---|
 | 0 | 2 | `input_seq` (u16, increments per sent chunk) |
 | 2 | 4 | `sample_time`: the client's estimate of host time when this state was sampled (§2.2) |
 | 6 | 4 | `view_time`: the host time the client's interpolation was displaying for remote entities at that moment (`sample_time − interp_delay`, §5.4). The host uses it for rewinds (§6.6). |
-| 10 | 1 | `flags`: bit 0 alive, bit 1 afterburner active, bit 2 headlight on, bit 3 `WANT_RESPAWN` (fire pressed while dead), bit 4 guided record follows, bit 5 dying (stage 2: the ship exists but is in its death sequence), bits 6–7 reserved |
+| 10 | 1 | `flags`: bit 0 alive, bit 1 afterburner active, bit 2 headlight on, bit 3 `WANT_RESPAWN` (fire pressed while dead), bit 4 guided record follows, bit 5 dying (stage 2: the ship exists but is in its death sequence), bit 6 controls follow (protocol 107), bit 7 reserved |
 | 11 | 8 | quaternion |
 | 19 | 12 | position |
 | 31 | 2 | segment |
@@ -954,6 +954,7 @@ are `disconnected` are omitted from the mask.
 | 39 | 6 | rotational velocity |
 | 45 | 1 | `weapon`: bits 0–3 selected primary, bits 4–7 selected secondary |
 | 46 | 31 | optional guided missile record (same layout as §5.2, `pid` = sender) |
+| 46 or 78 | 6 | optional pilot's controls (protocol 107, `-sharemoves`): forward, sideways, vertical thrust, pitch, heading, bank as i8, 60 = full deflection, forward up to 120 with the afterburner (the movement recording's units). Last in the chunk. |
 
 The chunk is sent every tick while the client is in the level (also while
 dead, with bit 0 clear, so `WANT_RESPAWN` and keepalive-by-content work).
@@ -2472,7 +2473,8 @@ damage and shields). The game side is `similar/main/net_combat.cpp`,
 with hooks in `laser.cpp`, `collide.cpp`, `fireball.cpp`, `object.cpp`,
 `gameseq.cpp`, `bot.cpp`, `multi.cpp`, `net_objects.cpp`,
 `net_interp.cpp` and `net_v2.cpp`. `MULTI_PROTO_VERSION` and
-`NET_V2_PROTO_VERSION` are 106. Active in every network game that is
+`NET_V2_PROTO_VERSION` are 106 (107 since the shared controls, below).
+Active in every network game that is
 not a demo played back (`net_combat_active`). Differences from §6.5,
 §6.6 and decisions:
 
@@ -2565,6 +2567,38 @@ not a demo played back (`net_combat_active`). Differences from §6.5,
   catch-up, damage in the inventory copy, wire round trips and malformed
   sizes, and the simulation above); `test-net-v2-authority` for the
   larger inventory copy. Only playable: everything that touches objects.
+
+#### Shared controls for the movement recording (protocol 107)
+
+- **What.** A client started with `-sharemoves` appends its pilot's
+  controls of the frame to every `INPUT` (`flags` bit 6, 6 bytes after
+  the optional guided record): the thrust and rotational thrust
+  `apply_pilot_controls` gave the ship, normalised and quantised exactly
+  as the movement recording stores them
+  (Documentation/movement-recording.md §3.1), so that the host's
+  recording has exact controls for every player who opted in instead of
+  estimating them from the motion.
+- **When.** Only with the switch (consent; without it the chunk is as
+  before), only while the ship is alive and not steering a guided
+  missile. Unreliable like the rest of `INPUT`: no extra packet, no
+  retransmission; a lost `INPUT` is a gap the recording fills by
+  estimation.
+- **Host.** `read_input` clamps the values (forward −60 to 120, the other
+  axes −60 to 60) and checks the size like every other field (the flag
+  without the bytes, or the bytes without the flag, drop the chunk). The
+  host keeps them with the newest accepted `INPUT` and hands them only to
+  the movement recording (`host_input_controls`, used while the `INPUT`
+  is at most 100 ms old); when it does not record, they are read and
+  dropped. They never touch the simulation, the checks of §5.5 or other
+  clients, so a client that sends nonsense spoils only its own
+  recording. The slot's stored `INPUT` is cleared when a player leaves,
+  so a new occupant never inherits the controls of the old one.
+- **Bandwidth.** 6 bytes per `INPUT`: 360 bytes/s at the default 60 Hz
+  tick (180 at 30 Hz, 720 at 120 Hz), client → host only, about 13 % of
+  the bare 46-byte `INPUT`; nothing host → client.
+- **Version.** `MULTI_PROTO_VERSION` and `NET_V2_PROTO_VERSION` are 107
+  (the version check keeps 106 and 107 apart; a 106 host would drop
+  such an `INPUT` as too long).
 
 ### Stage 5 — Join in progress, level flow, level end
 

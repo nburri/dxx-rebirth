@@ -217,7 +217,7 @@ void test_state_layout()
 	CHECK(!read_input(std::span(ib).first(ni - 1)));
 	in.guided = guided_record{.pid = 2, .id = 300, .gen = 42, .orient = {7, 7, 7, 7}, .pos = {1, 2, 3}, .segment = 4, .vel = quantised_velocity({F1, F1, F1})};
 	const auto ng{write_input(ib, in)};
-	CHECK(ng == NET_V2_MAX_INPUT_SIZE);
+	CHECK(ng == NET_V2_INPUT_SIZE + NET_V2_GUIDED_RECORD_SIZE);
 	CHECK(NET_V2_GUIDED_RECORD_SIZE == 32 && ng == 78);
 	/* The generation is the record's last byte. */
 	CHECK(ib[ng - 1] == 42);
@@ -227,6 +227,49 @@ void test_state_layout()
 	CHECK(!read_input(std::span(ib).first(NET_V2_INPUT_SIZE)));
 	ib[10] &= static_cast<std::uint8_t>(~flag_bit(input_flag::has_guided));
 	CHECK(!read_input(std::span(ib).first(ng)));
+
+	/* Protocol 107: the pilot's controls (-sharemoves), 6 bytes at the
+	 * end, after the guided record if there is one.
+	 */
+	{
+		input_chunk c;
+		c.seq = 7;
+		c.flags = flag_bit(input_flag::alive) | flag_bit(input_flag::afterburner);
+		c.pose = make_record(1).pose;
+		c.controls = ::dcx::movrec::control_array{{120, -60, 60, -1, 0, 59}};
+		const auto nc{write_input(ib, c)};
+		CHECK(nc == NET_V2_INPUT_SIZE + NET_V2_INPUT_CONTROLS_SIZE);
+		CHECK(ib[10] & flag_bit(input_flag::controls));
+		CHECK(static_cast<std::int8_t>(ib[NET_V2_INPUT_SIZE]) == 120 && static_cast<std::int8_t>(ib[nc - 1]) == 59);
+		const auto rc{read_input(std::span(ib).first(nc))};
+		CHECK(rc && rc->controls == c.controls && rc->pose == c.pose && !rc->guided);
+		/* Cut short, or without the flag (6 bytes too many). */
+		CHECK(!read_input(std::span(ib).first(nc - 1)));
+		ib[10] &= static_cast<std::uint8_t>(~flag_bit(input_flag::controls));
+		CHECK(!read_input(std::span(ib).first(nc)));
+		/* The flag in `flags` follows `controls`. */
+		c.flags |= flag_bit(input_flag::controls);
+		c.controls.reset();
+		CHECK(write_input(ib, c) == NET_V2_INPUT_SIZE && !(ib[10] & flag_bit(input_flag::controls)));
+		/* With a guided record: the controls come last, and the largest
+		 * INPUT fits the buffer.
+		 */
+		c.controls = ::dcx::movrec::control_array{{1, 2, 3, 4, 5, 6}};
+		c.guided = in.guided;
+		const auto nb{write_input(ib, c)};
+		CHECK(nb == NET_V2_MAX_INPUT_SIZE && ib[nb - 1] == 6 && ib[nb - 7] == 42);
+		const auto rb{read_input(std::span(ib).first(nb))};
+		CHECK(rb && rb->guided == c.guided && rb->controls == c.controls);
+		/* Untrusted values are clamped to what a pilot can give: forward
+		 * -60..120, the others -60..60.
+		 */
+		for (std::size_t i{}; i != 6; ++i)
+			ib[nb - 6 + i] = static_cast<std::uint8_t>(i % 2 ? 0x80 : 0x7f);
+		const auto rx{read_input(std::span(ib).first(nb))};
+		CHECK(rx && rx->controls);
+		const ::dcx::movrec::control_array clamped{{120, -60, 60, -60, 60, -60}};
+		CHECK(*rx->controls == clamped);
+	}
 }
 
 [[nodiscard]]

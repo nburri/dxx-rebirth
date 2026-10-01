@@ -190,6 +190,7 @@ static void print_commandline_help()
 	VERB("  -recordmoves                  Record how the players move, for bot styles\n\t\t\t\t(recordings/ next to gamelog.txt)\n")	\
 	VERB("  -recordmoves-rate <n>         Movement samples per second (10-60, default 30)\n")	\
 	VERB("  -recordmoves-bots             Record the bots' movement too\n")	\
+	VERB("  -sharemoves                   Record, and share your exact controls with\n\t\t\t\tthe host's recording (implies -recordmoves)\n")	\
 	VERB("  -window                       Run the game in a window\n")	\
 	VERB("  -noborders                    Don't show borders in window mode\n")	\
 	DXX_COMMAND_LINE_HELP_D1(	\
