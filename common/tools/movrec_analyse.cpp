@@ -9,7 +9,7 @@
  * of Documentation/movement-recording.md).
  *
  *	movrec-analyse [--out DIR] [--player CALLSIGN]... [--bots]
- *	               [--skill NAME] [--min-seconds N] FILE...
+ *	               [--skill NAME] [--min-seconds N] [--missions DIR] FILE...
  *
  * Reads the recordings, puts those of one game made on several machines
  * together (each player's own recording is used for that player, for its
@@ -17,7 +17,9 @@
  * words, the numbers behind them, and the proposed bot style.  With
  * --out it writes DIR/<callsign>.botstyle per player and
  * DIR/<callsign>.report.txt; without, the profile follows the report on
- * the standard output.
+ * the standard output.  With --missions it finds every recorded level in
+ * the folder of missions (.hog and .mn2) and reports the traits per level
+ * and room (section 8.8 of the document).
  *
  * Build: scons sdl2=1 d1x=0 d2x=1 register_runtime_test_plain_link_targets=1 movrec-analyse
  * Binary: build/common/movrec-analyse
@@ -27,10 +29,14 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "movement_analysis.h"
+#include "level_geometry.h"
 
 using namespace dcx::movrec;
 using namespace dcx::movrec::analysis;
@@ -44,6 +50,85 @@ struct options
 	bool bots{};
 	dcx::bot::bot_skill skill{dcx::bot::BOT_DEFAULT_SKILL};
 	double min_seconds{limits::MIN_ALIVE_S};
+	const char *missions{};
+};
+
+/* Mission files larger than this are not read (untrusted input). */
+constexpr std::uintmax_t MAX_MISSION_FILE{256u << 20};
+
+/* The missions of a folder (--missions): per .mn2 its .hog, read when a
+ * level of it is asked for; the geometry of every level found, once.
+ */
+class mission_library
+{
+	std::vector<geometry::mission_entry> missions;
+	std::map<std::string, std::unique_ptr<geometry::level_geometry>> cache;
+	std::map<std::string, std::filesystem::path> hog_paths;
+	static std::optional<std::vector<std::uint8_t>> read(const std::filesystem::path &p)
+	{
+		std::error_code ec;
+		const auto size{std::filesystem::file_size(p, ec)};
+		if (ec || size > MAX_MISSION_FILE)
+			return std::nullopt;
+		return load_file(p.string().c_str());
+	}
+public:
+	/* The number of missions found. */
+	std::size_t load(const char *const folder)
+	{
+		std::error_code ec;
+		std::vector<std::filesystem::path> mn2s;
+		for (const auto &e : std::filesystem::directory_iterator(folder, ec))
+		{
+			if (!e.is_regular_file(ec))
+				continue;
+			const auto ext{geometry::lower(e.path().extension().string())};
+			if (ext == ".hog")
+				hog_paths[geometry::lower(e.path().stem().string())] = e.path();
+			else if (ext == ".mn2" || ext == ".msn")
+				mn2s.push_back(e.path());
+		}
+		std::sort(mn2s.begin(), mn2s.end());
+		for (const auto &p : mn2s)
+		{
+			const auto text{read(p)};
+			if (!text)
+				continue;
+			geometry::mission_entry m;
+			m.stem = p.stem().string();
+			m.info = geometry::parse_mission(std::string_view{reinterpret_cast<const char *>(text->data()), text->size()});
+			if (const auto h{hog_paths.find(geometry::lower(m.stem))}; h != hog_paths.end())
+				m.hog_name = h->second.filename().string();
+			missions.push_back(std::move(m));
+		}
+		return missions.size();
+	}
+	/* The geometry of a recorded level, or nothing; `note` says how it
+	 * was found or why not.
+	 */
+	const geometry::level_geometry *find(const level_record &rec, std::string &note)
+	{
+		const geometry::level_query q{rec.mission, rec.mission_file, rec.level_file, rec.level_num, rec.segments};
+		auto found{geometry::find_level(missions, q, [this](geometry::mission_entry &m) {
+			const auto h{hog_paths.find(geometry::lower(m.stem))};
+			if (h == hog_paths.end())
+				return;
+			if (auto bytes{read(h->second)})
+				if (auto dir{geometry::read_hog(*bytes)})
+				{
+					m.hog = std::move(*bytes);
+					m.dir = std::move(*dir);
+				}
+		}, MAX_FILE_NAME)};
+		note = std::move(found.note);
+		if (!found.mesh)
+			return nullptr;
+		const auto key{geometry::lower(found.mission->stem) + ":" + geometry::lower(found.level_file)};
+		auto &slot{cache[key]};
+		if (!slot)
+			slot = std::make_unique<geometry::level_geometry>(geometry::measure(std::move(*found.mesh), "level " + std::to_string(rec.level_num) + " \"" + rec.level_name + "\" of \"" + rec.mission + "\"", found.mission->hog_name + ": " + found.level_file));
+		return slot.get();
+	}
 };
 
 std::string safe_name(const std::string &s)
@@ -82,12 +167,13 @@ const char *clock_name(const clock_source c)
 
 void usage()
 {
-	std::fputs("usage: movrec-analyse [--out DIR] [--player CALLSIGN]... [--bots] [--skill NAME] [--min-seconds N] FILE...\n"
+	std::fputs("usage: movrec-analyse [--out DIR] [--player CALLSIGN]... [--bots] [--skill NAME] [--min-seconds N] [--missions DIR] FILE...\n"
 		"  --out DIR          write DIR/<callsign>.botstyle and DIR/<callsign>.report.txt\n"
 		"  --player CALLSIGN  only this player (may be given several times)\n"
 		"  --bots             also the recorded bots (-recordmoves-bots)\n"
 		"  --skill NAME       the skill the profile is scaled for: Trainee, Rookie, Hotshot (default), Ace, Insane\n"
-		"  --min-seconds N    skip players alive for less than N seconds (default 20)\n", stderr);
+		"  --min-seconds N    skip players alive for less than N seconds (default 20)\n"
+		"  --missions DIR     the folder of the missions (.hog, .mn2): traits per level and room\n", stderr);
 }
 
 }
@@ -107,6 +193,8 @@ int main(const int argc, char **const argv)
 			opt.bots = true;
 		else if (!std::strcmp(a, "--min-seconds") && i + 1 < argc)
 			opt.min_seconds = std::atof(argv[++i]);
+		else if (!std::strcmp(a, "--missions") && i + 1 < argc)
+			opt.missions = argv[++i];
 		else if (!std::strcmp(a, "--skill") && i + 1 < argc)
 		{
 			const auto name{lower(argv[++i])};
@@ -163,7 +251,27 @@ int main(const int argc, char **const argv)
 	}
 	if (files.empty())
 		return 1;
-	const auto result{analyse_recordings(files, opt.skill)};
+	/* Section 8.8: the levels' geometry. */
+	mission_library library;
+	level_geometries geo;
+	if (opt.missions)
+	{
+		const auto n{library.load(opt.missions)};
+		std::printf("\nmissions: %u in %s\n", analysis::detail::count(n), opt.missions);
+		for (const auto &f : files)
+		{
+			auto &g{geo.emplace_back()};
+			for (const auto &l : f.levels)
+			{
+				std::string note;
+				g.push_back(library.find(l.rec, note));
+				std::printf("  %s level %d \"%s\" of \"%s\" (%u segments): %s\n", f.name.c_str(), l.rec.level_num, l.rec.level_name.c_str(), l.rec.mission.c_str(), l.rec.segments, note.c_str());
+				if (const auto p{g.back()})
+					std::printf("    %s\n", p->character().c_str());
+			}
+		}
+	}
+	const auto result{analyse_recordings(files, opt.skill, pyro_gx(), opt.missions ? &geo : nullptr)};
 	std::printf("\n%u game(s):\n", analysis::detail::count(result.sessions.size()));
 	for (const auto &ses : result.sessions)
 	{

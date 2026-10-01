@@ -45,10 +45,17 @@ constexpr std::uint16_t FORMAT_VERSION{1};
  * afterburner "known once seen" rule and slot reuse
  * (Documentation/movement-recording.md section 4); 2 for the shared
  * controls (-sharemoves: sample_flag2::controls_shared,
- * player_flag::shares_controls).  Appended to the header; a header
- * without it is minor 0.
+ * player_flag::shares_controls); 3 for the mission's and the level's file
+ * names (the mission's .hog/.mn2 stem, the level's .rl2), appended to
+ * the level record and the header, so that the analysis finds the
+ * level's geometry.  Appended to the header; a header without it is
+ * minor 0.
  */
-constexpr std::uint16_t FORMAT_MINOR{2};
+constexpr std::uint16_t FORMAT_MINOR{3};
+/* The file names are cut to this length (the level record has room for
+ * the names and two of these).
+ */
+constexpr std::size_t MAX_FILE_NAME{20};
 /* "MRCK" as bytes in the file. */
 constexpr std::uint32_t CHUNK_MAGIC{0x4b43524du};
 /* magic, sequence, payload size, payload CRC-32 */
@@ -668,6 +675,12 @@ struct level_record
 	std::uint32_t game_mode{};
 	std::string mission;
 	std::string level_name;
+	/* Minor 3: the mission's file name without extension (the .hog and
+	 * .mn2 of a custom mission; empty for none or an older file) and the
+	 * level's file (".rl2").
+	 */
+	std::string mission_file;
+	std::string level_file;
 	bool operator==(const level_record &) const = default;
 };
 
@@ -794,10 +807,10 @@ inline std::span<const std::uint8_t> encode(record_buffer &buf, const tick_recor
 }
 
 /* Strings are cut to fit the record (callsigns are short; mission and
- * level names at most 100 bytes each).
+ * level names at most 100 bytes each, the file names MAX_FILE_NAME).
  */
 [[nodiscard]]
-inline std::span<const std::uint8_t> encode_level(record_buffer &buf, const std::int8_t level_num, const std::uint16_t segments, const std::uint32_t game_mode, const std::string_view mission, const std::string_view level_name)
+inline std::span<const std::uint8_t> encode_level(record_buffer &buf, const std::int8_t level_num, const std::uint16_t segments, const std::uint32_t game_mode, const std::string_view mission, const std::string_view level_name, const std::string_view mission_file = {}, const std::string_view level_file = {})
 {
 	byte_writer w{buf};
 	detail::begin_record(w, record_type::level);
@@ -806,6 +819,8 @@ inline std::span<const std::uint8_t> encode_level(record_buffer &buf, const std:
 	w.u32(game_mode);
 	w.str8(mission.substr(0, 100));
 	w.str8(level_name.substr(0, 100));
+	w.str8(mission_file.substr(0, MAX_FILE_NAME));
+	w.str8(level_file.substr(0, MAX_FILE_NAME));
 	return detail::finish_record(w);
 }
 
@@ -916,6 +931,18 @@ inline std::optional<level_record> decode_level(const std::span<const std::uint8
 	l.level_name = r.str8();
 	if (!r.ok())
 		return std::nullopt;
+	/* Minor 3; a damaged tail costs the names, not the record. */
+	if (r.remaining())
+	{
+		auto t{r};
+		auto mission_file{t.str8()};
+		auto level_file{t.str8()};
+		if (t.ok())
+		{
+			l.mission_file = std::move(mission_file);
+			l.level_file = std::move(level_file);
+		}
+	}
 	return l;
 }
 
@@ -958,6 +985,9 @@ struct file_header
 	std::uint8_t num_players{};
 	/* FORMAT_MINOR of the writer; 0 when the header has no such field. */
 	std::uint16_t minor{FORMAT_MINOR};
+	/* Minor 3: as in level_record (of the level at the start). */
+	std::string mission_file;
+	std::string level_file;
 	bool operator==(const file_header &) const = default;
 };
 
@@ -965,8 +995,9 @@ struct file_header
  * included), tick rate u16, flags u16, start time i64, game mode u32,
  * local player u8, program str8, mission str8, level name str8, level
  * number i8, player count u8, per player {pid u8, flags u8, team u8,
- * callsign str8}, minor u16 (FORMAT_MINOR; absent in minor 0), CRC-32 u32
- * of everything before it.  Fields appended before the CRC are skipped
+ * callsign str8}, minor u16 (FORMAT_MINOR; absent in minor 0), mission
+ * file str8 and level file str8 (minor 3), CRC-32 u32 of everything
+ * before it.  Fields appended before the CRC are skipped
  * by older readers.  Returns the size,
  * 0 if `out` is too small.
  */
@@ -998,6 +1029,11 @@ inline std::size_t encode_header(const std::span<std::uint8_t> out, const file_h
 		w.str8(p.callsign);
 	}
 	w.u16(h.minor);
+	if (h.minor >= 3)
+	{
+		w.str8(std::string_view{h.mission_file}.substr(0, MAX_FILE_NAME));
+		w.str8(std::string_view{h.level_file}.substr(0, MAX_FILE_NAME));
+	}
 	const std::size_t total{w.size() + 4};
 	if (!w.ok() || total > MAX_HEADER_SIZE || total > out.size())
 		return 0;
@@ -1049,6 +1085,17 @@ inline std::optional<std::pair<file_header, std::size_t>> decode_header(const st
 	h.minor = b.remaining() >= 2 ? b.u16() : 0;
 	if (!b.ok() || h.tick_rate == 0)
 		return std::nullopt;
+	if (h.minor >= 3 && b.remaining())
+	{
+		auto t{b};
+		auto mission_file{t.str8()};
+		auto level_file{t.str8()};
+		if (t.ok())
+		{
+			h.mission_file = std::move(mission_file);
+			h.level_file = std::move(level_file);
+		}
+	}
 	return std::pair{std::move(h), total};
 }
 

@@ -32,6 +32,7 @@
  * four of the synthetic recordings into DIR, to try movrec-analyse on.
  */
 
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -39,6 +40,7 @@
 #include <cstring>
 #include <memory>
 #include <numbers>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -1569,6 +1571,323 @@ void test_profile_format()
 	CHECK_RANGE(insane.skill.dodge_prob, 0.2, 0.3);
 }
 
+/*
+ * Section 8.8: the levels' geometry.  A tiny level written as the game's
+ * files have it: a tunnel of five 16 unit cubes along z that opens into
+ * a room of 200 units.
+ */
+
+namespace geo = dcx::movrec::geometry;
+
+struct level_writer
+{
+	std::vector<geo::vec3> verts;
+	std::vector<geo::segment> segs;
+	/* A box from `lo` to `hi`: the vertices as segment.h numbers them
+	 * (0 right top front, 1 right bottom front, 2 left bottom front, 3
+	 * left top front, 4 to 7 the same at the back; front is low z).
+	 */
+	std::size_t box(const geo::vec3 &lo, const geo::vec3 &hi)
+	{
+		geo::segment s;
+		const std::array<geo::vec3, 8> corner{{
+			{{hi[0], hi[1], lo[2]}}, {{hi[0], lo[1], lo[2]}}, {{lo[0], lo[1], lo[2]}}, {{lo[0], hi[1], lo[2]}},
+			{{hi[0], hi[1], hi[2]}}, {{hi[0], lo[1], hi[2]}}, {{lo[0], lo[1], hi[2]}}, {{lo[0], hi[1], hi[2]}},
+		}};
+		for (std::size_t i{}; i != 8; ++i)
+		{
+			s.verts[i] = static_cast<std::uint16_t>(verts.size());
+			verts.push_back(corner[i]);
+		}
+		s.children.fill(geo::SEGMENT_NONE);
+		segs.push_back(s);
+		return segs.size() - 1;
+	}
+	/* Back of `a` to the front of `b`. */
+	void join(const std::size_t a, const std::size_t b)
+	{
+		segs[a].children[4] = static_cast<std::uint16_t>(b);
+		segs[b].children[5] = static_cast<std::uint16_t>(a);
+	}
+	std::vector<std::uint8_t> rl2(const int version = 8) const
+	{
+		std::vector<std::uint8_t> out;
+		const auto u8{[&out](const unsigned v) { out.push_back(static_cast<std::uint8_t>(v)); }};
+		const auto u16{[&u8](const unsigned v) { u8(v & 0xff); u8(v >> 8); }};
+		const auto i32{[&u8](const std::int32_t v) {
+			const auto u{static_cast<std::uint32_t>(v)};
+			for (unsigned k{}; k != 4; ++k)
+				u8((u >> (8 * k)) & 0xff);
+		}};
+		for (const char c : {'L', 'V', 'L', 'P'})
+			u8(static_cast<unsigned char>(c));
+		i32(version);
+		i32(20);	/* the mine */
+		i32(0);		/* the game data: not read */
+		i32(0);
+		u8(0);		/* compiled version */
+		u16(static_cast<unsigned>(verts.size()));
+		u16(static_cast<unsigned>(segs.size()));
+		for (const auto &v : verts)
+			for (const double c : v)
+				i32(static_cast<std::int32_t>(std::lround(c * 65536)));
+		for (const auto &s : segs)
+		{
+			unsigned mask{};
+			for (unsigned k{}; k != 6; ++k)
+				if (s.children[k] != geo::SEGMENT_NONE)
+					mask |= 1u << k;
+			u8(mask);
+			const auto children{[&] {
+				for (unsigned k{}; k != 6; ++k)
+					if (mask & (1u << k))
+						u16(s.children[k]);
+			}};
+			/* The Descent 2 shareware has the vertices first. */
+			if (version != 5)
+				children();
+			for (const auto v : s.verts)
+				u16(v);
+			if (version == 5)
+				children();
+			if (version <= 5)
+				u16(0);
+			u8(0);	/* no walls */
+			for (unsigned k{}; k != 6; ++k)
+				if (!(mask & (1u << k)))
+				{
+					u16(1);
+					for (unsigned n{}; n != 12; ++n)
+						u16(0);
+				}
+		}
+		return out;
+	}
+};
+
+level_writer tunnel_level()
+{
+	level_writer w;
+	std::size_t last{};
+	for (unsigned k{}; k != 5; ++k)
+	{
+		const auto s{w.box({{-8, -8, 16.0 * k}}, {{8, 8, 16.0 * (k + 1)}})};
+		if (k)
+			w.join(last, s);
+		last = s;
+	}
+	w.join(last, w.box({{-100, -100, 80}}, {{100, 100, 280}}));
+	return w;
+}
+
+std::vector<std::uint8_t> hog_of(const std::vector<std::pair<std::string, std::vector<std::uint8_t>>> &files)
+{
+	std::vector<std::uint8_t> out{'D', 'H', 'F'};
+	for (const auto &[name, data] : files)
+	{
+		std::array<std::uint8_t, 13> n{};
+		std::copy_n(name.begin(), std::min<std::size_t>(name.size(), 12), n.begin());
+		out.insert(out.end(), n.begin(), n.end());
+		const auto size{static_cast<std::uint32_t>(data.size())};
+		for (unsigned k{}; k != 4; ++k)
+			out.push_back(static_cast<std::uint8_t>((size >> (8 * k)) & 0xff));
+		out.insert(out.end(), data.begin(), data.end());
+	}
+	return out;
+}
+
+void test_level_geometry()
+{
+	const auto w{tunnel_level()};
+	const auto bytes{w.rl2()};
+	const auto l{geo::read_level(bytes, "tunnel.rl2")};
+	CHECK(l && l->segments.size() == 6 && l->vertices.size() == 48);
+	CHECK(l->segments[0].children[4] == 1 && l->segments[1].children[5] == 0 && l->segments[4].children[4] == 5 && l->segments[0].children[0] == geo::SEGMENT_NONE);
+	CHECK(l->vertices[1] == (geo::vec3{{8, -8, 0}}));
+	/* The same in the format of the Descent 2 shareware (version 5) and of Descent 1. */
+	for (const int version : {1, 5})
+	{
+		const auto o{geo::read_level(w.rl2(version))};
+		CHECK(o && o->segments.size() == 6 && o->segments[4].children[4] == 5 && o->vertices == l->vertices);
+	}
+
+	/* Rays: along the tunnel into the room and to its far wall. */
+	CHECK_RANGE(geo::free_distance(*l, 0, {{0, 0, 8}}, {{0, 0, 1}}), 271.9, 272.1);
+	CHECK_RANGE(geo::free_distance(*l, 0, {{0, 0, 8}}, {{1, 0, 0}}), 7.9, 8.1);
+	CHECK_RANGE(geo::free_distance(*l, 0, {{0, 0, 8}}, {{0, 0, -1}}), 7.9, 8.1);
+	CHECK_RANGE(geo::free_distance(*l, 2, {{0, 0, 40}}, {{0, 0, 1}}, 100), 100, 100);
+	/* A slanted ray leaves the tunnel through its side. */
+	const double k{1 / std::sqrt(2.0)};
+	CHECK_RANGE(geo::free_distance(*l, 0, {{0, 0, 8}}, {{k, 0, k}}), 8 * std::sqrt(2.0) - 0.1, 8 * std::sqrt(2.0) + 0.1);
+	/* From the room back into the tunnel, and through its mouth's edge. */
+	CHECK_RANGE(geo::free_distance(*l, 5, {{0, 0, 180}}, {{0, 0, -1}}), 179.9, 180.1);
+	CHECK(geo::free_distance(*l, 99, {{0, 0, 8}}, {{1, 0, 0}}) == 0);
+
+	/* The rooms and the level's character. */
+	const auto g{geo::measure(*l, "level 1 \"Tunnel\"", "TUNNEL.HOG: tunnel.rl2")};
+	for (std::size_t i{}; i != 5; ++i)
+	{
+		CHECK(g.rooms[i].kind == geo::room_class::tight);
+		CHECK_RANGE(g.rooms[i].volume, 4095, 4097);
+	}
+	CHECK(g.rooms[5].kind == geo::room_class::open);
+	CHECK_RANGE(g.rooms[5].room, 90, 175);
+	CHECK_RANGE(g.rooms[5].volume, 7.99e6, 8.01e6);
+	CHECK_RANGE(g.volume_share[static_cast<std::size_t>(geo::room_class::open)], 0.99, 1.0);
+	CHECK(g.character().starts_with("large open spaces"));
+
+	/* The mission files. */
+	const auto m{geo::parse_mission("name = Test Tunnels \r\ntype = anarchy\r\n; a comment\r\nnum_levels = 2\r\ntunnel.rl2\r\nother.rl2 ; the second\r\nnum_secrets = 1\r\nsecret.rl2,1\r\n")};
+	CHECK(m.name == "Test Tunnels" && m.levels.size() == 2 && m.levels[0] == "tunnel.rl2" && m.levels[1] == "other.rl2" && m.secret_levels.size() == 1 && m.secret_levels[0] == "secret.rl2");
+	const auto hog{hog_of({{"other.txt", {1, 2, 3}}, {"tunnel.rl2", bytes}})};
+	const auto dir{geo::read_hog(hog)};
+	CHECK(dir && dir->size() == 2 && (*dir)[1].size == bytes.size());
+	const auto in_hog{geo::hog_file(hog, *dir, "TUNNEL.RL2")};
+	CHECK(in_hog && geo::read_level(*in_hog) && !geo::hog_file(hog, *dir, "nothing.rl2"));
+
+	/* Untrusted files: cut short anywhere, a size past the end, an index
+	 * out of range, random damage.  Nothing crashes; what cannot be
+	 * right gives nothing.
+	 */
+	for (std::size_t n{}; n < bytes.size(); ++n)
+		CHECK(!geo::read_level(std::span<const std::uint8_t>(bytes).first(n)));
+	for (std::size_t n{3}; n < hog.size(); ++n)
+		if (const auto d{geo::read_hog(std::span<const std::uint8_t>(hog).first(n))})
+			CHECK(d->size() < 2 || (*d)[1].offset + (*d)[1].size <= n);
+	{
+		auto bad{bytes};
+		/* The first vertex index of segment 0: past the vertices. */
+		const std::size_t at{20 + 5 + 48 * 12 + 1 + 2};
+		bad[at] = 200;
+		CHECK(!geo::read_level(bad));
+		/* Segment 0's child at the back: no such segment.  The game
+		 * takes it for none and then reads that side's texture, which
+		 * the file does not have: nothing.
+		 */
+		auto child{bytes};
+		child[20 + 5 + 48 * 12 + 1] = 77;
+		CHECK(!geo::read_level(child));
+		/* The exit (0xfffe) is a way out, not a neighbour. */
+		auto exit{bytes};
+		exit[20 + 5 + 48 * 12 + 1] = 0xfe;
+		exit[20 + 5 + 48 * 12 + 2] = 0xff;
+		const auto e{geo::read_level(exit)};
+		CHECK(e && e->segments[0].children[4] == geo::SEGMENT_EXIT);
+		CHECK_RANGE(geo::free_distance(*e, 0, {{0, 0, 8}}, {{0, 0, 1}}), 7.9, 8.1);
+	}
+	rng random{777};
+	for (unsigned trial{}; trial != 300; ++trial)
+	{
+		auto damaged{bytes};
+		for (unsigned n{}; n != 4; ++n)
+			damaged[static_cast<std::size_t>(random.next() * static_cast<double>(damaged.size()))] = static_cast<std::uint8_t>(random.next() * 256);
+		if (const auto d{geo::read_level(damaged)})
+			for (std::size_t s{}; s != d->segments.size(); ++s)
+				CHECK(geo::free_distance(*d, s, {{0, 0, 8}}, {{0.3, 0.1, 0.95}}) <= geo::MAX_RAY);
+	}
+
+	/* Finding the level: by the mission's file, by its name and level
+	 * number, with the segment count; two missions with the same level
+	 * are one, with different levels ambiguous.
+	 */
+	auto shifted{tunnel_level()};
+	for (auto &v : shifted.verts)
+		v[0] += 1;
+	const auto other_hog{hog_of({{"tunnel.rl2", shifted.rl2()}})};
+	std::vector<geo::mission_entry> missions;
+	for (const char *const stem : {"TUNNEL", "TUNCOPY", "TUNSHIFT"})
+	{
+		geo::mission_entry e;
+		e.stem = stem;
+		e.hog_name = std::string{stem} + ".HOG";
+		e.info = m;
+		missions.push_back(e);
+	}
+	unsigned opened{};
+	const auto open{[&](geo::mission_entry &e) {
+		++opened;
+		e.hog = e.stem == "TUNSHIFT" ? other_hog : hog;
+		e.dir = *geo::read_hog(e.hog);
+	}};
+	{
+		const auto f{geo::find_level(missions, {"Test Tunnels", "tuncopy", "", 1, 6}, open)};
+		CHECK(f.mesh && f.mission == &missions[1] && f.level_file == "tunnel.rl2" && f.note.starts_with("by the mission file"));
+	}
+	{
+		const auto f{geo::find_level(missions, {"test tunnels", "", "", 1, 6}, open)};
+		CHECK(!f.mesh && f.note.starts_with("ambiguous: TUNNEL, TUNCOPY, TUNSHIFT"));
+	}
+	{
+		auto two{missions};
+		two.pop_back();
+		const auto f{geo::find_level(two, {"Test Tunnels", "", "", 1, 6}, open)};
+		CHECK(f.mesh && f.note.starts_with("the same level in TUNNEL, TUNCOPY"));
+	}
+	{
+		const auto f{geo::find_level(missions, {"Test Tunnels", "tunshift", "tunnel.rl2", 1, 7}, open)};
+		CHECK(!f.mesh && f.note.find("has 6 segments, the recording 7") != std::string::npos);
+		const auto g2{geo::find_level(missions, {"Test Tunnels", "tunnel", "", 3, 6}, open)};
+		CHECK(!g2.mesh && g2.note.find("has no level 3") != std::string::npos);
+		const auto g3{geo::find_level(missions, {"No Such Mission", "", "", 1, 6}, open)};
+		CHECK(!g3.mesh && g3.note.starts_with("no mission named"));
+		/* The second level of the list is not in the hog. */
+		const auto g4{geo::find_level(missions, {"", "tunnel", "", 2, 0}, open)};
+		CHECK(!g4.mesh && g4.note.find("has no other.rl2") != std::string::npos);
+	}
+	/* Each hog read once. */
+	CHECK(opened == 3);
+}
+
+/* Section 8.8 in the analysis: a flight in a level of one huge room
+ * (the scripted flights stay within 3000 units of the origin): open
+ * everywhere, the line of fire known, the report's level lines; with
+ * all shots on one level the range is no more than medium sure.
+ */
+void test_level_analysis()
+{
+	level_writer w;
+	w.box({{-10, -10, -10}}, {{10, 10, 10}});
+	w.box({{-6000, -6000, -6000}}, {{6000, 6000, 6000}});
+	w.box({{-6000, -6000, -6000}}, {{6000, 6000, 6000}});
+	const auto g{geo::measure(*geo::read_level(w.rl2()), "level 1 \"Arena\" of \"Test Mission\"", "TEST.HOG: arena.rl2")};
+	const auto f{fly(sniper(), CYCLES)};
+	const std::array<recording, 1> files{{load(record(f, {}), "sniper")}};
+	const level_geometries known{{&g}};
+	const auto with{analyse_recordings(files, bot::BOT_DEFAULT_SKILL, M, &known)};
+	const auto without{analyse_recordings(files)};
+	const auto pick{[](const analysis_result &r) -> const player_result & {
+		for (const auto &p : r.players)
+			if (p.stats.callsign == "Pilot")
+				return p;
+		std::exit(1);
+	}};
+	const auto &a{pick(with)};
+	const auto &b{pick(without)};
+	const auto &s{a.stats};
+	CHECK(s.levels.size() == 1 && b.stats.levels.empty() && b.stats.room_known_s == 0);
+	CHECK_RANGE(s.room_known_s, s.alive_s - 1, s.alive_s + 1);
+	const auto &open_room{s.levels[0].by_class[static_cast<std::size_t>(geo::room_class::open)]};
+	CHECK_RANGE(open_room.alive_s, s.alive_s - 1, s.alive_s + 1);
+	CHECK(s.levels[0].label == "level 1 \"Arena\" of \"Test Mission\"" && s.levels[0].source == "TEST.HOG: arena.rl2");
+	/* The enemy at 250 to 380 in a room of 12000: a small share of the line. */
+	CHECK(s.line_share.n > 1000);
+	CHECK_RANGE(s.line_share.p50, 0.005, 0.05);
+	CHECK_RANGE(open_room.distance.p50, 200, 400);
+	CHECK(s.levels_with_fire == 1);
+	CHECK(s.fire_distance_by_line[LINE_BANDS - 1].n == s.fire_distance.n);
+	/* The rest is as without the geometry. */
+	CHECK(s.fire_distance.p50 == b.stats.fire_distance.p50 && s.dodge_prob == b.stats.dodge_prob && s.large_turns == b.stats.large_turns);
+	CHECK(b.profile.find("style.range_scale")->confidence == bot::style_confidence::high);
+	CHECK(a.profile.find("style.range_scale")->confidence == bot::style_confidence::medium);
+	CHECK_RANGE(value(a.profile, "measured.line_share_median"), 0.005, 0.05);
+	const auto report{write_report(s, a.profile)};
+	CHECK(report.find("level: level 1 \"Arena\" of \"Test Mission\" (TEST.HOG: arena.rl2)") != std::string::npos);
+	CHECK(report.find("by level and room") != std::string::npos);
+	CHECK(write_report(b.stats, b.profile).find("level: geometry not known") != std::string::npos);
+	const auto traits{describe_traits(s)};
+	CHECK(std::any_of(traits.begin(), traits.end(), [](const std::string &t) { return t.starts_with("Rooms: open 100%"); }));
+}
+
 /* Too little data gives no opinion. */
 void test_little_data()
 {
@@ -1636,6 +1955,8 @@ int main(const int argc, char **const argv)
 	test_reader_cases();
 	test_profile_format();
 	test_little_data();
+	test_level_geometry();
+	test_level_analysis();
 	std::puts("test-movement-analysis: all checks passed");
 	return 0;
 }

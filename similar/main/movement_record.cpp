@@ -23,6 +23,7 @@
 #include <cmath>
 #include <cstdio>
 #include <ctime>
+#include <iterator>
 #include <optional>
 #include <string>
 
@@ -350,6 +351,32 @@ const char *mission_name()
 	return Current_mission ? static_cast<const char *>(Current_mission->mission_name) : "";
 }
 
+/* Format minor 3: the mission's file name without extension (the stem
+ * of its .hog and .mn2) and the level's file, so that the analysis can
+ * find the level's geometry.
+ */
+[[nodiscard]]
+const char *mission_file_name()
+{
+	if (!Current_mission)
+		return "";
+	const auto &path{Current_mission->path};
+	return path.c_str() + std::distance(path.cbegin(), Current_mission->filename);
+}
+
+[[nodiscard]]
+const char *level_file_name()
+{
+	if (!Current_mission)
+		return "";
+	const int n{Current_level_num};
+	if (n > 0 && n <= Current_mission->last_level && Current_mission->level_names)
+		return static_cast<const char *>(Current_mission->level_names[n - 1]);
+	if (n < 0 && -n <= Current_mission->n_secret_levels && Current_mission->secret_level_names)
+		return static_cast<const char *>(Current_mission->secret_level_names[-n - 1]);
+	return "";
+}
+
 void begin_level()
 {
 	R.level_known = true;
@@ -360,7 +387,7 @@ void begin_level()
 		t = {};
 	R.sync_due = true;
 	mr::record_buffer buf;
-	put_record(mr::encode_level(buf, static_cast<std::int8_t>(std::clamp(Current_level_num, -128, 127)), static_cast<std::uint16_t>(R.segments), underlying_value(Game_mode), mission_name(), static_cast<const char *>(Current_level_name)));
+	put_record(mr::encode_level(buf, static_cast<std::int8_t>(std::clamp(Current_level_num, -128, 127)), static_cast<std::uint16_t>(R.segments), underlying_value(Game_mode), mission_name(), static_cast<const char *>(Current_level_name), mission_file_name(), level_file_name()));
 	announce_players(true);
 }
 
@@ -425,6 +452,8 @@ bool begin_session()
 	h.mission = mission_name();
 	h.level_name = static_cast<const char *>(Current_level_name);
 	h.level_num = static_cast<std::int8_t>(std::clamp(Current_level_num, -128, 127));
+	h.mission_file = mission_file_name();
+	h.level_file = level_file_name();
 	for (unsigned pid{}; pid != player_count() && h.num_players < mr::MAX_RECORDED_PLAYERS; ++pid)
 	{
 		auto &p{h.players[h.num_players++]};

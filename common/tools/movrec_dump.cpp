@@ -160,7 +160,8 @@ int dump(const char *const path, const options &opt)
 			level = l->level_num;
 			++levels;
 			std::array<char, 512> line;
-			std::snprintf(line.data(), line.size(), "  level %d \"%s\" of \"%s\" (%u segments, game mode 0x%x) at %.1f s\n", l->level_num, l->level_name.c_str(), l->mission.c_str(), l->segments, l->game_mode, last_time_ms / 1000.0);
+			std::snprintf(line.data(), line.size(), "  level %d \"%s\" of \"%s\" (%u segments, game mode 0x%x) at %.1f s%s%s%s%s\n", l->level_num, l->level_name.c_str(), l->mission.c_str(), l->segments, l->game_mode, last_time_ms / 1000.0,
+				l->mission_file.empty() && l->level_file.empty() ? "" : "; files ", l->mission_file.c_str(), l->mission_file.empty() || l->level_file.empty() ? "" : ", ", l->level_file.c_str());
 			level_lines += line.data();
 		}
 		else if (const auto p{std::get_if<player_record>(&r)})
@@ -292,11 +293,12 @@ int dump(const char *const path, const options &opt)
 	const auto &h{*result.header};
 	const auto &st{result.stats};
 	std::printf("%s: format %u.%u, %s, %u Hz, started %" PRId64 " (unix time)\n", path, h.version, h.minor, h.program.c_str(), h.tick_rate, h.start_unix_time);
-	std::printf("  %s%s%s, local player %u, first level %d \"%s\" of \"%s\"\n",
+	std::printf("  %s%s%s, local player %u, first level %d \"%s\" of \"%s\"%s%s%s%s\n",
 		(h.flags & static_cast<std::uint16_t>(header_flag::multiplayer)) ? "multiplayer" : "single player",
 		(h.flags & static_cast<std::uint16_t>(header_flag::host)) ? " host" : "",
 		(h.flags & static_cast<std::uint16_t>(header_flag::bots_recorded)) ? ", bots recorded" : "",
-		h.local_pid, h.level_num, h.level_name.c_str(), h.mission.c_str());
+		h.local_pid, h.level_num, h.level_name.c_str(), h.mission.c_str(),
+		h.mission_file.empty() && h.level_file.empty() ? "" : " (files ", h.mission_file.c_str(), h.mission_file.empty() || h.level_file.empty() ? "" : ", ", h.mission_file.empty() && h.level_file.empty() ? "" : (h.level_file + ")").c_str());
 	const std::uint64_t file_size{data->size()};
 	std::printf("  %" PRIu64 " bytes, %u chunks, %u damaged, %u missing, %" PRIu64 " records (%" PRIu64 " unknown, %" PRIu64 " malformed), %s\n",
 		file_size, st.chunks_ok, st.chunks_bad, st.sequence_gaps, st.records, st.unknown_records, st.malformed_records,

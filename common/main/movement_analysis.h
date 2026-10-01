@@ -49,6 +49,7 @@
 #include <vector>
 
 #include "movement_record_reader.h"
+#include "level_geometry.h"
 #include "bot_brain.h"
 #include "bot_goals.h"
 #include "bot_weapons.h"
@@ -231,7 +232,7 @@ inline std::optional<recording> load_recording(const std::span<const std::uint8_
 			if (s->pid == PLAYER_NONE)
 				return;
 			if (rec.levels.empty())
-				rec.levels.push_back({{head->first.level_num, 0, head->first.game_mode, head->first.mission, head->first.level_name}, now_ms});
+				rec.levels.push_back({{head->first.level_num, 0, head->first.game_mode, head->first.mission, head->first.level_name, head->first.mission_file, head->first.level_file}, now_ms});
 			file_sample fs;
 			fs.time_ms = now_ms;
 			fs.level = static_cast<std::uint16_t>(rec.levels.size() - 1);
@@ -809,6 +810,8 @@ constexpr double PURSUIT_MAX_S{30};
 constexpr double BURN_THRUST{1.3};
 /* Too little to say anything about a player. */
 constexpr double MIN_ALIVE_S{20};
+/* A room class needs this much time alive to be reported. */
+constexpr double ROOM_MIN_S{10};
 }
 
 struct track_point
@@ -850,7 +853,26 @@ struct track_point
 	int enemy_key{-1};
 	/* My own speed toward the enemy (units/s). */
 	double own_approach{};
+	/* The level's geometry (section 8.8), if known: the room of the
+	 * segment the ship is in, the free distance ahead, behind, right,
+	 * left, up and down (ship frame), and toward the enemy (the sight
+	 * line, through it to the wall behind it) and away from it; `line`
+	 * is the two together, the whole line of fire.
+	 */
+	const geometry::level_geometry *geo{};
+	bool room_known{};
+	geometry::room_class room{};
+	double room_size{};
+	std::array<double, 6> free{};
+	bool line_known{};
+	double sight{}, line{};
 };
+
+/* The geometry of every level of every recording (by the order of the
+ * files given to analyse_recordings, then the recording's levels), where
+ * the missions are known (movrec-analyse --missions); null where not.
+ */
+using level_geometries = std::vector<std::vector<const geometry::level_geometry *>>;
 
 struct track
 {
@@ -883,8 +905,41 @@ struct track
 	}
 };
 
+namespace detail {
+
+/* Section 8.8: the room around the ship of `p`, in the level `g`. */
+inline void measure_room(track_point &p, const geometry::level_geometry &g)
+{
+	const auto r{g.room_at(p.m.s.segment)};
+	if (!r)
+		return;
+	p.geo = &g;
+	p.room_known = true;
+	p.room = r->kind;
+	p.room_size = r->room;
+	const auto &o{p.u.orient};
+	const std::array<vec3, 3> axes{{o.forward, o.right, o.up}};
+	for (std::size_t k{}; k != 3; ++k)
+	{
+		const auto &a{axes[k]};
+		p.free[2 * k] = geometry::free_distance(g.mesh, p.m.s.segment, p.u.pos, a);
+		p.free[2 * k + 1] = geometry::free_distance(g.mesh, p.m.s.segment, p.u.pos, vec3{{-a[0], -a[1], -a[2]}});
+	}
+	if (p.enemy_key >= 0 && p.u.enemy_distance > 0)
+	{
+		vec3 to;
+		for (std::size_t k{}; k != 3; ++k)
+			to[k] = p.u.enemy_rel_pos[k] / p.u.enemy_distance;
+		p.sight = geometry::free_distance(g.mesh, p.m.s.segment, p.u.pos, to);
+		p.line = p.sight + geometry::free_distance(g.mesh, p.m.s.segment, p.u.pos, vec3{{-to[0], -to[1], -to[2]}});
+		p.line_known = true;
+	}
+}
+
+}
+
 [[nodiscard]]
-inline track build_track(const merged_session &ms, const std::size_t player, const ship_model &ship = pyro_gx())
+inline track build_track(const merged_session &ms, const std::size_t player, const ship_model &ship = pyro_gx(), const level_geometries *const geo = nullptr, const session *const ses = nullptr)
 {
 	track tr;
 	const auto &src{ms.players[player].samples};
@@ -928,6 +983,10 @@ inline track build_track(const merged_session &ms, const std::size_t player, con
 			if (p.u.enemy_distance > 0)
 				p.own_approach = dot(p.u.vel, p.u.enemy_rel_pos) / p.u.enemy_distance;
 		}
+		if (geo && ses && p.alive && p.m.file < ses->files.size())
+			if (const auto f{ses->files[p.m.file].file}; f < geo->size() && p.m.level < (*geo)[f].size())
+				if (const auto g{(*geo)[f][p.m.level]})
+					detail::measure_room(p, *g);
 		tr.pts.push_back(p);
 	}
 	for (std::size_t i{}; i != tr.pts.size(); ++i)
@@ -1045,6 +1104,9 @@ inline constexpr std::array<double, 5> DISTANCE_EDGES{{35, 60, 95, 150, 250}};
 constexpr std::size_t DISTANCE_BINS{DISTANCE_EDGES.size() + 1};
 constexpr std::size_t SHIELD_BUCKETS{5};	/* 25 shields each, the last 100 and more */
 constexpr std::size_t WEAPON_SLOTS{10};
+/* Section 8.8: bands of the length of the line of fire. */
+inline constexpr std::array<double, 3> LINE_EDGES{{100, 200, 400}};
+constexpr std::size_t LINE_BANDS{LINE_EDGES.size() + 1};
 /* Dodging: the phases of the weave (the time since its last switch in
  * PHASE_BINS bins and one open bin; idle or in a run), and the bins of
  * the time to the first switch.
@@ -1218,6 +1280,45 @@ struct player_stats
 	 */
 	double hits_per_shot{};
 
+	/* Section 8.8: by level and by room class (where the level's
+	 * geometry is known).
+	 */
+	struct room_traits
+	{
+		double alive_s{}, speed{}, fight_s{};
+		/* Sideways or vertical thrust, share of the fight time with controls. */
+		double strafe_share{};
+		/* The distance to the enemy in sight; the line of fire then
+		 * (the free distance toward the enemy and away from it); the
+		 * distance as a share of that line; the free room to the nearer
+		 * side (left or right) in a fight.
+		 */
+		summary distance, line, line_share, side_room;
+		unsigned turns{};
+		double reverse_turn_share{}, slide_turn_share{}, forward_turn_share{};
+	};
+	struct level_traits
+	{
+		std::string label, source, character;
+		/* tight, medium, open; then all of them. */
+		std::array<room_traits, geometry::ROOM_CLASSES> by_class{};
+		room_traits all;
+	};
+	std::vector<level_traits> levels;
+	/* Seconds alive with the room known. */
+	double room_known_s{};
+	/* The distance to the enemy in sight as a share of the line of fire
+	 * (the free distance toward the enemy, through it, and away from
+	 * it): the distance normalised by what the map offers.
+	 */
+	summary line_share;
+	/* The distance at the primary shots by the length of the line of
+	 * fire (LINE_EDGES): how much the map sets the distance.
+	 */
+	std::array<summary, LINE_BANDS> fire_distance_by_line{};
+	/* Levels with at least 20 primary shots with the enemy in sight. */
+	unsigned levels_with_fire{};
+
 	[[nodiscard]]
 	double estimated_share() const
 	{
@@ -1281,6 +1382,29 @@ struct accum
 	std::vector<double> pursuit_s;
 	unsigned hits_dealt{}, splash_dealt{}, hits_taken{}, kills{}, deaths{}, suicides{};
 	double damage_dealt{}, damage_taken{};
+	/* Section 8.8: per level (by its geometry) and room class. */
+	struct room_acc
+	{
+		double alive_s{}, speed_sum{}, fight_s{}, fight_ctl_s{}, fight_strafe_s{};
+		std::vector<double> distance, line, line_share, side_room;
+		unsigned turns{}, turns_ctl{}, reverse{}, slide{}, forward{};
+	};
+	struct level_acc
+	{
+		const geometry::level_geometry *geo{};
+		std::array<room_acc, geometry::ROOM_CLASSES + 1> by{};
+	};
+	std::vector<level_acc> levels;
+	double room_known_s{};
+	std::vector<double> line_share;
+	std::array<std::vector<double>, LINE_BANDS> fire_distance_by_line;
+	/* Primary shots with the enemy in sight per level (by its geometry). */
+	std::vector<std::pair<const geometry::level_geometry *, unsigned>> fire_per_level;
+	/* The large turns of the track being scanned: first point, and how
+	 * flown ('r' reverse, 's' sliding, 'f' forward, 'c' otherwise, '-'
+	 * without enough controls to tell).
+	 */
+	std::vector<std::pair<std::size_t, char>> turn_marks;
 };
 
 enum situation : std::size_t
@@ -1511,19 +1635,29 @@ inline std::vector<bool> scan_turns(const track &tr, accum &a, const ship_model 
 			if (std::hypot(p.ctl[1], p.ctl[2]) > limits::CONTROL_USED)
 				++slide;
 		}
+		char mark{'-'};
 		if (n * 2 >= j - first + 1)
 		{
 			++a.turns_ctl;
+			mark = 'c';
 			if (rev >= limits::TURN_THRUST_SHARE * n)
 			{
 				++a.turns_reverse;
 				a.reverse_speed.push_back(back_speed / ship.max_speed);
+				mark = 'r';
 			}
 			else if (slide >= limits::TURN_THRUST_SHARE * n)
+			{
 				++a.turns_slide;
+				mark = 's';
+			}
 			else if (fwd >= limits::TURN_THRUST_SHARE * n)
+			{
 				++a.turns_forward;
+				mark = 'f';
+			}
 		}
+		a.turn_marks.emplace_back(first, mark);
 		/* The push after the turn. */
 		double thrust{}, time{};
 		bool burn{};
@@ -1815,6 +1949,15 @@ inline void scan_events(const track &tr, accum &a)
 					{
 						const double d{pts[*i].u.enemy_distance};
 						a.fire_distance.push_back(d);
+						if (const auto &q{pts[*i]}; q.line_known)
+						{
+							a.fire_distance_by_line[static_cast<std::size_t>(std::upper_bound(LINE_EDGES.begin(), LINE_EDGES.end(), q.line) - LINE_EDGES.begin())].push_back(d);
+							const auto f{std::find_if(a.fire_per_level.begin(), a.fire_per_level.end(), [&q](const auto &x) { return x.first == q.geo; })};
+							if (f == a.fire_per_level.end())
+								a.fire_per_level.emplace_back(q.geo, 1u);
+							else
+								++f->second;
+						}
 						if (e.e.id < WEAPON_SLOTS)
 							++a.primary_by_band[static_cast<std::size_t>(bot::band_of(d))][e.e.id];
 					}
@@ -1949,6 +2092,67 @@ inline void scan_pursuit(const track &tr, accum &a, const ship_model &ship)
 			a.pursuit_s.push_back(pursued);
 		}
 		i = std::max(i, k);
+	}
+}
+
+/* Section 8.8: the main traits per level and room class. */
+inline void scan_rooms(const track &tr, accum &a)
+{
+	const auto &pts{tr.pts};
+	const auto level_of{[&a](const geometry::level_geometry *const g) -> accum::level_acc & {
+		for (auto &l : a.levels)
+			if (l.geo == g)
+				return l;
+		return a.levels.emplace_back(accum::level_acc{g, {}});
+	}};
+	for (const auto &p : pts)
+	{
+		if (!p.alive || !p.room_known)
+			continue;
+		const double w{p.w};
+		a.room_known_s += w;
+		auto &l{level_of(p.geo)};
+		for (auto *const r : {&l.by[static_cast<std::size_t>(p.room)], &l.by[geometry::ROOM_CLASSES]})
+		{
+			r->alive_s += w;
+			r->speed_sum += p.u.speed * w;
+			if (p.fight)
+			{
+				r->fight_s += w;
+				r->side_room.push_back(std::min(p.free[2], p.free[3]));
+				if (p.has_ctl)
+				{
+					r->fight_ctl_s += w;
+					if (std::abs(p.ctl[1]) > limits::CONTROL_USED || std::abs(p.ctl[2]) > limits::CONTROL_USED)
+						r->fight_strafe_s += w;
+				}
+			}
+			if (p.los && !p.u.enemy_distance_scaled && p.line_known)
+			{
+				r->distance.push_back(p.u.enemy_distance);
+				r->line.push_back(p.line);
+				r->line_share.push_back(p.line > 0 ? std::min(p.u.enemy_distance / p.line, 1.0) : 1.0);
+				if (r == &l.by[geometry::ROOM_CLASSES])
+					a.line_share.push_back(r->line_share.back());
+			}
+		}
+	}
+	for (const auto &[first, mark] : a.turn_marks)
+	{
+		const auto &p{pts[first]};
+		if (!p.room_known)
+			continue;
+		auto &l{level_of(p.geo)};
+		for (auto *const r : {&l.by[static_cast<std::size_t>(p.room)], &l.by[geometry::ROOM_CLASSES]})
+		{
+			++r->turns;
+			if (mark == '-')
+				continue;
+			++r->turns_ctl;
+			r->reverse += mark == 'r';
+			r->slide += mark == 's';
+			r->forward += mark == 'f';
+		}
 	}
 }
 
@@ -2109,12 +2313,14 @@ inline player_stats analyse(const std::span<const track> tracks, const ship_mode
 	detail::accum a;
 	for (const auto &tr : tracks)
 	{
+		a.turn_marks.clear();
 		const auto after_turn{detail::scan_turns(tr, a, ship)};
 		detail::scan_samples(tr, a, ship, after_turn);
 		detail::scan_strafe(tr, a);
 		detail::scan_dodge(tr, a, ship);
 		detail::scan_events(tr, a);
 		detail::scan_pursuit(tr, a, ship);
+		detail::scan_rooms(tr, a);
 	}
 	player_stats s;
 	s.sessions = detail::count(tracks.size());
@@ -2248,6 +2454,38 @@ inline player_stats analyse(const std::span<const track> tracks, const ship_mode
 	s.damage_dealt = a.damage_dealt;
 	s.damage_taken = a.damage_taken;
 	s.hits_per_shot = ratio(a.hits_dealt, a.primary_shots);
+
+	s.room_known_s = a.room_known_s;
+	s.line_share = summarise(a.line_share);
+	for (std::size_t b{}; b != LINE_BANDS; ++b)
+		s.fire_distance_by_line[b] = summarise(a.fire_distance_by_line[b]);
+	for (const auto &[g, n] : a.fire_per_level)
+		if (n >= 20)
+			++s.levels_with_fire;
+	for (const auto &l : a.levels)
+	{
+		auto &o{s.levels.emplace_back()};
+		o.label = l.geo->name;
+		o.source = l.geo->source;
+		o.character = l.geo->character();
+		for (std::size_t c{}; c != geometry::ROOM_CLASSES + 1; ++c)
+		{
+			const auto &r{l.by[c]};
+			auto &t{c == geometry::ROOM_CLASSES ? o.all : o.by_class[c]};
+			t.alive_s = r.alive_s;
+			t.speed = ratio(r.speed_sum, r.alive_s);
+			t.fight_s = r.fight_s;
+			t.strafe_share = ratio(r.fight_strafe_s, r.fight_ctl_s);
+			t.distance = summarise(r.distance);
+			t.line = summarise(r.line);
+			t.line_share = summarise(r.line_share);
+			t.side_room = summarise(r.side_room);
+			t.turns = r.turns;
+			t.reverse_turn_share = ratio(r.reverse, r.turns_ctl);
+			t.slide_turn_share = ratio(r.slide, r.turns_ctl);
+			t.forward_turn_share = ratio(r.forward, r.turns_ctl);
+		}
+	}
 	return s;
 }
 
@@ -2325,14 +2563,20 @@ inline bot::style_profile propose_profile(const player_stats &s, const bot::bot_
 	if (s.pickup_detour_n >= 5)
 		p.set("style.collect_weight", 0.7 + s.pickup_detour_share + 0.6 * s.pickup_in_fight_share, confidence_of(s, s.pickup_detour_n, 10, 40));
 
-	/* style.range_scale and the fight band: where it fires from. */
+	/* style.range_scale and the fight band: where it fires from.  With
+	 * the levels known (section 8.8) and all the shots on one of them,
+	 * no more than medium: on one map the distance is as much the map's
+	 * as the pilot's.
+	 */
 	{
 		constexpr double band_middle{65};	/* of BOT_RANGE_LO 35 and BOT_RANGE_HI 95 */
 		const bool shots{s.fire_distance.n >= 20};
 		const auto &d{shots ? s.fire_distance : s.los_distance};
 		if (shots || s.los_s >= 30)
 		{
-			const auto c{shots ? confidence_of(s, static_cast<double>(d.n), 50, 300) : std::min(fight_confidence, style_confidence::medium)};
+			auto c{shots ? confidence_of(s, static_cast<double>(d.n), 50, 300) : std::min(fight_confidence, style_confidence::medium)};
+			if (s.levels_with_fire == 1)
+				c = std::min(c, style_confidence::medium);
 			p.set("style.range_scale", d.p50 / band_middle, c);
 			p.set("tune.range_lo", d.p25, c);
 			p.set("tune.range_hi", d.p75, c);
@@ -2484,6 +2728,8 @@ inline bot::style_profile propose_profile(const player_stats &s, const bot::bot_
 		info("measured.enemy_distance_median", s.los_distance.p50);
 	if (s.turn_180_ms.n)
 		info("measured.turn_180_ms", s.turn_180_ms.p50);
+	if (s.line_share.n >= 100)
+		info("measured.line_share_median", s.line_share.p50);
 	/* The reaction only of a dodge that clearly is one (two standard
 	 * errors above nothing).
 	 */
@@ -2568,6 +2814,47 @@ inline std::vector<std::string> describe_traits(const player_stats &s, const shi
 		const char *const kind{d.p50 >= 150 ? "Long-range fighter" : d.p50 >= 95 ? "Keeps its distance" : d.p50 < 45 ? "In-your-face fighter" : "Fights at medium range"};
 		appendf(line(), "%s: %s at a median of %.0f units (half of the time between %.0f and %.0f); the bots' band is 35 to 95.", kind, s.fire_distance.n >= 20 ? "fires" : "has the enemy in sight", d.p50, d.p25, d.p75);
 	}
+	/* Section 8.8: the rooms, over all levels with a known geometry. */
+	if (s.room_known_s >= 30)
+	{
+		std::array<double, geometry::ROOM_CLASSES> t{}, speed{}, strafe{}, strafe_t{}, dist{}, dist_t{};
+		double share{}, share_t{};
+		for (const auto &l : s.levels)
+		{
+			for (std::size_t c{}; c != geometry::ROOM_CLASSES; ++c)
+			{
+				const auto &r{l.by_class[c]};
+				t[c] += r.alive_s;
+				speed[c] += r.speed * r.alive_s;
+				strafe[c] += r.strafe_share * r.fight_s;
+				strafe_t[c] += r.fight_s;
+				const auto n{static_cast<double>(r.distance.n)};
+				dist[c] += r.distance.p50 * n;
+				dist_t[c] += n;
+			}
+			const auto n{static_cast<double>(l.all.line_share.n)};
+			share += l.all.line_share.p50 * n;
+			share_t += n;
+		}
+		auto &l{line()};
+		l += "Rooms:";
+		const char *sep{" "};
+		for (std::size_t c{}; c != geometry::ROOM_CLASSES; ++c)
+		{
+			if (t[c] < limits::ROOM_MIN_S)
+				continue;
+			appendf(l, "%s%s %.0f%% of the time (speed %.0f", sep, geometry::room_class_names[c], pct(t[c] / s.room_known_s), speed[c] / t[c]);
+			if (strafe_t[c] >= limits::ROOM_MIN_S)
+				appendf(l, ", strafes %.0f%% of the fights", pct(strafe[c] / strafe_t[c]));
+			if (dist_t[c] >= 30)
+				appendf(l, ", enemy at %.0f", dist[c] / dist_t[c]);
+			l += ')';
+			sep = "; ";
+		}
+		if (share_t >= 30)
+			appendf(l, "; the enemy is at %.0f%% of the line of fire the level offers (median)", pct(share / share_t));
+		l += '.';
+	}
 	if (s.fight_s >= 20)
 	{
 		auto &l{line()};
@@ -2651,6 +2938,10 @@ inline std::string write_report(const player_stats &s, const bot::style_profile 
 	if (s.estimator_n)
 		appendf(o, "; the estimate is off by %.2f of full thrust (rms) where both exist", s.estimator_rms);
 	o += '\n';
+	for (const auto &l : s.levels)
+		appendf(o, "level: %s (%s), %.1f min alive here: %s\n", l.label.c_str(), l.source.c_str(), l.all.alive_s / 60, l.character.c_str());
+	if (s.levels.empty() && s.room_known_s <= 0)
+		o += "level: geometry not known (movrec-analyse --missions DIR)\n";
 	o += "\nTraits\n";
 	for (const auto &t : describe_traits(s, ship))
 		o += "  - " + t + "\n";
@@ -2723,6 +3014,41 @@ inline std::string write_report(const player_stats &s, const bot::style_profile 
 	appendf(o, "  pickups: %u (%.1f/min), off course %.0f%% of %u, in a fight %.0f%%\n", s.pickups, s.pickups_per_min, pct(s.pickup_detour_share), s.pickup_detour_n, pct(s.pickup_in_fight_share));
 	appendf(o, "  lost sight of the enemy %u times, followed %.0f%%; for %.1f s (median), p90 %.1f s\n", s.sight_losses, pct(s.pursue_share), s.pursuit_s.p50, s.pursuit_s.p90);
 	appendf(o, "  hits: dealt %u direct and %u splash (%.0f shields), taken %u (%.0f shields); %.2f direct hits per primary shot\n", s.hits_dealt, s.splash_dealt, s.damage_dealt, s.hits_taken, s.damage_taken, s.hits_per_shot);
+	if (!s.levels.empty())
+	{
+		o += "  by level and room (time alive; speed; sideways/vertical thrust in the fights; distance to the enemy in sight, median, of a line of fire of, the share of it; free room to the nearer side in the fights; large turns: reverse/slide/forward):\n";
+		for (const auto &l : s.levels)
+		{
+			appendf(o, "    %s\n", l.label.c_str());
+			for (std::size_t c{}; c != geometry::ROOM_CLASSES + 1; ++c)
+			{
+				const auto &r{c == geometry::ROOM_CLASSES ? l.all : l.by_class[c]};
+				if (r.alive_s < 1)
+					continue;
+				appendf(o, "      %-7s %5.0f s  speed %4.1f", c == geometry::ROOM_CLASSES ? "all" : geometry::room_class_names[c], r.alive_s, r.speed);
+				if (r.fight_s > 0)
+					appendf(o, "  strafe %3.0f%%  side room %3.0f", pct(r.strafe_share), r.side_room.p50);
+				if (r.distance.n)
+					appendf(o, "  enemy at %3.0f of %3.0f (%2.0f%%)", r.distance.p50, r.line.p50, pct(r.line_share.p50));
+				if (r.turns)
+					appendf(o, "  turns %u: %.0f/%.0f/%.0f%%", r.turns, pct(r.reverse_turn_share), pct(r.slide_turn_share), pct(r.forward_turn_share));
+				o += '\n';
+			}
+		}
+		o += "  distance when firing by the line of fire (shots, median):";
+		for (std::size_t b{}; b != LINE_BANDS; ++b)
+		{
+			const auto &f{s.fire_distance_by_line[b]};
+			if (b == 0)
+				appendf(o, " line < %.0f: ", LINE_EDGES[0]);
+			else if (b + 1 == LINE_BANDS)
+				appendf(o, "; >= %.0f: ", LINE_EDGES[b - 1]);
+			else
+				appendf(o, "; %.0f-%.0f: ", LINE_EDGES[b - 1], LINE_EDGES[b]);
+			appendf(o, "%.0f, %.0f", static_cast<double>(f.n), f.p50);
+		}
+		appendf(o, "; the enemy at %.0f%% of the line (median of the time in sight)\n", pct(s.line_share.p50));
+	}
 
 	o += "\nProposed bot style (closest built-in style: ";
 	o += bot::bot_style_names[std::min<std::size_t>(static_cast<std::size_t>(profile.base_style), bot::BOT_STYLE_COUNT - 1)];
@@ -2760,7 +3086,7 @@ struct analysis_result
 };
 
 [[nodiscard]]
-inline analysis_result analyse_recordings(const std::span<const recording> files, const bot::bot_skill base_skill = bot::BOT_DEFAULT_SKILL, const ship_model &ship = pyro_gx())
+inline analysis_result analyse_recordings(const std::span<const recording> files, const bot::bot_skill base_skill = bot::BOT_DEFAULT_SKILL, const ship_model &ship = pyro_gx(), const level_geometries *const geo = nullptr)
 {
 	analysis_result r;
 	r.sessions = group_sessions(files, &r.notes);
@@ -2782,7 +3108,7 @@ inline analysis_result analyse_recordings(const std::span<const recording> files
 			auto e{std::find_if(entries.begin(), entries.end(), [&sp](const entry &x) { return x.bot == sp.bot && lower(x.callsign) == lower(sp.callsign); })};
 			if (e == entries.end())
 				e = entries.insert(e, {sp.callsign, sp.bot, {}});
-			e->tracks.push_back(build_track(ms, p, ship));
+			e->tracks.push_back(build_track(ms, p, ship, geo, &ses));
 		}
 	}
 	for (const auto &e : entries)

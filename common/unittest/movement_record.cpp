@@ -141,6 +141,8 @@ file_header make_header()
 	h.num_players = 2;
 	h.players[0] = {0, player_flag::connected | player_flag::local | player_flag::recorded, 0xff, "host"};
 	h.players[1] = {1, player_flag::connected | player_flag::recorded, 0xff, "client"};
+	h.mission_file = "d2x";
+	h.level_file = "level01.rl2";
 	return h;
 }
 
@@ -520,8 +522,11 @@ void test_minor_1()
 		const auto n{encode_header(buf, h)};
 		const auto d{decode_header(std::span<const std::uint8_t>(buf).first(n))};
 		CHECK(d && d->first.minor == FORMAT_MINOR && d->first == h);
-		/* The same header as minor 0 wrote it: no minor field. */
-		std::vector<std::uint8_t> old(buf.begin(), buf.begin() + static_cast<std::ptrdiff_t>(n - 6));
+		/* The same header as minor 0 wrote it: no minor field (and none
+		 * of the fields after it).
+		 */
+		const std::size_t after_minor{2 + h.mission_file.size() + 1 + h.level_file.size() + 1};
+		std::vector<std::uint8_t> old(buf.begin(), buf.begin() + static_cast<std::ptrdiff_t>(n - 4 - after_minor));
 		const std::size_t total{old.size() + 4};
 		old[10] = static_cast<std::uint8_t>(total);
 		old[11] = static_cast<std::uint8_t>(total >> 8);
@@ -531,6 +536,8 @@ void test_minor_1()
 		const auto o{decode_header(old)};
 		CHECK(o && o->second == total && o->first.minor == 0);
 		h.minor = 0;
+		h.mission_file.clear();
+		h.level_file.clear();
 		CHECK(o->first == h);
 	}
 	{
@@ -594,7 +601,7 @@ void test_minor_1()
  */
 void test_minor_2()
 {
-	static_assert(FORMAT_MINOR == 2);
+	static_assert(FORMAT_MINOR >= 2);
 	static_assert((sample_flag2::controls_shared & (sample_flag2::vitals_exact | sample_flag2::afterburner_known | sample_flag2::bot | sample_flag2::local | sample_flag2::guided | sample_flag2::headlight | sample_flag2::buttons_known)) == 0);
 	static_assert((player_flag::shares_controls & (player_flag::connected | player_flag::bot | player_flag::local | player_flag::recorded)) == 0);
 	/* Clamping untrusted controls: forward -60..120, the others -60..60. */
@@ -663,6 +670,54 @@ void test_crc()
 
 }
 
+namespace {
+
+/* Minor 3: the mission's and the level's file names in the level record
+ * and the header.  A minor 2 reader reads the fields it knows and skips
+ * the names; a minor 3 reader reads a minor 2 record without them, and
+ * a record whose names are damaged keeps the rest.
+ */
+void test_minor_3()
+{
+	static_assert(FORMAT_MINOR == 3);
+	{
+		record_buffer buf;
+		const auto bytes{encode_level(buf, 3, 412, 0x21, "Pyroglyphic (Sny)", "Pyro Level", "PYGL", "pygl03.rl2")};
+		const auto payload{bytes.subspan(RECORD_HEADER_SIZE)};
+		const auto d{decode_level(payload)};
+		CHECK(d && d->mission == "Pyroglyphic (Sny)" && d->level_name == "Pyro Level" && d->mission_file == "PYGL" && d->level_file == "pygl03.rl2" && d->segments == 412 && d->level_num == 3);
+		/* The record as minor 2 wrote it: no names. */
+		const std::size_t names{1 + 4 + 1 + 10};
+		const auto old{decode_level(payload.first(payload.size() - names))};
+		CHECK(old && old->mission == d->mission && old->mission_file.empty() && old->level_file.empty());
+		/* A name cut short: the record stays, without the names. */
+		const auto cut{decode_level(payload.first(payload.size() - 3))};
+		CHECK(cut && cut->level_name == "Pyro Level" && cut->mission_file.empty() && cut->level_file.empty());
+		/* Long strings are cut; the record fits. */
+		const std::string longest(300, 'x');
+		const auto big{encode_level(buf, -1, 9999, 0, longest, longest, longest, longest)};
+		CHECK(!big.empty() && big.size() <= MAX_RECORD_SIZE);
+		const auto db{decode_level(big.subspan(RECORD_HEADER_SIZE))};
+		CHECK(db && db->mission.size() == 100 && db->mission_file.size() == MAX_FILE_NAME && db->level_file.size() == MAX_FILE_NAME);
+	}
+	{
+		std::array<std::uint8_t, MAX_HEADER_SIZE> buf;
+		const auto h{make_header()};
+		const auto n{encode_header(buf, h)};
+		const auto d{decode_header(std::span<const std::uint8_t>(buf).first(n))};
+		CHECK(d && d->first.mission_file == "d2x" && d->first.level_file == "level01.rl2" && d->first == h);
+		/* A minor 2 header (no names after the minor field). */
+		auto two{h};
+		two.minor = 2;
+		const auto n2{encode_header(buf, two)};
+		CHECK(n2 + 2 + h.mission_file.size() + h.level_file.size() == n);
+		const auto d2{decode_header(std::span<const std::uint8_t>(buf).first(n2))};
+		CHECK(d2 && d2->first.minor == 2 && d2->first.mission_file.empty() && d2->first.level_file.empty());
+	}
+}
+
+}
+
 int main()
 {
 	test_crc();
@@ -677,6 +732,7 @@ int main()
 	test_quantisation();
 	test_minor_1();
 	test_minor_2();
+	test_minor_3();
 	std::puts("test-movement-record: all checks passed");
 	return 0;
 }
