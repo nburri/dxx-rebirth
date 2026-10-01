@@ -458,6 +458,86 @@ inline double free_distance(const level &l, std::size_t seg, vec3 from, const ve
 	return travelled;
 }
 
+/* free_distance with where the ray ends: the segment the end point lies
+ * in, and, if a wall stopped it, the wall's normal (unit, toward where
+ * the ray came from).  For the bots' level simulation
+ * (common/unittest/bot_level_sim.cpp), which moves ships with it.
+ */
+struct ray_end
+{
+	double distance{};
+	std::size_t segment{};
+	bool wall{};
+	vec3 normal{};
+};
+
+[[nodiscard]]
+inline ray_end trace_ray(const level &l, std::size_t seg, vec3 from, const vec3 &dir, const double limit = MAX_RAY)
+{
+	ray_end out;
+	out.segment = seg;
+	if (seg >= l.segments.size())
+	{
+		out.wall = true;
+		return out;
+	}
+	for (std::size_t step{}; step != MAX_RAY_STEPS; ++step)
+	{
+		const auto &s{l.segments[seg]};
+		double best{-1};
+		std::size_t side{};
+		for (std::size_t k{}; k != 6; ++k)
+		{
+			const auto &sv{side_verts[k]};
+			const auto &a{l.vertices[s.verts[sv[0]]]}, &b{l.vertices[s.verts[sv[1]]]}, &c{l.vertices[s.verts[sv[2]]]}, &d{l.vertices[s.verts[sv[3]]]};
+			for (const double t : {ray_triangle(from, dir, a, b, c), ray_triangle(from, dir, a, c, d), ray_triangle(from, dir, a, b, d), ray_triangle(from, dir, b, c, d)})
+				if (t > best)
+				{
+					best = t;
+					side = k;
+				}
+		}
+		out.segment = seg;
+		if (best < 0)
+		{
+			/* Outside its segment: no way on. */
+			out.wall = true;
+			out.normal = {{-dir[0], -dir[1], -dir[2]}};
+			return out;
+		}
+		if (out.distance + best >= limit)
+		{
+			out.distance = limit;
+			return out;
+		}
+		out.distance += best;
+		const auto next{s.children[side]};
+		if (next == SEGMENT_NONE || next == SEGMENT_EXIT)
+		{
+			const auto &sv{side_verts[side]};
+			const auto &a{l.vertices[s.verts[sv[0]]]}, &b{l.vertices[s.verts[sv[1]]]}, &c{l.vertices[s.verts[sv[2]]]}, &d{l.vertices[s.verts[sv[3]]]};
+			const auto n1{cross(sub(b, a), sub(c, a))}, n2{cross(sub(c, a), sub(d, a))};
+			vec3 n{{n1[0] + n2[0], n1[1] + n2[1], n1[2] + n2[2]}};
+			const double len{std::sqrt(dot(n, n))};
+			if (len > 1e-12)
+				for (auto &c3 : n)
+					c3 /= len;
+			else
+				n = {{-dir[0], -dir[1], -dir[2]}};
+			if (dot(n, dir) > 0)
+				for (auto &c3 : n)
+					c3 = -c3;
+			out.wall = true;
+			out.normal = n;
+			return out;
+		}
+		for (std::size_t k{}; k != 3; ++k)
+			from[k] += dir[k] * best;
+		seg = next;
+	}
+	return out;
+}
+
 /*
  * The room of each segment and the level's character.
  */
