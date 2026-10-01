@@ -1971,33 +1971,40 @@ inline unsigned count(const std::size_t n)
 /* The quiet moments of a phase of the weave; with fewer than
  * MIN_PHASE_N, with those of the neighbouring phases of the same kind
  * (idle or in a run), nearest first; with still too few, all.
+ * `members`, if given, is set to the phases taken.
  */
 [[nodiscard]]
-inline accum::phase_cell quiet_near(const accum &a, const std::size_t phase)
+inline accum::phase_cell quiet_near(const accum &a, const std::size_t phase, std::array<bool, DODGE_PHASES> *const members = nullptr)
 {
 	constexpr std::size_t per_kind{limits::PHASE_BINS + 1};
 	const std::size_t kind{phase / per_kind}, bin{phase % per_kind};
 	accum::phase_cell sum;
-	const auto add{[&sum](const accum::phase_cell &c) {
+	std::array<bool, DODGE_PHASES> taken{};
+	const auto add{[&sum, &taken, &a](const std::size_t ph) {
+		const auto &c{a.quiet[ph]};
+		taken[ph] = true;
 		sum.n += c.n;
 		sum.switched += c.switched;
 		for (std::size_t k{}; k != DODGE_LATENCY_BINS; ++k)
 			sum.first[k] += c.first[k];
 	}};
-	add(a.quiet[phase]);
+	add(phase);
 	for (std::size_t r{1}; sum.n < limits::MIN_PHASE_N && r != per_kind; ++r)
 	{
 		if (bin >= r)
-			add(a.quiet[kind * per_kind + bin - r]);
+			add(kind * per_kind + bin - r);
 		if (bin + r < per_kind)
-			add(a.quiet[kind * per_kind + bin + r]);
+			add(kind * per_kind + bin + r);
 	}
 	if (sum.n < limits::MIN_PHASE_N)
 	{
 		sum = {};
-		for (const auto &c : a.quiet)
-			add(c);
+		taken = {};
+		for (std::size_t ph{}; ph != DODGE_PHASES; ++ph)
+			add(ph);
 	}
+	if (members)
+		*members = taken;
 	return sum;
 }
 
@@ -2029,15 +2036,22 @@ inline void finish_dodge(const accum &a, player_stats &s)
 	if (a.bursts.empty() || a.quiet_n < limits::MIN_PHASE_N)
 		return;
 	double switched{}, expected{}, room{};
-	std::array<double, DODGE_PHASES> per_phase{};
+	/* How much the expected count moves per switch in each phase's
+	 * quiet moments: a burst's p0 is the share of its pool of phases,
+	 * and the pools of neighbouring phases overlap.
+	 */
+	std::array<double, DODGE_PHASES> weight{};
 	std::array<double, DODGE_LATENCY_BINS> seen{}, due{};
 	std::vector<double> p0s;
 	for (const auto &b : a.bursts)
 	{
-		const auto c{quiet_near(a, b.phase)};
+		std::array<bool, DODGE_PHASES> pool;
+		const auto c{quiet_near(a, b.phase, &pool)};
 		const double p0{ratio(c.switched, c.n)};
 		p0s.push_back(p0);
-		per_phase[b.phase] += 1;
+		for (std::size_t ph{}; ph != DODGE_PHASES; ++ph)
+			if (pool[ph])
+				weight[ph] += 1.0 / c.n;
 		if (b.switched)
 			++switched;
 		expected += p0;
@@ -2055,7 +2069,12 @@ inline void finish_dodge(const accum &a, player_stats &s)
 	const double excess{(switched - expected) / room};
 	s.dodge_prob = std::clamp(excess, 0.0, 1.0);
 	/* The standard error: the bursts' own chance (binomial, at the
-	 * measured excess) and that of the quiet moments' shares.
+	 * measured excess) and that of the quiet moments' shares.  The
+	 * latter per phase of the quiet moments, with the weight of all the
+	 * bursts whose pool takes it (pools that share a phase share its
+	 * error); its chance of a switch is that of its own pool, kept off
+	 * 0 and 1 (eight quiet moments without a switch do not make the
+	 * chance certain).
 	 */
 	double var{};
 	for (const double p0 : p0s)
@@ -2064,11 +2083,11 @@ inline void finish_dodge(const accum &a, player_stats &s)
 		var += q * (1 - q);
 	}
 	for (std::size_t ph{}; ph != DODGE_PHASES; ++ph)
-		if (per_phase[ph] > 0)
+		if (weight[ph] > 0 && a.quiet[ph].n)
 		{
 			const auto c{quiet_near(a, ph)};
-			const double p0{ratio(c.switched, c.n)};
-			var += per_phase[ph] * per_phase[ph] * p0 * (1 - p0) / c.n;
+			const double p{(c.switched + 0.5) / (c.n + 1.0)};
+			var += weight[ph] * weight[ph] * a.quiet[ph].n * p * (1 - p);
 		}
 	s.dodge_se = std::sqrt(var) / room;
 	s.dodge_measurable = a.bursts.size() >= 8 && room >= limits::DODGE_MIN_ROOM;
