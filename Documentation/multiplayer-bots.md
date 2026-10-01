@@ -3291,7 +3291,7 @@ someone took it):
 | ... taken / went for | 70 % / 86 % | 12–32 % / 29–39 % |
 | ... went for when first seen in a fight | 77 % of 22 | 14–47 % of 14–22 |
 | ... taken from (median, p90) | 136, 268 units, 2.7 s after the first sight | 71–160, 125–310 units, 2.5–11 s |
-| Other pickups in sight: taken / went for | 27 % / 76 % | 18–22 % / 45–51 % |
+| Other pickups in sight: taken / went for | 27 % / 75 % | 18–22 % / 44–51 % |
 
 **Root cause.** A bot took a big missile only as a grab (§9.8, §9.9:
 within 85 units, a detour of at most 60 units in a fight) or by its
@@ -3313,7 +3313,8 @@ state and the bot's own state only), no protocol change:
   `collect_in_fight`).
 - **In sight at any distance.** Every strategy tick the bot checks the
   power pickups in its field of view (the skill's, 45°–90°) for a line
-  of sight, nearest first, at most 4: one it did not know is learned, one
+  of sight, at most 4 (the nearest two, the others in turn, so that a
+  near one behind a wall does not starve a far one in plain sight): one it did not know is learned, one
   it remembers whose place it sees empty (someone took it) is forgotten
   (the bot turns to its next goal; behind a corner it flies on until it
   sees the place or arrives, as a human does).

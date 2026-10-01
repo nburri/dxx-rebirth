@@ -738,8 +738,9 @@ the screen) with a free line to it through the level (section 8.8; the
 ray may end 5 units short), checked every third sample; without the
 level's geometry, within 150 units (`SIGHT_NO_GEOMETRY`). It **went for
 it** when afterwards (in the same life, until it was taken) it came
-within 25 units of it or half the distance of the first sight
-(`GO_FOR_NEAR`, `GO_FOR_SHARE`); it took it, or lost the race.
+within 25 units of it or half the distance of the first sight, and
+at least 10 units closer than then (`GO_FOR_NEAR`, `GO_FOR_SHARE`,
+`GO_FOR_MIN_CLOSE`); it took it, or lost the race.
 
 Per class (power missiles: the smart missile, mega and earthshaker,
 ids 20, 21 and 45 of Descent 2; every other pickup) the report gives the
@@ -761,9 +762,9 @@ pilot's choice.
 **The Corona recording** (2026-10-01, EC against five bots, geometry
 from the missions): EC had 43 power missiles in sight, went for 86 % (77
 % of the 22 seen in a fight), took 70 %, from a median 136 units (p90
-268) 2.7 s after the first sight; other pickups: went for 76 %, took 27
+268) 2.7 s after the first sight; other pickups: went for 75 %, took 27
 %. The bots: 23–28 power missiles in sight each, went for 29–39 %, took
-12–32 %; other pickups 45–51 % and 18–22 %. Bots' behaviour since:
+12–32 %; other pickups 44–51 % and 18–22 %. Bots' behaviour since:
 Documentation/multiplayer-bots.md §9.14.
 
 ## 9. Code

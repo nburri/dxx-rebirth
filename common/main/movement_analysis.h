@@ -806,7 +806,8 @@ constexpr double DETOUR_DEG{40};
  * (section 8.8; SIGHT_SLACK short of it is enough), checked every
  * SIGHT_STRIDE samples; without the level's geometry, within
  * SIGHT_NO_GEOMETRY.  It went for it when it came within GO_FOR_NEAR of
- * it, or GO_FOR_SHARE of the distance at the first sight.
+ * it, or GO_FOR_SHARE of the distance at the first sight, and at least
+ * GO_FOR_MIN_CLOSE closer than then.
  */
 constexpr std::int64_t SIGHT_LOOK_BACK_MS{15000};
 constexpr double DROP_RADIUS{40};
@@ -816,6 +817,7 @@ constexpr std::size_t SIGHT_STRIDE{3};
 constexpr double SIGHT_NO_GEOMETRY{150};
 constexpr double GO_FOR_NEAR{25};
 constexpr double GO_FOR_SHARE{0.5};
+constexpr double GO_FOR_MIN_CLOSE{10};
 /* After losing sight: a pursuit ends when the player has not moved
  * toward the enemy for this long; one counts from this length.
  */
@@ -2257,7 +2259,10 @@ inline void scan_pickup_sight(const track &tr, accum &a)
 			if (pts[k].dt > 0)
 				flown += length(off(pts[k - 1].u.pos, pts[k].u.pos));
 		}
-		const bool went{sp.own || nearest <= std::max(limits::GO_FOR_NEAR, limits::GO_FOR_SHARE * d0)};
+		/* Closer by GO_FOR_MIN_CLOSE at least: one seen right next to the
+		 * ship and left there is not gone for.
+		 */
+		const bool went{sp.own || (nearest <= std::max(limits::GO_FOR_NEAR, limits::GO_FOR_SHARE * d0) && d0 - nearest >= limits::GO_FOR_MIN_CLOSE)};
 		++c.seen;
 		c.taken += sp.own;
 		c.went += went;

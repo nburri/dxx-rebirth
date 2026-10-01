@@ -470,8 +470,11 @@ struct bot_state
 	uint32_t turn_from{}, turn_until{};
 	/* Section 9.5: a valuable powerup close by is the collect goal. */
 	bool grabbing{};
-	/* Section 9.14: a power pickup is the collect goal. */
+	/* Section 9.14: a power pickup is the collect goal; the turn of the
+	 * further power pickups' line of sight checks.
+	 */
 	bool power_going{};
+	uint8_t power_sight_turn{};
 	/* Section 9.9: with no target, the enemy whose last known place the
 	 * bot flies to (b::seek_utility), and for each enemy the memory
 	 * tick + 1 of the place it searched already (reached, nobody there).
@@ -1980,9 +1983,10 @@ goal_place best_upgrade(const bot_state &bs, const b::resource_view &res, const 
  * earthshaker anywhere on the screen).  One the bot does not know yet is
  * learned; one it remembers whose place it sees empty (someone took it)
  * is forgotten.  At most BOT_POWER_LOS_BUDGET lines of sight per
- * strategy tick, nearest first; the bot's own memory first.
+ * strategy tick: the nearest, then the others in turn.
  */
-constexpr unsigned BOT_POWER_LOS_BUDGET{4};
+constexpr std::size_t BOT_POWER_LOS_BUDGET{4};
+constexpr std::size_t BOT_POWER_LOS_NEAREST{2};
 
 void sight_power_powerups(bot_state &bs, const object &obj, const uint32_t tick)
 {
@@ -2037,10 +2041,26 @@ void sight_power_powerups(bot_state &bs, const object &obj, const uint32_t tick)
 	std::sort(cand.begin(), cand.begin() + n, [](const candidate &a, const candidate &c) {
 		return a.dist < c.dist;
 	});
-	unsigned budget{BOT_POWER_LOS_BUDGET};
-	for (std::size_t i = 0; i < n && budget; ++i, --budget)
+	/* The nearest BOT_POWER_LOS_NEAREST every time, the others in turn
+	 * (the review of PR #71: a near one behind a wall, checked first at
+	 * every tick, would starve a far one in plain sight, as B3's checks
+	 * did, section 9.5).
+	 */
+	std::array<std::size_t, BOT_POWER_LOS_BUDGET> order;
+	std::size_t checks{0};
+	for (; checks < n && checks < BOT_POWER_LOS_NEAREST; ++checks)
+		order[checks] = checks;
+	if (n > BOT_POWER_LOS_NEAREST)
 	{
-		const auto &c{cand[i]};
+		const std::size_t rest{n - BOT_POWER_LOS_NEAREST};
+		const std::size_t turns{std::min<std::size_t>(rest, BOT_POWER_LOS_BUDGET - BOT_POWER_LOS_NEAREST)};
+		for (std::size_t j = 0; j < turns; ++j)
+			order[checks++] = BOT_POWER_LOS_NEAREST + (bs.power_sight_turn + j) % rest;
+		bs.power_sight_turn = static_cast<uint8_t>((bs.power_sight_turn + turns) % rest);
+	}
+	for (std::size_t i = 0; i < checks; ++i)
+	{
+		const auto &c{cand[order[i]]};
 		if (!line_clear(obj, obj.pos, obj.segnum, to_fixvec(c.place), 0, true))
 			continue;
 		if (c.gone_key != 0xffff)
