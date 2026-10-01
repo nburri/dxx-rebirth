@@ -862,6 +862,9 @@ bvec sim::follow_path(sim_bot &b, const bool engaged)
 	const double reach{std::max(SHIP_SIZE * 1.5, 5.0)};
 	const bool collecting{b.goal == sim_goal::collect};
 	b.point_index = advance_along(b.points, b.point_index, pos, reach);
+	/* The review of PR #74: the points the string skipped (advance_skipped). */
+	if (!opt.before)
+		b.point_index = advance_skipped(b.points, b.point_index, b.steer_index, pos);
 	if (b.steer_index < b.point_index)
 		b.steer_index = b.point_index;
 	const auto &target{b.points[b.steer_index]};

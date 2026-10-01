@@ -467,6 +467,31 @@ std::size_t pull_string_ahead(const std::size_t from, const std::size_t current,
 	return at;
 }
 
+/* The review of PR #74: the points the string skips are not flown past
+ * (the bot cuts the corner, often further than 3 `reach` from them), so
+ * advance_along never passed them: the path's point stayed behind, the
+ * remaining length (the stuck detector's progress) grew as the bot flew
+ * on, the string could not be pulled beyond PULL_AHEAD points of it, and
+ * a broken string went back to points behind the bot.  In the -botarena
+ * games the stuck recoveries went up 1.7 to 3.8 times.  The bot's point
+ * on the path is now the skipped point nearest to it (never back).
+ */
+[[nodiscard]]
+inline std::size_t advance_skipped(const std::span<const vec3> points, const std::size_t index, const std::size_t steer, const vec3 &pos)
+{
+	if (steer <= index || steer >= points.size())
+		return index;
+	std::size_t best{index};
+	double best_d{distance(pos, points[index])};
+	for (std::size_t i{index + 1}; i < steer; ++i)
+		if (const double d{distance(pos, points[i])}; d < best_d)
+		{
+			best_d = d;
+			best = i;
+		}
+	return best;
+}
+
 /* Section 9.15: how far the bot flies straight on: to the point it
  * steers at, then along the path while each leg stays within
  * STRAIGHT_MAX_BEND of the direction to that point.

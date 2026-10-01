@@ -3581,6 +3581,23 @@ thrust and the afterburner most of the time) and the strafe reversals
 They are the next steps, to be measured with `-botarena` and the mode
 byte of the next real games.
 
+**The review of PR #74.** The string pulled up to 24 points ahead skips
+points the bot never flies near (it cuts the corner, often further than
+3 `reach` from them), so `advance_along` never passed them: the path's
+point stayed behind, the stuck detector's remaining length grew as the
+bot flew on, the string could not be pulled beyond 24 points of it, and
+a broken string went back to points behind the bot.  In `-botarena`
+(seeds 1–3) the stuck recoveries went from 36–56 to 90–92 a game on
+Corona and from 12–16 to 52–58 on Earth Shaker, on the paths of collect
+and retreat goals.  The bot's point on the path is now the skipped
+point nearest to it, never back (`advance_skipped`, after
+`advance_along`): 11–14 recoveries a game on Corona (seeds 2–5), 11–26
+on Earth Shaker (seeds 1–3); the flight's numbers above are unchanged
+(speed 44.3 and 44.4, strafe reversals 76 and 77 a minute, keys 91 % and
+82 %).  The kills of a game are still below experimental-netcode's (Corona
+62–80 against 79–108, Earth Shaker 68–77 against 84–89), as in the level
+simulation.
+
 **Tests.** `test-bot-brain`: the modes, the hold, the blocked line, the
 path's keys (thresholds, release, hold, facing the path, the command),
 the walls round a fight (turned at a run's start, let go during it, a

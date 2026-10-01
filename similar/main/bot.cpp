@@ -2937,6 +2937,10 @@ vec3 follow_path(bot_state &bs, object &obj, const bool engaged)
 	 */
 	const bool collecting{bs.goal == bot_goal::collect};
 	bs.point_index = b::advance_along(bs.points, bs.point_index, pos, reach);
+	/* The review of PR #74: the points the string skipped are passed
+	 * (b::advance_skipped).
+	 */
+	bs.point_index = b::advance_skipped(bs.points, bs.point_index, bs.steer_index, pos);
 	if (bs.steer_index < bs.point_index)
 		bs.steer_index = bs.point_index;
 	const auto &target{bs.points[bs.steer_index]};

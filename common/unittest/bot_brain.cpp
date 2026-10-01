@@ -1137,7 +1137,6 @@ void test_pursuit_target_and_corner()
 	CHECK(!corner_approach_point(bot, corner, {60, 0, 0}, 0).peek);
 	CHECK(!corner_approach_point(bot, corner, {}, keep).peek);
 }
-}
 
 /* Section 9.15: the fight's movement. */
 void test_fight_movement()
@@ -1372,6 +1371,19 @@ void test_fight_movement()
 		CHECK(std::abs(straight_ahead(pts, 3, {0, 0, 30}) - 20) < 1e-9);
 		CHECK(straight_ahead(pts, 5, {}) == 0);
 	}
+	/* The review of PR #74: the points the string skipped are passed (the
+	 * nearest of them to the bot, never back).
+	 */
+	{
+		const std::array<vec3, 6> pts{{{0, 0, 0}, {10, 0, 0}, {20, 0, 0}, {20, 10, 0}, {20, 20, 0}, {20, 30, 0}}};
+		/* Cutting the corner toward point 5, near point 3. */
+		CHECK(advance_skipped(pts, 0, 5, {16, 9, 0}) == 3);
+		/* Not beyond the point steered at, not back. */
+		CHECK(advance_skipped(pts, 3, 5, {0, 0, 0}) == 3);
+		CHECK(advance_skipped(pts, 2, 2, {20, 30, 0}) == 2);
+		CHECK(advance_skipped(pts, 0, 1, {20, 30, 0}) == 0);
+		CHECK(advance_skipped(pts, 0, 6, {20, 30, 0}) == 0);
+	}
 	/* lateral_keys: immediate per axis. */
 	{
 		lateral_keys l;
@@ -1380,6 +1392,7 @@ void test_fight_movement()
 		v = l.apply({-1, -1, 0}, 11, std::array<bool, 2>{{true, false}});
 		CHECK(v.x == -1 && v.y == 0);
 	}
+}
 }
 
 int main()
