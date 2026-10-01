@@ -119,11 +119,6 @@ int64_t distance(const vec3 &p, const box &b)
 /* Sides: 0 -x, 1 +x, 2 -y, 3 +y, 4 -z, 5 +z.  Corner (dx, dy, dz) is
  * vertex dx + 2 dy + 4 dz.
  */
-constexpr std::array<std::array<unsigned, 4>, 6> side_to_verts{{
-	{{0, 2, 4, 6}}, {{1, 3, 5, 7}},
-	{{0, 1, 4, 5}}, {{2, 3, 6, 7}},
-	{{0, 1, 2, 3}}, {{4, 5, 6, 7}},
-}};
 
 struct segment
 {
