@@ -748,6 +748,21 @@ struct goal_inputs
 	 * are short detours (PURSUIT_COLLECT, PURSUIT_GRAB_PATH).
 	 */
 	bool pursuing{};
+	/* Section 9.14: the best power pickup (power_pickup_value): its
+	 * utility without a fight, the factor on the fight's utility it is
+	 * worth in sight (0: not in sight, or the race is lost), whether it
+	 * is invulnerability (taken in danger too), and whether the bot's
+	 * target is about to die (the fight goes on).
+	 */
+	double power{};
+	double power_fight{};
+	bool power_invulnerability{};
+	bool kill_imminent{};
+	/* The bot goes for that power pickup already: against the other
+	 * collections it counts GOAL_HYSTERESIS more (no flip between two
+	 * powerups of about the same utility).
+	 */
+	bool power_current{};
 	/* The goal of the last strategy tick (hysteresis). */
 	std::optional<goal_kind> current;
 };
@@ -761,6 +776,8 @@ enum class collect_source : uint8_t
 	plain,
 	phase,
 	grab,
+	/* Section 9.14: a power pickup (power_goal_utility). */
+	power,
 };
 
 struct goal_utilities
@@ -1282,6 +1299,207 @@ constexpr double grab_goal_utility(const goal_inputs &in, const double fight)
 	return std::max(fight * GRAB_DETOUR_FACTOR, ROAM_UTILITY * 2);
 }
 
+/* Section 9.14: the power pickups.  The playtest of 2026-10-01 (Corona,
+ * EC against five bots): "A human player will always try to get an
+ * earthshaker missile and also a mega missile if they see it anywhere on
+ * their screen.  They will take large detours just to pick up these
+ * missiles because if they don't, another player will and get the
+ * kills."  EC took 15 of the 24 earthshakers, 5 of the 13 megas and 10
+ * of the 25 smart missiles; each bot 1-3 earthshakers.  A bot took them
+ * only as a grab within 85 units (GRAB_HIGH_RADIUS) or by value over
+ * path (collect_utility: 3 for an earthshaker, a third of it 120 units
+ * away).
+ *
+ * Now a power pickup in sight (in the bot's field of view with a line
+ * of sight, at any distance) is a goal of its own: the earthshaker,
+ * mega missile and invulnerability (big), the smart missile and the
+ * cloak (smart).  It is worth POWER_BIG_UTILITY (POWER_SMART_UTILITY)
+ * times the bot's power weight (power_pickup_weight: Trainee hardly,
+ * Insane nearly always, Collector most), falling to half at
+ * POWER_DISTANCE_SCALE of path; in a fight, at least POWER_FIGHT_FACTOR
+ * times the fight times the weight, so from a weight of about 0.55 the
+ * bot breaks off a fight for it (the fight's hysteresis is 1.2), unless
+ * its target is about to die (kill_imminent) or the bot is in danger
+ * (in_danger; invulnerability is taken then too).  A power pickup the
+ * bot only knows (its memory, its map knowledge by skill) counts
+ * POWER_KNOWN_FACTOR as much, within POWER_KNOWN_PATH, and does not
+ * break off a fight.  What the rules do not let the bot take (it is
+ * full) is no power pickup.
+ *
+ * The race: an enemy the bot knows nearer to the powerup does not stop
+ * it (humans go anyway, POWER_RACE_BEHIND), but one that will clearly
+ * be there first (its way less than POWER_RACE_GIVE_UP of the bot's;
+ * POWER_RACE_GIVE_UP_GOING once the bot goes for it) does.
+ */
+enum class power_class : uint8_t
+{
+	none,
+	smart,
+	big,
+};
+
+[[nodiscard]]
+constexpr power_class power_class_of(const item_desc &d)
+{
+	switch (d.kind)
+	{
+		case item::secondary:
+			switch (static_cast<secondary>(d.secondary))
+			{
+				case secondary::mega:
+				case secondary::earthshaker:
+					return power_class::big;
+				case secondary::smart:
+					return power_class::smart;
+				default:
+					return power_class::none;
+			}
+		case item::invulnerability:
+			return power_class::big;
+		case item::cloak:
+			return power_class::smart;
+		default:
+			return power_class::none;
+	}
+}
+
+constexpr double POWER_BIG_UTILITY{7};
+constexpr double POWER_SMART_UTILITY{4.5};
+constexpr double POWER_DISTANCE_SCALE{300};
+constexpr double POWER_FIGHT_FACTOR{2.2};
+constexpr double POWER_KNOWN_FACTOR{0.5};
+constexpr double POWER_KNOWN_PATH{400};
+/* Seen at any distance, but not beyond this much path (the level's
+ * other end).
+ */
+constexpr double POWER_MAX_PATH{1500};
+constexpr double POWER_RACE_GIVE_UP{0.5};
+/* ... and once the bot goes for it, this (no flip as the two close in). */
+constexpr double POWER_RACE_GIVE_UP_GOING{0.4};
+constexpr double POWER_RACE_BEHIND{0.8};
+/* An enemy's way to the powerup: its straight distance times this (the
+ * bot's own is its path cost).
+ */
+constexpr double POWER_ENEMY_PATH_FACTOR{1.3};
+/* The target is about to die: in sight, at most this many shields, and
+ * within this distance.
+ */
+constexpr double POWER_KILL_SHIELDS{20};
+constexpr double POWER_KILL_DISTANCE{150};
+/* A power pickup counts as in sight this long after the bot last saw it
+ * (it turns its nose, the path goes round a corner), and as long as the
+ * bot goes for it, up to POWER_COMMIT_MS after the last sighting.
+ */
+constexpr unsigned POWER_SEEN_HOLD_MS{3000};
+constexpr unsigned POWER_COMMIT_MS{20000};
+
+/* `sighted`: the tick + 1 of the last sighting (known_powerup::sighted,
+ * 0: never); `going_for_it`: the bot's collect goal is this powerup.
+ */
+[[nodiscard]]
+constexpr bool power_in_sight(const uint32_t sighted, const uint32_t tick, const bool going_for_it)
+{
+	if (!sighted || sighted > tick + 1)
+		return false;
+	const uint32_t since{tick + 1 - sighted};
+	return since <= ticks_from_ms(POWER_SEEN_HOLD_MS) || (going_for_it && since <= ticks_from_ms(POWER_COMMIT_MS));
+}
+
+/* The power weight of a skill and style (a style profile's
+ * tune.power_pickup in place of it): Trainee 0.15, Rookie 0.35,
+ * Hotshot 0.6, Ace 0.8, Insane 0.95, times Balanced 1, Aggressive 0.95
+ * (it gets the kills with them), Cautious 0.85, Collector 1.1; at most 1.
+ */
+[[nodiscard]]
+constexpr double power_pickup_weight(const bot_skill k, const bot_style s)
+{
+	constexpr std::array<double, BOT_SKILL_COUNT> by_skill{{0.15, 0.35, 0.6, 0.8, 0.95}};
+	constexpr std::array<double, BOT_STYLE_COUNT> by_style{{1, 0.95, 0.85, 1.1}};
+	const auto ki{static_cast<unsigned>(k)};
+	const auto si{static_cast<unsigned>(s)};
+	return std::min(by_skill[ki < BOT_SKILL_COUNT ? ki : 2] * by_style[si < BOT_STYLE_COUNT ? si : 0], 1.0);
+}
+
+/* The race factor: 1 when the bot is nearer than every enemy it knows
+ * (`enemy_way`: the nearest one's, none: no enemy known), 0 when an
+ * enemy will clearly be there first.
+ */
+[[nodiscard]]
+constexpr double power_race_factor(const double own_path, const std::optional<double> enemy_way, const bool going = false)
+{
+	if (!enemy_way)
+		return 1;
+	if (*enemy_way < (going ? POWER_RACE_GIVE_UP_GOING : POWER_RACE_GIVE_UP) * own_path)
+		return 0;
+	return *enemy_way < own_path ? POWER_RACE_BEHIND : 1;
+}
+
+struct power_view
+{
+	power_class cls{power_class::none};
+	/* In sight now, or lately, or the bot goes for it (section 9.14). */
+	bool in_sight{};
+	/* The bot's path cost to it. */
+	double path{};
+	/* The nearest known enemy's way to it (none: no enemy known). */
+	std::optional<double> enemy_way;
+	/* The rules let the bot take it (net_objects_bot_can_use: not full). */
+	bool usable{true};
+	/* power_pickup_weight, or the profile's tune.power_pickup. */
+	double weight{};
+	/* The bot goes for it already (the race's hysteresis). */
+	bool going{};
+};
+
+struct power_value
+{
+	/* The utility without a fight. */
+	double utility{};
+	/* The factor on the fight's utility (0: it does not break off a
+	 * fight).
+	 */
+	double fight{};
+};
+
+[[nodiscard]]
+constexpr power_value power_pickup_value(const power_view &v)
+{
+	if (v.cls == power_class::none || !v.usable || !(v.weight > 0) || v.path > POWER_MAX_PATH)
+		return {};
+	if (!v.in_sight && v.path > POWER_KNOWN_PATH)
+		return {};
+	const double race{power_race_factor(v.path, v.enemy_way, v.going)};
+	if (!(race > 0))
+		return {};
+	const double base{v.cls == power_class::big ? POWER_BIG_UTILITY : POWER_SMART_UTILITY};
+	const double u{v.weight * base * race * POWER_DISTANCE_SCALE / (POWER_DISTANCE_SCALE + std::max(v.path, 0.0))};
+	if (!v.in_sight)
+		return {u * POWER_KNOWN_FACTOR, 0};
+	return {u, v.weight * race * POWER_FIGHT_FACTOR};
+}
+
+[[nodiscard]]
+constexpr bool kill_imminent(const bool target_visible, const double target_shields, const double target_distance)
+{
+	return target_visible && target_shields <= POWER_KILL_SHIELDS && target_distance <= POWER_KILL_DISTANCE;
+}
+
+/* The power pickup's utility against the fight (`fight`: the engage or
+ * hunt utility); 0 when there is none, or the bot is in danger (but for
+ * invulnerability).
+ */
+[[nodiscard]]
+constexpr double power_goal_utility(const goal_inputs &in, const double fight)
+{
+	if (!(in.power > 0))
+		return 0;
+	if (in_danger(in) && !in.power_invulnerability)
+		return 0;
+	if (fight > 0 && in.power_fight > 0 && !in.kill_imminent)
+		return std::max(in.power, fight * in.power_fight);
+	return in.power;
+}
+
 [[nodiscard]]
 inline goal_utilities goal_utility(const goal_inputs &in)
 {
@@ -1321,10 +1539,19 @@ inline goal_utilities goal_utility(const goal_inputs &in)
 	const bool pursuit_limits{in.pursuing && !in_danger(in)};
 	if (pursuit_limits)
 		collect *= PURSUIT_COLLECT;
-	if (const double grab{grab_goal_utility(in, std::max(at(goal_kind::engage), at(goal_kind::hunt)))}; grab > 0 && grab >= collect)
+	const double fight{std::max(at(goal_kind::engage), at(goal_kind::hunt))};
+	if (const double grab{grab_goal_utility(in, fight)}; grab > 0 && grab >= collect)
 	{
 		collect = grab;
 		r.collect_from = collect_source::grab;
+	}
+	/* Section 9.14: a power pickup (not reduced in a fight, armed or in
+	 * pursuit: power_goal_utility weighs it against the fight).
+	 */
+	if (const double power{power_goal_utility(in, fight)}; power > 0 && power * (in.power_current ? GOAL_HYSTERESIS : 1) > collect)
+	{
+		collect = power;
+		r.collect_from = collect_source::power;
 	}
 	at(goal_kind::collect) = collect;
 	double refuel{in.refuel * in.collect_weight};
@@ -1624,6 +1851,10 @@ struct known_powerup
 	uint32_t learned_tick{};
 	/* Not a goal before this tick (it could not be taken on arrival). */
 	uint32_t ignore_until{};
+	/* Section 9.14: the tick + 1 the bot last had it in sight (0:
+	 * never; power pickups only).
+	 */
+	uint32_t sighted{};
 };
 
 class powerup_memory
@@ -1684,10 +1915,13 @@ public:
 		for (auto &k : m_items)
 			if (k.key == p.key)
 			{
-				const auto ignore{k.signature == p.signature ? k.ignore_until : 0};
+				const bool same{k.signature == p.signature};
+				const auto ignore{same ? k.ignore_until : 0};
+				const auto sighted{same ? std::max(k.sighted, p.sighted) : p.sighted};
 				k = p;
 				k.learned_tick = tick;
 				k.ignore_until = ignore;
+				k.sighted = sighted;
 				return true;
 			}
 		if (full())
@@ -1711,6 +1945,15 @@ public:
 		k.ignore_until = 0;
 		return true;
 	}
+	/* Section 9.14: forget that powerup, not another object that took
+	 * its slot since.
+	 */
+	void forget(const uint16_t key, const uint16_t signature)
+	{
+		std::erase_if(m_items, [=](const known_powerup &k) {
+			return k.key == key && k.signature == signature;
+		});
+	}
 	void forget(const uint16_t key)
 	{
 		std::erase_if(m_items, [key](const known_powerup &k) {
@@ -1729,6 +1972,12 @@ public:
 		for (auto &k : m_items)
 			if (k.key == key)
 				k.ignore_until = until;
+	}
+	/* Section 9.14: the bot has it in sight at `tick`. */
+	void sight(const uint16_t key, const uint16_t signature, const uint32_t tick)
+	{
+		if (const auto k{find(key, signature)})
+			k->sighted = tick + 1;
 	}
 };
 

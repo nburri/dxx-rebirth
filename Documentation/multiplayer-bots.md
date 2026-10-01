@@ -3227,6 +3227,7 @@ go 0.25 and 0.7 of the way from the base value):
 | `tune.volley_size` | the rounds of a good volley of light missiles (rounded; a smart missile burst at most 3), in place of the table |
 | `tune.pursuit_seconds` | how long a lost target is pursued, in place of the skill's and style's (0: it lets it go, no pursuit starts) |
 | `tune.grab_detour` | a scale of the detour a grab may take in a fight: the measured share of pickups off course over 0.45, the bots' with the scale 1 |
+| `tune.power_pickup` | the bot's power weight (§9.14), in place of the skill's and style's: the measured share of the power missiles in sight the pilot went for |
 | `measured.*` | not read: statistics for people |
 
 No key is left unapplied. One caveat: the analysis counts a large turn
@@ -3266,6 +3267,108 @@ profiles and checks that their keys change the flight (bobbing, every
 own turn reversed, no burn fleeing; a far band backs off);
 `build/common/test-bot-style-profiles -f FILE` checks a file and prints
 the bot it makes at every skill.
+
+### 9.14 After the Corona game (2026-10-01): power missiles
+
+The playtest on "Corona" (CORONA (Sny), 805 segments, mostly large open
+rooms), EC against five bots for 22 minutes: "Flight looks much better,
+but powerup priority is off. A human player will always try to get an
+earthshaker missile and also a mega missile if they see it anywhere on
+their screen. They will take large detours just to pick up these
+missiles because if they don't, another player will and get the
+kills." EC took 15 of the 24 earthshakers, 5 of the 13 megas and 10 of
+the 25 smart missiles; each bot 1–3 earthshakers. EC made 59 kills for
+17 deaths.
+
+**Measured** (`movrec-analyse --missions`, the new pickup sight of
+movement-recording.md §8.9, on that recording; "in sight" is within 45°
+of the nose with a free line through the level, up to 15 s before
+someone took it):
+
+| | EC | bots (5) |
+|---|---|---|
+| Power missiles in sight before taken | 43 | 23–28 each |
+| ... taken / went for | 70 % / 86 % | 12–32 % / 29–39 % |
+| ... went for when first seen in a fight | 77 % of 22 | 14–47 % of 14–22 |
+| ... taken from (median, p90) | 136, 268 units, 2.7 s after the first sight | 71–160, 125–310 units, 2.5–11 s |
+| Other pickups in sight: taken / went for | 27 % / 76 % | 18–22 % / 45–51 % |
+
+**Root cause.** A bot took a big missile only as a grab (§9.8, §9.9:
+within 85 units, a detour of at most 60 units in a fight) or by its
+value over the path (`collect_utility`: an earthshaker 120 units away
+is worth 1, a third of a middling fight, and in a fight a third of
+that). It had to notice it first within its awareness (Hotshot 350
+units), with at most eight line-of-sight checks per strategy tick,
+nearest first.
+
+**Changes** (`bot_goals.h`: `power_class_of`, `power_pickup_weight`,
+`power_pickup_value`, `power_goal_utility`; `bot.cpp`:
+`sight_power_powerups`, `best_power`), deterministic on the host (game
+state and the bot's own state only), no protocol change:
+
+- **Power pickups**: the earthshaker, the mega missile and
+  invulnerability (big, `POWER_BIG_UTILITY` 7), the smart missile and
+  the cloak (smart, 4.5). Invulnerability and cloak count because the
+  goal code already treats them with the big missiles (`GRAB_HIGH_VALUE`,
+  `collect_in_fight`).
+- **In sight at any distance.** Every strategy tick the bot checks the
+  power pickups in its field of view (the skill's, 45°–90°) for a line
+  of sight, nearest first, at most 4: one it did not know is learned, one
+  it remembers whose place it sees empty (someone took it) is forgotten
+  (the bot turns to its next goal; behind a corner it flies on until it
+  sees the place or arrives, as a human does).
+  A sighting holds 3 s (`POWER_SEEN_HOLD_MS`: the nose turns, the path
+  goes round a corner) and, while the bot goes for it, up to 20 s
+  (`POWER_COMMIT_MS`).
+- **The weight** (`power_pickup_weight`): Trainee 0.15, Rookie 0.35,
+  Hotshot 0.6, Ace 0.8, Insane 0.95, times Balanced 1, Aggressive 0.95
+  (it gets the kills with them), Cautious 0.85, Collector 1.1, at most 1;
+  a style profile's `tune.power_pickup` replaces it (§9.13).
+- **The utility**: weight × 7 (4.5) × 300 / (300 + path) without a fight
+  (an earthshaker in sight 400 units away: 2.85 for Insane, above any
+  plain collection); in a fight at least weight × 2.2 × the fight's
+  utility, so from a weight of about 0.55 (Hotshot Balanced and up) the
+  bot breaks off a fight for it, the engagement's hysteresis (1.2)
+  included. It is not cut down in a fight, armed with heavy missiles or
+  in pursuit as a plain collection is. Not when the target is about to
+  die (`kill_imminent`: in sight, at most 20 shields, within 150 units),
+  nor in danger (`in_danger`, the retreat; invulnerability is taken
+  then too).
+- **Known, not in sight** (the memory, the map knowledge by skill):
+  half as much, within 400 units of path, and never above a fight.
+- **The race**: the nearest enemy the bot knows (its memory), its way
+  1.3 × the straight distance. Nearer than the bot: the bot still goes
+  (0.8 of the utility); nearer than half the bot's way: it gives up
+  (once on its way, at 0.4 of it: no flip as the two close in).
+- **Full**: what the rules do not let the bot take
+  (`net_objects_bot_can_use`) is no power pickup: no detour.
+- **No flip**: the power pickup the bot goes for counts 1.2 more against
+  another power pickup and against the other collections.
+- The bot's log shows ` power` on the goal line and on the pickup line.
+
+**Profile.** `movrec-analyse` writes `tune.power_pickup` (the share of
+the power missiles in sight the pilot went for; confidence from the
+sightings: low below 8, high from 25, at most medium when most were
+judged without the level's geometry) and, for people,
+`measured.power_seen`, `measured.power_taken_share`,
+`measured.power_fight_went_share`, `measured.power_sight_distance_median`
+and `measured.other_pickup_went_share`. EC: 0.86 (high, 43 sightings),
+between Ace and Insane. The bots of the recording measured 0.29–0.39 with
+the old code; how close the new weights come to the measured shares is
+for the next recordings to tell (the weight is the bot's drive, the
+measure what a pilot did, with races lost and powerups taken by others
+in between).
+
+**Tests.** `test-bot-goals`: an earthshaker in sight 400 units away
+beats energy the bot needs 20 units away and an engagement it is in
+(Insane, Hotshot), not for Rookie and Trainee; full: no detour; an enemy
+nearer but not by half: still goes, nearer by half: gives up; the kill
+imminent, in danger (invulnerability yes), only known, the smart
+missile, armed and in pursuit, the sighting's hold and commitment, the
+hysteresis, the memory's sighting. `test-movement-analysis`: a
+synthetic pilot that flies to every power missile it sees (in a fight
+too) and lets the other pickups go, one that lets all go and one that
+takes all; their shares, distances, times and the profile key.
 
 ---
 

@@ -1613,10 +1613,233 @@ void test_pursuit_block()
 	}
 }
 
+/* Section 9.14: the power pickups. */
+void test_power_pickups()
+{
+	const item_desc shaker{item::secondary, primary::laser, 9};
+	const item_desc mega{item::secondary, primary::laser, 4};
+	const item_desc smart{item::secondary, primary::laser, 3};
+	const item_desc conc{item::secondary, primary::laser, 0};
+	CHECK(power_class_of(shaker) == power_class::big && power_class_of(mega) == power_class::big);
+	CHECK(power_class_of(smart) == power_class::smart);
+	CHECK(power_class_of({item::invulnerability}) == power_class::big && power_class_of({item::cloak}) == power_class::smart);
+	CHECK(power_class_of(conc) == power_class::none && power_class_of({item::shield}) == power_class::none && power_class_of({item::quad}) == power_class::none);
+	/* The weight: by skill, Collector strongest, Aggressive close to
+	 * Balanced, Trainee barely, at most 1.
+	 */
+	for (unsigned k = 0; k < BOT_SKILL_COUNT; ++k)
+	{
+		const auto skill{static_cast<bot_skill>(k)};
+		const double balanced{power_pickup_weight(skill, bot_style::balanced)};
+		CHECK(power_pickup_weight(skill, bot_style::collector) >= balanced);
+		CHECK(power_pickup_weight(skill, bot_style::aggressive) >= 0.9 * balanced);
+		CHECK(power_pickup_weight(skill, bot_style::cautious) < balanced);
+		for (unsigned s = 0; s < BOT_STYLE_COUNT; ++s)
+			CHECK(power_pickup_weight(skill, static_cast<bot_style>(s)) <= 1);
+		if (k)
+			CHECK(balanced > power_pickup_weight(static_cast<bot_skill>(k - 1), bot_style::balanced));
+	}
+	CHECK(power_pickup_weight(bot_skill::trainee, bot_style::balanced) <= 0.2);
+	CHECK(power_pickup_weight(bot_skill::insane, bot_style::collector) == 1);
+	const double insane{power_pickup_weight(bot_skill::insane, bot_style::balanced)};
+	const double trainee{power_pickup_weight(bot_skill::trainee, bot_style::balanced)};
+
+	/* An earthshaker in sight 400 units of path away, no enemy near it. */
+	power_view far_shaker{.cls = power_class::big, .in_sight = true, .path = 400, .enemy_way = std::nullopt, .usable = true, .weight = insane};
+	const auto v{power_pickup_value(far_shaker)};
+	CHECK(v.utility > 0 && v.fight > 0);
+	/* A bot in a fight (an enemy in sight, a middling score), engaged
+	 * already, with energy 20 units away that it needs.
+	 */
+	resource_view r;
+	r.energy = 50;
+	goal_inputs in;
+	in.has_target = true;
+	in.target_visible = true;
+	in.target_score = 1.2;
+	in.threatened = true;
+	in.shields = 80;
+	in.retreat_shields = 45;
+	in.collect = collect_utility(item_value({item::energy}, r), 20);
+	in.collect_path = 20;
+	in.current = goal_kind::engage;
+	const auto power_in{[&](goal_inputs g, const power_value &pv) {
+		g.power = pv.utility;
+		g.power_fight = pv.fight;
+		return g;
+	}};
+	/* Without the power pickup it fights on. */
+	CHECK(choose_goal(in) == goal_kind::engage);
+	/* With it, Insane breaks off the fight for the far earthshaker. */
+	{
+		const auto g{power_in(in, v)};
+		CHECK(choose_goal(g) == goal_kind::collect);
+		CHECK(goal_utility(g).collect_from == collect_source::power);
+	}
+	/* No fight: the far earthshaker beats the energy close by. */
+	{
+		auto g{power_in(in, v)};
+		g.has_target = g.target_visible = g.threatened = false;
+		g.current.reset();
+		CHECK(choose_goal(g) == goal_kind::collect);
+		CHECK(goal_utility(g).collect_from == collect_source::power);
+		/* ... and a Trainee takes the energy (its power utility is about
+		 * the plain one's).
+		 */
+		auto t{far_shaker};
+		t.weight = trainee;
+		g = power_in(g, power_pickup_value(t));
+		CHECK(goal_utility(g).collect_from == collect_source::plain);
+	}
+	/* A Trainee does not break off the fight. */
+	{
+		auto t{far_shaker};
+		t.weight = trainee;
+		CHECK(choose_goal(power_in(in, power_pickup_value(t))) == goal_kind::engage);
+	}
+	/* From about the Hotshot weight it does. */
+	{
+		auto t{far_shaker};
+		t.weight = power_pickup_weight(bot_skill::hotshot, bot_style::balanced);
+		CHECK(choose_goal(power_in(in, power_pickup_value(t))) == goal_kind::collect);
+		t.weight = power_pickup_weight(bot_skill::rookie, bot_style::balanced);
+		CHECK(choose_goal(power_in(in, power_pickup_value(t))) == goal_kind::engage);
+	}
+	/* Full (the rules do not let it take more): no detour. */
+	{
+		auto f{far_shaker};
+		f.usable = false;
+		const auto fv{power_pickup_value(f)};
+		CHECK(fv.utility == 0 && fv.fight == 0);
+		CHECK(choose_goal(power_in(in, fv)) == goal_kind::engage);
+	}
+	/* The race: an enemy nearer, but not by half: still goes. */
+	{
+		auto e{far_shaker};
+		e.enemy_way = 300;
+		const auto ev{power_pickup_value(e)};
+		CHECK(ev.utility > 0 && ev.utility < v.utility);
+		CHECK(choose_goal(power_in(in, ev)) == goal_kind::collect);
+		/* An enemy that will clearly be there first: gives up. */
+		e.enemy_way = 150;
+		const auto lost{power_pickup_value(e)};
+		CHECK(lost.utility == 0 && lost.fight == 0);
+		CHECK(choose_goal(power_in(in, lost)) == goal_kind::engage);
+		/* Going for it already, the bot gives up only later (no flip
+		 * as the two close in).
+		 */
+		e.enemy_way = 0.45 * e.path;
+		CHECK(power_pickup_value(e).utility == 0);
+		e.going = true;
+		CHECK(power_pickup_value(e).utility > 0);
+		e.enemy_way = 0.35 * e.path;
+		CHECK(power_pickup_value(e).utility == 0);
+		e.going = false;
+		/* An enemy further than the bot: no difference. */
+		e.enemy_way = 600;
+		CHECK(power_pickup_value(e).utility == v.utility);
+	}
+	/* The kill is imminent: the fight goes on. */
+	{
+		auto g{power_in(in, v)};
+		g.kill_imminent = true;
+		CHECK(choose_goal(g) == goal_kind::engage);
+		CHECK(kill_imminent(true, 15, 80) && !kill_imminent(false, 15, 80) && !kill_imminent(true, 40, 80) && !kill_imminent(true, 15, 300));
+	}
+	/* Shields critical (in danger): it retreats; invulnerability is
+	 * taken even so.
+	 */
+	{
+		auto g{power_in(in, v)};
+		g.shields = 20;
+		CHECK(choose_goal(g) == goal_kind::retreat);
+		g.power_invulnerability = true;
+		CHECK(choose_goal(g) == goal_kind::collect);
+	}
+	/* Only known (not in sight): worth less, does not break off the
+	 * fight, nothing beyond POWER_KNOWN_PATH.
+	 */
+	{
+		auto k{far_shaker};
+		k.in_sight = false;
+		k.path = 300;
+		const auto kv{power_pickup_value(k)};
+		CHECK(kv.utility > 0 && kv.fight == 0);
+		CHECK(choose_goal(power_in(in, kv)) == goal_kind::engage);
+		k.path = POWER_KNOWN_PATH + 1;
+		CHECK(power_pickup_value(k).utility == 0);
+		/* In sight it is taken from the other end of a large level. */
+		k.in_sight = true;
+		k.path = 1200;
+		CHECK(power_pickup_value(k).utility > 0);
+	}
+	/* The smart missile counts less than the earthshaker. */
+	{
+		auto sm{far_shaker};
+		sm.cls = power_class::smart;
+		CHECK(power_pickup_value(sm).utility < v.utility);
+	}
+	/* Armed with a heavy missile and in pursuit, the power pickup is
+	 * not cut down as a plain collection is.
+	 */
+	{
+		auto g{power_in(in, v)};
+		g.armed = armed_level::heavy;
+		CHECK(choose_goal(g) == goal_kind::collect);
+		g.target_visible = false;
+		g.pursuing = true;
+		g.current = goal_kind::hunt;
+		CHECK(choose_goal(g) == goal_kind::collect);
+	}
+	/* In sight: the sighting holds for POWER_SEEN_HOLD_MS, and while the
+	 * bot goes for it up to POWER_COMMIT_MS.
+	 */
+	{
+		const uint32_t seen{1000};
+		CHECK(!power_in_sight(0, seen, true));
+		CHECK(power_in_sight(seen + 1, seen, false));
+		CHECK(power_in_sight(seen + 1, seen + ticks_from_ms(POWER_SEEN_HOLD_MS) - 1, false));
+		CHECK(!power_in_sight(seen + 1, seen + ticks_from_ms(POWER_SEEN_HOLD_MS) + 1, false));
+		CHECK(power_in_sight(seen + 1, seen + ticks_from_ms(POWER_SEEN_HOLD_MS) + 1, true));
+		CHECK(!power_in_sight(seen + 1, seen + ticks_from_ms(POWER_COMMIT_MS) + 1, true));
+	}
+	/* Two power pickups of about the same utility: the one the bot goes
+	 * for keeps the collect goal against a plain collection just above
+	 * it (no flip).
+	 */
+	{
+		auto g{in};
+		g.has_target = g.target_visible = g.threatened = false;
+		g.current = goal_kind::collect;
+		g.power = 2.0;
+		g.collect = 2.2;
+		CHECK(goal_utility(g).collect_from == collect_source::plain);
+		g.power_current = true;
+		CHECK(goal_utility(g).collect_from == collect_source::power);
+	}
+	/* The memory keeps the sighting when the entry is refreshed. */
+	{
+		powerup_memory m;
+		m.learn(kp(5, 7, 45), 10);
+		m.sight(5, 7, 12);
+		m.learn(kp(5, 7, 45), 20);
+		CHECK(m.find(5, 7)->sighted == 13);
+		/* Another object in the slot: a new sighting record. */
+		m.learn(kp(5, 8, 45), 30);
+		CHECK(m.find(5, 8)->sighted == 0);
+		/* Forgetting the old one leaves the new one in its slot. */
+		m.forget(5, 7);
+		CHECK(m.knows(5, 8));
+		m.forget(5, 8);
+		CHECK(!m.knows(5, 8));
+	}
+}
+
 }
 
 int main()
 {
+	test_power_pickups();
 	test_pursuit();
 	test_pursuit_block();
 	test_log_tuning_goals();

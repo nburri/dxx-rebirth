@@ -996,6 +996,128 @@ void test_brawler()
 	CHECK(sn.profile.base_style == bot::bot_style::cautious);
 }
 
+/* Section 8.9: a programme of powerups in sight.  Every 20 s a powerup
+ * appears 120 units ahead and 40 to the side of the pilot (in its view,
+ * within SIGHT_NO_GEOMETRY: the test level has no geometry): a power
+ * missile (an earthshaker) and another pickup (energy) in turn, in a
+ * fight (the enemy in sight 100 units ahead) in half of the cycles.  The
+ * pilot flies to the classes it goes for and takes them; it turns away
+ * from the others, which the enemy takes 8 s later.
+ */
+flight fly_pickups(const char *const name, const bool for_power, const bool for_other, const unsigned cycles)
+{
+	const auto m{pyro_gx()};
+	flight out;
+	out.h.name = name;
+	constexpr unsigned cycle_ticks{20 * RATE};
+	ship s;
+	vec3 spot{};
+	bool taken{}, power{}, fight{}, goes{};
+	const auto add_event{[&out](const std::uint32_t ms, const unsigned pid, const unsigned id) {
+		out.events.push_back({ms, {record_type::pickup, ms, static_cast<std::uint8_t>(pid), PLAYER_NONE, 0, static_cast<std::uint8_t>(id), 0, 0}});
+	}};
+	for (std::uint32_t tick{}; tick != cycles * cycle_ticks; ++tick)
+	{
+		const std::uint32_t now{ms_of_tick(tick)};
+		const unsigned cycle{tick / cycle_ticks};
+		const unsigned in_cycle{tick % cycle_ticks};
+		if (in_cycle == 0)
+		{
+			/* A new start, at rest, the nose along z, far from the last
+			 * (the analysis looks 15 s back for the first sight).
+			 */
+			s = {};
+			s.pos = {{static_cast<double>(cycle) * 1200 - 14000, 0, 0}};
+			spot = s.pos + s.fwd * 120 + s.right * 40;
+			power = cycle % 2 == 0;
+			fight = cycle % 4 < 2;
+			goes = power ? for_power : for_other;
+			taken = false;
+		}
+		std::array<double, 6> c{};
+		const auto to_spot{spot - s.pos};
+		if (goes && !taken)
+		{
+			steer(s, to_spot, m, c);
+			c[0] = 1;
+			if (length(to_spot) < 6)
+			{
+				taken = true;
+				add_event(now, 0, power ? 45 : 1);
+				++out.pickups;
+			}
+		}
+		else if (!goes)
+		{
+			/* Away from it. */
+			steer(s, s.right * -1.0 - s.fwd * 0.2, m, c);
+			c[0] = 1;
+		}
+		moment mo;
+		/* The enemy: in sight ahead in a fight, else out of sight; takes
+		 * the powerup the pilot leaves.
+		 */
+		mo.enemy = true;
+		mo.sight = fight && in_cycle < 6 * RATE;
+		mo.enemy_pos = fight && in_cycle < 6 * RATE ? s.pos + s.fwd * 100 - s.right * 30 : s.pos + vec3{{0, 600, 0}};
+		if (!goes && in_cycle >= 8 * RATE && in_cycle < 8 * RATE + 3)
+		{
+			mo.enemy_pos = spot;
+			if (in_cycle == 8 * RATE + 1)
+				add_event(now, 1, power ? 45 : 1);
+		}
+		s.step(c, m);
+		mo.pilot = s;
+		mo.ctl = c;
+		mo.shields = 100;
+		out.moments.push_back(mo);
+	}
+	std::stable_sort(out.events.begin(), out.events.end(), [](const happening &a, const happening &b) { return a.ms < b.ms; });
+	return out;
+}
+
+/* Section 8.9: a pilot that goes for every power missile it sees (in a
+ * fight too) and lets the other pickups go, and one that lets all go.
+ */
+void test_power_pickups()
+{
+	constexpr unsigned cycles{24};
+	const auto hoarder{analyse_flight(fly_pickups("hoarder", true, false, cycles))};
+	const auto &h{hoarder.stats};
+	const auto &hp{h.pickup_sight[0]}, &ho{h.pickup_sight[1]};
+	CHECK(hp.seen == cycles / 2 && ho.seen == cycles / 2);
+	CHECK(hp.taken == cycles / 2 && ho.taken == 0);
+	CHECK_RANGE(hp.went_share, 1, 1);
+	CHECK_RANGE(hp.fight_went_share, 1, 1);
+	CHECK(hp.fight_seen == cycles / 4 && hp.calm_seen == cycles / 4);
+	CHECK_RANGE(ho.went_share, 0, 0);
+	CHECK(ho.lost == 0);
+	/* Seen at the start, 126 units away, taken some 3 s later. */
+	CHECK_RANGE(hp.sight_distance.p50, 115, 130);
+	CHECK_RANGE(hp.take_s.p50, 2, 5);
+	CHECK(h.pickup_sight_geometry_share == 0);
+	/* The profile: every one in sight; no geometry, so medium at most. */
+	CHECK_RANGE(value(hoarder.profile, "tune.power_pickup"), 1, 1);
+	CHECK(hoarder.profile.find("tune.power_pickup")->confidence == bot::style_confidence::medium);
+	CHECK_RANGE(value(hoarder.profile, "measured.power_taken_share"), 1, 1);
+
+	const auto idle{analyse_flight(fly_pickups("idle", false, false, cycles))};
+	const auto &ip{idle.stats.pickup_sight[0]};
+	CHECK(ip.seen == cycles / 2 && ip.taken == 0);
+	CHECK_RANGE(ip.went_share, 0, 0);
+	CHECK_RANGE(value(idle.profile, "tune.power_pickup"), 0, 0);
+
+	/* One that takes everything: no difference between the classes. */
+	const auto all{analyse_flight(fly_pickups("all", true, true, cycles))};
+	CHECK_RANGE(all.stats.pickup_sight[0].went_share, 1, 1);
+	CHECK_RANGE(all.stats.pickup_sight[1].went_share, 1, 1);
+
+	/* The profile's key drives the bot: its power weight. */
+	const auto applied{bot::apply_style_profile(hoarder.profile, bot::bot_skill::rookie)};
+	CHECK(applied.tune.power_pickup > bot::power_pickup_weight(bot::bot_skill::rookie, hoarder.profile.base_style));
+	CHECK(applied.tune.power_pickup <= 1);
+}
+
 /* The dodger sidesteps 80 % of the bursts, 250 ms late; pilots that
  * weave all the time (on the clock, or in runs of varying length) and
  * never dodge must not look like dodgers; one that weaves and dodges by
@@ -1957,6 +2079,7 @@ int main(const int argc, char **const argv)
 	test_turns();
 	test_sniper();
 	test_brawler();
+	test_power_pickups();
 	test_dodger();
 	test_afterburner();
 	test_estimated_controls();

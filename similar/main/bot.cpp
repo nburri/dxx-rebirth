@@ -470,6 +470,8 @@ struct bot_state
 	uint32_t turn_from{}, turn_until{};
 	/* Section 9.5: a valuable powerup close by is the collect goal. */
 	bool grabbing{};
+	/* Section 9.14: a power pickup is the collect goal. */
+	bool power_going{};
 	/* Section 9.9: with no target, the enemy whose last known place the
 	 * bot flies to (b::seek_utility), and for each enemy the memory
 	 * tick + 1 of the place it searched already (reached, nobody there).
@@ -633,6 +635,7 @@ struct bot_state
 		turn_to = 0xff;
 		turn_from = turn_until = 0;
 		grabbing = false;
+		power_going = false;
 		pursuit = {};
 		heavy_why = b::heavy_verdict::none_owned;
 		missile.reset();
@@ -1972,6 +1975,169 @@ goal_place best_upgrade(const bot_state &bs, const b::resource_view &res, const 
 	return best;
 }
 
+/* Section 9.14: the power pickups in sight (b::power_class_of): in the
+ * field of view with a line of sight, at any distance (a human sees an
+ * earthshaker anywhere on the screen).  One the bot does not know yet is
+ * learned; one it remembers whose place it sees empty (someone took it)
+ * is forgotten.  At most BOT_POWER_LOS_BUDGET lines of sight per
+ * strategy tick, nearest first; the bot's own memory first.
+ */
+constexpr unsigned BOT_POWER_LOS_BUDGET{4};
+
+void sight_power_powerups(bot_state &bs, const object &obj, const uint32_t tick)
+{
+	auto &Objects = LevelUniqueObjectState.Objects;
+	const auto pos{to_vec(obj.pos)};
+	const auto frame{to_frame(obj.orient)};
+	const double fov{bs.skill.fov_half_deg};
+	struct candidate
+	{
+		double dist;
+		objnum_t objnum;
+		/* A remembered entry whose powerup is gone: its key and
+		 * signature.
+		 */
+		uint16_t gone_key, gone_sig;
+		vec3 place;
+	};
+	std::array<candidate, 16> cand;
+	std::size_t n{0};
+	const auto add{[&](const candidate &c) {
+		if (n < cand.size())
+			cand[n++] = c;
+		else if (auto furthest{std::ranges::max_element(cand, {}, &candidate::dist)}; furthest->dist > c.dist)
+			*furthest = c;
+	}};
+	for (const auto &k : bs.powerups.items())
+	{
+		if (b::power_class_of(item_of(static_cast<powerup_type_t>(k.type))) == b::power_class::none)
+			continue;
+		const auto to{k.pos - pos};
+		if (!b::in_field_of_view(frame.f, to, fov))
+			continue;
+		if (live_powerup(k))
+			add({b::length(to), objnum_t{k.key}, 0xffff, 0, k.pos});
+		else
+			add({b::length(to), objnum_t{}, k.key, k.signature, k.pos});
+	}
+	for (const auto &&o : Objects.vcptridx)
+	{
+		if (o->type != object_type::OBJ_POWERUP || (o->flags & OF_SHOULD_BE_DEAD))
+			continue;
+		if (b::power_class_of(item_of(get_powerup_id(o))) == b::power_class::none)
+			continue;
+		if (bs.powerups.knows(o.get_unchecked_index(), underlying_value(o->signature)))
+			continue;
+		const auto ppos{to_vec(o->pos)};
+		const auto to{ppos - pos};
+		if (!b::in_field_of_view(frame.f, to, fov))
+			continue;
+		add({b::length(to), o.get_unchecked_index(), 0xffff, 0, ppos});
+	}
+	std::sort(cand.begin(), cand.begin() + n, [](const candidate &a, const candidate &c) {
+		return a.dist < c.dist;
+	});
+	unsigned budget{BOT_POWER_LOS_BUDGET};
+	for (std::size_t i = 0; i < n && budget; ++i, --budget)
+	{
+		const auto &c{cand[i]};
+		if (!line_clear(obj, obj.pos, obj.segnum, to_fixvec(c.place), 0, true))
+			continue;
+		if (c.gone_key != 0xffff)
+		{
+			/* Its place in sight, empty: someone took it. */
+			bs.powerups.forget(c.gone_key, c.gone_sig);
+			continue;
+		}
+		const auto &&o{Objects.vcptridx(c.objnum)};
+		const uint16_t key = o.get_unchecked_index();
+		const uint16_t sig = underlying_value(o->signature);
+		if (!bs.powerups.knows(key, sig))
+		{
+			const auto netid{net_objects_netid_of(o)};
+			bs.powerups.learn({
+				.key = key,
+				.signature = sig,
+				.type = static_cast<uint8_t>(get_powerup_id(o)),
+				.count = static_cast<uint32_t>(std::max(o->ctype.powerup_info.count, 0)),
+				.initial = netid != 0xffff && ::dcx::net_v2::is_level_netid(netid),
+				.pos = c.place,
+				.segment = o->segnum,
+			}, tick, true);
+		}
+		bs.powerups.sight(key, sig, tick);
+	}
+}
+
+/* Section 9.14: the best power pickup the bot knows (b::power_pickup_value),
+ * with the race against the enemies it knows of.
+ */
+struct power_place
+{
+	goal_place place;
+	b::power_value value;
+};
+
+[[nodiscard]]
+power_place best_power(const bot_state &bs, const object &obj, const b::resource_view &res, const uint32_t tick, const uint32_t memory_ticks)
+{
+	power_place best;
+	double best_rank{0};
+	const double weight{bs.tune.power_pickup >= 0 ? bs.tune.power_pickup : b::power_pickup_weight(bs.skill_level, bs.cfg.style)};
+	if (!(weight > 0))
+		return best;
+	auto &Objects = LevelUniqueObjectState.Objects;
+	const auto pos{to_vec(obj.pos)};
+	for (const auto &k : bs.powerups.items())
+	{
+		if (tick < k.ignore_until)
+			continue;
+		const auto type{static_cast<powerup_type_t>(k.type)};
+		const auto desc{item_of(type)};
+		const auto cls{b::power_class_of(desc)};
+		if (cls == b::power_class::none || !(b::item_value(desc, res) > 0))
+			continue;
+		const auto cost{bs.dist.cost(k.segment)};
+		if (!cost)
+			continue;
+		const double straight{b::distance(pos, k.pos)};
+		const double path{k.segment == obj.segnum ? straight : std::min(*cost + b::distance(B.graph.position(k.segment), k.pos), *cost + straight)};
+		/* The enemies it knows of (seen or heard within its memory). */
+		std::optional<double> enemy_way;
+		for (playernum_t i = 0; i < N_players && i < MAX_PLAYERS; ++i)
+		{
+			const auto &m{bs.memory[i]};
+			if (i == bs.pid || !m.valid || same_team(bs.pid, i) || tick - m.tick > memory_ticks)
+				continue;
+			if (Objects.vcptr(vcplayerptr(i)->objnum)->type != object_type::OBJ_PLAYER)
+				continue;
+			const double way{b::distance(m.pos, k.pos) * b::POWER_ENEMY_PATH_FACTOR};
+			if (!enemy_way || way < *enemy_way)
+				enemy_way = way;
+		}
+		const bool going{bs.goal == bot_goal::collect && bs.power_going && bs.collect_key == k.key && bs.collect_sig == k.signature};
+		const auto v{b::power_pickup_value({
+			.cls = cls,
+			.in_sight = b::power_in_sight(k.sighted, tick, going),
+			.path = path,
+			.enemy_way = enemy_way,
+			.usable = net_objects_bot_can_use(bs.pid, type, k.count),
+			.weight = weight,
+			.going = going,
+		})};
+		/* The one it goes for keeps its place against another of about
+		 * the same utility (the goal's hysteresis).
+		 */
+		const double rank{v.utility * (going ? b::GOAL_HYSTERESIS : 1)};
+		if (v.utility > 0 && rank > best_rank)
+		{
+			best_rank = rank;
+			best = {{v.utility, path, k.segment, k.pos, k.key, k.signature, false, true, b::item_value(desc, res), desc.kind == b::item::invulnerability}, v};
+		}
+	}
+	return best;
+}
+
 /* Section 4.7: the best fuel centre (energy) or repair centre (shields). */
 [[nodiscard]]
 goal_place best_centre(const bot_state &bs, const b::resource_view &res, const bool repair_only = false)
@@ -2320,10 +2486,14 @@ void think(bot_state &bs, object &obj, const uint32_t tick)
 	/* Section 4.7: what it knows and what it needs. */
 	compute_distances(bs, obj);
 	learn_powerups(bs, obj, tick);
+	/* Section 9.14: the power pickups in sight, at any distance. */
+	sight_power_powerups(bs, obj, tick);
 	const auto res{resources_of(obj)};
 	auto collect{best_collect(bs, res, tick)};
 	/* Section 9.5: a valuable powerup close by. */
 	const auto grab{best_grab(bs, obj, res, tick)};
+	/* Section 9.14: the best power pickup. */
+	const auto power{best_power(bs, obj, res, tick, memory_ticks)};
 	auto centre{best_centre(bs, res)};
 	/* A bot hovering in a centre stays until it is full, unless an enemy
 	 * comes into sight while it has enough to fight.
@@ -2453,6 +2623,15 @@ void think(bot_state &bs, object &obj, const uint32_t tick)
 	 */
 	const bool pursuing{bs.pursuit.active && bs.target == bs.pursuit.who && !target_visible};
 	const bool given_up{bs.target && !target_visible && !bs.pursuit.active && bs.pursuit.ended.blocks(*bs.target, bs.memory[*bs.target].tick)};
+	/* Section 9.14: the target is about to die (a power pickup does not
+	 * break off this fight).
+	 */
+	bool kill_soon{false};
+	if (bs.target && target_distance)
+	{
+		const auto &t{*Objects.vcptr(vcplayerptr(*bs.target)->objnum)};
+		kill_soon = t.type == object_type::OBJ_PLAYER && b::kill_imminent(target_visible, t.shields / 65536.0, *target_distance);
+	}
 	const b::goal_inputs gin{
 		.has_target = bs.target.has_value() && !given_up,
 		.target_visible = target_visible,
@@ -2481,6 +2660,11 @@ void think(bot_state &bs, object &obj, const uint32_t tick)
 		.collector = bs.cfg.style == b::bot_style::collector,
 		.detour_scale = bs.tune.grab_detour_scale,
 		.pursuing = pursuing,
+		.power = power.value.utility,
+		.power_fight = power.value.fight,
+		.power_invulnerability = power.place.invulnerability,
+		.kill_imminent = kill_soon,
+		.power_current = bs.power_going && bs.goal == bot_goal::collect && power.place.key == bs.collect_key && power.place.sig == bs.collect_sig,
 		.current = current_goal(bs, target_visible),
 	};
 	const auto goal{b::choose_goal(gin)};
@@ -2490,8 +2674,11 @@ void think(bot_state &bs, object &obj, const uint32_t tick)
 	 * (section 9.8).
 	 */
 	bs.grabbing = goal == b::goal_kind::collect && u.collect_from == b::collect_source::grab;
+	bs.power_going = goal == b::goal_kind::collect && u.collect_from == b::collect_source::power;
 	if (bs.grabbing)
 		collect = grab;
+	else if (bs.power_going)
+		collect = power.place;
 	else if (goal == b::goal_kind::collect && phase_upgrade && u.collect_from == b::collect_source::phase)
 		collect = *phase_upgrade;
 	/* Section 9.9: seeking is the hunt without a target. */
@@ -3919,9 +4106,9 @@ void log_summary(const bot_state &bs, const object &obj, const uint32_t tick)
 		std::snprintf(powerup, sizeof(powerup), "-");
 	char arm[160];
 	describe_armament(pi, arm, sizeof(arm));
-	con_printf(CON_VERBOSE, "bots: '%s' goal=%s %.2f (next %s %.2f, collect %.2f%s%s%s%s%s) tgt=%s | %s [%s] | sh=%.0f en=%.0f | pu=%s | heavy=%s min=%.0f keep=%.0f risk=%.2f/%.1f%s%s%s%s | light=%s armed=%s",
+	con_printf(CON_VERBOSE, "bots: '%s' goal=%s %.2f (next %s %.2f, collect %.2f%s%s%s%s%s%s) tgt=%s | %s [%s] | sh=%.0f en=%.0f | pu=%s | heavy=%s min=%.0f keep=%.0f risk=%.2f/%.1f%s%s%s%s | light=%s armed=%s",
 		static_cast<const char *>(bs.cfg.name),
-		goal_name(bs.chosen), bs.chosen_u, goal_name(bs.runner_up), bs.runner_up_u, bs.collect_u, bs.grabbing ? " grab" : "", bs.powerup_phase ? " phase" : "", bs.third_parties ? " 3rd-party" : "", bs.seek_who ? " seek" : "", bs.pursuit.active ? " pursuit" : "",
+		goal_name(bs.chosen), bs.chosen_u, goal_name(bs.runner_up), bs.runner_up_u, bs.collect_u, bs.grabbing ? " grab" : "", bs.power_going ? " power" : "", bs.powerup_phase ? " phase" : "", bs.third_parties ? " 3rd-party" : "", bs.seek_who ? " seek" : "", bs.pursuit.active ? " pursuit" : "",
 		target,
 		primary_name(underlying_value(pi.Primary_weapon.get_active())), arm,
 		obj.shields / 65536.0, pi.energy / 65536.0,
@@ -5267,7 +5454,7 @@ bool bot_touch_powerup(object &ship, const vmobjptridx_t powerup)
 	{
 		char arm[160];
 		describe_armament(pi, arm, sizeof(arm));
-		con_printf(CON_VERBOSE, "bots: '%s' takes powerup %u (granted%s): %s", static_cast<const char *>(bs->cfg.name), underlying_value(id), bs->grabbing ? ", grab" : "", arm);
+		con_printf(CON_VERBOSE, "bots: '%s' takes powerup %u (granted%s): %s", static_cast<const char *>(bs->cfg.name), underlying_value(id), bs->grabbing ? ", grab" : bs->power_going ? ", power" : "", arm);
 	}
 	return true;
 }
