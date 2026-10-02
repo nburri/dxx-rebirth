@@ -677,6 +677,10 @@ constexpr fix64 GAME_INFO_BROADCAST_INTERVAL{F1_0 * 10};
 constexpr fix64 STATS_INTERVAL{F1_0 * 5};
 constexpr fix64 ENDLEVEL_INTERVAL{F1_0};
 constexpr fix64 EXTRAS_INTERVAL{F1_0 / 50};
+/* menu_pump runs a frame only if none ran for this long (a menu with a
+ * polling handler runs one every event loop).
+ */
+constexpr fix64 MENU_PUMP_INTERVAL{F1_0 / 100};
 
 struct queued_message
 {
@@ -799,6 +803,23 @@ struct session_state
 	/* Datagrams rejected before or by the transport since the last report. */
 	unsigned rejected_datagrams{};
 	bool in_frame{};
+	/* When frame() last ran (menu_pump runs it only if nothing else did). */
+	fix64 last_frame{};
+	/* Host: the lobby menu is up, so a JOIN_REQUEST while `starting` may
+	 * add a player (not while the host sets up the teams, between the
+	 * lobby and the level start).
+	 */
+	bool lobby_open{};
+	/* Host: the nonce of the last JOIN_REQUEST logged. */
+	uint32_t logged_join_nonce{};
+	/* Client: a GAME_INFO from the asked host was ignored and logged. */
+	bool info_drop_logged{};
+	/* Client: JOIN_REQUESTs sent in the running attempt. */
+	unsigned join_requests_sent{};
+	/* Client: why the connection to the host ended while waiting for the
+	 * level start, for the level wait's message (client_take_host_lost).
+	 */
+	std::optional<host_lost_info> host_lost;
 };
 
 session_state S;
@@ -1028,6 +1049,66 @@ const char *close_reason_name(const close_reason r)
 		case close_reason::local: return "closed";
 	}
 	return "unknown";
+}
+
+/* For the game log: kick, deny and leave reasons by name. */
+[[nodiscard]]
+const char *kick_reason_name(const kick_player_reason r)
+{
+	switch (r)
+	{
+		case kick_player_reason::closed: return "game closed";
+		case kick_player_reason::full: return "game full";
+		case kick_player_reason::endlevel: return "between levels";
+		case kick_player_reason::dork: return "not selected";
+		case kick_player_reason::aborted: return "game aborted";
+		case kick_player_reason::level: return "wrong level";
+		case kick_player_reason::kicked: return "kicked";
+		case kick_player_reason::version: return "version mismatch";
+		case kick_player_reason::duplicate_callsign: return "duplicate callsign";
+		case kick_player_reason::queue_overflow: return "link too slow (queue overflow or unacknowledged data)";
+		case kick_player_reason::protocol_error: return "protocol errors";
+		case kick_player_reason::checksum: return "level checksum mismatch";
+		case kick_player_reason::snapshot_failed: return "join not completed";
+		case kick_player_reason::timeout: return "timeout";
+		case kick_player_reason::quit: return "quit";
+		case kick_player_reason::cancelled: return "cancelled";
+		case kick_player_reason::host_shutdown: return "host shut down";
+	}
+	return "unknown";
+}
+
+[[nodiscard]]
+const char *network_state_name(const network_state s)
+{
+	switch (s)
+	{
+		case network_state::menu: return "menu";
+		case network_state::playing: return "playing";
+		case network_state::browsing: return "browsing";
+		case network_state::waiting: return "waiting for the level start";
+		case network_state::starting: return "lobby";
+		case network_state::endlevel: return "level end";
+	}
+	return "unknown";
+}
+
+[[nodiscard]]
+unsigned net_clock_to_ms(const ::dcx::net_v2::net_clock t)
+{
+	return static_cast<unsigned>((t * 1000) / 65536);
+}
+
+/* Section 3.6 / 4.3: generous timeouts while no level runs
+ * (net_v2::timeouts_for); applied every frame, so they switch with the
+ * level start and end.
+ */
+void apply_timeouts(connection &c, const ::dcx::net_v2::peer_phase phase)
+{
+	const auto t{::dcx::net_v2::timeouts_for(Network_status == network_state::playing, phase)};
+	const auto &cfg{c.config()};
+	if (cfg.timeout != t.idle || cfg.unacked_timeout != t.unacked)
+		c.set_timeouts(t.idle, t.unacked);
 }
 
 [[nodiscard]]
@@ -3143,6 +3224,7 @@ void kick_peer(peer &p, const kick_player_reason why)
 {
 	if (!p.conn)
 		return;
+	con_printf(CON_NORMAL, "net: KICK to P#%u: %s (%s)", peer_slot(p), kick_reason_name(why), network_state_name(Network_status));
 	const uint8_t reason{underlying_value(why)};
 	peer_queue(p, session_msg::kick, std::span<const uint8_t>(&reason, 1));
 	p.ph = peer::phase::closing;
@@ -3214,6 +3296,8 @@ void deny_join(const _sockaddr &to, const uint32_t nonce, const kick_player_reas
 	std::array<uint8_t, ::dcx::net_v2::NET_V2_JOIN_DENY_SIZE> buf;
 	d.write(buf.data());
 	send_unconnected(to, session_id, 0, 0, session_msg::join_deny, buf);
+	_sockaddr::presentation_buffer dbuf;
+	con_printf(CON_NORMAL, "net: join refused for %s:%hu: %s", dxx_ntop(to, dbuf), dxx_sockaddr_port(to), kick_reason_name(why));
 }
 
 /* Host: create the connection to a newly accepted player in `slot` and
@@ -3529,6 +3613,16 @@ void handle_join_request(const std::span<const uint8_t> payload, const _sockaddr
 	callsign_t callsign;
 	callsign.copy_lower(std::span<const char, CALLSIGN_LEN>(reinterpret_cast<const char *>(req->callsign.data()), CALLSIGN_LEN));
 	const auto rank{build_rank_from_untrusted(req->rank)};
+	/* The game log names every join attempt once (the client retries
+	 * every 500 ms with the same nonce).
+	 */
+	const bool first_request{req->client_nonce != S.logged_join_nonce};
+	if (first_request)
+	{
+		S.logged_join_nonce = req->client_nonce;
+		_sockaddr::presentation_buffer dbuf;
+		con_printf(CON_NORMAL, "net: join request from '%s' at %s:%hu (attempt %08x, game %s)", callsign.operator const char *(), dxx_ntop(from, dbuf), dxx_sockaddr_port(from), req->client_nonce, network_state_name(Network_status));
+	}
 	/* A retry of an attempt that already has a connection: the same
 	 * answer while the accept may have been lost, nothing once the
 	 * connection is established (a delayed or reordered retry).
@@ -3551,7 +3645,13 @@ void handle_join_request(const std::span<const uint8_t> payload, const _sockaddr
 	switch (Network_status)
 	{
 		case network_state::starting:
-			lobby_add_player(*req, callsign, rank, from);
+			/* Between the lobby and the level start (team selection) the
+			 * player list is settled: no answer, the client retries.
+			 */
+			if (S.lobby_open)
+				lobby_add_player(*req, callsign, rank, from);
+			else if (first_request)
+				con_printf(CON_NORMAL, "net: join request from '%s' while the host sets up the level start; not answered (the client retries)", callsign.operator const char *());
 			break;
 		case network_state::playing:
 			/* One join in progress at a time, as in v1: the joiner's
@@ -3559,7 +3659,11 @@ void handle_join_request(const std::span<const uint8_t> payload, const _sockaddr
 			 * the client retries every 500 ms for 10 s.
 			 */
 			if (join_in_progress(from))
+			{
+				if (first_request)
+					con_printf(CON_NORMAL, "net: '%s' waits: another player is joining (not answered; the client retries)", callsign.operator const char *());
 				break;
+			}
 			if (Netgame.RefusePlayers)
 				do_refuse_stuff(*req, callsign, rank, from);
 			else
@@ -3570,6 +3674,8 @@ void handle_join_request(const std::span<const uint8_t> payload, const _sockaddr
 			break;
 		case network_state::waiting:
 			/* Answered once the level is loaded; the client retries. */
+			if (first_request)
+				con_printf(CON_NORMAL, "net: '%s' waits: the level is starting (not answered; the client retries)", callsign.operator const char *());
 			break;
 		case network_state::menu:
 		case network_state::browsing:
@@ -3696,6 +3802,10 @@ void handle_join_accept(const packet_header &h, const std::span<const uint8_t> p
 	Netgame.protocol.udp.your_index = acc->player_id;
 	S.join.end();
 	S.join_result = join_status::accepted;
+	/* Joined: no GAME_INFO is taken from now on (a late answer must not
+	 * describe the game anew).
+	 */
+	S.info_addr.reset();
 	con_printf(CON_NORMAL, "net: joined session %08x as P#%u, tick rate %u Hz", S.session_id, acc->player_id, Netgame.TickRate);
 	/* Protocol 108: tell the host the address it answered from, which
 	 * behind a NAT router is its public one.
@@ -3822,6 +3932,7 @@ void handle_join_deny(const std::span<const uint8_t> payload, const _sockaddr &f
 	}
 	if (match != ::dcx::net_v2::join_deny_match::join)
 		return;
+	con_printf(CON_NORMAL, "net: the host refused the join: %s", kick_reason_name(*why));
 	S.join.end();
 	S.join_result = join_status::denied;
 	if (!version_mismatch)
@@ -3831,7 +3942,7 @@ void handle_join_deny(const std::span<const uint8_t> payload, const _sockaddr &f
 /* Client: the host removed us, or left. */
 void handle_kick(const kick_player_reason why)
 {
-	con_printf(CON_NORMAL, "net: removed by the host (reason %u)", static_cast<unsigned>(underlying_value(why)));
+	con_printf(CON_NORMAL, "net: removed by the host: %s (network status: %s)", kick_reason_name(why), network_state_name(Network_status));
 	con_flush_gamelog();
 	if (auto &p{S.peers[0]}; p.conn)
 		drop_peer(p);
@@ -3862,18 +3973,20 @@ void handle_kick(const kick_player_reason why)
 	}
 }
 
-void handle_host_lost(const kick_player_reason why)
+void handle_host_lost(const kick_player_reason why, const unsigned silent_ms = 0)
 {
-	con_printf(CON_VERBOSE, "teardown: host lost (%s), network status %u", why == kick_player_reason::host_shutdown ? "host shut down" : "connection closed", static_cast<unsigned>(underlying_value(Network_status)));
+	con_printf(CON_NORMAL, "net: lost the host: %s (network status: %s)", kick_reason_name(why), network_state_name(Network_status));
 	con_flush_gamelog();
 	if (auto &p{S.peers[0]}; p.conn)
 		drop_peer(p);
 	if (Network_status == network_state::waiting || Network_status == network_state::browsing || Network_status == network_state::menu)
 	{
-		/* The level start menu notices the host is gone. */
+		/* The level start menu notices the host is gone, and says why
+		 * (client_take_host_lost).
+		 */
 		Netgame.players[0].connected = player_connection_status::disconnected;
 		vmplayerptr(0u)->connected = player_connection_status::disconnected;
-		con_printf(CON_NORMAL, "net: lost the host (%s)", why == kick_player_reason::host_shutdown ? "host shut down" : "timeout");
+		S.host_lost = host_lost_info{.why = why, .silent_ms = silent_ms};
 		return;
 	}
 	multi_disconnect_player(0);
@@ -4286,7 +4399,12 @@ void udp_tracker_verify_ack_timeout()
 		if (Network_status == network_state::playing)
 			HUD_init_message_literal(HM_MULTI, "No ACK from tracker. Please check game log.");
 		else
-			nm_messagebox_str(menu_title{TXT_WARNING}, nm_messagebox_tie(TXT_OK), menu_subtitle{"No ACK from tracker.\nPlease check game log."});
+			/* Not a blocking message box: this runs inside the network
+			 * frame, and while a nested one waited for the host to click
+			 * it nothing was sent or received, so every player in the
+			 * lobby timed out.
+			 */
+			window_create<passive_messagebox>(menu_title{TXT_WARNING}, menu_subtitle{"No ACK from tracker.\nPlease check game log."}, TXT_OK, grd_curscreen->sc_canvas);
 	}
 	else if (TrackerAckStatus == TrackerAckState::TACK_NOCONNECTION)
 		/* The tracker sends an ACK only for a game new to it; one it
@@ -4465,16 +4583,22 @@ void handle_game_info_lite(const std::span<const uint8_t> payload, const _sockad
 
 void handle_game_info(const std::span<const uint8_t> payload, const _sockaddr &from)
 {
-	if (multi_i_am_master())
-		return;
-	if (Network_status != network_state::browsing && Network_status != network_state::menu)
-		return;
-	/* Only the answer of the host that was asked, and never while a join
-	 * is under way: the Netgame being joined (its session id and host
-	 * address) must not be replaced by another game's description.
+	/* Only the answer of the host that was asked, never while a join is
+	 * under way or a connection to a host exists: the Netgame being joined
+	 * (its session id and host address) must not be replaced by another
+	 * game's description.  Not by Network_status, which a way out of a
+	 * game could leave stale (net_v2::client_takes_game_info).
 	 */
-	if (!S.info_addr || from != *S.info_addr || S.join.active())
+	const bool from_asked_host{S.info_addr && from == *S.info_addr};
+	if (!::dcx::net_v2::client_takes_game_info(multi_i_am_master(), S.peers[0].conn.has_value(), S.join.active(), from_asked_host))
+	{
+		if (from_asked_host && !multi_i_am_master() && !S.info_drop_logged)
+		{
+			S.info_drop_logged = true;
+			con_printf(CON_NORMAL, "net: GAME_INFO ignored (%s)", S.join.active() ? "a join is under way" : "still connected to a host");
+		}
 		return;
+	}
 	reader r{payload};
 	const auto session_id{r.u32()};
 	read_game_settings(r);
@@ -4483,6 +4607,11 @@ void handle_game_info(const std::span<const uint8_t> payload, const _sockaddr &f
 	{
 		con_printf(CON_VERBOSE, "net: malformed GAME_INFO (%zu bytes) ignored", payload.size());
 		return;
+	}
+	if (Netgame.protocol.udp.valid != 1 || Netgame.protocol.udp.session_id != session_id)
+	{
+		_sockaddr::presentation_buffer dbuf;
+		con_printf(CON_NORMAL, "net: game info from %s:%hu: session %08x, %s, %u/%u players", dxx_ntop(from, dbuf), dxx_sockaddr_port(from), session_id, network_state_name(Netgame.game_status), static_cast<unsigned>(Netgame.numplayers), static_cast<unsigned>(Netgame.max_numplayers));
 	}
 	Netgame.players[0].protocol.udp.addr = from;
 	Netgame.protocol.udp.session_id = session_id;
@@ -4796,6 +4925,12 @@ void receive_datagram(const std::span<const uint8_t> datagram, const _sockaddr &
 		p->addr = from;
 		Netgame.players[peer_slot(*p)].protocol.udp.addr = from;
 	}
+	/* A client leaving (its LEAVE lingers for the acknowledgement) takes
+	 * nothing more from the host: a LEVEL_GO arriving now would start the
+	 * level it is giving up.
+	 */
+	if (!multi_i_am_master() && p->ph == peer::phase::closing)
+		return;
 	/* The report's views live in the connection and the datagram buffer;
 	 * a handler may drop the peer or nest a menu, so copy first.
 	 */
@@ -4849,6 +4984,8 @@ void client_join_frame()
 	{
 		S.join.end();
 		S.join_result = join_status::timed_out;
+		_sockaddr::presentation_buffer dbuf;
+		con_printf(CON_NORMAL, "net: no answer to the join request: %u requests to %s:%hu (session %08x) in %u s", S.join_requests_sent, dxx_ntop(S.join_addr, dbuf), dxx_sockaddr_port(S.join_addr), S.session_id, net_clock_to_ms(::dcx::net_v2::NET_V2_JOIN_TIMEOUT) / 1000);
 		return;
 	}
 #if DXX_USE_TRACKER
@@ -4875,12 +5012,7 @@ void client_join_frame()
 	std::array<uint8_t, ::dcx::net_v2::NET_V2_JOIN_REQUEST_SIZE> buf;
 	req.write(buf.data());
 	send_unconnected(S.join_addr, S.session_id, 0, NET_V2_PLAYER_ID_NONE, session_msg::join_request, buf);
-}
-
-[[nodiscard]]
-unsigned net_clock_to_ms(const ::dcx::net_v2::net_clock t)
-{
-	return static_cast<unsigned>((t * 1000) / 65536);
+	++S.join_requests_sent;
 }
 
 /* The per-connection statistics of connection::stats() on the console
@@ -4932,11 +5064,22 @@ void handle_closed_connection(peer &p)
 {
 	const auto slot{peer_slot(p)};
 	const auto why{p.conn->closed_because()};
-	con_printf(CON_NORMAL, "net: connection to P#%u closed: %s", slot, close_reason_name(why));
+	const auto st{p.conn->stats()};
+	const auto &cfg{p.conn->config()};
+	/* Always in the game log, with the timings: why a player was dropped
+	 * is otherwise not known after the fact.
+	 */
+	con_printf(CON_NORMAL, "net: connection to P#%u closed: %s (last packet %u ms ago; limits %u ms silent, %u ms unacknowledged; rtt %u ms, loss %.1f%%, %llu packets received, queue %zu msgs; %s)",
+		slot, close_reason_name(why),
+		net_clock_to_ms(S.now - st.last_heard),
+		net_clock_to_ms(cfg.timeout), net_clock_to_ms(cfg.unacked_timeout),
+		st.rtt_valid ? net_clock_to_ms(st.srtt) : 0u, st.loss_estimate * 100.0,
+		static_cast<unsigned long long>(st.packets_received), st.queue_messages,
+		network_state_name(Network_status));
 	if (multi_i_am_master())
 		host_peer_gone(p, kick_reason_from_close(why));
 	else
-		handle_host_lost(kick_reason_from_close(why));
+		handle_host_lost(kick_reason_from_close(why), net_clock_to_ms(S.now - st.last_heard));
 }
 
 void frame(const bool listen)
@@ -4950,6 +5093,7 @@ void frame(const bool listen)
 		return;
 	S.in_frame = true;
 	S.now = timer_update();
+	S.last_frame = S.now;
 
 	/* Section 2.3: the session's tick counter, and the clock the
 	 * interpolation shows the remote objects by (the host's own; on a
@@ -4981,6 +5125,7 @@ void frame(const bool listen)
 		if (!p.conn)
 			continue;
 		auto &c = *p.conn;
+		apply_timeouts(c, p.ph);
 		if (c.begin_tick(S.now))
 		{
 			flush_events();
@@ -5057,6 +5202,38 @@ void frame(const bool listen)
 	S.in_frame = false;
 }
 
+[[nodiscard]]
+bool any_peer_closing()
+{
+	return std::ranges::any_of(S.peers, [](const peer &p) { return p.conn && p.ph == peer::phase::closing; });
+}
+
+/* Wait up to NET_V2_CLOSE_LINGER for the reliable messages still queued
+ * (a LEAVE, KICK or HOST_SHUTDOWN on a closing connection) to be
+ * acknowledged, driving the network meanwhile.  Not inside a frame.
+ */
+void linger_closing()
+{
+	if (S.in_frame || !UDP_Socket[0] || !any_peer_closing())
+		return;
+	const fix64 deadline{timer_query() + ::dcx::net_v2::NET_V2_CLOSE_LINGER};
+	for (;;)
+	{
+		frame(true);
+		bool pending{false};
+		for (auto &p : S.peers)
+			if (p.conn && p.conn->state() != connection_state::closed)
+			{
+				const auto stats{p.conn->stats()};
+				if (stats.queue_messages || !p.backlog.empty())
+					pending = true;
+			}
+		if (!pending || timer_query() >= deadline)
+			break;
+		timer_delay_ms(5);
+	}
+}
+
 }
 
 /* Public interface (net_v2_game.h) */
@@ -5084,13 +5261,17 @@ void probe_report()
 
 bool open_socket(const unsigned index, const uint16_t port)
 {
-	return udp_open_socket(UDP_Socket[index], port) == 0;
+	if (udp_open_socket(UDP_Socket[index], port) != 0)
+		return false;
+	event_background_task = &menu_pump;
+	return true;
 }
 
 bool open_loopback_socket()
 {
 	if (udp_open_socket(UDP_Socket[0], 0, true) != 0)
 		return false;
+	event_background_task = &menu_pump;
 	_sockaddr a{};
 	socklen_t len = sizeof(a);
 	if (getsockname(UDP_Socket[0], &a.sa, &len) == 0)
@@ -5106,10 +5287,16 @@ bool open_loopback_socket()
 
 void close_sockets()
 {
-	/* A LEAVE or HOST_SHUTDOWN queued just before leaves with this frame. */
+	/* A LEAVE, KICK or HOST_SHUTDOWN queued just before gets its second:
+	 * in the lobby the peer would otherwise wait out the long lobby
+	 * timeout.
+	 */
+	linger_closing();
+	/* Whatever was queued last leaves with this frame. */
 	frame(false);
 	session_reset();
 	UDP_Socket = {};
+	event_background_task = nullptr;
 }
 
 void flush_sockets()
@@ -5159,6 +5346,26 @@ void session_reset()
 	S.info_limit.reset();
 	S.join_limit.reset();
 	S.in_frame = false;
+	S.join_addr = {};
+#if DXX_USE_TRACKER
+	S.join_tracker_id = {};
+#endif
+	S.left_reason = kick_player_reason::timeout;
+	S.snapshot_crc = 0;
+	S.snapshot_objects = 0;
+	S.snapshot_parts = 0;
+	S.lobby_open = false;
+	S.logged_join_nonce = 0;
+	S.info_drop_logged = false;
+	S.join_requests_sent = 0;
+	S.host_lost.reset();
+	/* Out of every session: back in the menus.  Some ways out of a game
+	 * (the host lost or the wait cancelled before the level start) left
+	 * the status at `waiting`, and the next join's GAME_INFO was then
+	 * ignored until the program was restarted.  Whoever opens a session
+	 * next sets its own status after this.
+	 */
+	Network_status = network_state::menu;
 #if DXX_USE_TRACKER
 	udp_tracker_init();
 #endif
@@ -5208,9 +5415,13 @@ void client_begin_join(const _sockaddr &host, const uint32_t session_id
 #endif
 	S.join_result = join_status::joining;
 	S.join.begin(timer_query(), random_nonzero_u32());
+	S.join_requests_sent = 0;
+	S.host_lost.reset();
 #if DXX_USE_TRACKER
 	Holepunch_reply.reset();
 #endif
+	_sockaddr::presentation_buffer dbuf;
+	con_printf(CON_NORMAL, "net: joining session %08x at %s:%hu (attempt %08x)", session_id, dxx_ntop(host, dbuf), dxx_sockaddr_port(host), S.join.nonce());
 }
 
 join_status client_join_status()
@@ -5226,6 +5437,7 @@ void client_end_join()
 
 void client_cancel_join()
 {
+	con_puts(CON_NORMAL, "net: join cancelled by the player");
 	S.join.end();
 	S.join_result = join_status::idle;
 	/* Accepted meanwhile: the host counts this client as joining (and
@@ -5253,6 +5465,35 @@ void client_send_level_ready()
 bool client_sync_timed_out()
 {
 	return S.sync_wait.expired(timer_query());
+}
+
+std::optional<host_lost_info> client_take_host_lost()
+{
+	return std::exchange(S.host_lost, std::nullopt);
+}
+
+void menu_pump()
+{
+	/* Inside a frame (a message box a handler opened) the outer frame
+	 * finishes first; in a level the game loop drives the network.
+	 */
+	if (S.in_frame || !UDP_Socket[0])
+		return;
+	/* The lobby and the level wait; or a KICK, LEAVE or HOST_SHUTDOWN
+	 * still lingering after the game was given up (the host's setup menu
+	 * after an aborted lobby polls nothing).
+	 */
+	if (Network_status != network_state::starting && Network_status != network_state::waiting && !any_peer_closing())
+		return;
+	/* A menu's polling handler ran it just now. */
+	if (timer_query() - S.last_frame < MENU_PUMP_INTERVAL)
+		return;
+	frame(true);
+}
+
+void host_set_lobby_open(const bool open)
+{
+	S.lobby_open = open;
 }
 
 void client_send_leave(const kick_player_reason reason)
@@ -5789,22 +6030,7 @@ void dispatch_table::leave_game() const
 	/* Wait up to a second for the LEAVE or HOST_SHUTDOWN to be
 	 * acknowledged.
 	 */
-	const fix64 deadline{timer_query() + ::dcx::net_v2::NET_V2_CLOSE_LINGER};
-	for (;;)
-	{
-		net_v2::frame(true);
-		bool pending{false};
-		for (auto &p : S.peers)
-			if (p.conn && p.conn->state() != ::dcx::net_v2::connection_state::closed)
-			{
-				const auto stats{p.conn->stats()};
-				if (stats.queue_messages || !p.backlog.empty())
-					pending = true;
-			}
-		if (!pending || timer_query() >= deadline)
-			break;
-		timer_delay_ms(5);
-	}
+	net_v2::linger_closing();
 
 	if (multi_i_am_master())
 	{

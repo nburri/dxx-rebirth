@@ -148,6 +148,14 @@ struct d_event_end_loop : d_event
 fix event_get_idle_seconds();
 #endif
 
+/* Work that must go on whatever window is in front: run once per
+ * event_process, after the windows drew.  The network session sets it
+ * while its sockets are open (net_v2::menu_pump keeps the lobby's
+ * keepalives flowing behind menus that do not poll the network).
+ * nullptr: nothing.
+ */
+extern void (*event_background_task)();
+
 // Process all events until the front window is deleted
 // Won't work if there's the possibility of another window on top
 // without its own event loop

@@ -866,6 +866,57 @@ public:
 	}
 };
 
+/* Section 3.6 / 4.3: the timeouts of a connection while no level runs.
+ * In the lobby and while the players load a level nobody flies, nothing
+ * is lost by waiting for a peer, and the game itself sometimes stops
+ * driving the network for seconds: a menu without a polling handler (the
+ * host's team selection), a level load, a window the player drags.  The
+ * in-level timeouts (NET_V2_TIMEOUT, 5 s; NET_V2_UNACKED_TIMEOUT, 10 s)
+ * would drop every player waiting for the game to start.
+ */
+constexpr net_clock NET_V2_LOBBY_TIMEOUT{net_seconds(60)};
+
+struct connection_timeouts
+{
+	/* No valid packet from the peer. */
+	net_clock idle;
+	/* The oldest reliable message unacknowledged. */
+	net_clock unacked;
+	constexpr bool operator==(const connection_timeouts &) const = default;
+};
+
+/* The timeouts a connection to a peer in `phase` uses: the in-level ones
+ * only while a level runs (`level_running`: the local network status is
+ * `playing`) and the peer plays in it; a peer joining or syncing a level
+ * in progress is still loading it (its join is bounded by
+ * NET_V2_JOIN_SYNC_TIMEOUT instead).  The caller applies them every frame
+ * (connection::set_timeouts), so they switch with the level start; a peer
+ * silent for longer than the in-level timeout is then dropped at once.
+ */
+[[nodiscard]]
+constexpr connection_timeouts timeouts_for(const bool level_running, const peer_phase phase)
+{
+	if (level_running && (phase == peer_phase::playing || phase == peer_phase::closing))
+		return {NET_V2_TIMEOUT, NET_V2_UNACKED_TIMEOUT};
+	return {NET_V2_LOBBY_TIMEOUT, NET_V2_LOBBY_TIMEOUT};
+}
+
+/* Section 4.1, the client: whether a GAME_INFO is taken (it replaces the
+ * description of the game about to be joined).  Only the answer of the
+ * host last asked (`from_asked_host`), never on the host, never while a
+ * join is under way, and never while connected to a host (in a game, or
+ * a game's lobby).  It depends on the session's own state only: the menu
+ * state the game keeps elsewhere was left stale by some ways out of a
+ * game (the host lost while waiting for the level start), and then every
+ * later GAME_INFO was dropped, so no join got past "No response by host"
+ * until the program was restarted.
+ */
+[[nodiscard]]
+constexpr bool client_takes_game_info(const bool hosting, const bool connected_to_host, const bool join_active, const bool from_asked_host)
+{
+	return !hosting && !connected_to_host && !join_active && from_asked_host;
+}
+
 /* Section 4.2, the client: whether a JOIN_DENY is an answer to us.  A
  * denial of the running join attempt carries its nonce and comes from the
  * host it was sent to.  A version denial with nonce 0 answers a

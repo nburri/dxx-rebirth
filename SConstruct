@@ -5002,6 +5002,7 @@ class DXXArchive(DXXCommon):
 		# Test of the game-independent session layer (net_v2_session.h).
 		RuntimeTest('test-net-v2-session', (
 			'common/unittest/net_v2_session.cpp',
+			'common/main/net_v2_transport.cpp',
 			)),
 		# Test of the state layouts and the interpolation, clock and tick
 		# math (net_v2_state.h, net_interp.h).
