@@ -1880,10 +1880,82 @@ void test_release_aim()
 	CHECK(s == secondary::homing);
 	CHECK(s && release_aim_of({.role = role_of(*s), .has_target_pos = true, .corner_shot = homing_round_corner(m), .pursuing = m.pursuing}) == release_aim::corner);
 }
+
+/* Section 9.17: the eagerness to use a heavy missile held for a while. */
+void test_heavy_eagerness()
+{
+	/* The delay falls with the skill: Hotshot 6 s, Insane 4 s. */
+	CHECK(heavy_fire_delay(bot_skill::hotshot) == 6);
+	CHECK(heavy_fire_delay(bot_skill::insane) == 4);
+	CHECK(heavy_fire_delay(bot_skill::ace) < heavy_fire_delay(bot_skill::hotshot));
+	/* Nothing before half the delay, half at the delay, all from one
+	 * and a half.
+	 */
+	CHECK(heavy_eagerness(0, 4) == 0);
+	CHECK(heavy_eagerness(2, 4) == 0);
+	CHECK(std::abs(heavy_eagerness(4, 4) - 0.5) < 1e-9);
+	CHECK(heavy_eagerness(6, 4) == 1);
+	CHECK(heavy_eagerness(60, 4) == 1);
+	CHECK(heavy_eagerness(10, 0) == 0);
+	/* A stack of them: eager at once. */
+	CHECK(heavy_eagerness(0.1, 4, 1) == 0);
+	CHECK(heavy_eagerness(0.1, 4, 2) > 0.3 && heavy_eagerness(0.1, 4, 2) < 0.4);
+	CHECK(heavy_eagerness(0.1, 4, HEAVY_EAGER_COUNT) == 1);
+	CHECK(heavy_eagerness(0, 4, HEAVY_EAGER_COUNT) == 0);
+	/* The risk profile: unchanged at 0; bolder at 1. */
+	const auto rp{risk_profile_of(bot_skill::insane, bot_style::balanced)};
+	const auto same{eager_risk(rp, 0)};
+	CHECK(same.self_budget == rp.self_budget && same.trade == rp.trade && same.standoff_scale == rp.standoff_scale && same.value_share == rp.value_share);
+	const auto bold{eager_risk(rp, 1)};
+	CHECK(bold.self_budget > rp.self_budget * 2);
+	CHECK(bold.self_chance > rp.self_chance);
+	CHECK(bold.self_chance <= 1);
+	CHECK(bold.trade < rp.trade);
+	CHECK(bold.standoff_scale < rp.standoff_scale);
+	CHECK(bold.duck_share < rp.duck_share);
+	CHECK(bold.value_share < rp.value_share);
+	/* The rules: a target fired at may have another, the cooldown is
+	 * shorter.
+	 */
+	auto m{only(armed(4), {secondary::earthshaker})};
+	m.target_distance = 150;
+	m.heavy_used_on_target = true;
+	CHECK(heavy_check(m, secondary::earthshaker) == heavy_verdict::used_on_target);
+	m.heavy_eagerness = 0.5;
+	CHECK(heavy_check(m, secondary::earthshaker) != heavy_verdict::used_on_target);
+	m.heavy_used_on_target = false;
+	m.since_heavy = 0.6 * heavy_interval(4);
+	m.heavy_eagerness = 0;
+	CHECK(heavy_check(m, secondary::earthshaker) == heavy_verdict::cooldown);
+	m.heavy_eagerness = 1;
+	CHECK(heavy_check(m, secondary::earthshaker) != heavy_verdict::cooldown);
+	/* No suicide at any eagerness: point blank and lethal hold. */
+	blast_scene sc;
+	sc.shields = 50;
+	sc.target_shields = 100;
+	missile_data md;
+	md.damage = 220;
+	md.blast_radius = 80;
+	blast_outcome o;
+	o.impact = o.burst_distance = 100;
+	o.target_damage = o.target_nominal = 120;
+	o.self_nominal = 60;
+	CHECK(judge_blast(o, sc, md, bold) == risk_verdict::lethal);
+	o.self_nominal = 0;
+	o.impact = o.burst_distance = 20;
+	CHECK(judge_blast(o, sc, md, bold) == risk_verdict::point_blank);
+	/* A blast of little value: refused calm, fired eager. */
+	o.impact = o.burst_distance = 100;
+	o.target_damage = o.target_nominal = 15;
+	CHECK(judge_blast(o, sc, md, rp) == risk_verdict::low_value);
+	CHECK(judge_blast(o, sc, md, bold) == risk_verdict::fire);
+}
+
 }
 
 int main()
 {
+	test_heavy_eagerness();
 	test_homing_round_corner();
 	test_release_aim();
 	test_log_tuning_missiles();

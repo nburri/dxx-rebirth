@@ -42,6 +42,7 @@
 #include "bot_goals.h"
 #include "bot_movement.h"
 #include "movement_record_format.h"
+#include "level_geometry.h"
 #include "bot_nav.h"
 #include "bot_weapons.h"
 #include "net_v2_objects.h"
@@ -491,6 +492,19 @@ struct bot_state
 	 * missile chosen, the log's tallies.
 	 */
 	b::risk_profile risk;
+	/* Section 9.17: the risk profile at the bot's eagerness to use its
+	 * heavy missile (b::eager_risk), and since when (tick + 1, 0: none)
+	 * it holds one it has not yet had the chance to use: its pickup, or
+	 * its last heavy shot while it still holds one.
+	 */
+	b::risk_profile risk_now;
+	uint32_t heavy_since{};
+	double heavy_eager{};
+	/* Section 9.17: the appetite for cover of this strategy tick
+	 * (b::cover_appetite).
+	 */
+	double cover_appetite{};
+	b::cover_view cover;
 	std::array<b::aim_choice, 2> heavy_plan{};
 	uint32_t heavy_plan_tick{};
 	bool heavy_planned{};
@@ -645,6 +659,7 @@ struct bot_state
 		}
 		retreat_shields = style.retreat_shields;
 		risk = b::risk_profile_of(cfg.skill, cfg.style);
+		risk_now = risk;
 	}
 	void reset_for_life(const uint32_t tick)
 	{
@@ -695,6 +710,11 @@ struct bot_state
 		power_going = false;
 		pursuit = {};
 		heavy_why = b::heavy_verdict::none_owned;
+		heavy_since = 0;
+		heavy_eager = 0;
+		risk_now = risk;
+		cover_appetite = 0;
+		cover = {};
 		missile.reset();
 		missile_fire.reset();
 		missile_volley = 0;
@@ -768,6 +788,10 @@ struct bots_state
 	b::path_result path;
 	/* Side centres, 6 per segment. */
 	std::vector<vec3> side_centres;
+	/* Section 9.17: each segment's exposure (b::exposure_excess of the
+	 * geometry's segment_exposures).
+	 */
+	std::vector<float> exposure_excess;
 	/* Stage B3: the fuel centres and repair centres of the level. */
 	std::vector<uint32_t> fuel_centres;
 	std::vector<uint32_t> repair_centres;
@@ -854,6 +878,49 @@ void build_nav_graph()
 		}
 	}
 	B.graph.finish();
+	/* Section 9.17: the exposure of every segment, measured as the
+	 * analysis does (level_geometry.h) on the level as loaded.
+	 */
+	{
+		namespace geo = ::dcx::movrec::geometry;
+		geo::level mesh;
+		mesh.segments.resize(count);
+		bool vertices_ok{true};
+		for (const auto &&segp : vcsegptridx)
+		{
+			const uint32_t n{segp.get_unchecked_index()};
+			if (n >= count || !vertices_ok)
+				continue;
+			auto &ms{mesh.segments[n]};
+			std::size_t k{0};
+			for (const auto v : segp->verts)
+			{
+				const std::size_t vi{underlying_value(v)};
+				if (vi >= geo::MAX_VERTICES)
+				{
+					vertices_ok = false;
+					break;
+				}
+				if (vi >= mesh.vertices.size())
+					mesh.vertices.resize(vi + 1);
+				const auto &vp{*vcvertptr(v)};
+				ms.verts[k++] = static_cast<uint16_t>(vi);
+				mesh.vertices[vi] = {{vp.x / 65536.0, vp.y / 65536.0, vp.z / 65536.0}};
+			}
+			for (const auto side : MAX_SIDES_PER_SEGMENT)
+			{
+				const auto child{segp->shared_segment::children[side]};
+				ms.children[underlying_value(side)] = IS_CHILD(child) && child < count ? static_cast<uint16_t>(child) : geo::SEGMENT_NONE;
+			}
+		}
+		B.exposure_excess.assign(count, 0);
+		if (vertices_ok)
+		{
+			const auto e{geo::segment_exposures(mesh)};
+			for (std::size_t i = 0; i < count && i < e.size(); ++i)
+				B.exposure_excess[i] = static_cast<float>(b::exposure_excess(e[i]));
+		}
+	}
 	B.fuel_centres.clear();
 	B.repair_centres.clear();
 	for (const auto &&segp : vcsegptridx)
@@ -1380,8 +1447,13 @@ void plan_path(bot_state &bs, const object &obj, const uint32_t goal_seg, const 
 	const auto passable{[flags](const uint32_t from, const b::nav_edge &e) {
 		return edge_passable(from, e, flags);
 	}};
-	const auto extra{[&bs](const uint32_t from, const b::nav_edge &e) {
-		return bs.penalties.cost(from, e.side);
+	/* Section 9.17: with an appetite for cover, the edges into exposed
+	 * segments cost more (b::cover_extra_cost).
+	 */
+	const double appetite{bs.cover_appetite};
+	const auto extra{[&bs, appetite](const uint32_t from, const b::nav_edge &e) {
+		const double excess{appetite > 0 && e.to < B.exposure_excess.size() ? B.exposure_excess[e.to] : 0.0};
+		return bs.penalties.cost(from, e.side) + b::cover_extra_cost(e.cost, appetite, excess);
 	}};
 	if (!B.search.find(B.graph, start, goal_seg, passable, extra, BOT_NAV_NODE_LIMIT, B.path))
 		return;
@@ -1428,6 +1500,22 @@ void plan_path(bot_state &bs, const object &obj, const uint32_t goal_seg, const 
 		bot_arena_note_path(bs.pid, b::remaining_length(bs.points, 0, to_vec(obj.pos)));
 }
 
+/* Section 9.17: the appetite for cover with goal `g`: away from the
+ * fight (collecting, refuelling, retreating) as a weak bot; none going
+ * for a power pickup (the shortest way wins the race) or hunting (the
+ * fights are left as they were; the review of PR #76).
+ */
+[[nodiscard]]
+double cover_appetite_for(const bot_state &bs, const bot_goal g)
+{
+	if (g == bot_goal::hunt)
+		return 0;
+	auto cv{bs.cover};
+	cv.away = g == bot_goal::collect || g == bot_goal::refuel || g == bot_goal::retreat;
+	cv.power = g == bot_goal::collect && bs.power_going;
+	return b::cover_appetite(cv);
+}
+
 void set_goal(bot_state &bs, const object &obj, const bot_goal g, const uint32_t seg, const std::optional<vec3> pos, const uint32_t tick)
 {
 	if (bs.goal != g || bs.goal_seg != seg)
@@ -1437,6 +1525,10 @@ void set_goal(bot_state &bs, const object &obj, const bot_goal g, const uint32_t
 	}
 	bs.goal = g;
 	bs.goal_seg = seg;
+	/* Section 9.17: away from the fight (collecting, refuelling,
+	 * retreating) the bot wants cover as a weak one does.
+	 */
+	bs.cover_appetite = cover_appetite_for(bs, g);
 	plan_path(bs, obj, seg, pos, tick);
 }
 
@@ -1453,8 +1545,16 @@ void choose_roam_goal(bot_state &bs, const object &obj, const uint32_t tick)
 	const auto seconds_since{[&bs, tick](const uint32_t seg) {
 		return seg < bs.visited.size() && bs.visited[seg] ? (tick - (bs.visited[seg] - 1)) / static_cast<double>(b::BOT_TICK_RATE) : 1e9;
 	}};
-	const auto explore{b::pick_explore_goal(B.graph, obj.segnum, below, [&bs](const uint32_t seg) {
-		return bs.dist.cost(seg);
+	/* Section 9.17: the places weighed by the bot's appetite for cover
+	 * as a roaming bot (b::cover_roam_scale; the score is the path cost;
+	 * the review of PR #76: not the appetite of the goal before).
+	 */
+	const double appetite{cover_appetite_for(bs, bot_goal::roam)};
+	const auto explore{b::pick_explore_goal(B.graph, obj.segnum, below, [&bs, appetite](const uint32_t seg) -> std::optional<double> {
+		const auto c{bs.dist.cost(seg)};
+		if (!c || !appetite || seg >= B.exposure_excess.size())
+			return c;
+		return *c * b::cover_roam_scale(appetite, B.exposure_excess[seg]);
 	}, seconds_since)};
 	/* Else somewhere else, not next door (B1). */
 	const uint32_t seg{explore ? *explore : b::pick_roam_goal(B.graph, obj.segnum, to_vec(obj.pos), BOT_ROAM_MIN_DISTANCE, below)};
@@ -2728,6 +2828,19 @@ void think(bot_state &bs, object &obj, const uint32_t tick)
 		own_ammo[i] = obj.ctype.player_info.secondary_ammo[static_cast<secondary_weapon_index>(i)];
 	bs.armed = b::armed_of(own_ammo, sk.weapon_smarts);
 	const bool weak{b::weak_armament(res.weapons, own_ammo)};
+	/* Section 9.17: what the appetite for cover depends on (set_goal). */
+	bs.cover = {
+		.weak = weak,
+		.armament = b::armament_score(res.weapons),
+		/* A heavy missile it fires (mega, earthshaker; the review of PR
+		 * #76: not a smart one, nor below the skill that fires them).
+		 */
+		.heavy = sk.weapon_smarts >= b::min_smarts(b::secondary::mega) && (own_ammo[static_cast<unsigned>(b::secondary::mega)] || own_ammo[static_cast<unsigned>(b::secondary::earthshaker)]),
+		.shields = res.shields,
+		.away = false,
+		.cover = bs.style.cover,
+	};
+	bs.cover_appetite = cover_appetite_for(bs, bs.goal);
 	bs.seek_who.reset();
 	double seek{0};
 	if (!bs.target && bs.armed != b::armed_level::none)
@@ -3497,7 +3610,7 @@ bool teammate_behind(const bot_state &bs, const object &obj)
 void plan_heavy(bot_state &bs, const object &obj, const uint32_t tick, b::missile_situation &m, const bool target_visible, const std::optional<vec3> &target_pos, const double invulnerable_left)
 {
 	auto &Objects = LevelUniqueObjectState.Objects;
-	m.standoff_scale = bs.risk.standoff_scale;
+	m.standoff_scale = bs.risk_now.standoff_scale;
 	const bool due{!bs.heavy_planned || tick - bs.heavy_plan_tick >= b::STRATEGY_DIVISOR};
 	/* The fvi budget of all bots this tick: a weighing waits for the
 	 * next tick when it is spent (up to twice it for one overdue).
@@ -3538,7 +3651,7 @@ void plan_heavy(bot_state &bs, const object &obj, const uint32_t tick, b::missil
 				if (bs.heavy_planned && last && last->kind != b::aim_kind::direct && last->kind != b::aim_kind::wall_behind)
 					search.previous = last->point;
 				const double nearest{std::max(m.data[i].blast_radius, 0.0) + b::BLAST_MARGIN};
-				bs.heavy_plan[k] = b::choose_heavy_aim(geo, scene, b::role_of(s), m.data[i], bs.risk, search, [&](const b::aim_option &a) {
+				bs.heavy_plan[k] = b::choose_heavy_aim(geo, scene, b::role_of(s), m.data[i], bs.risk_now, search, [&](const b::aim_option &a) {
 					return aim_line_clear(bs, obj, a.point, nearest, geo.calls);
 				});
 			}
@@ -3620,8 +3733,8 @@ void plan_heavy(bot_state &bs, const object &obj, const uint32_t tick, b::missil
 			.standoff = bs.standoff,
 			.target_closing = m.target_closing_speed,
 			.back_blocked = wall_distance(obj, away, BOT_BACK_WALL_CLEARANCE) < BOT_BACK_WALL_CLEARANCE,
-			.duck_share = bs.risk.duck_share,
-			.duck_closing = bs.risk.duck_closing,
+			.duck_share = bs.risk_now.duck_share,
+			.duck_closing = bs.risk_now.duck_closing,
 		})};
 		bs.duck_point.reset();
 		if (duck)
@@ -3674,6 +3787,25 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 	auto &Objects = LevelUniqueObjectState.Objects;
 	const auto &sk{bs.skill};
 	auto &pi{obj.ctype.player_info};
+	/* Section 9.17: how long it holds a heavy missile (mega,
+	 * earthshaker: the ones the eagerness acts on; the smart missile is
+	 * fired as soon as its rules allow) it has not used, and how eager
+	 * that makes it.
+	 */
+	{
+		const unsigned heavies{pi.secondary_ammo[secondary_weapon_index::mega]
+#if DXX_BUILD_DESCENT == 2
+			+ pi.secondary_ammo[secondary_weapon_index::earthshaker]
+#endif
+		};
+		if (!heavies)
+			bs.heavy_since = 0;
+		else if (!bs.heavy_since)
+			bs.heavy_since = tick + 1;
+		const double delay{bs.tune.heavy_fire_delay >= 0 ? bs.tune.heavy_fire_delay : b::heavy_fire_delay(bs.skill_level)};
+		bs.heavy_eager = bs.heavy_since ? b::heavy_eagerness((tick + 1 - bs.heavy_since) / static_cast<double>(b::BOT_TICK_RATE), delay, heavies) : 0;
+		bs.risk_now = b::eager_risk(bs.risk, bs.heavy_eager);
+	}
 	if (bs.missile_fire)
 		return;
 	if (bs.missile && tick >= bs.missile_until)
@@ -3831,7 +3963,8 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 		m.mine_interval_scale = bs.style.mine_interval;
 		/* Section 9.13: the style profile's, else the style's. */
 		m.missile_interval_scale = bs.tune.missile_interval_scale >= 0 ? bs.tune.missile_interval_scale : b::missile_interval_scale(bs.cfg.style);
-		m.accepted_damage = bs.risk.self_budget * std::clamp(obj.shields / 65536.0, 0.0, 200.0);
+		m.accepted_damage = bs.risk_now.self_budget * std::clamp(obj.shields / 65536.0, 0.0, 200.0);
+		m.heavy_eagerness = bs.heavy_eager;
 		m.has_target = target_pos.has_value();
 		m.target_visible = target_visible;
 		m.shot_clear = target_visible && bs.shot_clear;
@@ -4046,7 +4179,7 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 			bs.heavy_why = b::heavy_verdict::no_clear_shot;
 			return;
 		}
-		const auto v{b::judge_blast(o, scene, md, bs.risk)};
+		const auto v{b::judge_blast(o, scene, md, bs.risk_now)};
 		if (v != b::risk_verdict::fire)
 		{
 			bs.heavy_why = b::heavy_verdict::nose_blast;
@@ -4140,6 +4273,9 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 			if (!bs.volley_left)
 				bs.volley_missile.reset();
 		}
+		/* Section 9.17: one more held waits from now. */
+		if (heavy)
+			bs.heavy_since = tick + 1;
 		if (heavy)
 		{
 			bs.last_heavy = tick;
@@ -4149,7 +4285,7 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 			/* Section 9.5: clear of its own blast until it is over (the
 			 * cooldown now drops the standoff).
 			 */
-			bs.blast_hold = b::heavy_min_distance(s, md, bs.risk.self_budget * std::clamp(obj.shields / 65536.0, 0.0, 200.0)) * bs.risk.standoff_scale + 8;
+			bs.blast_hold = b::heavy_min_distance(s, md, bs.risk_now.self_budget * std::clamp(obj.shields / 65536.0, 0.0, 200.0)) * bs.risk_now.standoff_scale + 8;
 			bs.blast_hold_until = tick + static_cast<uint32_t>(std::ceil(b::blast_danger_seconds(role, impact, md) * b::BOT_TICK_RATE));
 			bs.standoff = std::max(bs.standoff, bs.blast_hold);
 		}
@@ -4269,7 +4405,7 @@ void log_summary(const bot_state &bs, const object &obj, const uint32_t tick)
 		obj.shields / 65536.0, pi.energy / 65536.0,
 		powerup,
 		b::name_of(bs.heavy_why), bs.heavy_min, bs.standoff,
-		bs.risk.self_budget, bs.risk.trade, bs.hugging ? " hug" : "", bs.duck_point && tick < bs.duck_until ? " duck" : "",
+		bs.risk_now.self_budget, bs.risk_now.trade, bs.hugging ? " hug" : "", bs.duck_point && tick < bs.duck_until ? " duck" : "",
 		bs.dumping ? " dump" : "", bs.turning.phase == b::turn_phase::reversing ? " reverse-turn" : bs.turning.phase == b::turn_phase::sliding ? " slide-turn" : bs.turning.phase == b::turn_phase::boost ? (bs.turning.burn ? " boost-burn" : " boost") : "",
 		b::name_of(bs.light_why), b::name_of(bs.armed));
 }
@@ -4307,7 +4443,14 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 		perceive(bs, obj, tick);
 	if (b::layer_due(tick, b::STRATEGY_DIVISOR, bs.stagger))
 		think(bs, obj, tick);
-	bs.aim.update(bs.rng, b::radians(sk.aim_sigma_deg), b::ticks_from_ms(sk.aim_drift_ms));
+	/* Section 9.17: the gauss with a wider aim error (b::aim_sigma_for). */
+	bs.aim.update(bs.rng, b::radians(b::aim_sigma_for(sk.aim_sigma_deg,
+#if DXX_BUILD_DESCENT == 2
+		obj.ctype.player_info.Primary_weapon.get_active() == primary_weapon_index::gauss
+#else
+		false
+#endif
+		)), b::ticks_from_ms(sk.aim_drift_ms));
 	bs.lead.update(bs.rng, sk.lead, b::ticks_from_ms(sk.aim_drift_ms));
 	const double range_scale{bs.style.range_scale * bs.tactics.range_scale};
 	/* Section 9.13: the band of the bot's style profile, else

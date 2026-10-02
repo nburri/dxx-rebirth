@@ -1865,10 +1865,71 @@ void test_power_pickups()
 	}
 }
 
+/* Section 9.17: cover from exposed places, by state and style. */
+void test_cover()
+{
+	/* The excess: nothing up to the low edge, all from the high one. */
+	CHECK(exposure_excess(20) == 0);
+	CHECK(exposure_excess(COVER_EXPOSURE_LOW) == 0);
+	CHECK(exposure_excess(COVER_EXPOSURE_HIGH) == 1);
+	CHECK(exposure_excess(300) == 1);
+	const double mid{exposure_excess((COVER_EXPOSURE_LOW + COVER_EXPOSURE_HIGH) / 2)};
+	CHECK(mid > 0.4 && mid < 0.6);
+	/* The styles: Cautious wants cover most, Aggressive least. */
+	const auto cover{[](const bot_style st) { return style_of(st).cover; }};
+	CHECK(cover(bot_style::cautious) > cover(bot_style::collector));
+	CHECK(cover(bot_style::collector) > cover(bot_style::balanced));
+	CHECK(cover(bot_style::balanced) > cover(bot_style::aggressive));
+	CHECK(cover(bot_style::aggressive) > 0);
+	/* The appetite: weak or away full, armed and healthy negative,
+	 * else part of it; none without a cover weight.
+	 */
+	cover_view v{.weak = false, .armament = 2, .heavy = false, .shields = 100, .away = false, .cover = 1};
+	CHECK(std::abs(cover_appetite(v) - COVER_MIDDLE_SHARE) < 1e-9);
+	v.weak = true;
+	CHECK(cover_appetite(v) == 1);
+	v.weak = false;
+	v.shields = COVER_WEAK_SHIELDS - 1;
+	CHECK(cover_appetite(v) == 1);
+	v.shields = 100;
+	v.away = true;
+	CHECK(cover_appetite(v) == 1);
+	/* Going for a power pickup: the shortest way. */
+	v.power = true;
+	CHECK(cover_appetite(v) == 0);
+	v.power = false;
+	v.away = false;
+	v.armament = ARMED_ARMAMENT;
+	CHECK(cover_appetite(v) < 0);
+	v.armament = 1;
+	v.heavy = true;
+	CHECK(cover_appetite(v) < 0);
+	v.shields = COVER_ARMED_SHIELDS - 1;
+	CHECK(cover_appetite(v) > 0);
+	v.cover = 0;
+	CHECK(cover_appetite(v) == 0);
+	/* The path: only an appetite for cover adds, and only into exposed
+	 * segments; the roam places scale both ways, never to nothing.
+	 */
+	CHECK(cover_extra_cost(20, 1, 0) == 0);
+	CHECK(cover_extra_cost(20, -0.5, 1) == 0);
+	CHECK(std::abs(cover_extra_cost(20, 1, 1) - 20 * COVER_PATH_FACTOR) < 1e-9);
+	CHECK(cover_roam_scale(1, 0) == 1);
+	CHECK(cover_roam_scale(1, 1) < 1);
+	CHECK(cover_roam_scale(-0.5, 1) > 1);
+	CHECK(cover_roam_scale(5, 1) >= 0.2);
+	/* Section 9.17: the power weights, monotonic and higher than before. */
+	CHECK(power_pickup_weight(bot_skill::hotshot, bot_style::balanced) == 0.75);
+	CHECK(power_pickup_weight(bot_skill::insane, bot_style::balanced) == 1);
+	CHECK(power_pickup_weight(bot_skill::ace, bot_style::balanced) > power_pickup_weight(bot_skill::hotshot, bot_style::balanced));
+	CHECK(power_pickup_weight(bot_skill::insane, bot_style::cautious) < power_pickup_weight(bot_skill::insane, bot_style::balanced));
+}
+
 }
 
 int main()
 {
+	test_cover();
 	test_power_pickups();
 	test_pursuit();
 	test_pursuit_block();

@@ -570,6 +570,34 @@ inline room_class class_of(const double room)
 	return room < ROOM_TIGHT ? room_class::tight : room < ROOM_OPEN ? room_class::medium : room_class::open;
 }
 
+/* The exposure of a segment (Documentation/movement-recording.md
+ * section 8.11, multiplayer-bots.md section 9.17): the mean free
+ * distance from its centre over ROOM_DIRECTIONS directions, each capped
+ * at EXPOSURE_CAP; how far one sees, and is seen from, on average.  A
+ * long tunnel is little exposed (two long lines of 26), a big hall
+ * much.  The classes are absolute, the same on every level, so a level
+ * of tunnels and small rooms only has covered and middle segments and
+ * one of open halls only middle and exposed ones: covered below
+ * EXPOSURE_COVERED, exposed from EXPOSURE_EXPOSED.
+ */
+constexpr double EXPOSURE_CAP{300};
+constexpr double EXPOSURE_COVERED{40};
+constexpr double EXPOSURE_EXPOSED{65};
+enum class exposure_class : std::uint8_t
+{
+	covered,
+	middle,
+	exposed,
+};
+constexpr std::size_t EXPOSURE_CLASSES{3};
+inline constexpr std::array<const char *, EXPOSURE_CLASSES> exposure_class_names{{"covered", "middle", "exposed"}};
+
+[[nodiscard]]
+inline exposure_class exposure_class_of(const double exposure)
+{
+	return exposure < EXPOSURE_COVERED ? exposure_class::covered : exposure < EXPOSURE_EXPOSED ? exposure_class::middle : exposure_class::exposed;
+}
+
 struct segment_room
 {
 	vec3 centre{};
@@ -577,8 +605,11 @@ struct segment_room
 	 * ROOM_DIRECTIONS directions.
 	 */
 	double room{}, longest{};
+	/* The mean of those distances, each capped at EXPOSURE_CAP. */
+	double exposure{};
 	double volume{};
 	room_class kind{};
+	exposure_class exposed{};
 };
 
 struct level_geometry
@@ -590,6 +621,8 @@ struct level_geometry
 	 * whole volume.
 	 */
 	std::array<double, ROOM_CLASSES> volume_share{};
+	/* Shares of the volume by exposure class. */
+	std::array<double, EXPOSURE_CLASSES> exposure_share{};
 	double median_room{}, long_lines{}, volume{};
 	/* For people: the level ("level 1 \"SnyTek: Pyroglyphic\" of
 	 * \"Pyroglyphic (Sny)\"") and where it came from ("PYGL.HOG:
@@ -648,6 +681,58 @@ inline std::vector<vec3> room_directions()
 	return d;
 }
 
+/* The free distances from a segment's centre (a little off it: not on
+ * a plane of symmetry) over room_directions, sorted.
+ */
+[[nodiscard]]
+inline std::vector<double> centre_distances(const level &l, const std::size_t seg, const vec3 &centre, const std::span<const vec3> dirs, const double limit = MAX_RAY)
+{
+	const vec3 from{{centre[0] + 0.137, centre[1] + 0.071, centre[2] + 0.093}};
+	std::vector<double> d;
+	d.reserve(dirs.size());
+	for (const auto &dir : dirs)
+		d.push_back(free_distance(l, seg, from, dir, limit));
+	std::sort(d.begin(), d.end());
+	return d;
+}
+
+[[nodiscard]]
+inline double exposure_of(const std::span<const double> distances)
+{
+	if (distances.empty())
+		return 0;
+	double sum{};
+	for (const double x : distances)
+		sum += std::min(x, EXPOSURE_CAP);
+	return sum / static_cast<double>(distances.size());
+}
+
+/* The centre of segment `seg` (the mean of its vertices). */
+[[nodiscard]]
+inline vec3 segment_centre(const level &l, const segment &s)
+{
+	vec3 c{};
+	for (const auto v : s.verts)
+		for (std::size_t k{}; k != 3; ++k)
+			c[k] += l.vertices[v][k] / 8;
+	return c;
+}
+
+/* The exposure of every segment of `l` (the game's bots: bot.cpp builds
+ * `l` from the loaded level, so that the bots and the analysis measure
+ * alike).
+ */
+[[nodiscard]]
+inline std::vector<double> segment_exposures(const level &l)
+{
+	const auto dirs{room_directions()};
+	std::vector<double> out;
+	out.reserve(l.segments.size());
+	for (std::size_t i{}; i != l.segments.size(); ++i)
+		out.push_back(exposure_of(centre_distances(l, i, segment_centre(l, l.segments[i]), dirs, EXPOSURE_CAP)));
+	return out;
+}
+
 [[nodiscard]]
 inline level_geometry measure(level mesh, std::string name = {}, std::string source = {})
 {
@@ -663,28 +748,28 @@ inline level_geometry measure(level mesh, std::string name = {}, std::string sou
 	{
 		const auto &s{l.segments[i]};
 		segment_room r;
-		for (const auto v : s.verts)
-			for (std::size_t k{}; k != 3; ++k)
-				r.centre[k] += l.vertices[v][k] / 8;
-		/* A little off the centre: not on a plane of symmetry. */
-		const vec3 from{{r.centre[0] + 0.137, r.centre[1] + 0.071, r.centre[2] + 0.093}};
-		std::vector<double> d;
-		for (const auto &dir : dirs)
-			d.push_back(free_distance(l, i, from, dir));
-		std::sort(d.begin(), d.end());
+		r.centre = segment_centre(l, s);
+		const auto d{centre_distances(l, i, r.centre, dirs)};
 		r.room = (d[d.size() / 2 - 1] + d[d.size() / 2]) / 2;
 		r.longest = d.back();
+		r.exposure = exposure_of(d);
 		r.volume = detail::segment_volume(l, s);
 		r.kind = class_of(r.room);
+		r.exposed = exposure_class_of(r.exposure);
 		g.volume += r.volume;
 		g.volume_share[static_cast<std::size_t>(r.kind)] += r.volume;
+		g.exposure_share[static_cast<std::size_t>(r.exposed)] += r.volume;
 		by_room.emplace_back(r.room, r.volume);
 		longest.push_back(r.longest);
 		g.rooms.push_back(r);
 	}
 	if (g.volume > 0)
+	{
 		for (auto &v : g.volume_share)
 			v /= g.volume;
+		for (auto &v : g.exposure_share)
+			v /= g.volume;
+	}
 	std::sort(by_room.begin(), by_room.end());
 	double cum{};
 	for (const auto &[room, volume] : by_room)

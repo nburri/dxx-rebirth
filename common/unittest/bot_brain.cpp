@@ -1507,10 +1507,19 @@ void test_fight_movement()
 		CHECK(v.x == -1 && v.y == 0);
 	}
 }
+/* Section 9.17: only the gauss aims with a wider error. */
+void test_gauss_aim()
+{
+	CHECK(aim_sigma_for(1.0, false) == 1.0);
+	CHECK(aim_sigma_for(1.0, true) == 1.0 + GAUSS_AIM_ERROR_EXTRA);
+	CHECK(GAUSS_AIM_ERROR_EXTRA > 0);
+}
+
 }
 
 int main()
 {
+	test_gauss_aim();
 	test_pursuit_target_and_corner();
 	test_intercept();
 	test_aim_error();

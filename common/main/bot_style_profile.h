@@ -83,7 +83,7 @@ struct style_profile_key
 	std::string_view text;
 };
 
-inline constexpr std::array<style_profile_key, 31> style_profile_keys{{
+inline constexpr std::array<style_profile_key, 33> style_profile_keys{{
 	/* style_params */
 	{"style.retreat_shields", 5, 90, "shields below which the bot retreats"},
 	{"style.engage_weight", 0.5, 1.8, "weight of fighting against everything else"},
@@ -121,6 +121,11 @@ inline constexpr std::array<style_profile_key, 31> style_profile_keys{{
 	{"tune.pursuit_seconds", 0, 30, "how long a target is followed after it left the sight (pursuit_seconds)"},
 	{"tune.grab_detour", 0, 1, "share of the pickups taken by leaving the course (grab_is_detour)"},
 	{"tune.power_pickup", 0, 1, "share of the power pickups in sight the bot goes for (power_pickup_weight)"},
+	/* Section 9.17: the seconds from a heavy missile's pickup to its
+	 * shot, and keeping out of exposed places when weak.
+	 */
+	{"tune.heavy_fire_delay", 0.5, 60, "seconds from a heavy missile's pickup to its shot (heavy_fire_delay, median)"},
+	{"style.cover", 0, 2, "how strongly a weak or collecting bot keeps out of exposed places (cover_appetite)"},
 }};
 
 [[nodiscard]]
@@ -404,7 +409,10 @@ inline std::optional<style_profile> parse_style_profile(std::string_view text)
  *   with the scale 1 (GRAB_DETOUR_BASE_SHARE);
  * - `tune.power_pickup` (the share of the power pickups in sight the
  *   pilot went for): the bot's power weight, in place of the skill's
- *   and the style's (power_pickup_weight, section 9.14).
+ *   and the style's (power_pickup_weight, section 9.14);
+ * - `tune.heavy_fire_delay` (seconds from a heavy missile's pickup to
+ *   its shot, median): in place of the skill's (heavy_fire_delay,
+ *   section 9.17).
  */
 struct style_profile_params
 {
@@ -453,6 +461,7 @@ inline style_profile_params apply_style_profile(const style_profile &p, const bo
 	s.behind_engage = blend("style.behind_engage", s.behind_engage, same);
 	s.outgunned_retreat = blend("style.outgunned_retreat", s.outgunned_retreat, same);
 	s.burn_chase_distance = blend("style.burn_chase_distance", s.burn_chase_distance, same);
+	s.cover = blend("style.cover", s.cover, same);
 	auto &k{r.skill};
 	/* A skill that does not strafe or dodge at all (Trainee) keeps that:
 	 * the profile is a style, not a skill.
@@ -498,6 +507,8 @@ inline style_profile_params apply_style_profile(const style_profile &p, const bo
 	t.grab_detour_scale = blend("tune.grab_detour", t.grab_detour_scale, [](const double v) { return std::clamp(v / GRAB_DETOUR_BASE_SHARE, 0.25, 3.0); });
 	if (p.find("tune.power_pickup"))
 		t.power_pickup = blend("tune.power_pickup", power_pickup_weight(skill, p.base_style), same);
+	if (p.find("tune.heavy_fire_delay"))
+		t.heavy_fire_delay = blend("tune.heavy_fire_delay", heavy_fire_delay(skill), same);
 	return r;
 }
 

@@ -492,6 +492,9 @@ deflection. The thresholds are the constants of `analysis::limits`.
 | Pickups in sight | per class (power pickups: smart, mega, earthshaker missiles and the omega cannon; other): the share taken and gone for of those in sight, in a fight and outside one; distance and time from the first sight, the way flown, off course | section 8.9 |
 | Pursuit | how often the player follows an enemy that left its sight, and for how long (until it has not thrust toward it for 1 s, it is in sight again, or another enemy took its place in the record) | losses of sight while not already flying away |
 | Hits | dealt (direct, splash), taken, damage, direct hits per primary shot (an estimate of accuracy; a shot of several bolts can hit more than once; the hits are those the victim's or the recording machine saw) | hit events |
+| Accuracy per weapon | per primary and secondary: shots, hits on other players (direct and splash) and damage per shot, the median distance of the primary's shots | section 8.10 |
+| Heavy missiles | smart, mega, earthshaker: picked up, fired, time from the pickup to the shot, lost in a death ("died holding"), held at the end | section 8.10 |
+| Exposure | share of the time alive in covered, middle and exposed segments, of all of it, weak and armed, against the levels' volume | section 8.11 |
 
 **Dodging.** Most pilots weave all the time: humans and bots alike move
 across the line of fire in most moments with or without a shot, so "a
@@ -610,6 +613,9 @@ The keys, their range, and what they are computed from:
 | `tune.pursuit_seconds` | 0–30 | median pursuit time (0: lets the enemy go) |
 | `tune.grab_detour` | 0–1 | share of pickups off course |
 | `tune.power_pickup` | 0–1 | share of the power pickups in sight the player went for (section 8.9) |
+| `tune.heavy_fire_delay` | 0.5–60 | median seconds from a heavy missile's pickup to its shot (section 8.10; from 2 shots, high from 12) |
+| `style.cover` | 0–2 | how much less of its time the player spends in exposed segments than the bots without cover, on open levels (section 8.11; at most medium) |
+| `measured.hit_rate_<gun>`, `measured.damage_per_shot_<gun>` | | hits and damage per shot of each primary from 30 shots (section 8.10; for people: the bots' aim is the skill's) |
 
 A value the recordings say nothing about is left out; the confidence of the
 others comes from how much evidence there is (for example fights: low below
@@ -791,6 +797,74 @@ missiles): EC had 43 power pickups in sight, went for 86 % (77
 %. The bots: 23–28 power pickups in sight each, went for 29–39 %, took
 12–32 %; other pickups 44–51 % and 18–22 %. Bots' behaviour since:
 Documentation/multiplayer-bots.md §9.14.
+
+### 8.10 Accuracy per weapon; heavy missiles from the pickup
+
+A `fire` event names the weapon by its slot, a `hit` by its
+`Weapon_info` index (`weapon_slot_of_hit`): the lasers 0–3 and the super
+lasers 30–31 are the laser's slot (the recorder writes slot 0 for the
+super laser's shots), vulcan 11, spreadfire 12, plasma 13, fusion 14,
+gauss 32, helix 33, phoenix 34, omega 35; concussion 8, homing 15,
+proximity 16, smart 17 and its blobs 19, mega 18, flash 36, guided 37,
+smart mine 38 and its blobs 47, mercury 39, earthshaker 40 and its
+children 54. A weapon's **hits** are the player's hits on other players
+(its own blasts left out), direct and splash together: the gauss has a
+blast radius, so its hits come as splash. Per primary and secondary the
+report gives the shots, the hits and the damage per shot, and the median
+distance of the primary's shots with the enemy in sight; the traits
+name those primaries with 30 shots or more (`ACCURACY_MIN_SHOTS`). A shot of
+several bolts (quad lasers, spreadfire, helix) can hit more than once;
+the hits are those the recording saw (section 3.2).
+
+**Heavy missiles** (smart, mega, earthshaker; powerups 20, 21, 45): per
+life, each shot of one is matched to the oldest of its kind picked up
+in that life; the time between is its **delay**. One still held at a
+death **died holding**; one held at a respawn without a death (the slot
+changed hands) or at the end is held at the end. The report gives per
+kind and for all three the pickups, the shots, the delay (median,
+quartiles, p90) and the deaths holding; `tune.heavy_fire_delay` is the
+median delay of all three.
+
+**The recordings** (EC, six games, 89 minutes): laser 0.10 hits and 1.0
+damage per shot, plasma 0.13 and 1.4, gauss 0.17 and 2.1, helix 0.17
+and 1.4, omega 0.33 and 1.9; heavy missiles fired 6.8 s after the
+pickup (median; smart 6.6, mega 7.1, earthshaker 6.2), 26 % died holding
+(Corona about 10 %, never with an earthshaker; Earth Shaker 35–40 %).
+The bots of the Corona game of exp-33: laser 0.18–0.39, gauss
+0.38–0.54, plasma 0.15–0.57, omega 0.55–0.83 hits per shot. Bots'
+behaviour since: Documentation/multiplayer-bots.md §9.17.
+
+### 8.11 Exposure: covered and exposed places
+
+Where is a pilot seen? A segment's **exposure** is the mean free
+distance from its centre over the 26 directions of its room (section
+8.8), each capped at 300 units (`EXPOSURE_CAP`): a long tunnel has two
+long lines of 26 and is little exposed, a big hall much. The classes are
+absolute (`EXPOSURE_COVERED` 40, `EXPOSURE_EXPOSED` 65), the same on
+every level: Earth Shaker (corridors and small rooms) has none exposed,
+Pyroglyphic 61 % of its volume covered and 18 % exposed, Corona 15 %
+covered and 56 % exposed (the hall). The game's bots measure their
+levels the same way (`segment_exposures`).
+
+On levels with room to choose (at least 10 % of the volume covered and
+as much exposed, `EXPOSURE_CHOICE_SHARE`) the report gives the share of
+the time alive in each class, of all of it, **weak** (below 50 shields,
+or the laser, vulcan or spreadfire in hand without a heavy missile
+selected) and **armed** (70 shields and more with a better gun or a
+heavy missile in hand), and the levels' volume shares (time-weighted). Hits on teammates count
+as hits (the group plays deathmatch).
+On levels with much exposed volume (30 %, `COVER_LEVEL_EXPOSED`: open
+halls) it also gives the share in exposed segments over the exposed
+volume share; `style.cover` is how far below the bots without cover the
+player stays (the bots' 1.21 less the player's ratio, over 0.134 per
+unit of cover weight: the arena on Corona, Documentation/multiplayer-
+bots.md §9.17), at most medium.
+
+**The recordings:** EC on Corona (three games) 26–32 % of the time
+covered and 55–58 % exposed (the volume 15 % and 56 %), weak and armed
+alike (55–60 % and 57–63 % exposed); on Pyroglyphic 87 % covered and 1 %
+exposed. The bots of the Corona game of exp-33: 12–19 % covered, 67–74
+% exposed.
 
 ## 9. Code
 
