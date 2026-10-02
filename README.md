@@ -72,7 +72,7 @@ The host sets three flag rules under *Advanced Options* → *CTF Classic: flag r
 - **Own team returns its flag by touch.** Fly through your own team's flag lying away from home to send it home ("Red flag returned by …"). Default: on.
 - **Score only with own flag home.** A capture counts only while your own flag sits in your goal. Otherwise you see "Your flag must be home to score". Default: on.
 
-When neither return rule is on but *score only with own flag home* is, a flag lying away from home goes home by itself after 30 seconds. Without this, both teams could be stuck unable to score. The level needs a goal for each team. When a team has several goal segments, the flag goes to the largest one. All players need a build with this mode (network protocol 111).
+When *score only with own flag home* is on but *own team returns its flag by touch* is off, a flag lying away from home goes home by itself after 30 seconds. Without this, a team whose flag was dropped somewhere could never score again. The level needs a goal for each team. When a team has several goal segments, the flag goes to the largest one. All players need a build with this mode (network protocol 111).
 
 
 ## 4. Legal stuff:

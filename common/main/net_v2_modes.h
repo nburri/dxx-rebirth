@@ -234,16 +234,17 @@ constexpr bool dropped_flag_goes_home(const ctf_rules &r)
 }
 
 /* A flag lying away from home that nobody returns: with "score only with
- * the own flag home" and neither return rule, two dropped flags would
- * stop both teams from scoring for the rest of the level.  The host then
- * returns a flag that lay away from home this long (seconds).
+ * the own flag home" and no touch return, a dropped flag (by hand, or by
+ * a death without "dropped flag returns") would stop its team from
+ * scoring for the rest of the level.  The host then returns a flag that
+ * lay away from home this long (seconds).
  */
 constexpr unsigned CTF_IDLE_RETURN_SECONDS{30};
 
 [[nodiscard]]
 constexpr bool idle_flag_returns(const ctf_rules &r)
 {
-	return r.home_to_score && !r.touch_returns && !r.dropped_returns;
+	return r.home_to_score && !r.touch_returns;
 }
 
 /* Where a captured (or lost, or missing) flag reappears: at home in the

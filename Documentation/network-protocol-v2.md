@@ -2847,13 +2847,16 @@ triggers, robots). Rules and wire layouts in `common/main/net_v2_modes.h`
   - The own team's touch: the pickup rules let a player take its own
     team's flag as a *return* (`inventory_rules::own_flag_returns`; the
     player gains nothing, `apply_pickup`); the host refuses it while the
-    flag is at home, else removes it (`OBJ_REMOVE`) and puts it home. A
+    flag is at home, else removes it (`OBJ_REMOVE`, from the object scan:
+    no `PICKUP_GRANT`, nobody "picks up" a flag) and puts it home (also
+    with `-lagtest`). A
     client asks only for a flag away from home; a bot does not seek its
     own flag (it returns one by flying through it).
-  - The idle return: with "score only with own flag home" and neither
-    return rule, two dropped flags could stop both teams from scoring
-    for the rest of the level; a flag that lies away from home for 30 s
-    then goes home (`idle_flag_returns`).
+  - The idle return: with "score only with own flag home" and no touch
+    return, a dropped flag (by hand, or by a death without "dropped flag
+    returns") could stop its team from scoring for the rest of the
+    level; a flag that lies away from home for 30 s then goes home
+    (`idle_flag_returns`; not for a team without a goal).
 - **`CTF_NOTICE` (0x4A, reliable, host → all or one, 3 bytes):** `kind` u8
   (0 returned: the flag of `team` went home, touched by `pid` or on its
   own with `pid` 0xFF; 1 own flag away: to player `pid` only), `team` u8,
@@ -2872,7 +2875,7 @@ triggers, robots). Rules and wire layouts in `common/main/net_v2_modes.h`
   step. `-botarena-mode ctfclassic -botarena-ctf-rules N` (N: bits 1–3
   as above, default 12): every combination on Tynos and SNYTEK-P 1, 2, 3,
   6, 9, 2 seeds × 30 min each (96 games): the flags start at home in every
-  game, 278 captures, 71 flags returned by touch, 46 idle returns, 96
+  game, 231 captures, 74 flags returned by touch, 43 idle returns, 91
   captures refused for an own flag away, the flag count never broken.
 - **Version.** `MULTI_PROTO_VERSION` and `NET_V2_PROTO_VERSION` are 111
   (110 is hoard's `ORB_BONUS`).

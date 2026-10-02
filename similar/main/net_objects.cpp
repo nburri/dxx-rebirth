@@ -765,9 +765,9 @@ void host_grant_remote(const playernum_t pnum, const netid_t id, const host_deci
 	if (is_flag_return(h.desc, pnum))
 	{
 		/* Its own flag goes home; the player gains nothing.  The
-		 * object's removal (OBJ_REMOVE) answers the request.
+		 * object's removal (scan_objects: OBJ_REMOVE, the id still
+		 * bound) answers the request.
 		 */
-		A.table.unbind(id);
 		net_modes_host_return_flag(h.obj, pnum);
 		return;
 	}
@@ -805,7 +805,7 @@ void host_touch(const vmobjptridx_t obj, const netid_t id)
 	}
 	if (is_flag_return(h.desc, Player_num))
 	{
-		A.table.unbind(id);
+		/* OBJ_REMOVE follows from scan_objects (the id still bound). */
 		net_modes_host_return_flag(obj, Player_num);
 		return;
 	}
@@ -950,6 +950,13 @@ void lag_decide(const nv::lag_pickup &e, const fix64 now)
 	if (!h.d.grant)
 	{
 		A.lag.deny(now, e);
+		return;
+	}
+	/* Its own flag (Classic): a return, not a grant. */
+	if (is_flag_return(h.desc, Player_num))
+	{
+		A.lag.deny(now, e);
+		net_modes_host_return_flag(h.obj, Player_num);
 		return;
 	}
 	auto &obj{*h.obj};
@@ -1560,7 +1567,7 @@ void net_objects_host_drop_player_eggs(const playernum_t pnum)
 	}
 	con_printf(CON_NORMAL, "net: P#%u (%s) dropped %u powerups:%s", pnum, player_role(pnum), created, list);
 	if (flag_home)
-		net_modes_host_flag_home(*flag_home, MAX_PLAYERS);
+		net_modes_host_flag_home(*flag_home, MAX_PLAYERS, true);
 }
 
 void net_objects_player_reappeared(const playernum_t pnum)

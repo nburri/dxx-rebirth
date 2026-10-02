@@ -287,7 +287,7 @@ void host_capture(const playernum_t pnum, const uint8_t team)
 	{
 		/* Classic: home; else somewhere away from the carrier. */
 		if (nv::flag_respawns_home(ctf_rules()))
-			net_modes_host_flag_home(flag, MAX_PLAYERS);
+			net_modes_host_flag_home(flag, MAX_PLAYERS, false);
 		else if (net_drop_powerup_away_from(flag_powerup(flag), pnum) == object_none)
 			con_printf(CON_URGENT, "ctf: the %s flag could not be put back; the level inventory will", team_name(flag));
 	}
@@ -322,6 +322,12 @@ void host_idle_flags()
 	for (const uint8_t team : {nv::CTF_TEAM_BLUE, nv::CTF_TEAM_RED})
 	{
 		auto &idle{M.idle[team]};
+		/* Without a goal the flag is never home: nothing to return. */
+		if (!home_segment(team))
+		{
+			idle = {};
+			continue;
+		}
 		std::optional<vmobjptridx_t> lying;
 		for (auto &&objp : Objects.vmptridx)
 			if (const auto t{flag_team(objp)}; t && *t == team && !(objp->flags & OF_SHOULD_BE_DEAD) && !net_modes_flag_at_home(objp))
@@ -592,7 +598,7 @@ void net_modes_prepare_level_flags()
 #endif
 }
 
-void net_modes_host_flag_home(const uint8_t team, const playernum_t returned_by)
+void net_modes_host_flag_home(const uint8_t team, const playernum_t returned_by, const bool returned)
 {
 #if DXX_BUILD_DESCENT == 2
 	if (!multi_i_am_master() || team >= nv::CTF_TEAMS)
@@ -622,12 +628,15 @@ void net_modes_host_flag_home(const uint8_t team, const playernum_t returned_by)
 	objp->pos = center;
 	net_objects_announce(objp, 0xff, true);
 	object_create_explosion_without_damage(Vclip, *home, center, i2f(5), vclip_index::powerup_disappearance);
-	++M.returns;
 	con_printf(CON_NORMAL, "ctf: the %s flag is home%s", team_name(team), returned_by < N_players ? " (returned by a player)" : "");
+	if (!returned)
+		return;
+	++M.returns;
 	send_notice({nv::ctf_notice_kind::returned, team, returned_by < N_players ? static_cast<uint8_t>(returned_by) : nv::NET_V2_PLAYER_ID_NONE}, std::nullopt);
 #else
 	(void)team;
 	(void)returned_by;
+	(void)returned;
 #endif
 }
 
@@ -641,7 +650,7 @@ void net_modes_host_return_flag(const vmobjptridx_t flag, const playernum_t pnum
 	flag->flags |= OF_SHOULD_BE_DEAD;
 	if (pnum < N_players)
 		con_printf(CON_NORMAL, "ctf: P#%u returns the %s flag", pnum, team_name(*team));
-	net_modes_host_flag_home(*team, pnum);
+	net_modes_host_flag_home(*team, pnum, true);
 #else
 	(void)flag;
 	(void)pnum;
@@ -671,9 +680,9 @@ bool net_modes_host_respawn_flag(const powerup_type_t powerup)
 	if (!nv::flag_respawns_home(ctf_rules()))
 		return false;
 	if (powerup == powerup_type_t::POW_FLAG_BLUE)
-		net_modes_host_flag_home(nv::CTF_TEAM_BLUE, MAX_PLAYERS);
+		net_modes_host_flag_home(nv::CTF_TEAM_BLUE, MAX_PLAYERS, false);
 	else if (powerup == powerup_type_t::POW_FLAG_RED)
-		net_modes_host_flag_home(nv::CTF_TEAM_RED, MAX_PLAYERS);
+		net_modes_host_flag_home(nv::CTF_TEAM_RED, MAX_PLAYERS, false);
 	else
 		return false;
 	return true;

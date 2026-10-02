@@ -439,7 +439,7 @@ void test_classic_rules()
 		/* The idle return only where nothing else returns a flag and a
 		 * team needs its own flag home.
 		 */
-		CHECK(idle_flag_returns(r) == (r.home_to_score && !r.touch_returns && !r.dropped_returns));
+		CHECK(idle_flag_returns(r) == (r.home_to_score && !r.touch_returns));
 		CHECK(flag_respawns_home(r) == c);
 		/* Touching flags: the other team's is taken unless one is
 		 * carried; the own one goes home only with the rule and away

@@ -1256,8 +1256,11 @@ void net_modes_host_return_flag(vmobjptridx_t flag, playernum_t pnum);
  */
 [[nodiscard]]
 std::optional<uint8_t> net_modes_host_take_dropped_flag(object &ship, playernum_t pnum);
-/* Host: put the flag of team `team` home (a return, a respawn). */
-void net_modes_host_flag_home(uint8_t team, playernum_t returned_by);
+/* Host: put the flag of team `team` home (a return, a respawn);
+ * `returned`: a return, told to everyone ("Red flag returned") and
+ * counted (not a capture's or the level inventory's respawn).
+ */
+void net_modes_host_flag_home(uint8_t team, playernum_t returned_by, bool returned);
 /* Host: the level inventory found a flag missing: true if it went home
  * (Classic), false to let the inventory place it.
  */
