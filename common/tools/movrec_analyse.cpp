@@ -10,7 +10,7 @@
  *
  *	movrec-analyse [--out DIR] [--player CALLSIGN]... [--bots]
  *	               [--skill NAME] [--min-seconds N] [--missions DIR]
- *	               [--fidelity PROFILE]... FILE...
+ *	               [--fidelity PROFILE[@BOT]]... FILE...
  *
  * Reads the recordings, puts those of one game made on several machines
  * together (each player's own recording is used for that player, for its
@@ -22,9 +22,9 @@
  * the folder of missions (.hog and .mn2) and reports the traits per level
  * and room (section 8.8 of the document).  With --fidelity, every bot
  * reported is compared with the profile's measured values, trait by trait
- * (section 9.18 of Documentation/multiplayer-bots.md): a bot whose name
- * starts with the profile's callsign's first three letters, or every
- * bot when none does.
+ * (section 9.18 of Documentation/multiplayer-bots.md): PROFILE@BOT the
+ * bot BOT, else a bot whose name starts with the profile's callsign's
+ * first three letters, or every bot when none does.
  *
  * Build: scons sdl2=1 d1x=0 d2x=1 register_runtime_test_plain_link_targets=1 movrec-analyse
  * Binary: build/common/movrec-analyse
@@ -56,7 +56,8 @@ struct options
 	dcx::bot::bot_skill skill{dcx::bot::BOT_DEFAULT_SKILL};
 	double min_seconds{limits::MIN_ALIVE_S};
 	const char *missions{};
-	std::vector<dcx::bot::style_profile> fidelity;
+	/* The profile and the bot it is compared with (empty: by name). */
+	std::vector<std::pair<dcx::bot::style_profile, std::string>> fidelity;
 };
 
 /* Mission files larger than this are not read (untrusted input). */
@@ -186,7 +187,7 @@ void usage()
 		"  --skill NAME       the skill the profile is scaled for: Trainee, Rookie, Hotshot (default), Ace, Insane\n"
 		"  --min-seconds N    skip players alive for less than N seconds (default 20)\n"
 		"  --missions DIR     the folder of the missions (.hog, .mn2): traits per level and room\n"
-		"  --fidelity FILE    compare the bots with this profile's measured values (repeatable)\n", stderr);
+		"  --fidelity FILE[@BOT]  compare the bot BOT (else the bots named like the profile) with this profile (repeatable)\n", stderr);
 }
 
 }
@@ -210,7 +211,14 @@ int main(const int argc, char **const argv)
 			opt.missions = argv[++i];
 		else if (!std::strcmp(a, "--fidelity") && i + 1 < argc)
 		{
-			const char *const path{argv[++i]};
+			std::string spec{argv[++i]};
+			std::string bot;
+			if (const auto at{spec.rfind('@')}; at != std::string::npos && spec.find('/', at) == std::string::npos)
+			{
+				bot = lower(spec.substr(at + 1));
+				spec.resize(at);
+			}
+			const char *const path{spec.c_str()};
 			const auto data{load_file(path)};
 			auto p{data ? dcx::bot::parse_style_profile(std::string_view{reinterpret_cast<const char *>(data->data()), data->size()}) : std::nullopt};
 			if (!p)
@@ -218,7 +226,7 @@ int main(const int argc, char **const argv)
 				std::fprintf(stderr, "%s: %s\n", path, data ? "not a style profile" : "cannot read");
 				return 2;
 			}
-			opt.fidelity.push_back(std::move(*p));
+			opt.fidelity.emplace_back(std::move(*p), std::move(bot));
 		}
 		else if (!std::strcmp(a, "--skill") && i + 1 < argc)
 		{
@@ -335,10 +343,12 @@ int main(const int argc, char **const argv)
 			std::printf("\n--- %s%s ---\n%s", safe_name(s.callsign).c_str(), std::string{dcx::bot::STYLE_PROFILE_EXTENSION}.c_str(), profile.c_str());
 	}
 	/* Section 9.18: the bots against the profiles they fly. */
-	for (const auto &target : opt.fidelity)
+	for (const auto &[target, bot] : opt.fidelity)
 	{
 		const auto stem{lower(target.callsign.substr(0, 3))};
-		const auto mine{[&stem](const player_stats &s) {
+		const auto mine{[&stem, &bot](const player_stats &s) {
+			if (!bot.empty())
+				return s.bot && lower(s.callsign) == bot;
 			return s.bot && !stem.empty() && lower(s.callsign).starts_with(stem);
 		}};
 		const bool any{std::any_of(result.players.begin(), result.players.end(), [&](const player_result &pr) { return mine(pr.stats); })};

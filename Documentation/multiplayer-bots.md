@@ -3189,7 +3189,8 @@ own random numbers (deterministic on the host), no protocol change:
   way on. The preferred distance is drawn every 1–2.5 s. The range is a
   key too (`approach_key`): forward beyond the preferred distance plus
   15 units, reverse inside it less 15, held in between, at the style's
-  closing thrust (`COMBAT_CLOSE_SPEED` 0.9 × `close_scale`); a band
+  closing thrust (`COMBAT_CLOSE_SPEED` 0.9 × `close_scale`; section
+  9.18: closing in is a full key, the scale backing off only); a band
   narrower than 30 units (hugging an enemy within its own blast) keeps
   the proportional thrust of before (`approach_thrust`), which does not
   overshoot into the enemy.
@@ -4036,10 +4037,18 @@ by fight.
   enemy with a line of sight at any angle, perceived for this). In a
   situation with an aim the bot lights it below the aim (`habit_burn`:
   with the forward key held and the keys within 60° of the nose, a charge
-  of 0.1, in roam 0.5 with a reserve of 0.25) and not above; the
-  skill's rules decide the others.
+  of 0.1, in roam 0.5 with a reserve of 0.25) and not above, besides the
+  push after a turn round (section 9.12); the skill's rules decide the
+  situations without an aim (for the bots without a profile from Hotshot
+  on there are none: the retreat's drawn burn of section 9.12 and the
+  chase, dodge and straight-flight rules give way to the aims). The
+  nearest enemy in sight is found with the lines perceive cast anyway
+  and at most three more a perception tick; a cloaked enemy only near,
+  as perceive sees it. "Under attack" is a hit within 2 s, not the
+  spawn.
 - *Firing distance* (`tune.fire_distance`): the median of the last 63
-  shots' distances; the juke's preferred distance moves by the miss
+  primary shots' distances to the target engaged (not while keeping a
+  heavy missile's standoff or hugging, nor is the offset applied then); the juke's preferred distance moves by the miss
   (`juke_rhythm::offset`, −0.5 to 1 band). (Backing off sooner as well
   — the range key reverse below up to 0.9 of the preferred distance —
   gained 4 units and cost 6 kills in 90.)
@@ -4075,7 +4084,7 @@ a pickup behind) gained 0.3 and cost 3 kills in 80. Kept:
   (`default_burn_aims`): Insane 30 % chasing, 35 % fleeing, 13 % with no
   enemy in sight, 14 % otherwise (the middle of the group's pilots:
   12–53, 15–53, 2–36, 8–38 %), Ace 0.8, Hotshot 0.6 of it, Rookie only
-  chasing (its rule); 10 → 17 % of the time.
+  chasing (its rule); 10 → 16 % of the time.
 
 **Measured** (`-botarena`, 600 s, seeds 1–8, mean ± spread; before is
 experimental-netcode after PR #81; the profiles made from the
@@ -4085,54 +4094,57 @@ Insane/Balanced, Insane/Aggressive):
 
 | Pyroglyphic: pilot, bot before → after | player S | player W |
 |---|---|---|
-| speed | 55.1: 44.5 → 47.1 | 58.5: 45.3 → 48.4 |
-| strafe reversals a minute | 42.3: 40.7 → 45.9 | 65.7: 44.5 → 61.5 |
-| strafing, share of the fight | 0.57: 0.59 → 0.63 | 0.81: 0.61 → 0.72 |
-| vertical share | 0.62: 0.58 → 0.63 | 0.43: 0.57 → 0.52 |
-| speed across | 82 %: 67 → 70 % | 84 %: 68 → 68 % |
-| afterburner | 15.7 %: 10.4 → 17.1 % | 32.6 %: 12.2 → 23.8 % |
-| afterburner chasing / fleeing | 33 / 32 %: 17 / 23 → 31 / 32 % | 46 / 48 %: 16 / 29 → 38 / 40 % |
-| afterburner roam / otherwise | 10 / 14 %: 10 / 8 → 13 / 17 % | 36 / 20 %: 13 / 8 → 22 / 20 % |
-| firing distance, median | 64: 39 → 43 | 69: 40 → 45 |
+| speed | 55.1: 44.5 → 46.3 | 58.5: 45.3 → 48.0 |
+| strafe reversals a minute | 42.3: 40.7 → 47.2 | 65.7: 44.5 → 65.2 |
+| strafing, share of the fight | 0.57: 0.59 → 0.62 | 0.81: 0.61 → 0.73 |
+| vertical share | 0.62: 0.58 → 0.65 | 0.43: 0.57 → 0.52 |
+| speed across | 82 %: 67 → 69 % | 84 %: 68 → 65 % |
+| afterburner | 15.7 %: 10.4 → 16.5 % | 32.6 %: 12.2 → 24.8 % |
+| afterburner chasing / fleeing | 33 / 32 %: 17 / 23 → 31 / 33 % | 46 / 48 %: 16 / 29 → 43 / 46 % |
+| afterburner roam / otherwise | 10 / 14 %: 10 / 8 → 14 / 15 % | 36 / 20 %: 13 / 8 → 23 / 20 % |
+| firing distance, median | 64: 39 → 43 | 69: 40 → 46 |
 
 | Corona: pilot, bot before → after | player S | player W |
 |---|---|---|
-| speed | 57.8: 45.2 → 47.0 | 61.7: 46.0 → 48.4 |
-| strafe reversals a minute | 47.8: 46.2 → 47.7 | 60.8: 47.0 → 60.2 |
+| speed | 57.8: 45.2 → 47.5 | 61.7: 46.0 → 46.9 |
+| strafe reversals a minute | 47.8: 46.2 → 47.7 | 60.8: 47.0 → 70.0 |
 | strafing, share of the fight | 0.62: 0.65 → 0.65 | 0.78: 0.65 → 0.76 |
-| vertical share | 0.74: 0.64 → 0.70 | 0.60: 0.64 → 0.61 |
-| afterburner | 15.7 %: 10.3 → 15.6 % | 35.7 %: 12.1 → 23.3 % |
-| afterburner chasing / fleeing | 26 / 23 %: 13 / 19 → 23 / 25 % | 44 / 53 %: 12 / 27 → 26 / 37 % |
-| firing distance, median | 67: 53 → 52 | 57: 50 → 49 |
+| vertical share | 0.74: 0.64 → 0.69 | 0.60: 0.64 → 0.62 |
+| afterburner | 15.7 %: 10.3 → 16.4 % | 35.7 %: 12.1 → 23.6 % |
+| afterburner chasing / fleeing | 26 / 23 %: 13 / 19 → 25 / 25 % | 44 / 53 %: 12 / 27 → 27 / 37 % |
+| firing distance, median | 67: 53 → 49 | 57: 50 → 48 |
 
-The strafe and S's afterburner now match. W's afterburner is at the
-charge's limit (the bot burns 25–30 % of the time it owns it, W 33 %:
-the arena's bots die half again as often as W and lose it with the
-ship). The firing
-distance gained 4 units on Pyroglyphic only: bot against bot both close
-in, and in most of a fight the bot flies its path to a pickup, where
-the band does not reach (in the exp-34 game the bots fired 12 units
-nearer than their pilots, in the arena 20–25).
+The strafe and S's afterburner now match (W's reversals overshoot on
+Corona: the walls and paths there add more than the juke can take back
+at its least flip share). W's afterburner is at the charge's limit (the
+bot burns 26–30 % of the time it owns it, W 33 %: the arena's bots die
+half again as often as W and lose it with the ship). The firing distance
+gained 4–6 units on Pyroglyphic only: bot against bot both close in,
+and in most of a fight the bot flies its path to a pickup, where the
+band does not reach (in the exp-34 game the bots fired 12 units nearer
+than their pilots, in the arena 20–25).
 
 | The group's five bots | Pyroglyphic before → after | Corona before → after |
 |---|---|---|
-| speed, Insane | 45.2 → 47.7 | 45.6 → 47.6 |
-| kills a game | 86.0 ± 7.3 → 82.6 ± 5.0 | 77.6 ± 5.5 → 78.4 ± 3.9 |
-| K/D Insane / Hotshot | 1.11 / 0.37 → 1.09 / 0.34 | 1.06 / 0.52 → 1.01 / 0.60 |
-| stuck recoveries a bot | 3.8 → 2.7 | 3.8 → 2.7 |
-| strafe reversals a minute, Insane | 49.6 → 56.4 | 48.6 → 54.1 |
-| afterburner | 10 → 17 % | 9 → 17 % |
-| power pickups in sight gone for | 83 → 81 % | 58 → 56 % |
-| time covered / exposed | 81 / 1 → 81 / 2 % | 16 / 65 → 16 / 65 % |
+| speed, Insane | 45.2 → 47.9 | 45.6 → 47.1 |
+| kills a game | 86.0 ± 7.3 → 82.8 ± 6.8 | 77.6 ± 5.5 → 79.1 ± 5.5 |
+| K/D Insane / Hotshot | 1.11 / 0.37 → 1.12 / 0.33 | 1.06 / 0.52 → 1.03 / 0.51 |
+| stuck recoveries a bot | 3.8 → 2.7 | 3.8 → 3.4 |
+| strafe reversals a minute, Insane | 49.6 → 56.4 | 48.6 → 54.4 |
+| afterburner | 10 → 16 % | 9 → 16 % |
+| power pickups in sight gone for | 83 → 76 % | 58 → 60 % |
+| time covered / exposed | 81 / 1 → 80 / 2 % | 16 / 65 → 16 / 64 % |
 
-With the two profile bots the kills a game were 98.8 ± 6.9 → 86.5 ± 9.1
-(Pyroglyphic) and 83.4 ± 8.5 → 80.5 ± 8.4 (Corona): the profile bots
-fight less and burn away more as their pilots did (W's bot 20.2 → 16.6
-kills, 20.5 → 18.0 deaths), the others meet them less. The speed stays
-below the 52 aimed at for Insane: +2 to +3 here; in the exp-34 game the
-bots flew 4 units faster than in the arena (bot against bot fights
-closer). The flight through pickups adds strafe reversals (the path's
-keys turn more often near a pickup): 54–56 a minute, above EC's 36–52.
+With the two profile bots the kills a game were 98.8 ± 6.9 → 83.5 ± 9.0
+(Pyroglyphic) and 83.4 ± 8.5 → 80.6 ± 7.0 (Corona): every bot of that
+lineup kills a little less (W's bot 20.2 → 17.6, S's 19.4 → 19.1, the
+others 59 → 47 together on Pyroglyphic); without the profiles' aims the
+same build had 91.6. The speed stays below the 52 aimed at for Insane:
++2 to +3 here; in the exp-34 game the bots flew 4 units faster than in
+the arena (bot against bot fights closer). The flight through pickups
+adds strafe reversals (the path's keys turn more often near a pickup):
+54–56 a minute, above EC's 36–52. The bots' code takes as long as before
+(1.5–2 ms a game second for five bots, single runs).
 
 **Tests.** `test-bot-brain` `test_habit_governor` (the reversals and the
 share counted as the analysis does, outside a fight not; the flip, the

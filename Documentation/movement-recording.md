@@ -371,7 +371,7 @@ proposed bot style:
 scons sdl2=1 d1x=0 d2x=1 register_runtime_test_plain_link_targets=1 movrec-analyse
 build/common/movrec-analyse [--out DIR] [--player CALLSIGN]... [--bots]
                             [--skill NAME] [--min-seconds N]
-                            [--missions DIR] [--fidelity PROFILE]... FILE...
+                            [--missions DIR] [--fidelity PROFILE[@BOT]]... FILE...
 ```
 
 | Option | Meaning |
@@ -382,7 +382,7 @@ build/common/movrec-analyse [--out DIR] [--player CALLSIGN]... [--bots]
 | `--skill NAME` | The skill the profile's skill-relative values are scaled for (Trainee … Insane; default Hotshot). |
 | `--min-seconds N` | Skip players alive for less than N seconds (default 20). |
 | `--missions DIR` | The folder of the missions (`.hog` and `.mn2`, as in the game's `missions/`): find every recorded level's geometry and report the traits per level and room (section 8.8). |
-| `--fidelity PROFILE` | Compare the recorded bots with this `.botstyle` file's measured values, trait by trait (section 8.12; repeatable). |
+| `--fidelity PROFILE[@BOT]` | Compare the recorded bot BOT (else the bots named like the profile's callsign, else all) with this `.botstyle` file's measured values, trait by trait (section 8.12; repeatable). |
 
 Give it every recording you have of a player: all files of all evenings, the
 host's and the clients'. It first lists the files (format, length, host or
@@ -893,9 +893,9 @@ and the value keys that are measurements, such as `skill.strafe_vertical`,
 aims at the `tune.strafe_*`, `tune.burn_*` and `tune.fire_distance` keys
 by watching its own flight.
 
-`--fidelity PROFILE` compares every recorded bot (`--bots`) whose name
-starts with the first three letters of the profile's callsign (else every
-bot) with the profile, trait by trait (`fidelity_rows`, `fidelity_report`):
+`--fidelity PROFILE[@BOT]` compares the recorded bot named BOT, else every
+recorded bot (`--bots`) whose name starts with the first three letters of
+the profile's callsign, else every bot, with the profile, trait by trait (`fidelity_rows`, `fidelity_report`):
 the profile's value, the bot's, the difference (absolute for shares,
 relative otherwise) and whether it is within the tolerance (shares 0.04
 to 0.1, rates and distances 8 to 30 %):
@@ -912,8 +912,8 @@ to 0.1, rates and distances 8 to 30 %):
 ```
 
 The report has the afterburner owned too: from the pickup of the
-afterburner powerup (or the first burn: a ship that burns has one) to the
-death, as a share of the time alive, and the share of that time burnt.
+afterburner powerup (or the first burn on exact controls: a ship that
+burns has one) to the death, as a share of the time alive, and the share of that time burnt.
 The players of the Pyroglyphic game of 2026-10-02 owned it 53–98 % of the
 time and burnt 14–33 % of it (a full charge lasts 3 s and comes back in 8:
 27 % with every pickup's full charge on top); the profile bots of that

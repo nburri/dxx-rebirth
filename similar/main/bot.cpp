@@ -449,8 +449,20 @@ struct bot_state
 	 * only with habits).
 	 */
 	std::optional<vec3> sight_enemy, near_enemy;
+	/* The lines of sight perceive cast this tick, by player (for
+	 * sense_nearest_enemies).
+	 */
+	per_player_array<int8_t> los_cast{};
 	/* The juke's run is held on the path too (b::path_weave). */
 	bool weave_run{};
+	/* The band is the heavy missile's standoff or a hug (no habits'
+	 * offset, no shot's distance).
+	 */
+	bool band_special{};
+	/* The last hit taken (0: none this life), for the habits' "under
+	 * attack" (attacked_tick starts at the spawn).
+	 */
+	uint32_t hit_tick{};
 	/* Section 9.12: retreating (at the last tick), flown turned away and
 	 * with the afterburner (drawn until flee_roll_at).
 	 */
@@ -694,6 +706,10 @@ struct bot_state
 			if (i != last_attacker)
 				m = {};
 		visible_now = {};
+		sight_enemy.reset();
+		near_enemy.reset();
+		weave_run = false;
+		hit_tick = 0;
 		target.reset();
 		seen.clear();
 		shot_clear = false;
@@ -1681,13 +1697,23 @@ double wall_distance(const object &obj, const vec3 &dir, double limit);
 
 /* Section 9.18: the nearest enemy the ship has a line of sight to, at any
  * angle, and the nearest enemy (the movement recorder's fight context),
- * for the habits.
+ * for the habits.  The lines perceive cast this tick are reused; at most
+ * HABIT_SIGHT_CASTS more.  A cloaked enemy is seen near only, as in
+ * perceive.
  */
+constexpr std::size_t HABIT_SIGHT_CASTS{3};
+
 void sense_nearest_enemies(bot_state &bs, const object &obj)
 {
 	auto &Objects = LevelUniqueObjectState.Objects;
 	const auto pos{to_vec(obj.pos)};
-	std::array<std::pair<double, const object *>, MAX_PLAYERS> near{};
+	struct enemy
+	{
+		double distance;
+		const object *ship;
+		playernum_t pid;
+	};
+	std::array<enemy, MAX_PLAYERS> enemies{};
 	std::size_t n{};
 	for (playernum_t i = 0; i < N_players && i < MAX_PLAYERS; ++i)
 	{
@@ -1700,19 +1726,33 @@ void sense_nearest_enemies(bot_state &bs, const object &obj)
 		const bool dying{i == Player_num ? Player_dead_state != player_dead_state::no : bot_ship_dying(i)};
 		if (t.type != object_type::OBJ_PLAYER || dying)
 			continue;
-		near[n++] = {b::distance(to_vec(t.pos), pos), &t};
+		const double d{b::distance(to_vec(t.pos), pos)};
+		if (+(t.ctype.player_info.powerup_flags & player_flag::cloaked) && d > BOT_CLOAK_SEE_DISTANCE)
+			continue;
+		enemies[n++] = {d, &t, i};
 	}
-	std::sort(near.begin(), near.begin() + n, [](const auto &a, const auto &c) { return a.first < c.first; });
+	std::sort(enemies.begin(), enemies.begin() + n, [](const enemy &a, const enemy &c) { return a.distance < c.distance; });
 	bs.sight_enemy.reset();
 	bs.near_enemy.reset();
 	if (n)
-		bs.near_enemy = to_vec(near[0].second->pos);
+		bs.near_enemy = to_vec(enemies[0].ship->pos);
+	std::size_t casts{};
 	for (std::size_t k{}; k != n; ++k)
-		if (line_clear(obj, obj.pos, obj.segnum, near[k].second->pos, 0, true))
+	{
+		const auto &e{enemies[k]};
+		bool clear;
+		if (bs.los_cast[e.pid])
+			clear = bs.los_cast[e.pid] > 0;
+		else if (casts++ < HABIT_SIGHT_CASTS)
+			clear = line_clear(obj, obj.pos, obj.segnum, e.ship->pos, 0, true);
+		else
+			break;
+		if (clear)
 		{
-			bs.sight_enemy = to_vec(near[k].second->pos);
+			bs.sight_enemy = to_vec(e.ship->pos);
 			return;
 		}
+	}
 }
 
 void perceive(bot_state &bs, const object &obj, const uint32_t tick)
@@ -1721,8 +1761,7 @@ void perceive(bot_state &bs, const object &obj, const uint32_t tick)
 	const auto &sk{bs.skill};
 	const auto pos{to_vec(obj.pos)};
 	const auto frame{to_frame(obj.orient)};
-	if (bs.habits.active())
-		sense_nearest_enemies(bs, obj);
+	bs.los_cast = {};
 	/* Section 9.5: where the bot has been (exploring). */
 	if (const uint32_t seg{obj.segnum}; seg < bs.visited.size())
 		bs.visited[seg] = tick + 1;
@@ -1758,7 +1797,9 @@ void perceive(bot_state &bs, const object &obj, const uint32_t tick)
 			continue;
 		if (+(t.ctype.player_info.powerup_flags & player_flag::cloaked) && dist > BOT_CLOAK_SEE_DISTANCE)
 			continue;
-		if (!line_clear(obj, obj.pos, obj.segnum, t.pos, 0, true))
+		const bool clear{line_clear(obj, obj.pos, obj.segnum, t.pos, 0, true)};
+		bs.los_cast[i] = clear ? 1 : -1;
+		if (!clear)
 			continue;
 		bs.visible_now[i] = true;
 		bs.memory[i] = {
@@ -1769,6 +1810,9 @@ void perceive(bot_state &bs, const object &obj, const uint32_t tick)
 			.tick = tick,
 		};
 	}
+	/* Section 9.18: the analysis' nearest enemies, for the habits. */
+	if (bs.habits.active())
+		sense_nearest_enemies(bs, obj);
 	/* Section 9.16: the target out of sight a moment, the fight's keys
 	 * fly on toward where it went only while no wall is between (it went
 	 * round a corner: the path).
@@ -3279,7 +3323,7 @@ void decide_afterburner(bot_state &bs, object &obj, const vec3 &wanted, const ui
 	 */
 	const auto situation{b::situation_of({
 		.enemy_in_sight = bs.sight_enemy.has_value(),
-		.attacked = tick - bs.attacked_tick < b::ticks_from_ms(2000) && bs.attacked_tick,
+		.attacked = bs.hit_tick && tick - bs.hit_tick < b::ticks_from_ms(2000),
 		.to_enemy = bs.sight_enemy ? *bs.sight_enemy - pos : bs.near_enemy ? *bs.near_enemy - pos : b::vec3{},
 		.nose = frame.f,
 		.vel = to_vec(obj.mtype.phys_info.velocity),
@@ -3288,6 +3332,10 @@ void decide_afterburner(bot_state &bs, object &obj, const vec3 &wanted, const ui
 		.max_turn_rate = B.limits.turn.max_rate,
 	})};
 	const bool governed{bs.habits.burn_governed(situation)};
+	const bool turn_boost{bs.turning.phase == b::turn_phase::boost && bs.turning.burn};
+	/* The review of PR #84: the push after a turn round (section 9.12,
+	 * the profile's tune.turn_boost_burn) keeps its burn.
+	 */
 	const bool burn{!bs.stuck.recovering() && (governed
 		? b::habit_burn({
 			.have = have,
@@ -3299,7 +3347,14 @@ void decide_afterburner(bot_state &bs, object &obj, const vec3 &wanted, const ui
 			 */
 			.along = b::dot(frame.f, bs.move_cmd) > 0.3 ? b::dot(frame.f, b::normalized(bs.move_cmd)) : 0,
 			.burning = bs.burning,
-		})
+		}) || (turn_boost && b::want_afterburner({
+			.have = have,
+			.charge = charge,
+			.use = b::afterburner_of(bs.skill_level),
+			.turn_boost = true,
+			.aligned = aligned,
+			.burning = bs.burning,
+		}))
 		: b::want_afterburner({
 		.have = have,
 		.charge = charge,
@@ -3308,12 +3363,12 @@ void decide_afterburner(bot_state &bs, object &obj, const vec3 &wanted, const ui
 		.retreating = bs.goal == bot_goal::retreat && bs.flee_burn,
 		.dodging = dodging,
 		.long_straight = long_straight,
-		.turn_boost = bs.turning.phase == b::turn_phase::boost && bs.turning.burn,
+		.turn_boost = turn_boost,
 		.aligned = aligned,
 		.burning = bs.burning,
 	}))};
-	/* What the analysis sees: the afterburner lit with charge and the
-	 * forward key (the flight's keys, before this tick's).
+	/* What the analysis sees: the afterburner as lit since the last
+	 * tick, with charge and this tick's forward key.
 	 */
 	if (bs.habits.active())
 		bs.habits.burn_tick(tick_seconds(1), situation, bs.burning && charge > 0 && have && b::dot(bs.move_cmd, frame.f) > 0);
@@ -4553,11 +4608,15 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 	 * BOT_RANGE_LO/HI (b::tune_params).
 	 */
 	double range_lo{bs.tune.range_lo * range_scale}, range_hi{bs.tune.range_hi * range_scale};
+	/* Section 9.18: the habits' offset and shots belong to this band. */
+	bs.band_width = range_hi - range_lo;
+	bs.band_special = false;
 	/* Section 9.5: with a heavy missile ready, far enough for its blast. */
 	if (bs.standoff > range_lo)
 	{
 		range_lo = bs.standoff;
 		range_hi = std::max(range_hi, range_lo + 25);
+		bs.band_special = true;
 	}
 	/* Section 9.6: hugging an enemy that holds a heavy missile, within
 	 * its own blast.
@@ -4566,9 +4625,17 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 	{
 		range_lo = b::HUG_NEAREST;
 		range_hi = bs.hug_keep;
+		bs.band_special = true;
 	}
-	bs.juke.update(bs.rng, b::ticks_from_ms(sk.strafe_min_ms), b::ticks_from_ms(sk.strafe_max_ms), range_lo, range_hi, sk.strafe_vertical, bs.habits.rhythm());
-	bs.band_width = range_hi - range_lo;
+	{
+		/* The review of PR #84: a standoff or a hug is kept as it is
+		 * (an offset took a bot into its own blast, or out of a hug).
+		 */
+		auto rhythm{bs.habits.rhythm()};
+		if (bs.band_special)
+			rhythm.offset = 0;
+		bs.juke.update(bs.rng, b::ticks_from_ms(sk.strafe_min_ms), b::ticks_from_ms(sk.strafe_max_ms), range_lo, range_hi, sk.strafe_vertical, rhythm);
+	}
 	/* Section 9.12: a retreat is flown turned away or facing the enemy,
 	 * drawn when it starts and every b::FLEE_ROLL_TICKS.
 	 */
@@ -4991,8 +5058,11 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 		 */
 		if (aim_set && in_fight)
 		{
+			/* No draw without a weave: the bots without a profile
+			 * keep their random numbers (the review of PR #84).
+			 */
 			if (bs.juke.started())
-				bs.weave_run = bs.rng.uniform() < bs.habits.rhythm().weave;
+				bs.weave_run = bs.habits.rhythm().weave > 0 && bs.rng.uniform() < bs.habits.rhythm().weave;
 			if (bs.weave_run)
 				keys = b::path_weave(keys, bs.juke, b::effective_strafe_speed(sk, bs.style));
 		}
@@ -5042,11 +5112,10 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 	 * thrust beyond 0.3 of full), in a fight as it counts one: an enemy
 	 * in sight within 400 units.
 	 */
-	if (bs.habits.active() && tick % b::HABIT_SAMPLE_TICKS == 0)
+	if (bs.habits.strafe_governed() && tick % b::HABIT_SAMPLE_TICKS == 0)
 	{
 		const auto l{frame.to_local(bs.move_cmd)};
-		const auto key{[](const double v) { return v > 0.3 ? 1 : v < -0.3 ? -1 : 0; }};
-		bs.habits.strafe_tick(tick_seconds(b::HABIT_SAMPLE_TICKS), bs.sight_enemy && b::distance(*bs.sight_enemy, pos) < b::HABIT_FIGHT_RANGE, key(l.x), key(l.y));
+		bs.habits.strafe_tick(tick_seconds(b::HABIT_SAMPLE_TICKS), bs.sight_enemy && b::distance(*bs.sight_enemy, pos) < b::HABIT_FIGHT_RANGE, l.x, l.y);
 	}
 	if (!aim_set)
 		bs.aim_dir = bs.face_dir;
@@ -5817,7 +5886,7 @@ void bots_fire()
 #endif
 		do_laser_firing_player(bs.pl, objp);
 		/* Section 9.18: the distance of the shot. */
-		if (bs.engaged_distance > 0)
+		if (bs.engaged_distance > 0 && !bs.band_special)
 			bs.habits.fired(bs.engaged_distance, bs.band_width);
 	}
 }
@@ -5882,6 +5951,7 @@ bool bot_take_damage(object &ship, const icobjptridx_t killer, const fix damage,
 			const auto tick{B.tick.tick()};
 			bs->last_attacker = who;
 			bs->attacked_tick = tick;
+			bs->hit_tick = tick;
 			/* Section 9.10: the attacker, if a bot, landed a hit (its
 			 * hits on a human show only as the human's shields: the
 			 * damage seen, b::pursuit_view).

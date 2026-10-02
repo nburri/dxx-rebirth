@@ -1911,6 +1911,8 @@ constexpr unsigned HABIT_REVERSAL_GAP_MS{300};
  * (a key of one tick of the bot's 60 is not in the recording).
  */
 constexpr unsigned HABIT_SAMPLE_TICKS{2};
+/* A lateral thrust from this share of full is a strafe (CONTROL_USED). */
+constexpr double HABIT_KEY_USED{0.3};
 /* Per second of fight: how far the flip share and the strafe amount move
  * for a miss of the whole aim.
  */
@@ -1940,7 +1942,7 @@ class habit_governor
 	/* The strafe: decaying sums over the fight time. */
 	double m_fight_s{}, m_strafe_s{}, m_reversals{}, m_side_s{}, m_vert_s{};
 	bool m_in_run{}, m_have_last{};
-	int8_t m_dir_side{}, m_dir_vert{}, m_last_side{}, m_last_vert{};
+	double m_dir_side{}, m_dir_vert{}, m_last_side{}, m_last_vert{};
 	double m_since_run_s{1e9};
 	/* The strafe amount (0 to 2, HABIT_PAUSE_MAX). */
 	double m_amount{(HABIT_PAUSE_MAX - STRAFE_PAUSE_SHARE) / (HABIT_PAUSE_MAX - HABIT_PAUSE_MIN)};
@@ -1975,13 +1977,27 @@ public:
 	{
 		return m_aim;
 	}
-	/* Every HABIT_SAMPLE_TICKS ticks alive (`dt` seconds): in a fight (an
-	 * enemy in sight within HABIT_FIGHT_RANGE), the lateral keys held
-	 * (-1, 0, 1).
-	 */
-	void strafe_tick(const double dt, const bool fight, const int side, const int vertical)
+	/* Whether the strafe has an aim (strafe_tick is wanted). */
+	[[nodiscard]]
+	bool strafe_governed() const
 	{
-		const bool active{fight && (side || vertical)};
+		return m_aim.strafe_reversals >= 0 || m_aim.strafe_share >= 0 || m_aim.strafe_vertical >= 0;
+	}
+	/* Every HABIT_SAMPLE_TICKS ticks alive (`dt` seconds): in a fight (an
+	 * enemy in sight within HABIT_FIGHT_RANGE), the lateral thrust
+	 * (sideways, vertical; shares of full).  As scan_strafe: a run while
+	 * the lateral thrust is at least HABIT_KEY_USED, its direction the
+	 * thrust's at its start.
+	 */
+	void strafe_tick(const double dt, const bool fight, double side, double vertical)
+	{
+		const double l{std::hypot(side, vertical)};
+		const bool active{fight && l >= HABIT_KEY_USED};
+		if (active)
+		{
+			side /= l;
+			vertical /= l;
+		}
 		/* A run ends when the keys let go or turn 90 degrees or more. */
 		if (m_in_run && (!active || side * m_dir_side + vertical * m_dir_vert <= 0))
 		{
@@ -2007,14 +2023,14 @@ public:
 			if (!m_in_run)
 			{
 				m_in_run = true;
-				m_dir_side = static_cast<int8_t>(side);
-				m_dir_vert = static_cast<int8_t>(vertical);
+				m_dir_side = side;
+				m_dir_vert = vertical;
 				if (m_have_last && m_since_run_s * 1000 <= HABIT_REVERSAL_GAP_MS && side * m_last_side + vertical * m_last_vert <= 0)
 					m_reversals += 1;
 			}
 			m_strafe_s += dt;
-			m_side_s += side ? dt : 0;
-			m_vert_s += vertical ? dt : 0;
+			m_side_s += std::abs(side) * l * dt;
+			m_vert_s += std::abs(vertical) * l * dt;
 		}
 		else
 			m_since_run_s += dt;

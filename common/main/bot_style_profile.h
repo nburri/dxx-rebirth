@@ -93,7 +93,7 @@ inline constexpr std::array<style_profile_key, 38> style_profile_keys{{
 	{"style.dodge_bonus", -0.3, 0.3, "added to the skill's dodge probability"},
 	{"style.mine_interval", 0.5, 3.0, "scale of the time between two mines"},
 	{"style.strafe_scale", 0.5, 1.3, "scale of the strafe speed"},
-	{"style.close_scale", 0.5, 1.25, "scale of the speed closing in and backing off"},
+	{"style.close_scale", 0.5, 1.25, "scale of the speed backing off (closing in is a full key)"},
 	{"style.behind_engage", 0.3, 1.0, "share of the engage weight left when behind in a fight"},
 	{"style.outgunned_retreat", 0, 40, "shields added to the retreat threshold when outgunned"},
 	{"style.burn_chase_distance", 40, 1000, "afterburner when chasing a target further than this"},

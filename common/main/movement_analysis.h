@@ -2604,9 +2604,6 @@ inline void scan_events(const track &tr, accum &a)
 	}
 }
 
-/* Section 8.9: the powerups the player had in sight before someone took
- * them, and what it did about them.
- */
 /* Section 9.18: the afterburner owned, from its pickup (or the first
  * burn: a ship that burns has one, as with an afterburner granted at
  * spawn) to the death.
@@ -2629,7 +2626,8 @@ inline void scan_afterburner_owned(const track &tr, accum &a)
 		}
 		if (!p.alive || !p.ab_known)
 			continue;
-		owned |= p.ab;
+		/* A burn proves it only on exact controls. */
+		owned |= p.ab && !p.ab_estimated;
 		if (!owned)
 			continue;
 		a.ab_owned_s += p.w;
@@ -2638,6 +2636,9 @@ inline void scan_afterburner_owned(const track &tr, accum &a)
 	}
 }
 
+/* Section 8.9: the powerups the player had in sight before someone took
+ * them, and what it did about them.
+ */
 inline void scan_pickup_sight(const track &tr, accum &a)
 {
 	const auto &pts{tr.pts};
@@ -4238,7 +4239,14 @@ inline std::string fidelity_report(const bot::style_profile &target, const playe
 {
 	using detail::appendf;
 	std::string o;
-	appendf(o, "== fidelity: %s%s against \"%s\" ==\n", s.callsign.c_str(), s.bot ? " (bot)" : "", target.name.c_str());
+	/* Names from files: printable ASCII only. */
+	const auto clean{[](const std::string &n) {
+		std::string r;
+		for (const char c : n.substr(0, 64))
+			r += (c >= ' ' && c <= '~') ? c : '?';
+		return r;
+	}};
+	appendf(o, "== fidelity: %s%s against \"%s\" ==\n", clean(s.callsign).c_str(), s.bot ? " (bot)" : "", clean(target.name).c_str());
 	const auto rows{fidelity_rows(target, s)};
 	unsigned within{};
 	for (const auto &x : rows)

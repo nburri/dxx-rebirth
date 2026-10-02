@@ -20,8 +20,9 @@
 #               the style may be a style profile's /bot word or name
 #   -S FILE     a style profile (.botstyle) for the game's botstyles/
 #               folder (repeatable)
-#   -F FILE     compare the bots' flight with this profile's measured
-#               values (movrec-analyse --fidelity, repeatable)
+#   -F FILE[@BOT]  compare the bot BOT (else the bots named like the
+#               profile's callsign) with this profile's measured values
+#               (movrec-analyse --fidelity, repeatable)
 #   -s SECONDS  game time (default 600)
 #   -f FPS      frames per game second (default 200)
 #   -r SEED     random seed (default 1)
@@ -56,7 +57,7 @@ nl='
 '
 
 usage() {
-	sed -n '2,37p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '2,39p' "$0" | sed 's/^# \{0,1\}//'
 	exit "${1:-2}"
 }
 
@@ -109,11 +110,11 @@ mkdir -p "$userdir"
 # Section 9.18 of multiplayer-bots.md: the style profiles the bots fly.
 if [ -n "$styles" ]; then
 	mkdir -p "$userdir/botstyles"
-	oldifs=$IFS; IFS=$nl
+	oldifs=$IFS; IFS=$nl; set -f
 	for f in $styles; do
 		[ -z "$f" ] || cp "$f" "$userdir/botstyles/"
 	done
-	IFS=$oldifs
+	IFS=$oldifs; set +f
 fi
 
 # With -n but no -b, the bots play the pilot's setup (or the default).
@@ -149,11 +150,11 @@ if [ -n "$missions" ]; then
 else
 	set --
 fi
-oldifs=$IFS; IFS=$nl
+oldifs=$IFS; IFS=$nl; set -f
 for f in $fidelity; do
 	[ -z "$f" ] || set -- "$@" --fidelity "$f"
 done
-IFS=$oldifs
+IFS=$oldifs; set +f
 "$analyse" --bots "$@" --out "$out/analysis" "$recording" > "$out/analysis.log" 2>&1 || {
 	status=$?
 	tail -20 "$out/analysis.log" >&2

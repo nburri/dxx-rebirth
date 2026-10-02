@@ -76,7 +76,7 @@ void check_range(const double v, const double lo, const double hi, const char *c
 
 #define CHECK_RANGE(v, lo, hi)	check_range((v), (lo), (hi), #v, __FILE__, __LINE__)
 
-bool near(const double a, const double b, const double eps)
+bool approx(const double a, const double b, const double eps)
 {
 	return std::abs(a - b) <= eps;
 }
@@ -894,11 +894,11 @@ void test_strafer()
 	/* Section 9.18: the aims of the bot's rhythm, and the measurements
 	 * the fidelity check compares with.
 	 */
-	CHECK(near(value(r.profile, "tune.strafe_reversals"), s.strafe_reversals_per_min, 0.01));
-	CHECK(near(value(r.profile, "tune.strafe_share"), s.fight_strafe_share, 0.001));
-	CHECK(near(value(r.profile, "measured.strafe_reversals_per_min"), s.strafe_reversals_per_min, 0.01));
-	CHECK(near(value(r.profile, "measured.speed_across"), s.strafe_speed, 0.001));
-	CHECK(near(value(r.profile, "measured.speed_median"), s.speed.p50, 0.01));
+	CHECK(approx(value(r.profile, "tune.strafe_reversals"), s.strafe_reversals_per_min, 0.01));
+	CHECK(approx(value(r.profile, "tune.strafe_share"), s.fight_strafe_share, 0.001));
+	CHECK(approx(value(r.profile, "measured.strafe_reversals_per_min"), s.strafe_reversals_per_min, 0.01));
+	CHECK(approx(value(r.profile, "measured.speed_across"), s.strafe_speed, 0.001));
+	CHECK(approx(value(r.profile, "measured.speed_median"), s.speed.p50, 0.01));
 	const auto traits{describe_traits(s)};
 	CHECK(!traits.empty() && traits.front().starts_with("Heavy strafer"));
 
@@ -1334,11 +1334,11 @@ void test_afterburner()
 	/* Section 9.18: the shares chasing and in the rest of the fight, the
 	 * afterburner owned (it burns: it has one) and burnt then.
 	 */
-	CHECK(near(value(r.profile, "tune.burn_chase"), s.ab_situation_rate[0], 0.001));
-	CHECK(near(value(r.profile, "measured.afterburner_roam"), s.ab_situation_rate[2], 0.001));
+	CHECK(approx(value(r.profile, "tune.burn_chase"), s.ab_situation_rate[0], 0.001));
+	CHECK(approx(value(r.profile, "measured.afterburner_roam"), s.ab_situation_rate[2], 0.001));
 	CHECK_RANGE(s.ab_owned_share, 0.5, 1.0);
 	CHECK(s.ab_owned_rate >= s.ab_share - 1e-9);
-	CHECK(near(s.ab_owned_rate * s.ab_owned_share, s.ab_share, 0.001));
+	CHECK(approx(s.ab_owned_rate * s.ab_owned_share, s.ab_share, 0.001));
 	const auto none{analyse_flight(fly(strafer(), CYCLES))};
 	CHECK_RANGE(none.stats.ab_share, 0, 0.001);
 	CHECK(none.stats.ab_owned_share == 0);
