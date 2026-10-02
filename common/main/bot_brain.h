@@ -1209,17 +1209,18 @@ public:
 	{
 		m_sign = 0;
 	}
-	/* Once per tick: 1 forward, -1 reverse, 0 none.  `band`: the width
+	/* Once per tick: 1 forward, -1 reverse (0 only before the first
+	 * update).  `band`: the width
 	 * of the fight band; a narrower one than 60 narrows the hysteresis
 	 * to a quarter of it.
 	 */
 	int update(const double dist, const double range, const double band = 60)
 	{
 		const double deadband{std::clamp(band / 4, 2.0, FIGHT_RANGE_DEADBAND)};
-		const double near{std::min(range - deadband, range * FIGHT_REVERSE_SHARE)};
-		if (dist < near)
+		const double reverse_below{std::min(range - deadband, range * FIGHT_REVERSE_SHARE)};
+		if (dist < reverse_below)
 			m_sign = -1;
-		else if (m_sign >= 0 || dist > near + deadband)
+		else if (m_sign >= 0 || dist > reverse_below + deadband)
 			m_sign = 1;
 		return m_sign;
 	}

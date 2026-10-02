@@ -3722,6 +3722,11 @@ sight a bot pressed forward into a wall for up to 1.5 s.
   the time (was 40 %; EC flew away 29–31 % of his fights, backed off
   facing 8–11 %). The afterburner chases from 60–120 units by style
   (was 100–200) and burns on straights of 100 (was 150).
+- *Review fixes*: a strafe run turns only the nose the path set (not a
+  turn to an unseen attacker or to a corner's exit); a dodge adds the
+  other axis only if both keys still push along the dodge; the
+  out-of-sight latch is per target; out of a fight the refuel hover (no
+  path) keeps the velocity controller.
 - *The pickup aside* (`pickup_aside`): engaged with a collect or refuel
   goal and the target more than 75° off the path's way, the bot fights
   with the fight's keys (back to the path within 55°, or with the pickup
@@ -3746,20 +3751,20 @@ experimental-netcode after PR #74, the kills also before PR #74:
 
 | | Corona before | after | EC | Earth Shaker before | after | EC |
 |---|---|---|---|---|---|---|
-| speed | 44.4 ± 0.5 | 45.5 ± 0.8 | 56–60 | 44.6 ± 0.4 | 49.4 ± 0.4 | 54–58 |
-| strafe reversals a minute | 74.9 ± 1.6 | 48.9 ± 1.7 | 52 | 78.2 ± 3.2 | 46.7 ± 1.7 | 36–44 |
+| speed | 44.4 ± 0.5 | 44.5 ± 1.2 | 56–60 | 44.6 ± 0.4 | 49.7 ± 0.7 | 54–58 |
+| strafe reversals a minute | 74.9 ± 1.6 | 50.1 ± 1.8 | 52 | 78.2 ± 3.2 | 46.4 ± 1.8 | 36–44 |
 | vertical share | 0.59 | 0.50 | 0.58–0.73 | 0.56 | 0.42 | 0.29–0.37 |
-| speed across | 71 % | 76 % | 81 % | 59 % | 71 % | 77–79 % |
-| afterburner fleeing | 13.7 % | 17.6 % | 24 % | 5.7 % | 7.5 % | 9–16 % |
+| speed across | 71 % | 75 % | 81 % | 59 % | 70 % | 77–79 % |
+| afterburner fleeing | 13.7 % | 15.7 % | 24 % | 5.7 % | 8.7 % | 9–16 % |
 | forward / reverse thrust | 62 / 21 % | 65 / 14 % | 73 / 8 % | 71 / 15 % | 70 / 12 % | 81 / 7 % |
-| keys share of the fight | 90 % | 97 % | | 80 % | 95 % | |
-| mode changes a minute | 29 | 27 | | 21 | 14 | |
-| kills a game (before PR #74: 84.0 ± 7.8, 87.4 ± 5.6) | 74.6 ± 7.2 | 82.9 ± 5.2 | | 74.8 ± 5.4 | 87.1 ± 6.1 | |
-| stuck recoveries a game | 14.3 ± 3.5 | 17.2 ± 4.2 | | 17.1 ± 5.0 | 13.2 ± 4.2 | |
+| keys share of the fight | 90 % | 97 % | | 80 % | 94 % | |
+| mode changes a minute | 29 | 29 | | 21 | 16 | |
+| kills a game (before PR #74: 84.0 ± 7.8, 87.4 ± 5.6) | 74.6 ± 7.2 | 89.2 ± 7.1 | | 74.8 ± 5.4 | 84.4 ± 5.2 | |
+| stuck recoveries a game | 14.3 ± 3.5 | 17.2 ± 5.2 | | 17.1 ± 5.0 | 17.3 ± 6.2 | |
 
 The power pickups (section 9.14) are unchanged: of those in sight the
-bots went for 56 % and took 31 % on Corona (57 and 30 % after), 74 and
-50 % on Earth Shaker (75 and 49 %). Forward into a wall out of sight
+bots went for 56 % and took 31 % on Corona (58 and 29 % after), 74 and
+50 % on Earth Shaker (74 and 48 %). Forward into a wall out of sight
 (the forward key within 10 units of a wall, the five bots, seeds 2–3):
 860–880 ticks (60 Hz) a game on Corona and 180 on Earth Shaker before,
 under 40 after. No reactor was destroyed in the 24 games after.

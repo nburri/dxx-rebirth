@@ -1330,12 +1330,15 @@ void test_fight_movement()
 		 */
 		d = dodge_key(k, {0.1, -0.9, 0.1});
 		CHECK(d.sideways == 1 && d.vertical == -1);
-		d = dodge_key(k, {-0.6, 0.5, 0});
+		d = dodge_key(k, {-0.4, 0.6, 0});
 		CHECK(d.sideways == 1 && d.vertical == 1);
+		/* Both keys would push against the dodge: turned. */
+		d = dodge_key(k, {-0.95, 0.3, 0});
+		CHECK(d.sideways == -1 && d.vertical == 0);
 		{
 			thrust_keys v;
 			v.vertical = 1;
-			d = dodge_key(v, {-0.5, -0.6, 0});
+			d = dodge_key(v, {-0.5, -0.3, 0});
 			CHECK(d.vertical == 1 && d.sideways == -1);
 		}
 		d = dodge_key({}, {0.1, 0.1, -0.9});

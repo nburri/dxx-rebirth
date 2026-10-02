@@ -390,7 +390,7 @@ window_event_result bot_arena_frame()
 	 * played.
 	 */
 	if (LevelUniqueObjectState.ControlCenterState.Control_center_destroyed)
-		con_printf(CON_URGENT, "botarena: the level ends after %.0f of %" PRIu32 " s (the reactor was destroyed); the arena ends here", game_seconds, CGameArg.DbgBotArenaSeconds);
+		con_printf(CON_URGENT, "botarena: the level ended after %.0f of %" PRIu32 " s (reactor, time or kill limit); the arena ends here", game_seconds, CGameArg.DbgBotArenaSeconds);
 	else if (game_seconds < CGameArg.DbgBotArenaSeconds)
 		return window_event_result::ignored;
 	print_summary(game_seconds);

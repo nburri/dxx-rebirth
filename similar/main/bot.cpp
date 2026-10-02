@@ -449,6 +449,12 @@ struct bot_state
 	 * velocity controller (b::PRECISE_AFTER_STUCK_MS), not keys.
 	 */
 	uint32_t precise_until{};
+	/* Section 9.16: the nose follow_path set (a strafe run turns only that
+	 * one, not a turn to an attacker or a corner's exit set after it).
+	 */
+	vec3 path_face_dir;
+	/* Section 9.16: the target the lost_clear latch is about. */
+	uint8_t lost_target{0xff};
 	uint32_t flee_roll_at{};
 	/* Where the bot aims (face_dir, unless it flees turned away from
 	 * its target): what the missiles are fired along.
@@ -709,7 +715,9 @@ struct bot_state
 		mode = b::move_mode::none;
 		room = {};
 		lost_clear = true;
+		lost_target = 0xff;
 		precise_until = 0;
+		path_face_dir = {};
 		fleeing = flee_turned = flee_burn = false;
 		flee_roll_at = 0;
 		roam_burn_ok = true;
@@ -1607,9 +1615,12 @@ void perceive(bot_state &bs, const object &obj, const uint32_t tick)
 	 * fly on toward where it went only while no wall is between (it went
 	 * round a corner: the path).
 	 */
-	if (!bs.target || !bs.memory[*bs.target].valid || bs.visible_now[*bs.target])
+	if (!bs.target || !bs.memory[*bs.target].valid || bs.visible_now[*bs.target] || *bs.target != bs.lost_target)
+	{
 		bs.lost_clear = true;
-	else if (bs.lost_clear)
+		bs.lost_target = bs.target ? *bs.target : 0xff;
+	}
+	if (bs.target && bs.memory[*bs.target].valid && !bs.visible_now[*bs.target] && bs.lost_clear)
 	{
 		/* Once broken, for the rest of this loss of sight. */
 		const auto &m{bs.memory[*bs.target]};
@@ -2989,6 +3000,7 @@ vec3 follow_path(bot_state &bs, object &obj, const bool engaged)
 	{
 		bs.face_dir = b::normalized(to);
 		bs.face_rate = {};
+		bs.path_face_dir = bs.face_dir;
 	}
 	/* Stuck recovery (section 4.3). */
 	switch (bs.stuck.update(b::remaining_length(bs.points, bs.point_index, pos)))
@@ -4262,6 +4274,17 @@ void log_summary(const bot_state &bs, const object &obj, const uint32_t tick)
 		b::name_of(bs.light_why), b::name_of(bs.armed));
 }
 
+/* Section 9.16: out of a fight, the hover of a refuel (no path) is flown
+ * with the velocity controller: keys at full thrust cannot hold a slow
+ * speed.  (The last 20 units of every path as well changed the movement
+ * mode 34 times a minute instead of 14, for no gain in the arena.)
+ */
+[[nodiscard]]
+bool precise_approach(const bot_state &bs)
+{
+	return bs.points.empty();
+}
+
 /* Section 9.6: toward the duck point, slowing to a hold on it. */
 [[nodiscard]]
 vec3 duck_velocity(const vec3 &pos, const vec3 &point, const double max_speed)
@@ -4691,7 +4714,7 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 	 * Section 9.16: out of a fight too (the velocity controller held the
 	 * top speed at best), except for a while after a stuck recovery.
 	 */
-	else if (!use_keys && mode != b::move_mode::duck && tick >= bs.precise_until)
+	else if (!use_keys && mode != b::move_mode::duck && tick >= bs.precise_until && (in_fight || !precise_approach(bs)))
 	{
 		const bool facing_path{!aim_set || (bs.fleeing && bs.flee_turned)};
 		keys = bs.path_keys.update(frame.to_local(b::path_key_command(wanted, vel, max_speed)), tick, facing_path);
@@ -4699,7 +4722,7 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 		/* Section 9.16: a straight flown with forward and a strafe key,
 		 * the nose off the way.
 		 */
-		const int run_side{facing_path && mode == b::move_mode::path && !bs.points.empty() ? bs.run.update(bs.rng, b::straight_ahead(bs.points, bs.steer_index, pos), b::length(vel)) : 0};
+		const int run_side{facing_path && mode == b::move_mode::path && !bs.points.empty() && bs.face_dir == bs.path_face_dir ? bs.run.update(bs.rng, b::straight_ahead(bs.points, bs.steer_index, pos), b::length(vel)) : 0};
 		if (!run_side)
 			bs.run.reset();
 		else if (const auto way{b::normalized(wanted)}; way != b::vec3{} && !bs.burning)

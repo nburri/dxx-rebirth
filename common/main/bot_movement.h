@@ -443,8 +443,8 @@ constexpr double DODGE_KEEP_SHARE{0.3};
  * (a reversal of the strafe after every shot dodged: a sixth to a
  * quarter of the bots' reversals in the -botarena games).  A strafe key
  * held is kept; the dodge adds the other lateral axis's key its way if
- * it lies DODGE_ADD_SHARE along it (the run goes on, diagonally); only a
- * dodge against the held key with nothing on the other axis turns it.
+ * it lies DODGE_ADD_SHARE along it and the two keys together still push
+ * along the dodge (the run goes on, diagonally); else the dodge turns it.
  */
 constexpr double DODGE_ADD_SHARE{0.25};
 
@@ -465,13 +465,13 @@ inline thrust_keys dodge_key(thrust_keys k, const vec3 &dodge_local)
 		k.vertical = k.vertical < 0 ? -1 : 1;
 		return k;
 	}
-	if (k.sideways && !k.vertical && ay > DODGE_ADD_SHARE * l)
+	if (k.sideways && !k.vertical && ay > DODGE_ADD_SHARE * l && k.sideways * dodge_local.x + ay > 0)
 	{
 		k.sideways = k.sideways < 0 ? -1 : 1;
 		k.vertical = dodge_local.y < 0 ? -1 : 1;
 		return k;
 	}
-	if (k.vertical && !k.sideways && ax > DODGE_ADD_SHARE * l)
+	if (k.vertical && !k.sideways && ax > DODGE_ADD_SHARE * l && k.vertical * dodge_local.y + ax > 0)
 	{
 		k.vertical = k.vertical < 0 ? -1 : 1;
 		k.sideways = dodge_local.x < 0 ? -1 : 1;
