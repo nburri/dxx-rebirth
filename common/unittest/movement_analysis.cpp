@@ -464,6 +464,11 @@ flight fly(const habits &h, const unsigned cycles, const std::uint32_t seed = 12
 					burner = true;
 				}
 			}
+			else
+				/* Looks about slowly, left and back: no one at the
+				 * keyboard sits still for 10 s (limits::IDLE_MIN_S).
+				 */
+				c[4] = t < 25 ? 0.06 : -0.06;
 		}
 		else
 		{
@@ -1407,6 +1412,124 @@ void test_shared_controls()
 	}
 }
 
+/* The flight `f` with the pilot away from the keyboard from tick
+ * `from` for `ticks`: no controls (the ship slows down and stops where it
+ * is), no shot or pickup, the enemy around as before and hitting it every
+ * 3 s; with `shot_every_ms`, it fires a shot that often (not away then).
+ * The hits taken in the flight outside that time in `hits_kept`.
+ */
+flight with_idle(const flight &f, const std::uint32_t from, const std::uint32_t ticks, unsigned &hits_kept, const std::uint32_t shot_every_ms = 0)
+{
+	flight out{f};
+	ship s{out.moments[from - 1].pilot};
+	for (std::uint32_t k{from}; k != from + ticks; ++k)
+	{
+		s.step({}, M);
+		auto &mo{out.moments[k]};
+		mo.pilot = s;
+		mo.ctl = {};
+		mo.burner = false;
+	}
+	const std::uint32_t t0{ms_of_tick(from)}, t1{ms_of_tick(from + ticks)};
+	std::erase_if(out.events, [&](const happening &h) {
+		return h.ms >= t0 && h.ms < t1 && h.e.pid == 0;
+	});
+	hits_kept = 0;
+	for (const auto &h : out.events)
+		hits_kept += h.e.type == record_type::hit && h.e.pid == 0;
+	for (std::uint32_t t{t0 + 1500}; t < t1; t += 3000)
+		out.events.push_back({t, {record_type::hit, t, 0, 1, attacker_kind::player, 0, 2 * 256, hit_flag::applied_here}});
+	if (shot_every_ms)
+		for (std::uint32_t t{t0 + shot_every_ms}; t < t1; t += shot_every_ms)
+			out.events.push_back({t, {record_type::fire, t, 0, PLAYER_NONE, fire_kind::primary, 0, 0, 0}});
+	std::stable_sort(out.events.begin(), out.events.end(), [](const happening &a, const happening &b) { return a.ms < b.ms; });
+	return out;
+}
+
+/* A pilot that leaves the keyboard for 5 of its 12 minutes: that time is
+ * found, left out of every statistic (the profile is that of the flying
+ * alone) and reported; with exact controls and with estimated ones.
+ */
+void test_idle()
+{
+	const auto plain{fly(strafer(), CYCLES)};
+	/* From 2 min 10 s, 200 s: five cycles' worth, in the middle of fights. */
+	constexpr std::uint32_t from{130 * RATE}, ticks{200 * RATE};
+	unsigned hits_kept{};
+	const auto idle{with_idle(plain, from, ticks, hits_kept)};
+	view remote;
+	remote.local_pid = 1;
+	for (const auto &v : {view{}, remote})
+	{
+		const bool exact{v.local_pid == 0};
+		const auto a{analyse_flight(plain, v)};
+		const auto b{analyse_flight(idle, v)};
+		const auto &p{a.stats};
+		const auto &q{b.stats};
+		CHECK(p.idle_s == 0 && p.idle_spans == 0);
+		/* Exact: from its first tick; estimated: once the ship is nearly
+		 * still (about 1.6 s later).
+		 */
+		CHECK(q.idle_spans == 1);
+		CHECK_RANGE(q.idle_s, exact ? 199.9 : 196.5, 200.1);
+		CHECK_RANGE(q.recorded_s, p.recorded_s - 0.1, p.recorded_s + 0.1);
+		CHECK_RANGE(q.alive_s, p.alive_s - q.idle_s - 0.1, p.alive_s - q.idle_s + 0.1);
+		/* Without the idle time the ship would be nearly still for 30 %
+		 * of the time alive and in fights it does not strafe in.
+		 */
+		CHECK_RANGE(q.slow_share, p.slow_share - 0.02, p.slow_share + 0.02);
+		CHECK_RANGE(q.speed.mean, p.speed.mean * 0.97, p.speed.mean * 1.03);
+		CHECK_RANGE(q.fight_strafe_share, p.fight_strafe_share - 0.03, p.fight_strafe_share + 0.03);
+		CHECK_RANGE(q.fight_s, p.fight_s * 0.6, p.fight_s * 0.75);
+		CHECK_RANGE(q.strafe_reversals_per_min, p.strafe_reversals_per_min * 0.95, p.strafe_reversals_per_min * 1.05);
+		CHECK_RANGE(q.forward_share, p.forward_share - 0.03, p.forward_share + 0.03);
+		/* The hits taken while away are kept as events, not counted. */
+		CHECK(q.hits_taken == hits_kept);
+		CHECK(q.primary_shots < p.primary_shots);
+		/* The same strafe and its confidence from the time that is left. */
+		CHECK(value(b.profile, "skill.strafe") == value(a.profile, "skill.strafe"));
+		CHECK(b.profile.find("skill.strafe")->confidence == a.profile.find("skill.strafe")->confidence);
+		CHECK_RANGE(value(b.profile, "measured.idle_minutes"), q.idle_s / 60, q.idle_s / 60);
+		CHECK(!a.profile.find("measured.idle_minutes"));
+		CHECK(b.profile.source.find("idle") != std::string::npos);
+		const auto report{write_report(q, b.profile)};
+		CHECK(report.find("idle (away) 3.3 min excluded (1 span") != std::string::npos);
+		CHECK(write_report(p, a.profile).find("idle") == std::string::npos);
+	}
+	/* The events are kept, marked. */
+	{
+		const std::array<recording, 1> files{{load(record(idle, view{}), "idle")}};
+		const auto ses{group_sessions(files)};
+		const auto ms{merge_session(files, ses[0])};
+		const auto tr{build_track(ms, 0)};
+		CHECK(tr.idle_spans.size() == 1);
+		unsigned marked{}, hits{};
+		for (const auto &e : tr.own)
+		{
+			hits += e.e.type == record_type::hit;
+			marked += e.idle;
+			if (e.idle)
+				CHECK(e.e.type == record_type::hit && tr.idle_at(e.t));
+		}
+		/* A hit every 3 s from 1.5 s on: 67 in 200 s. */
+		CHECK(marked == 67);
+		CHECK(hits == hits_kept + marked);
+		for (const auto &p : tr.pts)
+			if (p.idle)
+				CHECK(!p.alive && !p.has_ctl && !p.fight);
+	}
+	/* Sitting still but firing every 8 s: there, not away. */
+	{
+		unsigned kept{};
+		const auto camper{analyse_flight(with_idle(plain, from, ticks, kept, 8000))};
+		CHECK(camper.stats.idle_s == 0);
+		/* Every 12 s: away in the stretches between the shots. */
+		const auto slow{analyse_flight(with_idle(plain, from, ticks, kept, 12000))};
+		CHECK(slow.stats.idle_spans >= 15);
+		CHECK_RANGE(slow.stats.idle_s, 150, 200);
+	}
+}
+
 /* Two recordings of one game: the host's (the pilot flown there) and
  * the client's (the enemy flown there, joined later, left earlier).
  */
@@ -2178,6 +2301,7 @@ int main(const int argc, char **const argv)
 	test_afterburner();
 	test_estimated_controls();
 	test_shared_controls();
+	test_idle();
 	test_merge_by_sync();
 	test_merge_by_trajectory();
 	test_several_games();

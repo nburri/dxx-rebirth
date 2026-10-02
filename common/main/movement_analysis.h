@@ -575,6 +575,11 @@ struct merged_event
 	int who{-1};
 	int other{-1};
 	event_record e;
+	/* In a track (build_track): the track's player was away from the
+	 * keyboard then (limits::IDLE_MIN_S); kept, but left out of the
+	 * statistics.
+	 */
+	bool idle{};
 };
 
 struct session_player
@@ -858,6 +863,18 @@ constexpr double BURN_THRUST{1.3};
 constexpr double MIN_ALIVE_S{20};
 /* A room class needs this much time alive to be reported. */
 constexpr double ROOM_MIN_S{10};
+/* Away from the keyboard: alive and not firing for at least IDLE_MIN_S,
+ * with the exact controls all at rest (none beyond IDLE_CONTROL) or,
+ * where the controls are estimated, the ship nearly still (slower than
+ * IDLE_SPEED units/s, turning slower than IDLE_TURN revolutions/s).  A
+ * gap of more than IDLE_GAP_MS between two samples ends a span.  Such
+ * time says nothing about the flying and is left out of every statistic.
+ */
+constexpr double IDLE_MIN_S{10};
+constexpr double IDLE_CONTROL{0.02};
+constexpr double IDLE_SPEED{2};
+constexpr double IDLE_TURN{0.02};
+constexpr std::int64_t IDLE_GAP_MS{1000};
 }
 
 struct track_point
@@ -906,6 +923,10 @@ struct track_point
 	 * is the two together, the whole line of fire.
 	 */
 	const geometry::level_geometry *geo{};
+	/* Away from the keyboard (limits::IDLE_MIN_S): the point counts as
+	 * not alive, and has no controls, enemy or room.
+	 */
+	bool idle{};
 	bool room_known{};
 	geometry::room_class room{};
 	double room_size{};
@@ -953,8 +974,21 @@ struct track
 		std::uint16_t file{}, level{};
 		const geometry::level_geometry *geo{};
 		bool own{};
+		/* Taken while this player was away from the keyboard. */
+		bool idle{};
 	};
 	std::vector<powerup_spot> spots;
+	/* The spans this player was away from the keyboard (session clock,
+	 * first and last point), and their seconds.
+	 */
+	std::vector<std::pair<std::int64_t, std::int64_t>> idle_spans;
+	double idle_s{};
+	[[nodiscard]]
+	bool idle_at(const std::int64_t t) const
+	{
+		const auto i{std::upper_bound(idle_spans.begin(), idle_spans.end(), t, [](const std::int64_t v, const std::pair<std::int64_t, std::int64_t> &s) { return v < s.first; })};
+		return i != idle_spans.begin() && t <= std::prev(i)->second;
+	}
 	/* The point nearest to time `t`, within `tolerance_ms`. */
 	[[nodiscard]]
 	std::optional<std::size_t> at(const std::int64_t t, const std::int64_t tolerance_ms) const
@@ -1001,6 +1035,104 @@ inline void measure_room(track_point &p, const geometry::level_geometry &g)
 		p.line = p.sight + geometry::free_distance(g.mesh, p.m.s.segment, p.u.pos, vec3{{-to[0], -to[1], -to[2]}});
 		p.line_known = true;
 	}
+}
+
+/* Away from the keyboard (limits::IDLE_MIN_S): finds the spans, makes
+ * their points count as not alive (no controls, enemy, fight or room;
+ * the point after a span starts a new run) and marks the events and
+ * pickups of the time.  Only for people: a bot does not leave.
+ */
+inline void mark_idle(track &tr, const merged_session &ms, const std::size_t player)
+{
+	if (ms.players[player].bot)
+		return;
+	auto &pts{tr.pts};
+	const auto me{static_cast<int>(player)};
+	std::vector<bool> fired(pts.size());
+	for (const auto &e : ms.events)
+		if (e.who == me && e.e.type == record_type::fire)
+			if (const auto i{tr.at(e.t, 150)})
+				fired[*i] = true;
+	const auto at_rest{[&](const std::size_t i) {
+		const auto &p{pts[i]};
+		if (!p.alive || fired[i])
+			return false;
+		if ((p.m.s.flags2 & sample_flag2::buttons_known) && (p.m.s.flags & (sample_flag::fire_primary | sample_flag::fire_secondary)))
+			return false;
+		if (p.exact)
+			return !p.ab && std::all_of(p.ctl.begin(), p.ctl.end(), [](const double c) { return std::abs(c) <= limits::IDLE_CONTROL; });
+		return p.u.speed < limits::IDLE_SPEED && length(p.u.rotvel) < limits::IDLE_TURN;
+	}};
+	for (std::size_t i{}; i < pts.size();)
+	{
+		if (!at_rest(i))
+		{
+			++i;
+			continue;
+		}
+		std::size_t j{i};
+		while (j + 1 < pts.size() && pts[j + 1].m.t - pts[j].m.t <= limits::IDLE_GAP_MS && at_rest(j + 1))
+			++j;
+		const double span_s{static_cast<double>(pts[j].m.t - pts[i].m.t) / 1000.0 + pts[j].w};
+		if (span_s >= limits::IDLE_MIN_S)
+		{
+			tr.idle_spans.emplace_back(pts[i].m.t, pts[j].m.t);
+			for (std::size_t k{i}; k <= j; ++k)
+			{
+				auto &p{pts[k]};
+				tr.idle_s += p.w;
+				p.idle = true;
+				p.alive = false;
+				p.dt = 0;
+				p.ctl = {};
+				p.est = {};
+				p.has_ctl = p.exact = p.shared = p.est_valid = false;
+				p.ab_known = p.ab = p.ab_estimated = false;
+				p.los = p.fight = false;
+				p.enemy_key = -1;
+				p.own_approach = 0;
+				p.geo = nullptr;
+				p.room_known = p.line_known = false;
+			}
+			if (j + 1 < pts.size())
+				pts[j + 1].dt = 0;
+		}
+		i = j + 1;
+	}
+	if (tr.idle_spans.empty())
+		return;
+	/* An event is of the idle time if the ship's last living moment at
+	 * or before it was (a death of a ship left alone, a hit on it); a
+	 * shot is not (it ends the span).
+	 */
+	const auto idle_before{[&](const std::int64_t t) {
+		auto i{std::upper_bound(pts.begin(), pts.end(), t, [](const std::int64_t v, const track_point &p) { return v < p.m.t; })};
+		while (i != pts.begin())
+		{
+			--i;
+			if (t - i->m.t > limits::IDLE_GAP_MS)
+				return false;
+			if (i->alive || i->idle)
+				return i->idle;
+		}
+		return false;
+	}};
+	for (auto &e : tr.own)
+	{
+		if (e.e.type == record_type::fire)
+		{
+			const auto i{tr.at(e.t, 150)};
+			e.idle = i && pts[*i].idle;
+		}
+		else
+			e.idle = idle_before(e.t);
+	}
+	for (auto &e : tr.dealt)
+		e.idle = idle_before(e.t);
+	for (auto &e : tr.enemy_fire)
+		e.idle = idle_before(e.t);
+	for (auto &sp : tr.spots)
+		sp.idle = idle_before(sp.t);
 }
 
 }
@@ -1188,6 +1320,7 @@ inline track build_track(const merged_session &ms, const std::size_t player, con
 			tr.spots.push_back(sp);
 		}
 	}
+	detail::mark_idle(tr, ms, player);
 	return tr;
 }
 
@@ -1375,6 +1508,12 @@ struct player_stats
 	 * (-sharemoves), not recorded there.
 	 */
 	double shared_s{};
+	/* Away from the keyboard (limits::IDLE_MIN_S): the seconds, left out
+	 * of alive_s and of every statistic; the spans; the deaths then (not
+	 * in `deaths`).
+	 */
+	double idle_s{};
+	unsigned idle_spans{}, idle_deaths{};
 	/* The estimator against the exact controls, where both exist: root
 	 * mean square error of the three thrust axes (share of full thrust).
 	 */
@@ -1632,6 +1771,8 @@ namespace detail {
 struct accum
 {
 	double recorded_s{}, alive_s{}, exact_s{}, estimated_s{}, shared_s{};
+	double idle_s{};
+	unsigned idle_spans{}, idle_deaths{};
 	double est_err2{};
 	std::size_t est_n{};
 	std::vector<double> speed;
@@ -2190,6 +2331,8 @@ inline void scan_dodge(const track &tr, accum &a, const ship_model &ship)
 		const auto last{last_shot.find(e.who)};
 		const bool onset{last == last_shot.end() || e.t - last->second > limits::FIRE_ONSET_MS};
 		last_shot[e.who] = e.t;
+		if (e.idle)
+			continue;
 		const auto i{tr.at(e.t, 100)};
 		if (!i || !pts[*i].alive)
 			continue;
@@ -2288,6 +2431,22 @@ inline void scan_events(const track &tr, accum &a)
 	}};
 	for (const auto &e : tr.own)
 	{
+		/* Away from the keyboard: nothing of the flying.  A death then
+		 * loses the missiles held, but says nothing about keeping them; a
+		 * respawn (a span can start with one) still starts a new ship.
+		 */
+		if (e.idle)
+		{
+			if (e.e.type == record_type::death)
+			{
+				++a.idle_deaths;
+				for (auto &h : held)
+					h.clear();
+			}
+			else if (e.e.type == record_type::respawn)
+				drop_held(false);
+			continue;
+		}
 		const auto i{tr.at(e.t, 150)};
 		switch (e.e.type)
 		{
@@ -2411,6 +2570,8 @@ inline void scan_events(const track &tr, accum &a)
 	drop_held(false);
 	for (const auto &e : tr.dealt)
 	{
+		if (e.idle)
+			continue;
 		if (e.e.type == record_type::kill)
 		{
 			++a.kills;
@@ -2446,6 +2607,8 @@ inline void scan_pickup_sight(const track &tr, accum &a)
 	}};
 	for (const auto &sp : tr.spots)
 	{
+		if (sp.idle)
+			continue;
 		auto &c{a.pickup_sight[pickup_class_of(sp.id)]};
 		auto i{static_cast<std::size_t>(std::lower_bound(pts.begin(), pts.end(), sp.since, [](const track_point &p, const std::int64_t v) { return p.m.t < v; }) - pts.begin())};
 		/* The first sight. */
@@ -2853,6 +3016,8 @@ inline player_stats analyse(const std::span<const track> tracks, const ship_mode
 	for (const auto &tr : tracks)
 	{
 		a.turn_marks.clear();
+		a.idle_s += tr.idle_s;
+		a.idle_spans += detail::count(tr.idle_spans.size());
 		const auto after_turn{detail::scan_turns(tr, a, ship)};
 		detail::scan_samples(tr, a, ship, after_turn);
 		detail::scan_strafe(tr, a);
@@ -2868,6 +3033,9 @@ inline player_stats analyse(const std::span<const track> tracks, const ship_mode
 	s.alive_s = a.alive_s;
 	s.exact_s = a.exact_s;
 	s.shared_s = a.shared_s;
+	s.idle_s = a.idle_s;
+	s.idle_spans = a.idle_spans;
+	s.idle_deaths = a.idle_deaths;
 	s.estimated_s = a.estimated_s;
 	s.estimator_n = a.est_n;
 	s.estimator_rms = a.est_n ? std::sqrt(a.est_err2 / (3.0 * static_cast<double>(a.est_n))) : 0;
@@ -3156,8 +3324,11 @@ inline bot::style_profile propose_profile(const player_stats &s, const bot::bot_
 	p.name = s.callsign + " style";
 	p.base_skill = base_skill;
 	{
-		std::array<char, 160> buf;
-		std::snprintf(buf.data(), buf.size(), "%u game%s, %.1f min alive, %.1f min in fights, controls %.0f%% exact", s.sessions, s.sessions == 1 ? "" : "s", s.alive_s / 60, s.fight_s / 60, 100 * (1 - s.estimated_share()));
+		std::array<char, 224> buf;
+		std::array<char, 64> idle{};
+		if (s.idle_s > 0)
+			std::snprintf(idle.data(), idle.size(), " (idle %.1f min excluded)", s.idle_s / 60);
+		std::snprintf(buf.data(), buf.size(), "%u game%s, %.1f min alive%s, %.1f min in fights, controls %.0f%% exact", s.sessions, s.sessions == 1 ? "" : "s", s.alive_s / 60, idle.data(), s.fight_s / 60, 100 * (1 - s.estimated_share()));
 		p.source = buf.data();
 	}
 	const auto &skill{bot::skill_of(base_skill)};
@@ -3367,6 +3538,8 @@ inline bot::style_profile propose_profile(const player_stats &s, const bot::bot_
 		p.set(key, v, style_confidence::high);
 	}};
 	info("measured.alive_minutes", s.alive_s / 60);
+	if (s.idle_s > 0)
+		info("measured.idle_minutes", s.idle_s / 60);
 	info("measured.fight_minutes", s.fight_s / 60);
 	info("measured.estimated_controls_share", s.estimated_share());
 	if (s.shared_s > 0)
@@ -3635,7 +3808,13 @@ inline std::string write_report(const player_stats &s, const bot::style_profile 
 	using detail::pct;
 	std::string o;
 	appendf(o, "== %s%s ==\n", s.callsign.c_str(), s.bot ? " (bot)" : "");
-	appendf(o, "data: %u game%s, %.1f min recorded, %.1f min alive, %.1f min in fights; kills %u, deaths %u (%u suicides)\n", s.sessions, s.sessions == 1 ? "" : "s", s.recorded_s / 60, s.alive_s / 60, s.fight_s / 60, s.kills, s.deaths, s.suicides);
+	appendf(o, "data: %u game%s, %.1f min recorded, %.1f min alive", s.sessions, s.sessions == 1 ? "" : "s", s.recorded_s / 60, s.alive_s / 60);
+	if (s.idle_s > 0)
+		appendf(o, ", idle (away) %.1f min excluded (%u span%s of %.0f s or more)", s.idle_s / 60, s.idle_spans, s.idle_spans == 1 ? "" : "s", limits::IDLE_MIN_S);
+	appendf(o, ", %.1f min in fights; kills %u, deaths %u (%u suicides", s.fight_s / 60, s.kills, s.deaths, s.suicides);
+	if (s.idle_deaths)
+		appendf(o, "; %u more while away", s.idle_deaths);
+	o += ")\n";
 	appendf(o, "controls: exact %.1f min", s.exact_s / 60);
 	if (s.shared_s > 0)
 		appendf(o, " (%.1f min of it shared by the player's machine)", s.shared_s / 60);
