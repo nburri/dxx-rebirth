@@ -5109,6 +5109,11 @@ class DXXArchive(DXXCommon):
 		RuntimeTest('test-net-address-text', (
 			'common/unittest/net_address_text.cpp',
 			)),
+		# Test of the host's public address: ADDRESS_SEEN and the
+		# choice among the reports (net_public_address.h).
+		RuntimeTest('test-net-public-address', (
+			'common/unittest/net_public_address.cpp',
+			)),
 		# Test of the game world time's pause count and of the demo
 		# write check (world_time_pause.h).
 		RuntimeTest('test-world-time-pause', (

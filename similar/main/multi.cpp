@@ -5844,6 +5844,8 @@ void show_netgame_info(const netgame_info &netgame)
 			level_number,
 			game_mode,
 			player_counts,
+			game_address,
+			game_address_kind,
 			blank_1,
 			game_options_header,
 			difficulty,
@@ -5936,7 +5938,7 @@ void show_netgame_info(const netgame_info &netgame)
 		};
 		enumerated_array<std::array<char, 50>, count_array_elements, netgame_menu_info_index> lines;
 		enumerated_array<newmenu_item, count_array_elements, netgame_menu_info_index> menu_items;
-		netgame_info_menu_items(const netgame_info &netgame)
+		netgame_info_menu_items(const netgame_info &netgame, const bool in_game)
 		{
 			for (auto &&[m, l] : zip(menu_items, lines))
 				nm_set_item_text(m, l.data());
@@ -5964,6 +5966,21 @@ void show_netgame_info(const netgame_info &netgame)
 			const auto gamemode{netgame.gamemode};
 			array_snprintf(lines[game_mode], "Game Mode\t  %s", GMNames.valid_index(gamemode) ? GMNames[gamemode] : "INVALID");
 			array_snprintf(lines[player_counts], "Players\t  %i/%i", netgame.numplayers, netgame.max_numplayers);
+			if (in_game)
+			{
+				/* The address to give to players who want to join
+				 * (net_udp_game_address_summary).
+				 */
+				std::string address, kind;
+				net_udp_game_address_summary(address, kind);
+				array_snprintf(lines[game_address], "%s\t  %s", multi_i_am_master() ? "Game Address" : "Host Address", address.c_str());
+				array_snprintf(lines[game_address_kind], "\t  %s", kind == "LAN" ? "LAN; public once an Internet player joins" : kind.c_str());
+			}
+			else
+			{
+				menu_items[game_address].text = const_cast<char *>(" ");
+				menu_items[game_address_kind].text = const_cast<char *>(" ");
+			}
 			array_snprintf(lines[difficulty], "Difficulty\t  %s", MENU_DIFFICULTY_TEXT(netgame.difficulty));
 			array_snprintf(lines[reactor_life], "Reactor Life\t  %i %s", netgame.control_invul_time / F1_0 / 60, TXT_MINUTES_ABBREV);
 			array_snprintf(lines[max_time], "Max Time\t  %i %s", netgame.PlayTimeAllowed.count() / (F1_0 * 60), TXT_MINUTES_ABBREV);
@@ -6042,7 +6059,7 @@ void show_netgame_info(const netgame_info &netgame)
 		 */
 		const bool in_game;
 		netgame_info_menu(const netgame_info &netgame, const bool in_game, grs_canvas &src) :
-			netgame_info_menu_items(netgame),
+			netgame_info_menu_items(netgame, in_game),
 			passive_newmenu(menu_title{nullptr}, menu_subtitle{in_game ? "Netgame Info & Rules\nCtrl+C: copy game address" : "Netgame Info & Rules"}, menu_filename{nullptr}, tiny_mode_flag::tiny, tab_processing_flag::ignore, adjusted_citem::create(menu_items, 0), src),
 			in_game{in_game}
 			{

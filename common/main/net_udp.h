@@ -24,6 +24,7 @@
 #include "fwd-window.h"
 #include "d_array.h"
 #include <array>
+#include <string>
 
 // Exported functions
 #ifdef DXX_BUILD_DESCENT
@@ -71,6 +72,13 @@ void net_udp_probe_report();
  * address (a client), the best copied to the clipboard.
  */
 void net_udp_copy_game_address();
+/* The game's address for the host's waiting screen and the netgame info:
+ * `address` ("a.b.c.d:port") and what it is in `kind` ("Public, seen by
+ * 2 players" once players or the tracker reported it, else "LAN" or
+ * "Internet" for this computer's own address).  On a client, the host's
+ * address as this client reaches it.
+ */
+void net_udp_game_address_summary(std::string &address, std::string &kind);
 }
 #endif
 void net_udp_manual_join_game();

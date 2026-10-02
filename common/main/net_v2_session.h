@@ -54,6 +54,10 @@ enum class session_msg : std::uint8_t
 	leave = 0x0c,
 	kick = 0x0d,
 	host_shutdown = 0x0e,
+	/* Protocol 108: the address and port the client reaches the host at
+	 * (net_public_address.h), reliable, client to host, once per join.
+	 */
+	address_seen = 0x0f,
 	level_start = 0x10,
 	level_ready = 0x11,
 	level_go = 0x12,

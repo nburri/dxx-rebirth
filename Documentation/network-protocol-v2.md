@@ -596,13 +596,41 @@ or that has not been refreshed for 30 s is removed.
 
 Tracker: opcodes 21–26 and their outer layouts stay as in v1 §3.3 (the tracker
 program dictates them). The version string in `UPID_TRACKER_REGISTER` and
-`UPID_TRACKER_REQGAMES` becomes `"D2XR<major>.<minor>.<micro>.100"`, so a v2
+`UPID_TRACKER_REQGAMES` becomes `"D2XR<major>.<minor>.<micro>.<MULTI_PROTO_VERSION>"` (100 at stage 1, now 108), so a v2
 client never receives v1 games from the tracker and vice versa. The `z=` blob
 in `UPID_TRACKER_REGISTER` and `tracker_gameinfo` is a complete v2
 `GAME_INFO_LITE` datagram (34-byte header with `UNCONNECTED`, one `SESSION`
 chunk). Hole punching (opcode 26) is unchanged. This assumes the tracker
 stores the blob opaquely, which is how the v1 client parses it (it looks for
 `z=` and hands the rest to the normal packet parser); see §9.
+
+The tracker program in use since 2024 (github.com/Mako88/dxx-tracker, the
+TypeScript rewrite; IPv4 only) differs from the earlier one in ways the
+client allows for (protocol 108 builds):
+
+- Its game list (24) gives `a=` the address of the player *asking*, not the
+  game's. A client joining a game from the tracker therefore asks the tracker
+  for a hole punch at once (not after 4 s) and joins at the address the
+  host's one-byte answer (26) comes from (only while it asks for the game
+  info: an answer counts within 5 s of a request of its own, not from the
+  tracker's address or port 0, and once the game info came the join stays at
+  that address). A host asking for the list finds
+  its own entry by the session id in the blob; with either tracker version
+  that entry's `a=` is the host's address as the tracker sees it (its public
+  address), which feeds the public address (§8, protocol 108).
+- Its hole-punch request to the host (26) has no terminating zero byte; the
+  host accepts it with or without one.
+- It acknowledges (25) only a game it does not know yet, and drops a
+  registration that arrives while it clears stale games. The host waits for
+  two registrations (25 s) before reporting "No response from game tracker",
+  takes its entry in the game list as proof of registration too, and says so
+  if an ACK comes later.
+- The game id after `c=` is two binary bytes; the client searches `z=` in the
+  bytes after it (the id may hold a zero byte, which ended the old string
+  search and lost the game).
+- The tracker's address is looked up as IPv4 first (an IPv6 address of the
+  name would never reach it). Every step is logged to the game log as
+  `[Tracker] …` lines, without `-verbose`.
 
 ### 4.2 Join handshake
 
@@ -2599,6 +2627,39 @@ not a demo played back (`net_combat_active`). Differences from §6.5,
 - **Version.** `MULTI_PROTO_VERSION` and `NET_V2_PROTO_VERSION` are 107
   (the version check keeps 106 and 107 apart; a 106 host would drop
   such an `INPUT` as too long).
+
+#### The host's public address (protocol 108)
+
+- **Why.** Behind a NAT router the host only knows its LAN addresses
+  (`host_address_candidates`); players on the Internet need the router's
+  public address and port, which only the outside sees.
+- **`ADDRESS_SEEN` (0x0F, reliable, client → host, 19 bytes).** `family` u8
+  (4 or 6), the address (16 bytes, IPv4 in the first 4 and the rest zero), the
+  port u16. Sent once, right after `JOIN_ACCEPT`: the address and port the
+  accept came from, i.e. where the client reaches the host (for a game from
+  the tracker, the address of the host's hole-punch answer). Layout, checks
+  and choice in `common/main/net_public_address.h`
+  (`test-net-public-address`).
+- **Host.** Accepted only on an established connection (the slot's peer),
+  at most one per player per 10 s (a malformed one counts too); the exact
+  size, a known family, IPv4 padded with zeros, a port, and a usable address
+  (no loopback, link-local, multicast, unspecified) are required, an
+  IPv4-mapped address is IPv4. A LAN address (a player on the same network)
+  is not counted. The host keeps the newest report per connected player
+  (forgotten when the player's connection ends) and the tracker's (its own
+  entry in the tracker's game list, §4.1) and shows the address most of them
+  agree on (the tracker counts as one; ties: the one the tracker confirms,
+  then IPv4, then the lowest slot). Nothing is relayed; a lying client can
+  only mislabel the host's own display, and a majority of honest players
+  outvotes it.
+- **Display.** The host's waiting screen ("Address: … / Public, seen by 2
+  players", before that "… (LAN) / Public address: once a player joins"),
+  the netgame info (Shift+Pause, "Game Address"), and the Ctrl+C copy menu
+  (the public address first). The game log says `net: public address of this
+  game: …` when the choice changes.
+- **Version.** `MULTI_PROTO_VERSION` and `NET_V2_PROTO_VERSION` are 108 (a
+  107 host would log the unknown message and ignore it, but the version
+  check keeps them apart anyway).
 
 ### Stage 5 — Join in progress, level flow, level end
 
