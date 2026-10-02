@@ -74,13 +74,13 @@ struct modes_state
 
 modes_state M;
 
+#if DXX_BUILD_DESCENT == 2
 [[nodiscard]]
 bool network_game()
 {
 	return +(Game_mode & GM_NETWORK) && Newdemo_state != ND_STATE_PLAYBACK;
 }
 
-#if DXX_BUILD_DESCENT == 2
 [[nodiscard]]
 uint8_t team_of(const playernum_t pnum)
 {
@@ -163,6 +163,8 @@ void apply_capture(const nv::capture_msg &m)
 	multi_apply_capture(playernum_t{m.pid}, m.scores.team_score, m.scores.kills, m.scores.kill_goal_count, true);
 }
 
+nv::flag_census count_flags();
+
 /* Host: player `pnum` of team `team` scores. */
 void host_capture(const playernum_t pnum, const uint8_t team)
 {
@@ -181,10 +183,16 @@ void host_capture(const playernum_t pnum, const uint8_t team)
 	++M.captures;
 	con_printf(CON_NORMAL, "ctf: P#%u (%s) captured the %s flag; %s team %i", pnum, team_name(team), team_name(flag), team_name(team), m.scores.team_score);
 	/* The flag goes back into the level now (after CAPTURE, so that
-	 * every machine has taken it from the carrier first).
+	 * every machine has taken it from the carrier first), unless the
+	 * level has all its flags of the team without it.
 	 */
-	if (net_drop_powerup_away_from(flag_powerup(flag), pnum) == object_none)
-		con_printf(CON_URGENT, "ctf: the %s flag could not be put back; the level inventory will", team_name(flag));
+	if (!M.have_expected || count_flags().total(flag) < M.flags_expected[flag])
+	{
+		if (net_drop_powerup_away_from(flag_powerup(flag), pnum) == object_none)
+			con_printf(CON_URGENT, "ctf: the %s flag could not be put back; the level inventory will", team_name(flag));
+	}
+	else
+		con_printf(CON_URGENT, "ctf: the %s flag is not put back: the level has all of them", team_name(flag));
 	apply_capture(m);
 }
 
@@ -198,8 +206,8 @@ void host_check_goals()
 	}
 }
 
-/* Host: every flag is in the level or carried, once. */
-void host_census()
+/* The flags in the level and carried, as the host sees them. */
+nv::flag_census count_flags()
 {
 	nv::flag_census census;
 	auto &Objects{LevelUniqueObjectState.Objects};
@@ -222,6 +230,13 @@ void host_census()
 		if (ship.type == object_type::OBJ_PLAYER && +(ship.ctype.player_info.powerup_flags & player_flag::has_team_flag))
 			++census.carried[nv::other_team(team_of(i))];
 	}
+	return census;
+}
+
+/* Host: every flag is in the level or carried, once. */
+void host_census()
+{
+	const auto census{count_flags()};
 	if (!M.have_expected)
 	{
 		/* The level's flags, before anyone could take one. */

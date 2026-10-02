@@ -288,11 +288,12 @@ void test_model()
 			switch (rng() % 8)
 			{
 				case 0:
-					/* The client touches the enemy flag in the level:
-					 * the host grants it if it lies there and the
-					 * client does not carry one.
+					/* The client touches the enemy flag in the level
+					 * and asks (only if it carries none itself): the
+					 * host grants it if it lies there and its copy
+					 * carries none either.
 					 */
-					if (cl.alive && in_level[enemy_flag] && !(mirror.current().powerup_flags & FLAG_TEAM))
+					if (cl.alive && in_level[enemy_flag] && !(cl.own.powerup_flags & FLAG_TEAM) && !(mirror.current().powerup_flags & FLAG_TEAM))
 					{
 						const auto d{flag_desc(enemy_flag)};
 						const auto o{evaluate_pickup(mirror.current(), rules, d, 0)};
@@ -370,17 +371,10 @@ void test_model()
 					break;
 				case 7:
 					/* The client drops the flag it has (DROP_REQUEST):
-					 * the host spits it if its copy has it.  Not while
-					 * a capture is on its way to the client: the drop
-					 * could then take a second flag the host granted
-					 * since, and the grant arriving after it would show
-					 * a flag on the client that the host (the truth,
-					 * checked above) does not count, until its death.
+					 * the host spits it if its copy has it (not if it
+					 * was captured meanwhile: the request is refused).
 					 */
-					bool capture_pending{false};
-					for (const auto &q : cl.to_client)
-						capture_pending |= q.capture;
-					if (cl.alive && (cl.own.powerup_flags & FLAG_TEAM) && !capture_pending)
+					if (cl.alive && (cl.own.powerup_flags & FLAG_TEAM))
 					{
 						cl.own.powerup_flags &= ~FLAG_TEAM;
 						if (!evaluate_drop(mirror.current(), rules, flag_desc(enemy_flag), 0))
@@ -411,7 +405,11 @@ void test_model()
 						apply_pickup(cl.own, ctf_rules(cl.team), m.desc, m.outcome);
 				}
 			}
-			cl.to_host.clear();
+			while (!cl.to_host.empty())
+			{
+				host[i].on_report(ctf_rules(cl.team), cl.to_host.front().inv, cl.to_host.front().applied);
+				cl.to_host.pop_front();
+			}
 			host[i].on_report(ctf_rules(cl.team), cl.own, cl.applied);
 			if (cl.alive)
 				CHECK(((host[i].current().powerup_flags & FLAG_TEAM) != 0) == ((cl.own.powerup_flags & FLAG_TEAM) != 0));

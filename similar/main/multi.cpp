@@ -48,6 +48,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "multiinternal.h"
 #include "net_v2_state.h"
 #include "net_v2_objects.h"
+#include "net_v2_modes.h"
 #include "object.h"
 #include "player.h"
 #include "laser.h"
@@ -4023,8 +4024,6 @@ void multi_apply_capture(const playernum_t pnum, const int team_score, const int
 	// Figure out the results of a network kills and add it to the
 	// appropriate player's tally.
 
-	int TheGoal;
-
 	if (pnum==Player_num)
 		HUD_init_message_literal(HM_MULTI, "You have Scored!");
 	else
@@ -4046,21 +4045,16 @@ void multi_apply_capture(const playernum_t pnum, const int team_score, const int
 	player_info.net_kills_total = static_cast<int16_t>(kills);
 	player_info.KillGoalCount = static_cast<int16_t>(kill_goal_count);
 
-	if (Netgame.KillGoal>0)
+	if (::dcx::net_v2::kill_goal_reached(Netgame.KillGoal, team_goal, {static_cast<int16_t>(team_score), static_cast<int16_t>(kills), player_info.KillGoalCount}))
 	{
-		TheGoal=Netgame.KillGoal*5;
-
-		if ((team_goal ? team_score : player_info.KillGoalCount) >= TheGoal)
+		if (pnum==Player_num)
 		{
-			if (pnum==Player_num)
-			{
-				HUD_init_message_literal(HM_MULTI, "You reached the kill goal!");
-				get_local_plrobj().shields = i2f(200);
-			}
-			else
-				HUD_init_message(HM_MULTI, "%s has reached the kill goal!",static_cast<const char *>(vcplayerptr(pnum)->callsign));
-			net_destroy_controlcen(Objects, LevelSharedRobotInfoState.Robot_info);
+			HUD_init_message_literal(HM_MULTI, "You reached the kill goal!");
+			get_local_plrobj().shields = i2f(200);
 		}
+		else
+			HUD_init_message(HM_MULTI, "%s has reached the kill goal!",static_cast<const char *>(vcplayerptr(pnum)->callsign));
+		net_destroy_controlcen(Objects, LevelSharedRobotInfoState.Robot_info);
 	}
 
 	multi_sort_kill_list();

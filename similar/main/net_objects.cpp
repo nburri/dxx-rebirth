@@ -1233,7 +1233,24 @@ void net_objects_level_start()
 	for (unsigned i = 0; i < MAX_PLAYERS; ++i)
 	{
 		const auto objnum{vcplayerptr(static_cast<playernum_t>(i))->objnum};
-		A.mirrors[i].reset(objnum <= Highest_object_index ? inventory_of(*Objects.vcptr(objnum)) : nv::inventory{});
+		if (objnum > Highest_object_index)
+		{
+			A.mirrors[i].reset({});
+			continue;
+		}
+		auto &ship{*Objects.vmptr(objnum)};
+		auto inv{inventory_of(ship)};
+		/* Nobody carries what only the host gives (a flag): the ship
+		 * of another player may still hold the old level's, and no
+		 * report of the player would clear it.
+		 */
+		if (const auto owned{rules_for(static_cast<playernum_t>(i)).host_owned_flags}; owned && (inv.powerup_flags & owned))
+		{
+			inv.powerup_flags &= ~owned;
+			if (i != Player_num)
+				write_inventory(ship, inv, false);
+		}
+		A.mirrors[i].reset(inv);
 	}
 	for (auto &&objp : Objects.vmptridx)
 		if (objp->type == object_type::OBJ_POWERUP)

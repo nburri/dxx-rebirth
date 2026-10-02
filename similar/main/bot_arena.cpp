@@ -274,11 +274,6 @@ struct skill_totals
 	unsigned hits{};
 };
 
-/* The summary.  As movrec-analyse counts them: "hits" are the direct
- * hits (each bolt of a shot of several, and the missiles' direct hits)
- * on other players, "shots" the primary shots (a volley of bolts is one
- * shot), "splash" the blast hits, "damage" the shields they took.
- */
 /* -botarena-mode: the game mode by its name (empty: anarchy). */
 std::optional<network_game_type> arena_mode(const std::string_view name)
 {
@@ -291,6 +286,11 @@ std::optional<network_game_type> arena_mode(const std::string_view name)
 	return std::nullopt;
 }
 
+/* The summary.  As movrec-analyse counts them: "hits" are the direct
+ * hits (each bolt of a shot of several, and the missiles' direct hits)
+ * on other players, "shots" the primary shots (a volley of bolts is one
+ * shot), "splash" the blast hits, "damage" the shields they took.
+ */
 void print_summary(const double game_seconds)
 {
 	auto &Objects = LevelUniqueObjectState.Objects;
