@@ -5027,6 +5027,11 @@ class DXXArchive(DXXCommon):
 		RuntimeTest('test-spawn-site', (
 			'common/unittest/spawn_site.cpp',
 			)),
+		# Test of the Omega cannon's fire rule and of the damage a held
+		# Omega does at 30 to 500 fps (omega_fire.h, laser.cpp).
+		RuntimeTest('test-omega-fire', (
+			'common/unittest/omega_fire.cpp',
+			)),
 		# Test of the segment depths the network powerup drop and the
 		# thief's recreation draw from (segment_depths.h, fireball.cpp).
 		RuntimeTest('test-segment-depths', (
