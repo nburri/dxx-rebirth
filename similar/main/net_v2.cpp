@@ -77,6 +77,7 @@
 #include "kconfig.h"
 #include "controls.h"
 #include "movement_record.h"
+#include "movement_record_format.h"
 
 #include "compiler-range_for.h"
 #include "d_enumerate.h"
@@ -2579,7 +2580,7 @@ void receive_endlevel_host(const std::span<const uint8_t> data)
 	 * it runs while the host plays the level itself (slot 0, the first
 	 * entry of the list that follows).
 	 */
-	else if (Network_status == network_state::playing && LevelUniqueControlCenterState.Control_center_destroyed && get_local_player().connected == player_connection_status::playing)
+	else if (Network_status == network_state::playing && LevelUniqueControlCenterState.Control_center_destroyed && (get_local_player().connected == player_connection_status::playing || get_local_player().connected == player_connection_status::died_in_mine))
 	{
 		const bool host_live{player_connection_status{data[1]} == player_connection_status::playing};
 		if (const auto t{::dcx::net_v2::countdown_correction(LevelUniqueControlCenterState.Countdown_timer, countdown, host_live)})
@@ -2587,6 +2588,7 @@ void receive_endlevel_host(const std::span<const uint8_t> data)
 			con_printf(CON_NORMAL, "reactor: countdown T-%d s set to the host's T-%u s", LevelUniqueControlCenterState.Countdown_seconds_left, static_cast<unsigned>(countdown));
 			LevelUniqueControlCenterState.Countdown_timer = *t;
 			LevelUniqueControlCenterState.Countdown_seconds_left = ::dcx::net_v2::countdown_seconds_of_timer(*t);
+			movement_record_level_event(::dcx::movrec::level_event_kind::countdown_set, Player_num, LevelUniqueControlCenterState.Countdown_seconds_left, 0);
 		}
 	}
 	for (playernum_t i = 0; i < MAX_PLAYERS; i++)
@@ -5956,6 +5958,7 @@ void dispatch_table::do_protocol_frame(int, int listen) const
 		con_printf(CON_NORMAL, "reactor: countdown overdue (T-%d s of %d s after %d s); the host ends it", LevelUniqueControlCenterState.Countdown_seconds_left, LevelUniqueControlCenterState.Total_countdown_time, static_cast<int>((now - S.countdown_started) / F1_0));
 		LevelUniqueControlCenterState.Countdown_timer = std::min(LevelUniqueControlCenterState.Countdown_timer, ::dcx::net_v2::countdown_timer_of_seconds(0));
 		LevelUniqueControlCenterState.Countdown_seconds_left = 0;
+		movement_record_level_event(::dcx::movrec::level_event_kind::countdown_set, Player_num, 0, 1);
 		S.last_endlevel = 0;
 	}
 	if (now >= S.last_endlevel + net_v2::ENDLEVEL_INTERVAL && LevelUniqueControlCenterState.Control_center_destroyed)

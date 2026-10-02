@@ -44,6 +44,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "multi.h"
 #include "bot.h"
 #include "movement_record.h"
+#include "movement_record_format.h"
 #include "multiinternal.h"
 #include "net_v2_state.h"
 #include "net_v2_objects.h"
@@ -597,6 +598,12 @@ kmatrix_result multi_endlevel_score()
 		if (plr.connected != player_connection_status::died_in_mine)
 			plr.connected = player_connection_status::end_menu;
 		Network_status = network_state::endlevel;
+		{
+			auto &cc{LevelUniqueObjectState.ControlCenterState};
+			const int countdown{cc.Control_center_destroyed ? cc.Countdown_seconds_left : -1};
+			con_printf(CON_NORMAL, "level end: P#%u (this machine) at the score screen (T-%d s)", static_cast<unsigned>(Player_num), countdown);
+			movement_record_level_event(::dcx::movrec::level_event_kind::level_end, Player_num, countdown);
+		}
 		/* The host's bots are done with the level too: the score screen
 		 * waits for every player still in it.
 		 */
@@ -885,6 +892,7 @@ static void multi_compute_kill(const d_robot_info_array &Robot_info, const uint8
 	{
 		vmplayerptr(killed_pnum)->connected = player_connection_status::died_in_mine;
 		con_printf(CON_NORMAL, "reactor: P#%u died in the mine (T-%d s)", static_cast<unsigned>(killed_pnum), LevelUniqueControlCenterState.Countdown_seconds_left);
+		movement_record_level_event(::dcx::movrec::level_event_kind::died_in_mine, killed_pnum, LevelUniqueControlCenterState.Countdown_seconds_left);
 	}
 #endif
 
@@ -1902,6 +1910,7 @@ static void multi_do_controlcen_destroy(const d_robot_info_array &Robot_info, fi
 			HUD_init_message_literal(HM_MULTI, who == Player_num ? ( { const auto &&m = TXT_YOU_DEST_CONTROL; std::span<const char>(m, strlen(m)); }) : ( { const auto &&m = TXT_CONTROL_DESTROYED; std::span<const char>(m, strlen(m)); }));
 
 		net_destroy_controlcen_object(Robot_info, objnum == object_none ? object_none : imobjptridx(objnum));
+		movement_record_level_event(::dcx::movrec::level_event_kind::reactor_destroyed, who, LevelUniqueControlCenterState.Total_countdown_time);
 	}
 }
 
@@ -1930,6 +1939,7 @@ static void multi_do_escape(fvmobjptridx &vmobjptridx, const playernum_t pnum, c
 	}
 	HUD_init_message(HM_MULTI, "%s %s", static_cast<const char *>(plr.callsign), txt);
 	con_printf(CON_NORMAL, "reactor: P#%u escaped (T-%d s)", static_cast<unsigned>(pnum), LevelUniqueObjectState.ControlCenterState.Countdown_seconds_left);
+	movement_record_level_event(::dcx::movrec::level_event_kind::escape, pnum, LevelUniqueObjectState.ControlCenterState.Countdown_seconds_left, connected == player_connection_status::escape_tunnel ? 0 : 1);
 	if (+(Game_mode & GM_NETWORK))
 		plr.connected = connected;
 	create_player_appearance_effect(Vclip, objnum);
@@ -2504,6 +2514,7 @@ void multi_send_fire(int laser_gun, const laser_level level, int laser_flags, ob
 void multi_send_destroy_controlcen(const objnum_t objnum, const playernum_t player)
 {
 	con_printf(CON_NORMAL, "reactor: destroyed by P#%u, seen first on this machine", static_cast<unsigned>(player));
+	movement_record_level_event(::dcx::movrec::level_event_kind::reactor_destroyed, player, LevelUniqueObjectState.ControlCenterState.Total_countdown_time);
 	if (player == Player_num)
 	{
 		const auto &&m = TXT_YOU_DEST_CONTROL;
@@ -2571,6 +2582,7 @@ void multi_send_endlevel_start()
 
 	multi_send_data(buf, multiplayer_data_priority::_2);
 	con_printf(CON_NORMAL, "reactor: P#%u (this machine) escaped (T-%d s)", static_cast<unsigned>(Player_num), LevelUniqueObjectState.ControlCenterState.Countdown_seconds_left);
+	movement_record_level_event(::dcx::movrec::level_event_kind::escape, Player_num, LevelUniqueObjectState.ControlCenterState.Countdown_seconds_left);
 	if (+(Game_mode & GM_NETWORK))
 	{
 		get_local_player().connected = player_connection_status::escape_tunnel;

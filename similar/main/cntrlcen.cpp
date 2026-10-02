@@ -35,6 +35,8 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "inferno.h"
 #include "cntrlcen.h"
 #include "console.h"
+#include "movement_record.h"
+#include "movement_record_format.h"
 #include "digi.h"
 #include "game.h"
 #include "laser.h"
@@ -179,8 +181,14 @@ window_event_result do_controlcen_dead_frame()
 	auto &LevelUniqueControlCenterState = LevelUniqueObjectState.ControlCenterState;
 	auto &Objects = LevelUniqueObjectState.Objects;
 	auto &vmobjptridx = Objects.vmptridx;
-	if (+(Game_mode & GM_MULTI) && (get_local_player().connected != player_connection_status::playing)) // if out of level already there's no need for this
-		return window_event_result::ignored;
+	/* Out of the level already (escaped, at the score screen): nothing to
+	 * do.  A player marked died in the mine while still in the level
+	 * keeps its countdown (net_countdown.h): stopped, it kept the level
+	 * alive on this machine and, on the host, for everyone.
+	 */
+	if (+(Game_mode & GM_MULTI))
+		if (const auto connected{get_local_player().connected}; connected != player_connection_status::playing && connected != player_connection_status::died_in_mine)
+			return window_event_result::ignored;
 
 	const auto Dead_controlcen_object_num = LevelUniqueControlCenterState.Dead_controlcen_object_num;
 	if (Dead_controlcen_object_num != object_none && LevelUniqueControlCenterState.Countdown_seconds_left > 0)
@@ -282,6 +290,7 @@ window_event_result do_countdown_frame()
 		{
 			digi_play_sample( sound_effect::SOUND_MINE_BLEW_UP, F1_0 );
 			con_puts(CON_NORMAL, "reactor: countdown ended, the mine blows up");
+			movement_record_level_event(::dcx::movrec::level_event_kind::countdown_end, Player_num, 0);
 		}
 
 		flash_value = f2i(-Countdown_timer * (64 / 4));	// 4 seconds to total whiteness

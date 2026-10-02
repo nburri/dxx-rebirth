@@ -1862,7 +1862,15 @@ The implementation (`similar/main/net_v2.cpp`, `common/main/net_v2_game.h`,
   other machines no longer applied its positions. Second report: a player
   escaped at once and its score screen showed the countdown standing
   still, since the player left behind had stopped the same way and the
-  score screen waits for every player still in the level.) As a backstop
+  score screen waits for every player still in the level. The host's
+  movement recording of that game shows it: three humans and then the host
+  itself lost their connected flag at the moment of a kill during the
+  countdown, without a death following, 8.2 s apart for the machines that
+  stopped at 50 s and 42 s; the host's own countdown stopped with its own
+  kill, so it never ended the level and its bots flew on for 90 s.) A
+  machine whose player is marked died in the mine while still in the
+  level keeps running its countdown (`do_controlcen_dead_frame`) and still
+  follows the host's, so no such mark can stop a countdown. As a backstop
   the host ends a countdown that stands still: once the real time since
   the reactor died exceeds the countdown by 5 s it sends 0, and every
   machine still in the level blows up (`countdown_overdue`). Arena check:
@@ -1870,7 +1878,9 @@ The implementation (`similar/main/net_v2.cpp`, `common/main/net_v2_game.h`,
   and plays the countdown to 0 (it fails if the countdown stands still).
   Gamelog lines
   `reactor: ...` (destroyed, countdown start and end, escapes, deaths in
-  the mine, corrections from the host).
+  the mine, corrections from the host) and `level end: ...`; the movement
+  recording has the same as `level_event` records (format minor 5,
+  Documentation/movement-recording.md).
 - **Leaving**: a client sends `LEAVE` (also after the v1 `MULTI_QUIT`, which
   the gameplay layer still sends), the host `HOST_SHUTDOWN`; the connection
   lingers for one second so that the message is acknowledged, and a peer the

@@ -76,6 +76,8 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "newmenu.h"
 #include "hudmsg.h"
 #include "console.h"
+#include "movement_record.h"
+#include "movement_record_format.h"
 #include "endlevel.h"
 #include "kmatrix.h"
 #include "net_udp.h"
@@ -1954,7 +1956,10 @@ window_event_result DoPlayerDead()
 		plrobj.shields = 0;
 		plr.connected = player_connection_status::died_in_mine;
 		if (+(Game_mode & GM_MULTI))
+		{
 			con_printf(CON_NORMAL, "reactor: P#%u (this machine) died in the mine", static_cast<unsigned>(Player_num));
+			movement_record_level_event(::dcx::movrec::level_event_kind::died_in_mine, Player_num, LevelUniqueControlCenterState.Countdown_seconds_left);
+		}
 
 		do_screen_message(TXT_DIED_IN_MINE); // Give them some indication of what happened
 #if DXX_BUILD_DESCENT == 2

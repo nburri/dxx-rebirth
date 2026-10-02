@@ -727,7 +727,7 @@ namespace {
  */
 void test_minor_4()
 {
-	static_assert(FORMAT_MINOR == 4);
+	static_assert(FORMAT_MINOR >= 4);
 	record_buffer buf;
 	for (const bool ctl : {false, true})
 	{
@@ -784,6 +784,49 @@ void test_minor_4()
 
 }
 
+namespace {
+
+/* Minor 5: the level events (the reactor, its countdown, escapes, deaths
+ * in the mine, the level end) in the event layout.  A reader of minor 4
+ * does not know the type and counts it as unknown (skipped); minor 5
+ * hands it over.
+ */
+void test_minor_5()
+{
+	static_assert(FORMAT_MINOR >= 5);
+	static_assert(is_event(record_type::level_event));
+	record_buffer buf;
+	const event_record e{record_type::level_event, 1575900, 1, PLAYER_NONE, level_event_kind::reactor_destroyed, 0, 60, 0};
+	const auto bytes{encode(buf, e)};
+	CHECK(bytes.size() == RECORD_HEADER_SIZE + EVENT_SIZE);
+	CHECK(bytes[0] == 14);
+	std::array<std::uint8_t, MAX_HEADER_SIZE> hb;
+	const auto n{encode_header(hb, make_header())};
+	std::vector<std::uint8_t> file(hb.begin(), hb.begin() + static_cast<std::ptrdiff_t>(n));
+	auto cb{std::make_unique<chunk_builder>()};
+	CHECK(cb->append(bytes));
+	const event_record end{record_type::level_event, 1636000, 0, PLAYER_NONE, level_event_kind::countdown_end, 0, 0, 0};
+	record_buffer buf2;
+	CHECK(cb->append(encode(buf2, end)));
+	const auto chunk{cb->finish()};
+	file.insert(file.end(), chunk.begin(), chunk.end());
+	unsigned seen{};
+	const auto res{read_recording(file, [&](const record &r) {
+		if (const auto p{std::get_if<event_record>(&r)})
+		{
+			CHECK(*p == (seen ? end : e));
+			++seen;
+		}
+	})};
+	CHECK(seen == 2 && res.stats.unknown_records == 0 && res.stats.malformed_records == 0);
+	CHECK(std::string_view{record_type_name(record_type::level_event)} == "level_event");
+	CHECK(std::string_view{level_event_name(level_event_kind::reactor_destroyed)} == "reactor destroyed");
+	CHECK(std::string_view{level_event_name(level_event_kind::level_end)} == "level end");
+	CHECK(std::string_view{level_event_name(200)} == "level event");
+}
+
+}
+
 int main()
 {
 	test_crc();
@@ -800,6 +843,7 @@ int main()
 	test_minor_2();
 	test_minor_3();
 	test_minor_4();
+	test_minor_5();
 	std::puts("test-movement-record: all checks passed");
 	return 0;
 }
