@@ -385,7 +385,7 @@ proposed bot style:
 scons sdl2=1 d1x=0 d2x=1 register_runtime_test_plain_link_targets=1 movrec-analyse
 build/common/movrec-analyse [--out DIR] [--player CALLSIGN]... [--bots]
                             [--skill NAME] [--min-seconds N]
-                            [--missions DIR] FILE...
+                            [--missions DIR] [--fidelity PROFILE[@BOT]]... FILE...
 ```
 
 | Option | Meaning |
@@ -396,6 +396,7 @@ build/common/movrec-analyse [--out DIR] [--player CALLSIGN]... [--bots]
 | `--skill NAME` | The skill the profile's skill-relative values are scaled for (Trainee … Insane; default Hotshot). |
 | `--min-seconds N` | Skip players alive for less than N seconds (default 20). |
 | `--missions DIR` | The folder of the missions (`.hog` and `.mn2`, as in the game's `missions/`): find every recorded level's geometry and report the traits per level and room (section 8.8). |
+| `--fidelity PROFILE[@BOT]` | Compare the recorded bot BOT (else the bots named like the profile's callsign, else all) with this `.botstyle` file's measured values, trait by trait (section 8.12; repeatable). |
 
 Give it every recording you have of a player: all files of all evenings, the
 host's and the clients'. It first lists the files (format, length, host or
@@ -633,6 +634,9 @@ The keys, their range, and what they are computed from:
 | `tune.reverse_turn_speed` | 0.3–1 | backward speed reached in them (`REVERSE_TURN_SPEED`) |
 | `tune.turn_boost`, `tune.turn_boost_burn` | 0–1 | share of large turns followed by a push, and of those with the afterburner (`turn_habits::boost`, 0.8, `boost_burn`, 0.3) |
 | `tune.burn_retreat`, `tune.burn_roam` | 0–1 | share of the time fleeing / with no enemy in sight with the afterburner |
+| `tune.burn_chase`, `tune.burn_fight` | 0–1 | share of the time chasing / in the rest of the fight with the afterburner (section 8.12) |
+| `tune.strafe_reversals`, `tune.strafe_share` | 0–150, 0–1 | strafe reversals per minute of fight, share of the fight with a strafe key (section 8.12) |
+| `tune.fire_distance` | 10–400 | median distance when firing (from 20 shots; section 8.12) |
 | `tune.missile_interval_scale` | 0.3–4 | median time between volleys of one fight / the base skill's `missile_interval` (only with 3 such pairs or more) |
 | `tune.volley_size` | 1–8 | missiles per volley |
 | `tune.pursuit_seconds` | 0–30 | median pursuit time (0: lets the enemy go) |
@@ -641,6 +645,7 @@ The keys, their range, and what they are computed from:
 | `tune.heavy_fire_delay` | 0.5–60 | median seconds from a heavy missile's pickup to its shot (section 8.10; from 2 shots, high from 12) |
 | `style.cover` | 0–2 | how much less of its time the player spends in exposed segments than the bots without cover, on open levels (section 8.11; at most medium) |
 | `measured.hit_rate_<gun>`, `measured.damage_per_shot_<gun>` | | hits and damage per shot of each primary from 30 shots (section 8.10; for people: the bots' aim is the skill's) |
+| `measured.strafe_reversals_per_min`, `strafe_fight_share`, `strafe_vertical`, `speed_across`, `strafe_run_ms_median`, `speed_median`, `forward_share`, `afterburner_<chasing, fleeing, roam, fighting>`, `afterburner_owned_share`, `afterburner_owned_rate`, `fire_distance_median` | | what the fidelity check compares a bot with (section 8.12) |
 
 A value the recordings say nothing about is left out; the confidence of the
 others comes from how much evidence there is (for example fights: low below
@@ -890,6 +895,46 @@ covered and 55–58 % exposed (the volume 15 % and 56 %), weak and armed
 alike (55–60 % and 57–63 % exposed); on Pyroglyphic 87 % covered and 1 %
 exposed. The bots of the Corona game of exp-33: 12–19 % covered, 67–74
 % exposed.
+
+### 8.12 Fidelity: a bot against its profile
+
+A bot that flies a style profile should come out of the analysis with
+the profile's numbers. Since Documentation/multiplayer-bots.md §9.18 the
+profile carries them (`measured.*` above; the older files have only
+`measured.speed_mean`, `afterburner_share` and `enemy_distance_median`
+and the value keys that are measurements, such as `skill.strafe_vertical`,
+`tune.burn_retreat`, `tune.burn_roam`, `tune.reverse_turn`), and the bot
+aims at the `tune.strafe_*`, `tune.burn_*` and `tune.fire_distance` keys
+by watching its own flight.
+
+`--fidelity PROFILE[@BOT]` compares the recorded bot named BOT, else every
+recorded bot (`--bots`) whose name starts with the first three letters of
+the profile's callsign, else every bot, with the profile, trait by trait (`fidelity_rows`, `fidelity_report`):
+the profile's value, the bot's, the difference (absolute for shares,
+relative otherwise) and whether it is within the tolerance (shares 0.04
+to 0.1, rates and distances 8 to 30 %):
+
+```
+== fidelity: wbot (bot) against "W style" ==
+  speed, mean (units/s)                     58.5      51.1     -13%  off
+  strafe reversals a minute of fight        65.7      60.1      -9%  ok
+  strafing, share of the fight             0.812     0.734   -0.077  off
+  afterburner fleeing                      0.482     0.437   -0.045  ok
+  distance when firing, median              69.4      42.5     -39%  off
+  ...
+  7 of 19 within the tolerance
+```
+
+The report has the afterburner owned too: from the pickup of the
+afterburner powerup (or the first burn on exact controls: a ship that
+burns has one) to the death, as a share of the time alive, and the share of that time burnt.
+The players of the Pyroglyphic game of 2026-10-02 owned it 53–98 % of the
+time and burnt 14–33 % of it (a full charge lasts 3 s and comes back in 8:
+27 % with every pickup's full charge on top); the profile bots of that
+game owned it 90–95 % of the time.
+
+`tools/botarena-run.sh -S FILE -F FILE` (Documentation/multiplayer-bots.md
+§8.2) flies a profile in a headless arena game and prints this check.
 
 ## 9. Code
 

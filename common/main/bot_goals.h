@@ -2189,6 +2189,41 @@ constexpr bool want_afterburner(const afterburner_view &v)
 	return false;
 }
 
+/* Section 9.18: the afterburner of a situation the bot's habits aim at
+ * (habit_governor): lit below the aim with the charge for it (in roam
+ * above a reserve, so that a fight finds charge), only while the bot
+ * holds the forward key and its keys push within HABIT_BURN_CONE_COS of
+ * the nose (the afterburner is forward thrust), kept while it stays below
+ * the aim and within the cone, with a little charge.
+ */
+struct habit_burn_view
+{
+	bool have{};
+	double charge{};
+	/* Below the aim. */
+	bool wanted{};
+	bool roam{};
+	/* The cosine between the nose and the thrust of the keys (0 without
+	 * the forward key).
+	 */
+	double along{};
+	bool burning{};
+};
+
+constexpr double HABIT_BURN_CONE_COS{0.5};	// 60 degrees: forward with both strafe keys is 55
+constexpr double HABIT_BURN_LIGHT{0.1};
+constexpr double HABIT_BURN_KEEP{0.03};
+constexpr double HABIT_BURN_ROAM_LIGHT{0.5};
+constexpr double HABIT_BURN_ROAM_KEEP{0.25};
+
+[[nodiscard]]
+constexpr bool habit_burn(const habit_burn_view &v)
+{
+	if (!v.have || !v.wanted || v.along < HABIT_BURN_CONE_COS)
+		return false;
+	return v.charge > (v.burning ? (v.roam ? HABIT_BURN_ROAM_KEEP : HABIT_BURN_KEEP) : (v.roam ? HABIT_BURN_ROAM_LIGHT : HABIT_BURN_LIGHT));
+}
+
 inline constexpr std::array<afterburner_use, BOT_SKILL_COUNT> afterburner_by_skill{{
 	afterburner_use::never,
 	afterburner_use::chase,
