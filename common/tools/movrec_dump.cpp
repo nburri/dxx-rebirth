@@ -210,6 +210,11 @@ int dump(const char *const path, const options &opt)
 				if (s->flags & sample_flag::controls)
 				{
 					++ps.with_controls;
+					/* Flown here (sample_flag2::local) or shared over
+					 * the network by the player's machine.
+					 */
+					if ((s->flags2 & sample_flag2::controls_shared) && !(s->flags2 & sample_flag2::local))
+						++ps.shared_controls;
 					if (std::abs(u.controls[4]) > 0.5 || std::abs(u.controls[3]) > 0.5)
 					{
 						++ps.turning;

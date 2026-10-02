@@ -475,6 +475,17 @@ All shares are of the time in the situation named. "Fight" is an enemy with
 a line of sight within 400 units. "Uses a control" is more than 0.3 of full
 deflection. The thresholds are the constants of `analysis::limits`.
 
+Time **away from the keyboard** is left out of every statistic: a person
+(not a bot) alive and not firing for at least 10 s, with the exact controls
+all at rest (none beyond 0.02 of full deflection) or, where the controls are
+estimated, the ship nearly still (below 2 units/s and 0.02 revolutions/s).
+Such points count as not alive (no controls, enemy, fight or room); the
+events of the time (hits taken, a death, a respawn) are kept in the track,
+marked `idle`, but not counted. The report's data line says how much was
+left out ("idle (away) 12.0 min excluded (5 spans …)", deaths then as
+"N more while away"), the profile carries `measured.idle_minutes`, and its
+confidences come from the time that is left.
+
 | Group | Statistic | How |
 |---|---|---|
 | Speed | mean, p10, median, p90; seconds per 20 units/s; share above 85 % and below 20 % of the top speed | alive samples |
