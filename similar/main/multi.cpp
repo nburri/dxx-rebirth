@@ -1139,6 +1139,8 @@ window_event_result multi_do_frame()
 	 * damage reports.
 	 */
 	net_combat_frame();
+	/* Game modes: the host tests the goals (CAPTURE). */
+	net_modes_frame();
 	if (Network_status == network_state::playing)
 	{
 		// Repopulate the level if necessary
@@ -3253,6 +3255,8 @@ void multi_prep_level_objects(const d_powerup_info_array &Powerup_info, const d_
 	MultiLevelInv_InitializeCount();
 	/* Every machine gives the level's powerups the same net ids. */
 	net_objects_level_start();
+	/* Captures and flag counts belong to the old level. */
+	net_modes_level_start();
 	/* Spawn assignments and reservations belong to the old level. */
 	net_spawn_level_start();
 	/* Shots, ids and the host's histories too (stage 4). */
@@ -3990,6 +3994,30 @@ namespace {
 
 void multi_do_capture_bonus(const playernum_t pnum)
 {
+	/* Protocol v2: the host decides captures (CAPTURE, net_modes.cpp);
+	 * the v1 message is only played in a demo.
+	 */
+	if (net_objects_active())
+	{
+		con_printf(CON_VERBOSE, "net: MULTI_CAPTURE_BONUS from P#%u ignored (the host decides captures)", pnum);
+		return;
+	}
+	auto &Objects = LevelUniqueObjectState.Objects;
+	auto &plr = *vcplayerptr(pnum);
+	auto &player_info = Objects.vmptr(plr.objnum)->ctype.player_info;
+	const auto team{multi_get_team_from_player(Netgame, pnum)};
+	multi_apply_capture(pnum, team_kills[team] + 5, player_info.net_kills_total + 5, player_info.KillGoalCount + 5, false);
+}
+
+}
+
+/* A capture (the host's CAPTURE, or a v1 MULTI_CAPTURE_BONUS in a demo):
+ * the message, the sound and the scores.  `team_goal`: the kill goal
+ * counts the team's score (the host's rule, as for a kill), else the
+ * carrier's own count (v1).
+ */
+void multi_apply_capture(const playernum_t pnum, const int team_score, const int kills, const int kill_goal_count, const bool team_goal)
+{
 	auto &Objects = LevelUniqueObjectState.Objects;
 	auto &vmobjptr = Objects.vmptr;
 	// Figure out the results of a network kills and add it to the
@@ -4010,18 +4038,19 @@ void multi_do_capture_bonus(const playernum_t pnum)
 		), F1_0*2);
 
 
-	team_kills[multi_get_team_from_player(Netgame, pnum)] += 5;
+	const auto team{multi_get_team_from_player(Netgame, pnum)};
+	team_kills[team] = static_cast<int16_t>(team_score);
 	auto &plr = *vcplayerptr(pnum);
 	auto &player_info = vmobjptr(plr.objnum)->ctype.player_info;
 	player_info.powerup_flags &= ~player_flag::has_team_flag;  // Clear capture flag
-	player_info.net_kills_total += 5;
-	player_info.KillGoalCount += 5;
+	player_info.net_kills_total = static_cast<int16_t>(kills);
+	player_info.KillGoalCount = static_cast<int16_t>(kill_goal_count);
 
 	if (Netgame.KillGoal>0)
 	{
 		TheGoal=Netgame.KillGoal*5;
 
-		if (player_info.KillGoalCount >= TheGoal)
+		if ((team_goal ? team_score : player_info.KillGoalCount) >= TheGoal)
 		{
 			if (pnum==Player_num)
 			{
@@ -4037,6 +4066,8 @@ void multi_do_capture_bonus(const playernum_t pnum)
 	multi_sort_kill_list();
 	multi_show_player_list();
 }
+
+namespace {
 
 static int GetOrbBonus (char num)
 {

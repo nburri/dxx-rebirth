@@ -846,9 +846,7 @@ static vmsegptridx_t choose_drop_segment(fvmsegptridx &vmsegptridx, fvcvertptr &
 //	(Re)spawns powerup if in a network game.
 void maybe_drop_net_powerup(powerup_type_t powerup_type, bool adjust_cap, bool random_player)
 {
-	auto &LevelSharedVertexState{LevelSharedSegmentState.get_vertex_state()};
 	auto &LevelUniqueControlCenterState{LevelUniqueObjectState.ControlCenterState};
-	auto &Vertices{LevelSharedVertexState.get_vertices()};
 	playernum_t pnum{Player_num};
 	if (+(Game_mode & GM_MULTI) && !(Game_mode & GM_MULTI_COOP)) {
 		/* Only the host creates powerups in a network game (protocol v2
@@ -882,25 +880,26 @@ void maybe_drop_net_powerup(powerup_type_t powerup_type, bool adjust_cap, bool r
                         } while (vcplayerptr(pnum)->connected != player_connection_status::playing);
                 }
 
-//--old-- 		segnum = (d_rand() * Highest_segment_index) >> 15;
-//--old-- 		Assert((segnum >= 0) && (segnum <= Highest_segment_index));
-//--old-- 		if (segnum < 0)
-//--old-- 			segnum = -segnum;
-//--old-- 		while (segnum > Highest_segment_index)
-//--old-- 			segnum /= 2;
-
-		Net_create_loc = 0;
-
-		auto &vcvertptr{Vertices.vcptr};
-		const auto &&segnum{choose_drop_segment(LevelUniqueSegmentState.get_segments().vmptridx, vcvertptr, LevelUniqueWallSubsystemState.Walls.vcptr, pnum)};
-		const auto &&new_pos{pick_random_point_in_seg(vcvertptr, segnum, std::minstd_rand(d_rand()))};
-		/* The host sends the velocity drop_powerup chose: no shared seed. */
-		const auto &&objnum{drop_powerup(LevelUniqueObjectState, LevelSharedSegmentState, LevelUniqueSegmentState, Vclip, powerup_type, {}, new_pos, segnum, true)};
-		if (objnum == object_none)
-			return;
-		net_objects_announce(objnum, 0xff, true);
-		object_create_explosion_without_damage(Vclip, segnum, new_pos, i2f(5), vclip_index::powerup_disappearance);
+		net_drop_powerup_away_from(powerup_type, pnum);
 	}
+}
+
+imobjptridx_t net_drop_powerup_away_from(const powerup_type_t powerup_type, const playernum_t pnum)
+{
+	auto &LevelSharedVertexState{LevelSharedSegmentState.get_vertex_state()};
+	auto &Vertices{LevelSharedVertexState.get_vertices()};
+	Net_create_loc = 0;
+
+	auto &vcvertptr{Vertices.vcptr};
+	const auto &&segnum{choose_drop_segment(LevelUniqueSegmentState.get_segments().vmptridx, vcvertptr, LevelUniqueWallSubsystemState.Walls.vcptr, pnum)};
+	const auto &&new_pos{pick_random_point_in_seg(vcvertptr, segnum, std::minstd_rand(d_rand()))};
+	/* The host sends the velocity drop_powerup chose: no shared seed. */
+	const auto &&objnum{drop_powerup(LevelUniqueObjectState, LevelSharedSegmentState, LevelUniqueSegmentState, Vclip, powerup_type, {}, new_pos, segnum, true)};
+	if (objnum == object_none)
+		return objnum;
+	net_objects_announce(objnum, 0xff, true);
+	object_create_explosion_without_damage(Vclip, segnum, new_pos, i2f(5), vclip_index::powerup_disappearance);
+	return objnum;
 }
 
 namespace {

@@ -146,6 +146,10 @@ struct CArg : prohibit_void_ptr<>
 	uint32_t DbgBotArenaReactor;
 	std::string DbgBotArenaMission;
 	std::string DbgBotArenaSpec;
+	/* -botarena-mode anarchy|team|ctf: the game mode (default anarchy);
+	 * bots play every mode the arena offers (game modes, stage 6a).
+	 */
+	std::string DbgBotArenaMode;
 #if DXX_USE_SHAREPATH
 	bool SysNoHogDir;
 #endif

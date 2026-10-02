@@ -310,6 +310,8 @@ void test_pickup_rules()
 		CHECK(!evaluate_pickup(i, nc, FLAG_BLUE, 1).usable);
 		apply_pickup(i, r, FLAG_BLUE, evaluate_pickup(i, r, FLAG_BLUE, 1));
 		CHECK(i.powerup_flags & FLAG_TEAM);
+		/* A carrier takes no second flag. */
+		CHECK(!evaluate_pickup(i, make_rules(1), FLAG_BLUE, 1).usable);
 	}
 	/* Hoard orbs, up to the maximum. */
 	{

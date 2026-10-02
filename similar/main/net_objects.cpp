@@ -249,6 +249,8 @@ nv::inventory_rules rules_for(const playernum_t pnum)
 	r.has_team_flag_bit = underlying_value(player_flag::has_team_flag);
 	r.max_orbs = player_info::max_hoard_orbs;
 	r.capture_mode = game_mode_capture_flag(Game_mode);
+	if (r.capture_mode)
+		r.host_owned_flags = r.has_team_flag_bit;
 	r.hoard_mode = game_mode_hoard(Game_mode);
 	r.max_omega_charge = MAX_OMEGA_CHARGE;
 #else
@@ -1572,6 +1574,27 @@ void net_objects_host_own_ship_inventory(const playernum_t pnum, const bool forc
 	m.write(buf);
 	send(session_msg::inventory, buf);
 	last = {inv, true, now};
+}
+
+void net_objects_host_take_team_flag(const playernum_t pnum)
+{
+	if (!net_objects_active() || !multi_i_am_master() || pnum >= MAX_PLAYERS || pnum >= N_players)
+		return;
+	auto &Objects{LevelUniqueObjectState.Objects};
+	auto &ship{*Objects.vmptr(vcplayerptr(pnum)->objnum)};
+#if DXX_BUILD_DESCENT == 2
+	ship.ctype.player_info.powerup_flags &= ~player_flag::has_team_flag;
+	if (pnum == Player_num)
+		return;
+	auto &mirror{A.mirrors[pnum]};
+	if (bot_is_local(pnum))
+		/* The ship is the truth for a bot. */
+		mirror.assign(inventory_of(ship));
+	else
+		mirror.take_flags(underlying_value(player_flag::has_team_flag));
+#else
+	(void)ship;
+#endif
 }
 
 bool net_objects_bot_can_use(const playernum_t pnum, const powerup_type_t id, const uint32_t count)

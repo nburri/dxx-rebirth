@@ -63,7 +63,7 @@ window_event_result net_udp_setup_game(const d_select_event &);
  * bot setup), then host it with the bot setup, its randomness from
  * `seed`.  False if it could not start.
  */
-void net_udp_arena_prepare(unsigned level, unsigned bots);
+void net_udp_arena_prepare(unsigned level, unsigned bots, network_game_type mode);
 bool net_udp_arena_start(uint32_t seed);
 /* Sizes of the network session's queues, for the -verbose frame probe. */
 void net_udp_probe_report();

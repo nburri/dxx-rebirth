@@ -5023,6 +5023,12 @@ class DXXArchive(DXXCommon):
 		RuntimeTest('test-net-v2-combat', (
 			'common/unittest/net_v2_combat.cpp',
 			)),
+		# Test of the game mode rules the host decides: captures, the
+		# flag count, the inventory copy's host-owned flags, CAPTURE
+		# (net_v2_modes.h).
+		RuntimeTest('test-net-v2-modes', (
+			'common/unittest/net_v2_modes.cpp',
+			)),
 		# Test of the deathmatch spawn site choice (spawn_site.h) against
 		# the code it was extracted from.
 		RuntimeTest('test-spawn-site', (
@@ -5686,6 +5692,7 @@ class DXXProgram(DXXCommon):
 'similar/main/multibot.cpp',
 'similar/main/net_interp.cpp',
 'similar/main/net_combat.cpp',
+'similar/main/net_modes.cpp',
 'similar/main/net_objects.cpp',
 'similar/main/net_spawn.cpp',
 ),

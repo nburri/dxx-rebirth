@@ -81,6 +81,10 @@ enum class session_msg : std::uint8_t
 	damage = 0x29,
 	player_killed = 0x2a,
 	player_spawn = 0x2b,
+	/* Stage 6a, game modes (section 6.8, net_v2_modes.h): a capture in
+	 * capture the flag, host to all (protocol 109).
+	 */
+	capture = 0x39,
 	drop_request = 0x3b,
 	obj_settle = 0x47,
 	/* Host-assigned spawns (section 8, "Host-assigned spawns",

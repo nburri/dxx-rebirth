@@ -1951,7 +1951,13 @@ static window_event_result object_move_one(const d_level_shared_robot_info_state
 		const auto &&segp = vmsegptr(obj->segnum);
 #if DXX_BUILD_DESCENT == 2
 		if (game_mode_capture_flag(Game_mode))
-			fuelcen_check_for_goal(obj, segp);
+		{
+			/* In a network game the host tests every ship
+			 * (net_modes.cpp, CAPTURE).
+			 */
+			if (!(Game_mode & GM_NETWORK))
+				fuelcen_check_for_goal(obj, segp);
+		}
 		else if (game_mode_hoard(Game_mode))
 			fuelcen_check_for_hoard_goal(obj, segp);
 #endif

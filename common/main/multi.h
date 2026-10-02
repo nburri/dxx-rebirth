@@ -186,8 +186,9 @@ static inline player_ship_color get_team_color(const team_number tnum)
  * movement recording).
  * 108: ADDRESS_SEEN, the client tells the host the address it reaches the
  * host at (the host's public address behind a NAT router).
+ * 109: CAPTURE, the host decides captures in capture the flag.
  */
-constexpr std::uint16_t MULTI_PROTO_VERSION{108};
+constexpr std::uint16_t MULTI_PROTO_VERSION{109};
 // PROTOCOL VARIABLES AND DEFINES - END
 
 /* The network tick rate (positions per second, and the pacing of every
@@ -783,6 +784,11 @@ void multi_send_door_open_specific(playernum_t pnum, vcsegidx_t segnum, sidenum_
 void multi_send_wall_status_specific(playernum_t pnum, wallnum_t wallnum, uint8_t type, wall_flags flags, wall_state state);
 void multi_send_light_specific (playernum_t pnum, vcsegptridx_t segnum, sidemask_t val);
 void multi_send_capture_bonus (playernum_t pnum);
+/* A capture's message, sound and scores (the host's CAPTURE or a v1
+ * MULTI_CAPTURE_BONUS): the scores after it, and whether the kill goal
+ * counts the team's score.
+ */
+void multi_apply_capture(playernum_t pnum, int team_score, int kills, int kill_goal_count, bool team_goal);
 int multi_all_players_alive(const fvcobjptr &, std::ranges::subrange<const player *>);
 void multi_send_seismic(fix);
 void multi_send_drop_blobs(playernum_t);
@@ -1190,6 +1196,25 @@ bool net_objects_host_has_report(playernum_t pnum);
  */
 [[nodiscard]]
 bool net_objects_host_owns_weapon(playernum_t pnum, uint8_t weapon, uint8_t level);
+/* Host: player `pnum` no longer carries its CTF flag (a capture): the
+ * ship and the host's copy of its inventory, which no report of the
+ * player brings back.
+ */
+void net_objects_host_take_team_flag(playernum_t pnum);
+
+/* Game modes the host decides (similar/main/net_modes.cpp,
+ * Documentation/network-protocol-v2.md section 6.8 and "Stage 6a: game
+ * modes"): captures in capture the flag.  Nothing here acts outside a
+ * network game.
+ */
+/* Level start, every machine (after net_objects_level_start). */
+void net_modes_level_start();
+/* Every frame: the host tests the goals and counts the flags. */
+void net_modes_frame();
+/* CAPTURE from the host. */
+void net_modes_receive(playernum_t from, uint8_t type, std::span<const uint8_t> payload);
+/* The bot arena's summary: the captures and the flag counts. */
+void net_modes_arena_summary();
 
 /* Where the remote ship of player `pnum` is shown this frame: the host
  * time of its pose (net_interp.cpp).  False if it is not shown by
