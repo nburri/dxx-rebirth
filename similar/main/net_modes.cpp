@@ -461,6 +461,16 @@ uint8_t net_modes_host_death_orbs(const playernum_t pnum, const uint8_t orbs)
 #endif
 }
 
+void net_modes_forget_death(const playernum_t pnum)
+{
+#if DXX_BUILD_DESCENT == 2
+	if (pnum < MAX_PLAYERS)
+		M.death_orb[pnum] = false;
+#else
+	(void)pnum;
+#endif
+}
+
 void net_modes_host_orbs_lost(const unsigned orbs)
 {
 	M.orbs_lost += orbs;

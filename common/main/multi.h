@@ -1236,6 +1236,10 @@ uint8_t net_modes_host_death_orbs(playernum_t pnum, uint8_t orbs);
  * level).
  */
 void net_modes_host_orbs_lost(unsigned orbs);
+/* Player `pnum` reappeared or a new player took its slot: no death of it
+ * waits for its drop any more.
+ */
+void net_modes_forget_death(playernum_t pnum);
 /* The bot arena's summary: the captures and the flag counts. */
 void net_modes_arena_summary();
 

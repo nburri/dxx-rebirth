@@ -683,18 +683,7 @@ public:
 		take_flags(flags);
 		base_.orbs = current_.orbs = 0;
 	}
-	/* The host gave the player orbs it did not pick up (the extra orb of
-	 * a death, dropped with the rest at once).
-	 */
-	void set_orbs(const std::uint8_t orbs, const std::uint32_t flags)
-	{
-		base_.orbs = current_.orbs = orbs;
-		if (orbs)
-		{
-			base_.powerup_flags |= flags;
-			current_.powerup_flags |= flags;
-		}
-	}
+
 	/* A report of the player's inventory with `applied` grants. */
 	void on_report(const inventory_rules &r, const inventory &inv, const std::uint16_t applied)
 	{

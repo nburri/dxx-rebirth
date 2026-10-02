@@ -526,7 +526,11 @@ void test_host_owned_orbs()
 	m.on_report(r, more, seq2);
 	CHECK(m.current().orbs == 0 && !(m.current().powerup_flags & FLAG_TEAM));
 	/* A drop of one orb of two. */
-	m.set_orbs(2, FLAG_TEAM);
+	const auto seq3{m.on_grant(r, ORB, evaluate_pickup(m.current(), r, ORB, 1))};
+	m.on_grant(r, ORB, evaluate_pickup(m.current(), r, ORB, 1));
+	CHECK(m.current().orbs == 2 && (m.current().powerup_flags & FLAG_TEAM));
+	/* A report that knows only the first of the two grants. */
+	m.on_report(r, {}, seq3);
 	CHECK(m.current().orbs == 2 && (m.current().powerup_flags & FLAG_TEAM));
 	m.on_drop(r, ORB, 0);
 	CHECK(m.current().orbs == 1 && (m.current().powerup_flags & FLAG_TEAM));
@@ -538,7 +542,7 @@ void test_host_owned_orbs()
 	auto plain{r};
 	plain.host_owned_orbs = false;
 	plain.host_owned_flags = 0;
-	m.on_report(plain, more, seq2);
+	m.on_report(plain, more, m.issued());
 	CHECK(m.current().orbs == 2);
 }
 
@@ -597,7 +601,9 @@ void test_hoard_model()
 				case 2:
 					if (!reports[i].empty())
 					{
-						mirror.on_report(r, reports[i].front(), mirror.issued());
+						/* Some grants may still be on their way. */
+						const auto in_flight{static_cast<std::uint16_t>(std::min<std::size_t>(mirror.pending(), rng() % 3))};
+						mirror.on_report(r, reports[i].front(), static_cast<std::uint16_t>(mirror.issued() - in_flight));
 						reports[i].pop_front();
 					}
 					break;

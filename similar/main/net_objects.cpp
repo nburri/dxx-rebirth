@@ -1155,7 +1155,14 @@ void host_receive_drop(const playernum_t from, const std::span<const uint8_t> pa
 	Net_create_loc = 0;
 	const auto &&objp{spit_powerup(LevelUniqueObjectState, LevelSharedSegmentState, LevelUniqueSegmentState, Vclip, ship, id, static_cast<unsigned>(d_rand()))};
 	if (objp == object_none)
+	{
+		/* Taken from the player, and no room in the level: an orb is
+		 * gone, and the orb count knows it.
+		 */
+		if (desc.kind == nv::pickup_kind::orb)
+			net_modes_host_orbs_lost(1);
 		return;
+	}
 	if (desc.kind == nv::pickup_kind::vulcan_cannon || desc.kind == nv::pickup_kind::omega)
 		objp->ctype.powerup_info.count = static_cast<int>(m->count);
 	net_objects_announce(objp, static_cast<uint8_t>(from), false);
@@ -1305,6 +1312,7 @@ void net_objects_host_join(const playernum_t pnum)
 	 */
 	A.mirrors[pnum].reset({});
 	A.dropped[pnum] = false;
+	net_modes_forget_death(pnum);
 	/* A bot added to the slot during the game (bots section 6.4): its
 	 * first inventory is reported whatever a bot before it sent last.
 	 */
@@ -1514,13 +1522,15 @@ void net_objects_host_drop_player_eggs(const playernum_t pnum)
 	{
 		const auto &&dropped{Objects.vmptridx(Net_create_objnums[i])};
 		net_objects_announce(dropped, NO_OWNER, false);
-		if (dropped->type != object_type::OBJ_POWERUP || used >= sizeof(list))
+		if (dropped->type != object_type::OBJ_POWERUP)
 			continue;
 		const auto powerup{get_powerup_id(dropped)};
 #if DXX_BUILD_DESCENT == 2
 		if (powerup == powerup_type_t::POW_HOARD_ORB)
 			++orbs_dropped;
 #endif
+		if (used >= sizeof(list))
+			continue;
 		const int n{std::snprintf(list + used, sizeof(list) - used, " %s@%04x", powerup_short_name(powerup), netid_of(*dropped, dropped.get_unchecked_index()))};
 		if (n > 0)
 			used = std::min(sizeof(list), used + static_cast<std::size_t>(n));
@@ -1548,6 +1558,8 @@ void net_objects_player_reappeared(const playernum_t pnum)
 	if (pnum >= MAX_PLAYERS)
 		return;
 	A.dropped[pnum] = false;
+	/* A death's extra orb belongs to the death that was dropped. */
+	net_modes_forget_death(pnum);
 	if (pnum == Player_num)
 	{
 		/* Report the new ship's inventory even if it equals the old. */

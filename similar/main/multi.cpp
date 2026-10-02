@@ -25,6 +25,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 
 #include "dxxsconf.h"
 #include <bitset>
+#include <climits>
 #include <memory>
 #include <new>
 #include <stdexcept>
