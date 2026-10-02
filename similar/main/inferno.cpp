@@ -273,6 +273,7 @@ static void print_commandline_help()
 	VERB("  -fixedfps <n>                 -botarena: <n> frames per game second (10-1000,\n\t\t\t\tdefault 200), as fast as the machine runs\n")	\
 	VERB("  -botarena-bots <list>         -botarena: the bots, skill:style[:name] by commas\n\t\t\t\t(default: the pilot's bot setup)\n")	\
 	VERB("  -botarena-seed <n>            -botarena: the game's random seed (default 1)\n")	\
+	VERB("  -botarena-reactor <s>         -botarena: the host destroys the reactor after <s>\n\t\t\t\tgame seconds; the arena ends with the countdown\n")	\
 	VERB("  -norun                        Bail out after initialization\n")	\
 	VERB("  -no-grab                      Never grab keyboard/mouse\n")	\
 	VERB("  -renderstats                  Enable renderstats info by default\n")	\

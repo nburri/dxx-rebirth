@@ -49,6 +49,7 @@
 #include "net_v2_state.h"
 #include "net_interp.h"
 #include "net_score_carry.h"
+#include "net_countdown.h"
 #include "net_public_address.h"
 #include "game.h"
 #include "multi.h"
@@ -785,6 +786,10 @@ struct session_state
 	fix64 now{};
 	fix64 last_broadcast{};
 	fix64 last_endlevel{};
+	/* Host: when this machine saw the reactor die (net_countdown.h,
+	 * countdown_overdue); 0 while it lives.
+	 */
+	fix64 countdown_started{};
 	fix64 last_extras{};
 	/* Host: players whose "extras" wait for the current run to finish
 	 * (Network_sending_extras and Player_joining_extras describe one
@@ -2570,6 +2575,20 @@ void receive_endlevel_host(const std::span<const uint8_t> data)
 	const uint8_t countdown{r.u8()};
 	if (Network_status != network_state::playing && countdown < LevelUniqueControlCenterState.Countdown_seconds_left)
 		LevelUniqueControlCenterState.Countdown_seconds_left = countdown;
+	/* Playing the countdown: the host's is the game's (net_countdown.h);
+	 * it runs while the host plays the level itself (slot 0, the first
+	 * entry of the list that follows).
+	 */
+	else if (Network_status == network_state::playing && LevelUniqueControlCenterState.Control_center_destroyed && get_local_player().connected == player_connection_status::playing)
+	{
+		const bool host_live{player_connection_status{data[1]} == player_connection_status::playing};
+		if (const auto t{::dcx::net_v2::countdown_correction(LevelUniqueControlCenterState.Countdown_timer, countdown, host_live)})
+		{
+			con_printf(CON_NORMAL, "reactor: countdown T-%d s set to the host's T-%u s", LevelUniqueControlCenterState.Countdown_seconds_left, static_cast<unsigned>(countdown));
+			LevelUniqueControlCenterState.Countdown_timer = *t;
+			LevelUniqueControlCenterState.Countdown_seconds_left = ::dcx::net_v2::countdown_seconds_of_timer(*t);
+		}
+	}
 	for (playernum_t i = 0; i < MAX_PLAYERS; i++)
 	{
 		if (i == Player_num)
@@ -5927,6 +5946,18 @@ void dispatch_table::do_protocol_frame(int, int listen) const
 		multi_send_thief_frame();
 	}
 #endif
+	if (!LevelUniqueControlCenterState.Control_center_destroyed)
+		S.countdown_started = 0;
+	else if (!S.countdown_started)
+		S.countdown_started = now;
+	/* The host ends a countdown that stopped (net_countdown.h). */
+	else if (multi_i_am_master() && LevelUniqueControlCenterState.Countdown_seconds_left > 0 && ::dcx::net_v2::countdown_overdue(now - S.countdown_started, LevelUniqueControlCenterState.Total_countdown_time))
+	{
+		con_printf(CON_NORMAL, "reactor: countdown overdue (T-%d s of %d s after %d s); the host ends it", LevelUniqueControlCenterState.Countdown_seconds_left, LevelUniqueControlCenterState.Total_countdown_time, static_cast<int>((now - S.countdown_started) / F1_0));
+		LevelUniqueControlCenterState.Countdown_timer = std::min(LevelUniqueControlCenterState.Countdown_timer, ::dcx::net_v2::countdown_timer_of_seconds(0));
+		LevelUniqueControlCenterState.Countdown_seconds_left = 0;
+		S.last_endlevel = 0;
+	}
 	if (now >= S.last_endlevel + net_v2::ENDLEVEL_INTERVAL && LevelUniqueControlCenterState.Control_center_destroyed)
 	{
 		S.last_endlevel = now;

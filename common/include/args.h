@@ -139,6 +139,7 @@ struct CArg : prohibit_void_ptr<>
 	uint16_t DbgBotArenaFps;
 	uint32_t DbgBotArenaSeconds;
 	uint32_t DbgBotArenaSeed;
+	uint32_t DbgBotArenaReactor;
 	std::string DbgBotArenaMission;
 	std::string DbgBotArenaSpec;
 #if DXX_USE_SHAREPATH
