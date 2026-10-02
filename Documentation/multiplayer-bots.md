@@ -864,9 +864,10 @@ it is the main tuning tool:
 ```
 d2x-rebirth -hogdir DATA -botarena <mission> <level> <bots> <seconds>
             [-fixedfps N] [-botarena-bots "skill:style[:name],..."]
-            [-botarena-seed N] [-pilot NAME] [-recordmoves -recordmoves-bots]
+            [-botarena-seed N] [-botarena-reactor S] [-pilot NAME]
+            [-recordmoves -recordmoves-bots]
 tools/botarena-run.sh [-n bots] [-b list] [-s seconds] [-f fps] [-o dir]
-                      [-S profile.botstyle]... [-F profile.botstyle]... DATA <mission> [<level>]
+                      [-S profile.botstyle]... [-F profile.botstyle[@BOT]]... DATA <mission> [<level>]
 ```
 
 - **Start.** Instead of the main menu: the mission is found by its file
@@ -879,6 +880,12 @@ tools/botarena-run.sh [-n bots] [-b list] [-s seconds] [-f fps] [-o dir]
   else the pilot's bot setup cut or filled to `<bots>`. Without `-pilot` a
   pilot "arena" of defaults, written nowhere. The lobby is skipped
   (`net_udp_arena_start`: slot 0, `bots_allocate_slots`, `StartNewLevel`).
+- **Reactor countdown** (`-botarena-reactor S`): after `S` game seconds
+  the host destroys the reactor (as `/killreactor`) and the arena plays the
+  countdown to 0 instead of ending with the reactor: it logs the bots that
+  die in the mine and ends when the countdown ran out, or fails (status 1)
+  when it stands still 30 s past its length
+  (Documentation/network-protocol-v2.md, "Reactor countdown").
 - **No network.** The game socket is bound to the loopback address on a
   free port, without `SO_BROADCAST` (`net_v2::open_loopback_socket`), so
   nothing the game sends can leave the machine; `GAME_INFO_LITE`

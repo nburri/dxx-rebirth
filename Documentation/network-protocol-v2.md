@@ -448,12 +448,38 @@ before a delay that was just seen.
 | Packets per tick per connection | 1 normally; 2 if the reliable backlog, a further bundle part or a pending event does not fit next to the state chunk; a bundle that needs n > 1 packets allows n + 1 | – |
 | Reliable send queue (queued + in flight) per connection | 512 messages or 96 KiB | Host: kick that client, `kick_player_reason::queue_overflow` (new reason). Client: leave the game with the message "Connection to host too slow". |
 | Messages in flight | 256 (receiver window) | Sender stops taking new messages from the queue until acks arrive. |
-| Oldest unacked reliable message | 10 s | Same as queue overflow (this replaces the v1 `pkttimeout`; a message unacked for 10 s means the link is dead or unusable). |
-| No valid packet received | `NET_V2_TIMEOUT` = 5 s (v1 `UDP_TIMEOUT`) | Host: disconnect the player, broadcast `PLAYER_LEFT(timeout)`. Client: "Host left the game", return to menu. |
+| Oldest unacked reliable message | 10 s in a level, 60 s outside one (below) | Same as queue overflow (this replaces the v1 `pkttimeout`; a message unacked for 10 s means the link is dead or unusable). |
+| No valid packet received | `NET_V2_TIMEOUT` = 5 s (v1 `UDP_TIMEOUT`) in a level; `NET_V2_LOBBY_TIMEOUT` = 60 s outside one (below) | Host: disconnect the player, broadcast `PLAYER_LEFT(timeout)`. Client: "Host left the game", return to menu; while waiting for the level start, "Lost the connection to the host" with the time it was silent. |
 | Keepalive | header-only packet after 100 ms of silence | – |
 | Level snapshot pacing (§4.4) | 32 KiB/s per joining client | – |
 | `WEAPON_HIT` / `PICKUP_REQUEST` / `FIRE` from one client | 64 per second combined; excess messages are dropped by the host with a console warning | Protects the host from a flood; a legitimate client sends at most ~25/s (vulcan 20/s + hits). |
 | Discovery replies (`GAME_INFO_LITE`) | 8/s total, `GAME_INFO` 2/s per requester (v1 behaviour) | Excess requests ignored. |
+
+The in-level timeouts apply only while a level runs (the local network status
+is `playing`) and the peer plays in it. In the lobby, while the players load
+or wait for a level, at the level end, and for a peer still joining or syncing
+a level in progress (bounded by `NET_V2_JOIN_SYNC_TIMEOUT` instead), both
+limits are `NET_V2_LOBBY_TIMEOUT` = 60 s (`timeouts_for` in
+`net_v2_session.h`, applied every frame with `connection::set_timeouts`).
+Nobody flies there, and the game sometimes stops driving the network for
+seconds (a level load, a dragged window). With 5 s, every player waiting in a
+lobby was dropped whenever the host sat in a menu that does not poll the
+network (the team selection) or in the tracker's "No ACK" message box, which
+was opened inside the network frame and blocked it. The sequence jump bound
+(§3.7) follows the timeout in force.
+
+Besides, the network is driven from the event loop while a session waits
+outside a level (`net_v2::menu_pump`, through `event_background_task`): any
+menu in front keeps the keepalives flowing, not only those with a polling
+handler. A message box the network frame itself raises is non-blocking.
+
+Every drop is logged to the game log without `-verbose`: the close reason,
+the time since the last packet, the limits in force, rtt, loss, packets
+received and the network status; so are kicks and their reason, each join
+attempt on both ends (request, the host's answer or refusal and its reason,
+"not answered" while another join or the level start is under way, the
+client's timeout with the number of requests), and the game info a client
+takes.
 
 Connection states (per peer, on both ends):
 
@@ -692,8 +718,15 @@ gets a snapshot; its extras wait for the running ones.
 The client accepts a `JOIN_DENY` only with its attempt's `client_nonce` and
 from the host it sent the request to; a `JOIN_DENY(version)` with nonce 0
 (the answer to `GAME_INFO_REQ`) only from the host it asked. A `GAME_INFO`
-is accepted only from the host last asked and never while a join is under
-way, so a stray answer cannot replace the game being joined.
+is accepted only from the host last asked, never while a join is under way
+and never while a connection to a host exists (`client_takes_game_info`), so
+a stray answer cannot replace the game being joined. The rule rests on the
+session's own state, not on the game's network status: some ways out of a
+game before its level started (the host lost while waiting, the wait
+cancelled) left that status at `waiting`, and the client then ignored every
+`GAME_INFO` ("No response by host") until it was restarted. Leaving a session
+also resets the status to `menu` (`session_reset`), and the game list reopens
+its sockets when it comes back after such an exit.
 
 `JOIN_ACCEPT` (0x06), 22 bytes, header: `UNCONNECTED`, `session_id`,
 `peer_token` = the new token (so the client learns it from the header),
@@ -721,9 +754,11 @@ the client's transport is initialised with `seq = 1`, expecting host `seq` 1.
 ### 4.3 Game setup (`starting`) and level start
 
 - `starting` (host collecting players before the first level): joins are
-  accepted as above; the host sends `PLAYER_LIST` to everyone on every change
-  (reliable), and `GAME_INFO_LITE` broadcasts. A client cancels with
-  `LEAVE(cancelled)`.
+  accepted as above while the lobby menu is up; the host sends `PLAYER_LIST`
+  to everyone on every change (reliable), and `GAME_INFO_LITE` broadcasts. A
+  client cancels with `LEAVE(cancelled)`. Once the host confirmed the list
+  (team selection, messages before the level start) a `JOIN_REQUEST` gets no
+  answer, as while the host loads the level; the client retries.
 - Team games: after the host confirms the player list, `GAME_SETTINGS` carries
   the team vector and names (reliable), replacing the v1 second `game_info`.
 - `LEVEL_START` (0x10), reliable, host → all:
@@ -855,8 +890,12 @@ incremental forms used during play.
 - **Host kicks**: `KICK` (0x0D, `reason` u8) reliable; the host keeps the
   connection for 1 s to retransmit, then closes it, and broadcasts
   `PLAYER_LEFT(kicked)`. Manual kick via chat `/kick:` unchanged.
-- **Timeout**: no valid packet for 5 s → host treats it as `PLAYER_LEFT(timeout)`;
-  the slot becomes `disconnected` and can be rejoined by the same callsign.
+- **Timeout**: no valid packet for 5 s in a level (60 s outside one, §3.6) →
+  host treats it as `PLAYER_LEFT(timeout)`; the slot becomes `disconnected`
+  and can be rejoined by the same callsign. A connection given up (`LEAVE`,
+  `KICK`, `HOST_SHUTDOWN`) lingers up to 1 s for the acknowledgement whenever
+  the sockets close or the game is abandoned, so the peer does not wait out
+  the lobby timeout.
 - **Host leaves**: `HOST_SHUTDOWN` (0x0E) reliable to all, wait up to 1 s for
   acks, `GAME_INFO_LITE` broadcast with `numconnected = 0`, tracker unregister.
   Clients show "Host left the game!" (as v1).
@@ -1801,6 +1840,47 @@ The implementation (`similar/main/net_v2.cpp`, `common/main/net_v2_game.h`,
   change at a level start (`net: level start: ...`, urgent on the host,
   where it would be a bug), and with `-verbose` every slot's counts at the
   level load and every player kill with both totals.)
+- **Reactor countdown** (`net_countdown.h`, tested by `test-net-countdown`).
+  The reactor itself keeps the v1 handling: every machine applies the
+  damage of every ship's shots that hit it there, the first to destroy it
+  sends `MULTI_CONTROLCEN`, and each machine opens the exit and runs the
+  countdown with its own frame time while its own player is `playing`.
+  The host's countdown is the game's: the countdown byte of
+  `LEGACY_ENDLEVEL_HOST` (every second) sets a playing client's timer when
+  they differ by more than a second; while the host does not play the
+  level itself (slot 0 not `playing`: it escaped, died in the mine or
+  looks at the score screen, and its value is the lowest of the clients'
+  reports) it only moves a client's countdown down. A kill during the
+  countdown marks the victim "died in the mine" (D2) on the other machines
+  only; the victim's own machine marks itself when its death sequence ends
+  (`DoPlayerDead`). (Playtest report, exp-34: after the reactor the
+  countdown stopped, at 50 s on one machine and 42 s on another, and the
+  exit could no longer be passed. A player killed during the countdown was
+  marked died in the mine by the kill itself, so the host-judged death
+  (`PLAYER_KILLED`, `kill_local_ship`) refused to start: the ship flew on,
+  its machine's countdown stopped and the exit trigger ignored it, and the
+  other machines no longer applied its positions. Second report: a player
+  escaped at once and its score screen showed the countdown standing
+  still, since the player left behind had stopped the same way and the
+  score screen waits for every player still in the level. The host's
+  movement recording of that game shows it: three humans and then the host
+  itself lost their connected flag at the moment of a kill during the
+  countdown, without a death following, 8.2 s apart for the machines that
+  stopped at 50 s and 42 s; the host's own countdown stopped with its own
+  kill, so it never ended the level and its bots flew on for 90 s.) A
+  machine whose player is marked died in the mine while still in the
+  level keeps running its countdown (`do_controlcen_dead_frame`) and still
+  follows the host's, so no such mark can stop a countdown. As a backstop
+  the host ends a countdown that stands still: once the real time since
+  the reactor died exceeds the countdown by 5 s it sends 0, and every
+  machine still in the level blows up (`countdown_overdue`). Arena check:
+  `-botarena-reactor <s>` destroys the reactor after `<s>` game seconds
+  and plays the countdown to 0 (it fails if the countdown stands still).
+  Gamelog lines
+  `reactor: ...` (destroyed, countdown start and end, escapes, deaths in
+  the mine, corrections from the host) and `level end: ...`; the movement
+  recording has the same as `level_event` records (format minor 5,
+  Documentation/movement-recording.md).
 - **Leaving**: a client sends `LEAVE` (also after the v1 `MULTI_QUIT`, which
   the gameplay layer still sends), the host `HOST_SHUTDOWN`; the connection
   lingers for one second so that the message is acknowledged, and a peer the

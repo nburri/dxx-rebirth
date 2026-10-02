@@ -118,6 +118,10 @@ int dump(const char *const path, const options &opt)
 	int level{-1};
 	unsigned levels{};
 	std::string level_lines;
+	/* The level events (reactor, countdown, escapes, level end), printed
+	 * after the header lines.
+	 */
+	std::string level_event_lines;
 	std::uint64_t ticks{}, events{};
 	unsigned syncs{};
 	std::uint32_t session_id{};
@@ -260,7 +264,18 @@ int dump(const char *const path, const options &opt)
 			const auto pid{e->pid};
 			if (events_csv && (wanted(pid) || (e->other < MAX_PID && wanted(e->other))))
 				write_event_csv_row(events_csv, level, *e);
-			if (opt.records)
+			if (e->type == record_type::level_event)
+			{
+				char line[160];
+				char who[16]{};
+				if (e->pid != PLAYER_NONE)
+					std::snprintf(who, sizeof(who), " P#%u", e->pid);
+				std::snprintf(line, sizeof(line), "  t=%.3f %s%s, countdown %u s, flags 0x%x\n", e->time_ms / 1000.0, level_event_name(e->kind), who, e->value, e->flags);
+				level_event_lines += line;
+				if (opt.records)
+					std::printf("  level_event%s", line + 1);
+			}
+			else if (opt.records)
 				std::printf("  %s t=%.3f pid %u other %u kind %u id %u value %u flags 0x%x\n", record_type_name(e->type), e->time_ms / 1000.0, e->pid, e->other, e->kind, e->id, e->value, e->flags);
 			switch (e->type)
 			{
@@ -339,6 +354,11 @@ int dump(const char *const path, const options &opt)
 	if (syncs)
 		std::printf("  %u sync records, network session %08x\n", syncs, session_id);
 	std::fputs(level_lines.c_str(), stdout);
+	if (!level_event_lines.empty())
+	{
+		std::puts("  level events:");
+		std::fputs(level_event_lines.c_str(), stdout);
+	}
 	for (unsigned pid{}; pid != MAX_PID; ++pid)
 	{
 		const auto &p{players[pid]};

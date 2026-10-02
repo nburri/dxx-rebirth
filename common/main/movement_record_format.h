@@ -49,10 +49,12 @@ constexpr std::uint16_t FORMAT_VERSION{1};
  * names (the mission's .hog/.mn2 stem, the level's .rl2), appended to
  * the level record and the header, so that the analysis finds the
  * level's geometry; 4 for a bot's movement mode and goal appended to
- * its samples (sample::bot_known).  Appended to the header; a header
- * without it is minor 0.
+ * its samples (sample::bot_known); 5 for the level events (the reactor,
+ * its countdown, escapes, deaths in the mine, the level end:
+ * record_type::level_event).  Appended to the header; a header without it
+ * is minor 0.
  */
-constexpr std::uint16_t FORMAT_MINOR{4};
+constexpr std::uint16_t FORMAT_MINOR{5};
 /* The file names are cut to this length (the level record has room for
  * the names and two of these).
  */
@@ -91,6 +93,10 @@ enum class record_type : std::uint8_t
 	end = 12,
 	/* Minor 1: the session's shared clock (sync_record). */
 	sync = 13,
+	/* Minor 5: an event of the level's course (event layout, `kind` a
+	 * level_event_kind).
+	 */
+	level_event = 14,
 };
 
 /* file_header::flags */
@@ -243,6 +249,45 @@ constexpr std::uint8_t splash{1 << 1};
 namespace sync_flag {
 constexpr std::uint8_t clock_valid{1 << 0};	/* host_ms is the host's clock */
 constexpr std::uint8_t host{1 << 1};		/* the recording machine is the host */
+}
+
+/* event_record::kind for level_event.  `pid` the player concerned
+ * (PLAYER_NONE: none or unknown), `value` seconds of the countdown.
+ */
+namespace level_event_kind {
+/* The reactor died here: `pid` who destroyed it, `value` the countdown's
+ * length.
+ */
+constexpr std::uint8_t reactor_destroyed{0};
+/* The countdown ran out here (the mine blows up). */
+constexpr std::uint8_t countdown_end{1};
+/* `pid` escaped through the exit (flags 1: to the secret level, D1). */
+constexpr std::uint8_t escape{2};
+/* `pid` died in the mine (killed during the countdown). */
+constexpr std::uint8_t died_in_mine{3};
+/* The countdown here was set to `value` (flags: 0 from the host's
+ * status, 1 by the host's backstop).
+ */
+constexpr std::uint8_t countdown_set{4};
+/* This machine left the level for the score screen (`value` the
+ * countdown then, 0xffff none).
+ */
+constexpr std::uint8_t level_end{5};
+}
+
+[[nodiscard]]
+constexpr const char *level_event_name(const std::uint8_t kind)
+{
+	switch (kind)
+	{
+		case level_event_kind::reactor_destroyed: return "reactor destroyed";
+		case level_event_kind::countdown_end: return "countdown end";
+		case level_event_kind::escape: return "escape";
+		case level_event_kind::died_in_mine: return "died in the mine";
+		case level_event_kind::countdown_set: return "countdown set";
+		case level_event_kind::level_end: return "level end";
+		default: return "level event";
+	}
 }
 
 /* event_record::kind for end */
@@ -772,6 +817,7 @@ constexpr bool is_event(const record_type t)
 		case record_type::pickup:
 		case record_type::weapon:
 		case record_type::end:
+		case record_type::level_event:
 			return true;
 		default:
 			return false;

@@ -61,6 +61,7 @@ exits with status 1; success ends with `all tests passed`.
 | c: RTT/RTO | 80 ± 10 ms, 0 % and 30 % loss | `srtt` within 10 % of 160 ms, `rttvar` small, `rto ≥ srtt`, `rto` always inside [50, 1000] ms; a 1 ms link clamps to 50 ms, a 700 ms link to 1000 ms. |
 | d: bounds | 30 ms, acks cut | 1025-byte message rejected at enqueue; the 513th queued message and the 97th 1024-byte message close the connection with `queue_overflow`; with acks cut the sender never exceeds 256 in flight and the receiver delivers exactly 256; when acks return everything arrives in order. |
 | e: timeouts | 50 ms | Both sides close with `timeout` 5 s after the link is cut; a peer that talks but never acks makes the sender close with `unacked_timeout` after 10 s; an idle connection sends keepalives and stays up. |
+| e2: lobby timeouts | 50–70 ms | With `set_timeouts` at 60 s: 30 s of silence both ways closes nothing and a message queued in it arrives; back to 5 s after 6 s of silence closes at once; 61 s of silence closes; a host sending through a 55 s one-way blackout (3300 packets, beyond the 5 s bound) is taken back without `bad_seq`; two idle hours at 1 % loss (keepalives, a message every 30 s) wrap the sequence and stay connected. |
 | replay window | – | A repeated packet, and one 65 behind, are rejected; one 64 behind is accepted once; late packets show up in `ack_bits`; packets that fell out of the bitfield count as lost. |
 | malformed not acked | 40 ms | One packet's chunk length is corrupted in flight: the receiver counts one protocol error and does not ack it, the sender retransmits, all 300 messages arrive in order, exactly one packet counts as lost. |
 | hostile echo | – | Extreme `echo_time`/`echo_delay`/`now` combinations (including the int32 overflow case) naming a real packet are accepted without overflow and yield no sample. |
@@ -225,14 +226,15 @@ the reorder window, suppresses further counts for replays); the list never
 rejects anything, so an intact copy of a sequence whose corrupted copy came
 first is accepted normally, and a corrupt `seq` byte cannot blackhole the real
 packet with that sequence. A well-formed packet whose `seq` is further
-ahead of the newest seen than the peer could have sent within the 5 s
-timeout (`bad_seq`) is rejected and counted the same way: taking it as the
+ahead of the newest seen than the peer could have sent within the
+timeout (5 s, or the connection's own, `set_timeouts`) (`bad_seq`) is rejected and counted the same way: taking it as the
 new highest would reject every real packet that follows as a duplicate until
 the timeout and make our acks protocol errors at the peer. The bound follows
 the peer's tick (`set_peer_tick`): the ticks in the timeout, times the
 packets a tick may carry (`max_packets_per_tick` or a full bundle's parts + 1,
 whichever is more), times a margin of `NET_V2_SEQ_JUMP_MARGIN` (2), capped at
-32767; 3000 for a 60 Hz peer, 12010 for one at 240 Hz. `bad_ack` covers
+32767; 3000 for a 60 Hz peer, 12010 for one at 240 Hz (at the default 5 s;
+the session layer's 60 s lobby timeout gives the cap). `bad_ack` covers
 acks ahead of our newest packet and, until half the sequence space has been
 used, acks further behind it than we have sent packets (a forged ack 32768
 or more ahead reads as one far behind); after that an honest ack may lag by

@@ -5002,6 +5002,7 @@ class DXXArchive(DXXCommon):
 		# Test of the game-independent session layer (net_v2_session.h).
 		RuntimeTest('test-net-v2-session', (
 			'common/unittest/net_v2_session.cpp',
+			'common/main/net_v2_transport.cpp',
 			)),
 		# Test of the state layouts and the interpolation, clock and tick
 		# math (net_v2_state.h, net_interp.h).
@@ -5026,6 +5027,11 @@ class DXXArchive(DXXCommon):
 		# the code it was extracted from.
 		RuntimeTest('test-spawn-site', (
 			'common/unittest/spawn_site.cpp',
+			)),
+		# Test of the Omega cannon's fire rule and of the damage a held
+		# Omega does at 30 to 500 fps (omega_fire.h, laser.cpp).
+		RuntimeTest('test-omega-fire', (
+			'common/unittest/omega_fire.cpp',
 			)),
 		# Test of the segment depths the network powerup drop and the
 		# thief's recreation draw from (segment_depths.h, fireball.cpp).
@@ -5103,6 +5109,11 @@ class DXXArchive(DXXCommon):
 		# (net_score_carry.h).
 		RuntimeTest('test-net-score-carry', (
 			'common/unittest/net_score_carry.cpp',
+			)),
+		# Test of the reactor countdown in a network game: a kill
+		# during it, a client following the host's (net_countdown.h).
+		RuntimeTest('test-net-countdown', (
+			'common/unittest/net_countdown.cpp',
 			)),
 		# Test of the text of pasted and copied game addresses
 		# (net_address_text.h).

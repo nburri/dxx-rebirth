@@ -168,12 +168,40 @@ void client_send_leave(kick_player_reason reason);
  */
 [[nodiscard]]
 bool client_sync_timed_out();
+/* The connection to the host ended while the client waited for the level
+ * start (the level wait sees Netgame.players[0] disconnected): why, and
+ * for a timeout how long the host had been silent.  Once; none if the
+ * host was not lost that way since the last call.
+ */
+struct host_lost_info
+{
+	kick_player_reason why;
+	unsigned silent_ms;
+};
+[[nodiscard]]
+std::optional<host_lost_info> client_take_host_lost();
+
+/* Drive the network from the event loop (event_background_task) while a
+ * session waits outside a level (the lobby, the level wait), whatever
+ * window is in front: a menu without a polling handler (the team
+ * selection, a message box) would otherwise stop the keepalives, and the
+ * players waiting for the game to start time out.  Does nothing if a
+ * polling handler ran the network within the last few milliseconds, in a
+ * level (the game loop drives it), or inside a frame.
+ */
+void menu_pump();
 
 /* Host side. */
 /* Choose a session id (or take `fixed_id`, if not 0: -botarena) and
  * become the host of a new session.
  */
 void host_open_session(uint32_t fixed_id = 0);
+/* The host's lobby menu is up (true) or not (false).  A JOIN_REQUEST
+ * while `starting` adds a player only while it is; otherwise (the team
+ * selection, the messages before the level start) it gets no answer and
+ * the client retries, as while the host loads the level.
+ */
+void host_set_lobby_open(bool open);
 /* Send GAME_SETTINGS and PLAYER_LIST to every peer and broadcast
  * GAME_INFO_LITE (the v1 "netgame update").
  */

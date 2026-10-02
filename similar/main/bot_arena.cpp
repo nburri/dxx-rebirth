@@ -19,6 +19,7 @@
 #include "bot_arena.h"
 #include "bot.h"
 #include "bot_command.h"
+#include "collide.h"
 #include "console.h"
 #include "game.h"
 #include "gameseq.h"
@@ -56,6 +57,12 @@ struct arena_state
 	std::chrono::steady_clock::time_point wall_start{};
 	fix64 game_start{};
 	fix64 next_progress{};
+	/* -botarena-reactor: when the reactor died, and the deaths in the
+	 * mine seen since.
+	 */
+	fix64 reactor_time{};
+	unsigned died_in_mine{};
+	bool reactor_killed{};
 	bool started{};
 	bool parked{};
 	bool done{};
@@ -409,7 +416,47 @@ window_event_result bot_arena_frame()
 	 * arena hung there.  It ends now, with the summary of the time
 	 * played.
 	 */
-	if (LevelUniqueObjectState.ControlCenterState.Control_center_destroyed)
+	auto &cc{LevelUniqueObjectState.ControlCenterState};
+	/* -botarena-reactor: the host destroys the reactor (as /killreactor)
+	 * and the arena plays the countdown to its end: the bots killed
+	 * during it die in the mine, and the countdown must run to 0.
+	 */
+	if (CGameArg.DbgBotArenaReactor && !A.reactor_killed && !cc.Control_center_destroyed && game_seconds >= CGameArg.DbgBotArenaReactor)
+	{
+		A.reactor_killed = true;
+		A.reactor_time = GameTime64;
+		con_printf(CON_URGENT, "botarena: the host destroys the reactor after %.0f s", game_seconds);
+		net_destroy_controlcen_object(LevelSharedRobotInfoState.Robot_info, object_none);
+		multi_send_destroy_controlcen(object_none, Player_num);
+	}
+	if (A.reactor_killed && cc.Control_center_destroyed)
+	{
+		unsigned in_mine{};
+		for (unsigned i = 0; i < N_players; ++i)
+			if (vcplayerptr(static_cast<playernum_t>(i))->connected == player_connection_status::died_in_mine)
+				++in_mine;
+		if (in_mine != A.died_in_mine)
+		{
+			A.died_in_mine = in_mine;
+			con_printf(CON_URGENT, "botarena: T-%d s: %u players died in the mine", cc.Countdown_seconds_left, in_mine);
+		}
+		const double countdown_seconds{static_cast<double>(GameTime64 - A.reactor_time) / F1_0};
+		if (cc.Countdown_timer > 0)
+		{
+			/* The countdown stopped: the arena must not hang. */
+			if (countdown_seconds > cc.Total_countdown_time + 30)
+			{
+				con_printf(CON_URGENT, "botarena: FAIL: the countdown of %d s stands at T-%d s after %.0f s", cc.Total_countdown_time, cc.Countdown_seconds_left, countdown_seconds);
+				print_summary(game_seconds);
+				A.done = true;
+				exit_status = 1;
+				return window_event_result::close;
+			}
+			return window_event_result::ignored;
+		}
+		con_printf(CON_URGENT, "botarena: the countdown of %d s ran to 0 in %.1f s; %u players died in the mine; host connected %u; the arena ends here", cc.Total_countdown_time, countdown_seconds, in_mine, static_cast<unsigned>(get_local_player().connected));
+	}
+	else if (cc.Control_center_destroyed)
 		con_printf(CON_URGENT, "botarena: the level ended after %.0f of %" PRIu32 " s (reactor, time or kill limit); the arena ends here", game_seconds, CGameArg.DbgBotArenaSeconds);
 	else if (game_seconds < CGameArg.DbgBotArenaSeconds)
 		return window_event_result::ignored;

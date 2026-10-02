@@ -64,6 +64,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "partial_range.h"
 #include "homing.h"
 #include "controls.h"
+#include "omega_fire.h"
 
 namespace {
 #ifdef NEWHOMER
@@ -646,13 +647,21 @@ static void do_omega_stuff(fvmsegptridx &vmsegptridx, const vmobjptridx_t parent
 	if (parent_objp->type == object_type::OBJ_PLAYER && (get_player_id(parent_objp) == Player_num || bot_is_local(get_player_id(parent_objp))))
 	{
 		//	If charge >= min, or (some charge and zero energy), allow to fire.
+		/* In a network game, a pull without the charge still fires, but
+		 * takes no charge (omega_fire.h: as v1's remote copies did).
+		 */
 		auto &player_info = parent_objp->ctype.player_info;
-		if (!(player_info.Omega_charge >= MIN_OMEGA_CHARGE || (player_info.Omega_charge && !player_info.energy)))
+		switch (omega_shot_kind(player_info.Omega_charge, MIN_OMEGA_CHARGE, player_info.energy, +(Game_mode & GM_MULTI)))
 		{
-			obj_delete(LevelUniqueObjectState, Segments, weapon_objp);
-			return;
+			case omega_shot::none:
+				obj_delete(LevelUniqueObjectState, Segments, weapon_objp);
+				return;
+			case omega_shot::charged:
+				pl_info = &player_info;
+				break;
+			case omega_shot::uncharged:
+				break;
 		}
-		pl_info = &player_info;
 	}
 
 	weapon_objp->ctype.laser_info.parent_type = parent_objp->type;

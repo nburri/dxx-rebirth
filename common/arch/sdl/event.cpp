@@ -32,6 +32,8 @@
 
 namespace dcx {
 
+void (*event_background_task)();
+
 namespace {
 
 struct event_poll_state
@@ -400,6 +402,9 @@ window_event_result event_process(void)
 		}
 		wind = window_get_next(*wind);
 	}
+
+	if (const auto task{event_background_task})
+		task();
 
 	/* -botarena (timer.h): nobody watches, nothing to show. */
 	if (!timer_simulated())

@@ -10,8 +10,10 @@
  * message layouts, the admission table of section 4.2, the lobby slot
  * choice, the player count a joining player sees, the recognition of
  * retried join requests and of join denials, the serialisation of joins
- * in progress and their bounds, the client's join schedule and the rate
- * limiter.
+ * in progress and their bounds, the client's join schedule, the rate
+ * limiter, the lobby timeouts and the GAME_INFO rule, and a two-endpoint
+ * harness over the real transport: a lobby drop and the rejoin after it
+ * (same host, restarted host).
  *
  * Build and run with SCons:
  *
@@ -20,7 +22,7 @@
  *
  * or directly:
  *
- *	g++ -std=gnu++23 -O2 -Wall -Wextra -Icommon/main common/unittest/net_v2_session.cpp -o test-net-v2-session
+ *	g++ -std=gnu++23 -O2 -Wall -Wextra -Icommon/main common/unittest/net_v2_session.cpp common/main/net_v2_transport.cpp -o test-net-v2-session
  */
 
 #include <cstdio>
@@ -29,6 +31,7 @@
 #include <vector>
 
 #include "net_v2_session.h"
+#include "net_v2_transport.h"
 
 using namespace dcx::net_v2;
 
@@ -623,6 +626,447 @@ void test_join_attempt()
 	CHECK(j.holepunch_due(net_seconds(34)));
 }
 
+void test_timeouts_for()
+{
+	constexpr connection_timeouts level{NET_V2_TIMEOUT, NET_V2_UNACKED_TIMEOUT};
+	constexpr connection_timeouts lobby{NET_V2_LOBBY_TIMEOUT, NET_V2_LOBBY_TIMEOUT};
+	/* In a level: the in-level limits for players in it. */
+	CHECK(timeouts_for(true, peer_phase::playing) == level);
+	CHECK(timeouts_for(true, peer_phase::closing) == level);
+	/* A join in progress is still loading (NET_V2_JOIN_SYNC_TIMEOUT bounds
+	 * it).
+	 */
+	CHECK(timeouts_for(true, peer_phase::joining) == lobby);
+	CHECK(timeouts_for(true, peer_phase::syncing) == lobby);
+	/* No level runs (lobby, level wait, level end): everyone waits. */
+	for (const auto ph : {peer_phase::none, peer_phase::joining, peer_phase::syncing, peer_phase::playing, peer_phase::closing})
+		CHECK(timeouts_for(false, ph) == lobby);
+	/* Longer than any freeze of the game's own making the lobby saw: the
+	 * team selection, a message box, a level load.
+	 */
+	CHECK(NET_V2_LOBBY_TIMEOUT >= net_seconds(60));
+	CHECK(NET_V2_LOBBY_TIMEOUT > NET_V2_JOIN_SYNC_TIMEOUT);
+}
+
+void test_client_takes_game_info()
+{
+	/* In the menus, the answer of the host asked. */
+	CHECK(client_takes_game_info(false, false, false, true));
+	/* Anyone else's, or while hosting, joining or connected: never. */
+	CHECK(!client_takes_game_info(false, false, false, false));
+	CHECK(!client_takes_game_info(true, false, false, true));
+	CHECK(!client_takes_game_info(false, false, true, true));
+	CHECK(!client_takes_game_info(false, true, false, true));
+}
+
+/* An in-process harness: one host and one client endpoint over a
+ * lossless link with 40 ms one way, each with its own address, using the
+ * session layer's framing and handshake messages, the join schedule, the
+ * GAME_INFO rule and the timeouts of this header, and the real transport
+ * (net_v2_transport.cpp).  It follows similar/main/net_v2.cpp in what
+ * matters here: the host answers GAME_INFO_REQ with its session id and
+ * admits a JOIN_REQUEST for its session (replacing the connection of the
+ * same address); the client takes GAME_INFO by client_takes_game_info,
+ * joins the session it names, and drops its connection when the
+ * transport closes it.  `stale_status` is the game's Network_status as
+ * the old teardown left it.
+ */
+namespace harness {
+
+using datagram = std::vector<std::uint8_t>;
+constexpr unsigned host_addr{0}, client_addr{1};
+constexpr net_clock one_way{net_milliseconds(40)};
+
+struct in_flight
+{
+	net_clock arrival;
+	unsigned from, to;
+	datagram bytes;
+};
+
+struct wire
+{
+	std::vector<in_flight> queue;
+	void send(const unsigned from, const unsigned to, const std::span<const std::uint8_t> d, const net_clock now)
+	{
+		queue.push_back({now + one_way, from, to, datagram(d.begin(), d.end())});
+	}
+	/* The datagrams for `to` that have arrived (in order). */
+	std::vector<in_flight> take(const unsigned to, const net_clock now)
+	{
+		std::vector<in_flight> r, keep;
+		for (auto &q : queue)
+			(q.to == to && q.arrival <= now ? r : keep).push_back(std::move(q));
+		queue = std::move(keep);
+		return r;
+	}
+};
+
+void send_session(wire &w, const unsigned from, const unsigned to, const std::uint32_t session_id, const std::uint32_t token, const std::uint8_t player_id, const session_msg type, const std::span<const std::uint8_t> payload, const net_clock now)
+{
+	packet_buffer buf;
+	const auto d{build_unconnected(buf, session_id, token, player_id, to_net_time(now), type, payload)};
+	CHECK(!d.empty());
+	w.send(from, to, d, now);
+}
+
+bool is_unconnected(const datagram &d)
+{
+	const auto h{packet_header::read(d)};
+	return h && h->has_flag(packet_flag::unconnected);
+}
+
+struct endpoint_base
+{
+	std::optional<connection> conn;
+	/* Delivered reliable messages (their first byte). */
+	std::vector<std::uint8_t> delivered;
+	/* The transport closed the connection: why. */
+	std::optional<close_reason> closed;
+	bool frozen{};
+	void receive_connected(const datagram &d, const net_clock now)
+	{
+		if (!conn)
+			return;
+		const auto report{conn->on_receive(d, now)};
+		for (const auto &m : report.reliable)
+			delivered.push_back(m.payload.empty() ? 0 : m.payload[0]);
+	}
+	void pump_connection(wire &w, const unsigned self, const unsigned peer, const bool level_running, const net_clock now)
+	{
+		if (!conn)
+			return;
+		const auto t{timeouts_for(level_running, peer_phase::playing)};
+		if (conn->config().timeout != t.idle || conn->config().unacked_timeout != t.unacked)
+			conn->set_timeouts(t.idle, t.unacked);
+		conn->begin_tick(now);
+		for (;;)
+		{
+			const auto p{conn->build_outgoing(now)};
+			if (p.empty())
+				break;
+			w.send(self, peer, p, now);
+		}
+		if (conn->state() == connection_state::closed)
+		{
+			/* Teardown, as net_v2.cpp's handle_closed_connection. */
+			closed = conn->closed_because();
+			conn.reset();
+		}
+	}
+};
+
+struct host_endpoint : endpoint_base
+{
+	std::uint32_t session_id;
+	std::uint32_t token{};
+	std::uint32_t nonce{};
+	unsigned accepts{};
+	explicit host_endpoint(const std::uint32_t id) :
+		session_id{id}
+	{
+	}
+	void receive(wire &w, const in_flight &q, const net_clock now)
+	{
+		if (!is_unconnected(q.bytes))
+		{
+			receive_connected(q.bytes, now);
+			return;
+		}
+		const auto m{parse_unconnected(q.bytes, session_id)};
+		if (m.status != unconnected_status::accepted)
+		{
+			++rejected;
+			return;
+		}
+		if (m.type == session_msg::game_info_req)
+		{
+			std::array<std::uint8_t, 4> info;
+			net_put_le32(info.data(), session_id);
+			send_session(w, host_addr, q.from, 0, 0, 0, session_msg::game_info, info, now);
+		}
+		else if (m.type == session_msg::join_request && m.header.session_id == session_id)
+		{
+			const auto req{join_request::read(m.payload)};
+			CHECK(req.has_value());
+			/* A retry of the attempt that has the connection: resend. */
+			if (conn && req->client_nonce == nonce && conn->state() == connection_state::connecting)
+				;
+			else if (conn && req->client_nonce == nonce)
+				return;
+			else
+			{
+				/* New, or the same address again (admission_result::
+				 * accept_replace): a fresh connection.
+				 */
+				token = 0x5000 + ++accepts;
+				nonce = req->client_nonce;
+				conn.emplace(connection_config{.session_id = session_id, .peer_token = token, .local_player_id = 0, .remote_player_id = 1}, now);
+				closed.reset();
+			}
+			const join_accept acc{.client_nonce = nonce, .player_id = 1, .tick_rate = 60, .host_time = to_net_time(now), .tick = 0, .client_time = req->client_time, .session_id = session_id};
+			std::array<std::uint8_t, NET_V2_JOIN_ACCEPT_SIZE> b;
+			acc.write(b.data());
+			send_session(w, host_addr, q.from, session_id, token, 0, session_msg::join_accept, b, now);
+		}
+	}
+	unsigned rejected{};
+};
+
+struct client_endpoint : endpoint_base
+{
+	enum class status
+	{
+		menu,
+		waiting,
+	};
+	/* What the old teardown left in Network_status: `waiting` after the
+	 * host was lost before the level start.
+	 */
+	status stale_status{status::menu};
+	std::uint32_t session_id{};
+	std::optional<std::uint32_t> info_session;
+	bool asked_info{};
+	join_attempt join;
+	std::uint32_t next_nonce{0x100};
+	unsigned info_ignored{};
+	void ask_info(wire &w, const net_clock now)
+	{
+		asked_info = true;
+		info_session.reset();
+		const game_info_request req{.game_id = test_game_id, .version = test_version};
+		std::array<std::uint8_t, NET_V2_GAME_INFO_REQ_SIZE> b;
+		req.write(b.data());
+		send_session(w, client_addr, host_addr, 0, 0, NET_V2_PLAYER_ID_NONE, session_msg::game_info_req, b, now);
+	}
+	void begin_join(const net_clock now)
+	{
+		CHECK(info_session.has_value());
+		session_id = *info_session;
+		join.begin(now, ++next_nonce);
+	}
+	void receive(const in_flight &q, const net_clock now)
+	{
+		if (!is_unconnected(q.bytes))
+		{
+			receive_connected(q.bytes, now);
+			return;
+		}
+		const auto m{parse_unconnected(q.bytes, session_id)};
+		if (m.status != unconnected_status::accepted)
+			return;
+		if (m.type == session_msg::game_info)
+		{
+			if (!client_takes_game_info(false, conn.has_value(), join.active(), asked_info && q.from == host_addr))
+			{
+				++info_ignored;
+				return;
+			}
+			CHECK(m.payload.size() == 4);
+			info_session = net_get_le32(m.payload.data());
+		}
+		else if (m.type == session_msg::join_accept && join.active())
+		{
+			const auto acc{join_accept::read(m.payload)};
+			if (!acc || acc->client_nonce != join.nonce() || acc->session_id != session_id || !m.header.peer_token)
+				return;
+			join.end();
+			conn.emplace(connection_config{.session_id = session_id, .peer_token = m.header.peer_token, .local_player_id = 1, .remote_player_id = 0}, now);
+			closed.reset();
+			stale_status = status::waiting;
+		}
+	}
+	void pump_join(wire &w, const net_clock now)
+	{
+		if (!join.active() || !join.due(now))
+			return;
+		const join_request req{.game_id = test_game_id, .version = test_version, .client_nonce = join.nonce(), .callsign = {{'p', 'i', 'l', 'o', 't', 0, 0, 0, 0}}, .rank = 1, .current_level = 1, .client_time = to_net_time(now)};
+		std::array<std::uint8_t, NET_V2_JOIN_REQUEST_SIZE> b;
+		req.write(b.data());
+		send_session(w, client_addr, host_addr, session_id, 0, NET_V2_PLAYER_ID_NONE, session_msg::join_request, b, now);
+	}
+};
+
+struct world
+{
+	wire w;
+	host_endpoint host;
+	client_endpoint client;
+	/* Whether a level runs (the in-level timeouts apply). */
+	bool level_running{};
+	std::uint64_t step_count{};
+	net_clock now{};
+	explicit world(const std::uint32_t session) :
+		host{session}
+	{
+	}
+	void step()
+	{
+		++step_count;
+		now = static_cast<net_clock>(step_count) * net_seconds(1) / 60;
+		/* A frozen endpoint reads nothing: its datagrams wait, as in the
+		 * socket's receive buffer.
+		 */
+		if (!host.frozen)
+		{
+			for (auto &q : w.take(host_addr, now))
+				host.receive(w, q, now);
+			host.pump_connection(w, host_addr, client_addr, level_running, now);
+		}
+		if (!client.frozen)
+		{
+			for (auto &q : w.take(client_addr, now))
+				client.receive(q, now);
+			client.pump_join(w, now);
+			client.pump_connection(w, client_addr, host_addr, level_running, now);
+		}
+	}
+	void run_for(const net_clock duration)
+	{
+		const auto until{now + duration};
+		while (now < until)
+			step();
+	}
+	/* Ask for the game info and join the session it names, as the join
+	 * menus do.  True once connected.
+	 */
+	bool connect()
+	{
+		client.ask_info(w, now);
+		for (unsigned i{}; i != 120 && !client.info_session; ++i)
+		{
+			step();
+			if (i % 60 == 59)
+				/* The connect menu asks again every second. */
+				client.ask_info(w, now);
+		}
+		if (!client.info_session)
+			return false;
+		client.begin_join(now);
+		while (client.join.active() && !client.join.timed_out(now))
+			step();
+		if (!client.conn)
+			return false;
+		/* Let the connection come up (first packets both ways). */
+		run_for(net_milliseconds(500));
+		return client.conn && host.conn && client.conn->state() == connection_state::connected && host.conn->state() == connection_state::connected;
+	}
+	/* A reliable message each way arrives. */
+	bool messages_flow(const std::uint8_t tag)
+	{
+		const std::array<std::uint8_t, 1> m{{tag}};
+		if (!host.conn || !client.conn)
+			return false;
+		CHECK(host.conn->enqueue_reliable(1, m) == enqueue_result::ok);
+		CHECK(client.conn->enqueue_reliable(1, m) == enqueue_result::ok);
+		run_for(net_milliseconds(500));
+		return !host.delivered.empty() && host.delivered.back() == tag && !client.delivered.empty() && client.delivered.back() == tag;
+	}
+};
+
+}
+
+/* The report: players waiting in the lobby were dropped, and could not
+ * join again (not even after the host restarted) until they restarted
+ * the game.  The drop: the host stopped driving the network behind a
+ * menu without a polling handler or a nested message box, and the 5 s
+ * in-level timeout ran out.  The stuck rejoin: the client's GAME_INFO
+ * rule depended on a status the teardown left at `waiting`.
+ */
+void test_lobby_drop_and_rejoin()
+{
+	using namespace harness;
+	/* 1. Join a lobby and wait in it for ten minutes: keepalives keep the
+	 * connection.
+	 */
+	world a{0x1111aaaa};
+	CHECK(a.connect());
+	CHECK(a.client.stale_status == client_endpoint::status::waiting);
+	const auto received_before{a.client.conn->stats().packets_received};
+	a.run_for(net_seconds(600));
+	CHECK(a.client.conn && a.host.conn);
+	/* Keepalives only: about ten a second. */
+	CHECK(a.client.conn->stats().packets_received - received_before > 5000);
+	CHECK(a.messages_flow(1));
+
+	/* 2. The host stops driving the network for 30 s (team selection, a
+	 * message box): with the lobby timeouts both ends wait, and what was
+	 * queued meanwhile arrives.
+	 */
+	a.host.frozen = true;
+	a.run_for(net_seconds(30));
+	a.host.frozen = false;
+	a.run_for(net_seconds(1));
+	CHECK(a.client.conn && a.host.conn);
+	CHECK(!a.client.closed && !a.host.closed);
+	CHECK(a.messages_flow(2));
+
+	/* 3. The same stall with the in-level timeouts, as the lobby had
+	 * them before: the client drops the host after 5 s, the host the
+	 * client once it runs again.
+	 */
+	a.level_running = true;
+	a.host.frozen = true;
+	const auto frozen_at{a.now};
+	while (a.client.conn && a.now - frozen_at < net_seconds(7))
+		a.step();
+	CHECK(!a.client.conn);
+	CHECK(a.client.closed == close_reason::timeout);
+	CHECK(a.now - frozen_at >= NET_V2_TIMEOUT && a.now - frozen_at < NET_V2_TIMEOUT + net_milliseconds(100));
+	a.run_for(net_seconds(3));
+	a.host.frozen = false;
+	a.run_for(net_seconds(6));
+	CHECK(!a.host.conn);
+	CHECK(a.host.closed == close_reason::timeout);
+	a.level_running = false;
+
+	/* The client is back in the menus, but the game's status says
+	 * `waiting`: the old rule (only in `menu` or `browsing`) dropped every
+	 * GAME_INFO from here on.  The session's own state does not.
+	 */
+	CHECK(a.client.stale_status == client_endpoint::status::waiting);
+	CHECK(client_takes_game_info(false, a.client.conn.has_value(), a.client.join.active(), true));
+
+	/* 4. The client joins the same host again, without a restart. */
+	CHECK(a.connect());
+	CHECK(a.client.info_ignored == 0);
+	CHECK(a.messages_flow(3));
+	CHECK(a.host.accepts == 2);
+
+	/* 5. The host restarts the game on the same port (new session id;
+	 * the old one's last packets still on the wire).  The client asks
+	 * again and joins the new session.
+	 */
+	world b{0x2222bbbb};
+	b.w = std::move(a.w);
+	b.client = std::move(a.client);
+	b.step_count = a.step_count;
+	b.now = a.now;
+	/* The client loses the old host first (it is gone). */
+	b.level_running = false;
+	const auto lost_from{b.now};
+	while (b.client.conn && b.now - lost_from < NET_V2_LOBBY_TIMEOUT + net_seconds(2))
+		b.step();
+	CHECK(!b.client.conn);
+	CHECK(b.client.closed == close_reason::timeout);
+	CHECK(b.now - lost_from >= NET_V2_LOBBY_TIMEOUT - net_seconds(1));
+	/* A JOIN_REQUEST for the old session is not for the new host. */
+	{
+		const auto rejected_before{b.host.rejected};
+		const join_request req{.game_id = test_game_id, .version = test_version, .client_nonce = 7, .callsign = {}, .rank = 0, .current_level = 1, .client_time = 0};
+		std::array<std::uint8_t, NET_V2_JOIN_REQUEST_SIZE> pl;
+		req.write(pl.data());
+		send_session(b.w, client_addr, host_addr, 0x1111aaaa, 0, NET_V2_PLAYER_ID_NONE, session_msg::join_request, pl, b.now);
+		b.run_for(net_milliseconds(100));
+		CHECK(b.host.rejected == rejected_before + 1);
+		CHECK(!b.host.conn);
+	}
+	CHECK(b.connect());
+	CHECK(b.client.session_id == 0x2222bbbb);
+	CHECK(b.messages_flow(4));
+	std::printf("lobby: 10 min idle kept; 30 s host stall survived with %u s lobby timeouts; with %u s the client dropped the host; rejoined the same host and a restarted host\n", static_cast<unsigned>(NET_V2_LOBBY_TIMEOUT / net_seconds(1)), static_cast<unsigned>(NET_V2_TIMEOUT / net_seconds(1)));
+}
+
 void test_rate_limiter()
 {
 	rate_limiter r{NET_V2_GAME_INFO_LITE_INTERVAL};
@@ -661,6 +1105,9 @@ int main()
 	test_join_sync_wait();
 	test_join_deny();
 	test_join_attempt();
+	test_timeouts_for();
+	test_client_takes_game_info();
+	test_lobby_drop_and_rejoin();
 	test_rate_limiter();
 	test_crc32();
 	std::puts("all tests passed");

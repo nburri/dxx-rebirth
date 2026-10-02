@@ -54,6 +54,11 @@ void movement_record_damage(unsigned victim, unsigned attacker, std::uint8_t att
 void movement_record_kill(const object &victim, const object *killer);
 /* Player `pnum` picked up a powerup of type `powerup`. */
 void movement_record_pickup(unsigned pnum, unsigned powerup);
+/* An event of the level's course (movement_record_format.h,
+ * level_event_kind): `pid` the player concerned (255: none), `value` the
+ * countdown's seconds.
+ */
+void movement_record_level_event(std::uint8_t kind, unsigned pid, int value, std::uint8_t flags = 0);
 /* -sharemoves on a client: the local player's controls this frame as the
  * recording stores them (forward, sideways, vertical, pitch, heading,
  * bank; 60 = full deflection), for its INPUT chunk.  False while there

@@ -163,6 +163,7 @@ static void InitGameArg()
 	CGameArg.DbgVerbose = CON_NORMAL;
 	CGameArg.DbgBotArenaFps = 200;
 	CGameArg.DbgBotArenaSeed = 1;
+	CGameArg.DbgBotArenaReactor = 0;
 	CGameArg.DbgBpp = 32;
 #if DXX_USE_OGL
 	CGameArg.OglSyncMethod = OGL_SYNC_METHOD_DEFAULT;
@@ -439,6 +440,8 @@ static void ReadCmdArgs(Inilist &ini, Arglist &&Args)
 			CGameArg.DbgBotArenaSpec = arg_string(pp, end);
 		else if (!d_stricmp(p, "-botarena-seed"))
 			CGameArg.DbgBotArenaSeed = static_cast<uint32_t>(std::clamp<long>(arg_integer(pp, end), 1, 0x7fffffff));
+		else if (!d_stricmp(p, "-botarena-reactor"))
+			CGameArg.DbgBotArenaReactor = static_cast<uint32_t>(std::clamp<long>(arg_integer(pp, end), 1, 86400));
 		else if (!d_stricmp(p, "-norun"))
 			CGameArg.DbgNoRun = true;
 		else if (!d_stricmp(p, "-renderstats"))
