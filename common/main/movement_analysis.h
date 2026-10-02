@@ -1570,6 +1570,11 @@ struct player_stats
 	 */
 	std::array<double, 4> ab_situation_s{}, ab_situation_rate{};
 	summary ab_chase_distance;
+	/* Section 9.18: the share of the time alive (with the afterburner
+	 * known) that the player owned the afterburner powerup, and burnt
+	 * of that time.
+	 */
+	double ab_owned_share{}, ab_owned_rate{};
 
 	/* Distance to the enemy in sight (units). */
 	double los_s{};
@@ -1791,6 +1796,10 @@ struct accum
 	unsigned turns{}, turns_ctl{}, turns_reverse{}, turns_slide{}, turns_forward{}, boosts{}, boost_burns{}, boost_n{};
 	std::vector<double> turn_180_ms, reverse_speed, turn_rate;
 	double ab_known_s{}, ab_estimated_s{}, ab_s{};
+	/* Section 9.18: the time alive with the afterburner powerup owned
+	 * (known), and burnt then.
+	 */
+	double ab_owned_s{}, ab_owned_on_s{};
 	std::array<double, 4> ab_situation_s{}, ab_situation_on_s{};
 	std::vector<double> ab_chase_distance;
 	double los_s{};
@@ -1882,6 +1891,9 @@ enum situation : std::size_t
 	crossing,
 	fighting,
 };
+
+/* The situations in the profile's `measured.afterburner_<name>`. */
+inline constexpr std::array<const char *, 4> situation_key_names{{"chasing", "fleeing", "roam", "fighting"}};
 
 [[nodiscard]]
 inline situation situation_of(const track_point &p, const double approach_speed, const double turning_rate)
@@ -2592,6 +2604,38 @@ inline void scan_events(const track &tr, accum &a)
 	}
 }
 
+/* Section 9.18: the afterburner owned, from its pickup (or the first
+ * burn: a ship that burns has one, as with an afterburner granted at
+ * spawn) to the death.
+ */
+constexpr std::uint8_t POWERUP_AFTERBURNER{36};
+
+inline void scan_afterburner_owned(const track &tr, accum &a)
+{
+	bool owned{};
+	std::size_t next{};
+	for (const auto &p : tr.pts)
+	{
+		for (; next < tr.own.size() && tr.own[next].t <= p.m.t; ++next)
+		{
+			const auto &e{tr.own[next]};
+			if (e.e.type == record_type::pickup && e.e.id == POWERUP_AFTERBURNER)
+				owned = true;
+			else if (e.e.type == record_type::death || e.e.type == record_type::respawn)
+				owned = false;
+		}
+		if (!p.alive || !p.ab_known)
+			continue;
+		/* A burn proves it only on exact controls. */
+		owned |= p.ab && !p.ab_estimated;
+		if (!owned)
+			continue;
+		a.ab_owned_s += p.w;
+		if (p.ab)
+			a.ab_owned_on_s += p.w;
+	}
+}
+
 /* Section 8.9: the powerups the player had in sight before someone took
  * them, and what it did about them.
  */
@@ -3023,6 +3067,7 @@ inline player_stats analyse(const std::span<const track> tracks, const ship_mode
 		detail::scan_strafe(tr, a);
 		detail::scan_dodge(tr, a, ship);
 		detail::scan_events(tr, a);
+		detail::scan_afterburner_owned(tr, a);
 		detail::scan_pickup_sight(tr, a);
 		detail::scan_pursuit(tr, a, ship);
 		detail::scan_rooms(tr, a);
@@ -3085,6 +3130,8 @@ inline player_stats analyse(const std::span<const track> tracks, const ship_mode
 	s.ab_estimated_s = a.ab_estimated_s;
 	s.ab_share = ratio(a.ab_s, a.ab_known_s);
 	s.ab_situation_s = a.ab_situation_s;
+	s.ab_owned_share = ratio(a.ab_owned_s, a.ab_known_s);
+	s.ab_owned_rate = ratio(a.ab_owned_on_s, a.ab_owned_s);
 	for (std::size_t i{}; i != 4; ++i)
 		s.ab_situation_rate[i] = ratio(a.ab_situation_on_s[i], a.ab_situation_s[i]);
 	s.ab_chase_distance = summarise(a.ab_chase_distance);
@@ -3373,6 +3420,9 @@ inline bot::style_profile propose_profile(const player_stats &s, const bot::bot_
 			p.set("style.range_scale", d.p50 / band_middle, c);
 			p.set("tune.range_lo", d.p25, c);
 			p.set("tune.range_hi", d.p75, c);
+			/* Section 9.18: the median, the aim of the bot's distance. */
+			if (shots)
+				p.set("tune.fire_distance", d.p50, c);
 		}
 	}
 
@@ -3408,6 +3458,14 @@ inline bot::style_profile propose_profile(const player_stats &s, const bot::bot_
 			p.set("tune.burn_retreat", s.ab_situation_rate[detail::fleeing], std::min(cap, confidence_of(s, t, 8, 40)));
 		if (const double t{s.ab_situation_s[detail::crossing]}; t >= 10)
 			p.set("tune.burn_roam", s.ab_situation_rate[detail::crossing], std::min(cap, confidence_of(s, t, 30, 180)));
+		/* Section 9.18 of Documentation/multiplayer-bots.md: the shares
+		 * chasing and in the rest of the fight, the aims of the bot's
+		 * afterburner there.
+		 */
+		if (const double t{s.ab_situation_s[detail::chasing]}; t >= 5)
+			p.set("tune.burn_chase", s.ab_situation_rate[detail::chasing], std::min(cap, confidence_of(s, t, 15, 90)));
+		if (const double t{s.ab_situation_s[detail::fighting]}; t >= 10)
+			p.set("tune.burn_fight", s.ab_situation_rate[detail::fighting], std::min(cap, confidence_of(s, t, 30, 180)));
 	}
 
 	/* The strafe. */
@@ -3425,6 +3483,11 @@ inline bot::style_profile propose_profile(const player_stats &s, const bot::bot_
 				p.set("skill.strafe_max_ms", std::max(s.strafe_run_ms.p75, s.strafe_run_ms.p25 + 100), rc);
 			}
 			p.set("skill.strafe_vertical", s.strafe_vertical, c);
+			/* Section 9.18: the reversals and the share of the fight
+			 * strafed, the aims of the bot's rhythm.
+			 */
+			p.set("tune.strafe_reversals", s.strafe_reversals_per_min, c);
+			p.set("tune.strafe_share", s.fight_strafe_share, c);
 			/* The thrust of the bot's strafe keys (section 9.12 of
 			 * Documentation/multiplayer-bots.md): the pilot's thrust
 			 * across, whether or not the run is long enough to reach
@@ -3560,6 +3623,34 @@ inline bot::style_profile propose_profile(const player_stats &s, const bot::bot_
 		info("measured.dodge_prob_se", s.dodge_se);
 	if (s.ab_known_s > 0)
 		info("measured.afterburner_share", s.ab_share);
+	/* Section 9.18 of Documentation/multiplayer-bots.md: what a bot that
+	 * flies the profile is compared with (fidelity_report), and what it
+	 * aims for where a key alone does not say (the strafe's reversals,
+	 * the afterburner while chasing and fighting, the firing distance).
+	 */
+	if (s.fight_s >= 20 && s.exact_s + s.estimated_s > 0)
+	{
+		info("measured.strafe_reversals_per_min", s.strafe_reversals_per_min);
+		info("measured.strafe_fight_share", s.fight_strafe_share);
+		info("measured.strafe_vertical", s.strafe_vertical);
+		info("measured.speed_across", s.strafe_speed);
+		if (s.strafe_run_ms.n)
+			info("measured.strafe_run_ms_median", s.strafe_run_ms.p50);
+	}
+	info("measured.speed_median", s.speed.p50);
+	if (s.exact_s + s.estimated_s > 0)
+		info("measured.forward_share", s.forward_share);
+	if (s.ab_known_s > 0)
+		for (std::size_t i{}; i != s.ab_situation_s.size(); ++i)
+			if (s.ab_situation_s[i] >= 5)
+				info(std::string{"measured.afterburner_"} + detail::situation_key_names[i], s.ab_situation_rate[i]);
+	if (s.fire_distance.n >= 20)
+		info("measured.fire_distance_median", s.fire_distance.p50);
+	if (s.ab_known_s > 0)
+	{
+		info("measured.afterburner_owned_share", s.ab_owned_share);
+		info("measured.afterburner_owned_rate", s.ab_owned_rate);
+	}
 	if (s.primary_shots)
 		info("measured.hits_per_shot", s.hits_per_shot);
 	for (std::size_t w{}; w != WEAPON_SLOTS; ++w)
@@ -3844,7 +3935,10 @@ inline std::string write_report(const player_stats &s, const bot::style_profile 
 	appendf(o, "  strafe runs: %.0f, median %.0f ms (p25 %.0f, p75 %.0f), %.1f reversals/min, vertical share %.2f, thrust across %.0f%% of full, speed across %.0f%% of top (upper quartile)\n", static_cast<double>(s.strafe_run_ms.n), s.strafe_run_ms.p50, s.strafe_run_ms.p25, s.strafe_run_ms.p75, s.strafe_reversals_per_min, s.strafe_vertical, pct(s.strafe_thrust), pct(s.strafe_speed));
 	appendf(o, "  large turns: %u; reverse %.0f%%, slide %.0f%%, forward %.0f%%; 180 degrees in %.0f ms (p25 %.0f, p75 %.0f) at %.0f%% of the top rate; push after %.0f%% (with afterburner %.0f%%)\n", s.large_turns, pct(s.reverse_turn_share), pct(s.slide_turn_share), pct(s.forward_turn_share), s.turn_180_ms.p50, s.turn_180_ms.p25, s.turn_180_ms.p75, pct(s.turn_rate), pct(s.turn_boost_share), pct(s.turn_boost_burn_share));
 	if (s.ab_known_s > 0)
+	{
 		appendf(o, "  afterburner: known for %.1f min%s, on %.1f%%; chasing %.0f%% of %.0f s, fleeing %.0f%% of %.0f s, no enemy in sight %.0f%% of %.0f s, else %.0f%% of %.0f s; distance when chasing with it p10 %.0f, median %.0f\n", s.ab_known_s / 60, detail::burner_estimated(s) ? " (estimated)" : "", pct(s.ab_share), pct(s.ab_situation_rate[detail::chasing]), s.ab_situation_s[detail::chasing], pct(s.ab_situation_rate[detail::fleeing]), s.ab_situation_s[detail::fleeing], pct(s.ab_situation_rate[detail::crossing]), s.ab_situation_s[detail::crossing], pct(s.ab_situation_rate[detail::fighting]), s.ab_situation_s[detail::fighting], s.ab_chase_distance.p10, s.ab_chase_distance.p50);
+		appendf(o, "    owned (picked up, or burnt) %.0f%% of that time, on %.1f%% of it\n", pct(s.ab_owned_share), pct(s.ab_owned_rate));
+	}
 	else
 		o += "  afterburner: not known (an older client, recorded on the host, too little motion to estimate)\n";
 	appendf(o, "  enemy in sight: %.1f min; distance p10 %.0f, p25 %.0f, median %.0f, p75 %.0f, p90 %.0f\n    seconds at", s.los_s / 60, s.los_distance.p10, s.los_distance.p25, s.los_distance.p50, s.los_distance.p75, s.los_distance.p90);
@@ -4073,6 +4167,98 @@ inline analysis_result analyse_recordings(const std::span<const recording> files
 	}
 	std::stable_sort(r.players.begin(), r.players.end(), [](const player_result &a, const player_result &b) { return a.stats.alive_s > b.stats.alive_s; });
 	return r;
+}
+
+
+/* Section 9.18 of Documentation/multiplayer-bots.md: how close a bot that
+ * flies a style profile comes to the pilot the profile was made from.
+ * Per trait the profile's measured value (its `measured.` key, or the
+ * value key that is the same measurement), the bot's and whether it is
+ * within the tolerance (`abs`: shares, in absolute terms; else relative).
+ */
+struct fidelity_row
+{
+	std::string_view key;
+	std::string_view text;
+	double target{}, bot{};
+	double tolerance{};
+	bool absolute{};
+	[[nodiscard]]
+	double difference() const
+	{
+		return absolute ? bot - target : target != 0 ? (bot - target) / std::abs(target) : 0;
+	}
+	[[nodiscard]]
+	bool within() const
+	{
+		return std::abs(difference()) <= tolerance;
+	}
+};
+
+[[nodiscard]]
+inline std::vector<fidelity_row> fidelity_rows(const bot::style_profile &target, const player_stats &s)
+{
+	std::vector<fidelity_row> r;
+	const auto row{[&](const std::string_view key, const std::string_view fallback, const std::string_view text, const bool have, const double bot, const double tolerance, const bool absolute) {
+		if (!have)
+			return;
+		auto v{target.value(key)};
+		if (!v && !fallback.empty())
+			v = target.value(fallback);
+		if (v)
+			r.push_back({key, text, *v, bot, tolerance, absolute});
+	}};
+	const bool ctl{s.fight_s > 0 && s.exact_s + s.estimated_s > 0};
+	const bool ab{s.ab_known_s > 0};
+	row("measured.speed_mean", {}, "speed, mean (units/s)", s.alive_s > 0, s.speed.mean, 0.08, false);
+	row("measured.speed_median", {}, "speed, median (units/s)", s.alive_s > 0, s.speed.p50, 0.08, false);
+	row("measured.forward_share", {}, "forward thrust, share of the time", s.exact_s + s.estimated_s > 0, s.forward_share, 0.05, true);
+	row("measured.strafe_reversals_per_min", {}, "strafe reversals a minute of fight", ctl, s.strafe_reversals_per_min, 0.15, false);
+	row("measured.strafe_fight_share", {}, "strafing, share of the fight", ctl, s.fight_strafe_share, 0.05, true);
+	row("measured.strafe_run_ms_median", {}, "strafe run, median (ms)", ctl && s.strafe_run_ms.n, s.strafe_run_ms.p50, 0.2, false);
+	row("measured.strafe_vertical", "skill.strafe_vertical", "vertical share of the strafe", ctl, s.strafe_vertical, 0.08, true);
+	row("measured.speed_across", {}, "speed across, share of the top", ctl, s.strafe_speed, 0.05, true);
+	row("measured.afterburner_share", {}, "afterburner, share of the time", ab, s.ab_share, 0.04, true);
+	row("measured.afterburner_owned_share", {}, "afterburner owned, share of the time", ab, s.ab_owned_share, 0.1, true);
+	row("measured.afterburner_owned_rate", {}, "afterburner on while owned", ab && s.ab_owned_share > 0, s.ab_owned_rate, 0.05, true);
+	row("measured.afterburner_chasing", {}, "afterburner chasing", ab && s.ab_situation_s[detail::chasing] >= 5, s.ab_situation_rate[detail::chasing], 0.07, true);
+	row("measured.afterburner_fleeing", "tune.burn_retreat", "afterburner fleeing", ab && s.ab_situation_s[detail::fleeing] >= 5, s.ab_situation_rate[detail::fleeing], 0.07, true);
+	row("measured.afterburner_roam", "tune.burn_roam", "afterburner, no enemy in sight", ab && s.ab_situation_s[detail::crossing] >= 5, s.ab_situation_rate[detail::crossing], 0.05, true);
+	row("measured.afterburner_fighting", {}, "afterburner, otherwise", ab && s.ab_situation_s[detail::fighting] >= 5, s.ab_situation_rate[detail::fighting], 0.05, true);
+	row("measured.fire_distance_median", {}, "distance when firing, median", s.fire_distance.n >= 20, s.fire_distance.p50, 0.1, false);
+	row("measured.enemy_distance_median", {}, "enemy in sight, distance, median", s.los_distance.n > 0, s.los_distance.p50, 0.1, false);
+	row("tune.reverse_turn", {}, "large turns flown backwards", s.large_turns >= 3, s.reverse_turn_share, 0.07, true);
+	row("tune.turn_boost", {}, "large turns followed by a push", s.large_turns >= 3, s.turn_boost_share, 0.1, true);
+	row("tune.power_pickup", {}, "power pickups in sight gone for", s.pickup_sight[0].seen >= 5, s.pickup_sight[0].went_share, 0.1, true);
+	row("tune.heavy_fire_delay", {}, "heavy missile, pickup to shot (s)", s.heavy_all.delay_s.n >= 2, s.heavy_all.delay_s.p50, 0.3, false);
+	return r;
+}
+
+[[nodiscard]]
+inline std::string fidelity_report(const bot::style_profile &target, const player_stats &s)
+{
+	using detail::appendf;
+	std::string o;
+	/* Names from files: printable ASCII only. */
+	const auto clean{[](const std::string &n) {
+		std::string r;
+		for (const char c : n.substr(0, 64))
+			r += (c >= ' ' && c <= '~') ? c : '?';
+		return r;
+	}};
+	appendf(o, "== fidelity: %s%s against \"%s\" ==\n", clean(s.callsign).c_str(), s.bot ? " (bot)" : "", clean(target.name).c_str());
+	const auto rows{fidelity_rows(target, s)};
+	unsigned within{};
+	for (const auto &x : rows)
+	{
+		within += x.within();
+		if (x.absolute)
+			appendf(o, "  %-36s %9.3f %9.3f  %+7.3f  %s\n", std::string{x.text}.c_str(), x.target, x.bot, x.difference(), x.within() ? "ok" : "off");
+		else
+			appendf(o, "  %-36s %9.1f %9.1f  %+6.0f%%  %s\n", std::string{x.text}.c_str(), x.target, x.bot, 100 * x.difference(), x.within() ? "ok" : "off");
+	}
+	appendf(o, "  %u of %u within the tolerance\n\n", within, detail::count(rows.size()));
+	return o;
 }
 
 }
