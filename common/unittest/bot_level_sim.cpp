@@ -486,6 +486,7 @@ struct sim_bot
 	dcx::bot::path_keys pkeys;
 	mode_hold hold;
 	fire_blocked blocked;
+	pickup_aside aside;
 	move_mode mode{move_mode::none};
 	fight_room room;
 	int heading_pref{1};
@@ -762,6 +763,7 @@ void sim::spawn(sim_bot &b)
 	b.pkeys.reset();
 	b.hold.reset();
 	b.blocked.reset();
+	b.aside.reset();
 	b.mode = move_mode::none;
 	b.room = {};
 	b.face_dir = b.s.orient.f;
@@ -1329,7 +1331,7 @@ void sim::brain_tick(sim_bot &b)
 	if (!in_fight)
 		b.hold.release();
 	auto mode{move_mode::path};
-	const bool path_goal{b.goal == sim_goal::collect || b.goal == sim_goal::retreat};
+	bool path_goal{b.goal == sim_goal::collect || b.goal == sim_goal::retreat};
 	if (engaged_now)
 	{
 		const double delay{reaction_ticks / static_cast<double>(BOT_TICK_RATE)};
@@ -1341,6 +1343,16 @@ void sim::brain_tick(sim_bot &b)
 		aim_set = true;
 		const auto to{est - pos};
 		const double dist{length(to)};
+		/* Section 9.16: a pickup aside while the target is far off its
+		 * way: the fight first (bot_tick).
+		 */
+		if (!opt.before && b.goal == sim_goal::collect && b.steer_index < b.points.size())
+		{
+			if (b.aside.update(angle_between(b.points[b.steer_index] - pos, to), remaining_length(b.points, b.point_index, pos)))
+				path_goal = false;
+		}
+		else
+			b.aside.reset();
 		bool combat{(opt.before ? b.shot_clear : b.blocked.fight_on(b.shot_clear, tick)) && !path_goal};
 		if (!opt.before)
 			combat = b.hold.update(combat, tick);
@@ -1393,7 +1405,9 @@ void sim::brain_tick(sim_bot &b)
 		const auto rel_vel{p->vel - vel};
 		const auto los{normalized(to)};
 		const double lateral{length(rel_vel - los * dot(rel_vel, los))};
-		b.fire = should_fire(aim_err, fire_cone_with_spread(radians(sk.fire_cone_deg), 0), b.shot_clear, dist, 400) &&
+		/* Section 9.16: near, the target's size (bot_tick). */
+		const double cone{fire_cone_with_spread(radians(sk.fire_cone_deg), 0)};
+		b.fire = should_fire(aim_err, opt.before ? cone : fire_cone_near(cone, dist, SHIP_SIZE), b.shot_clear, dist, 400) &&
 			long_shot_worthwhile(dist, SHOT_SPEED, lateral, radians(sk.aim_sigma_deg), SHIP_SIZE);
 	}
 	else

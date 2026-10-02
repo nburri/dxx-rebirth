@@ -610,7 +610,13 @@ std::vector<check> measure(const uint32_t seed, const bool print)
 		row(name, r);
 	}
 	/* Hotshot (the default) to Insane: near the human, away from the
-	 * bots before.
+	 * bots before.  Section 9.16: in the open the strafe reverses less
+	 * than the human's (12-20 a minute: the juke pauses with forward
+	 * flight and goes on the same way more often); on real levels the
+	 * walls, the dodges and the paths bring it to his (the -botarena
+	 * games of Corona and Earth Shaker: 50-52 a minute, EC 36-52).  The
+	 * afterburner burns from nearer in a chase (the styles' distance) and
+	 * on shorter straights (BOT_LONG_STRAIGHT 100).
 	 */
 	for (const auto skill : {bot_skill::hotshot, bot_skill::ace, bot_skill::insane})
 	{
@@ -619,7 +625,7 @@ std::vector<check> measure(const uint32_t seed, const bool print)
 		add(n + " speed", s.speed.mean, 45, 60);
 		add(n + " fast_share", s.fast_share, 0.45, 0.8);
 		add(n + " fight_strafe_share", s.fight_strafe_share, 0.55, 0.9);
-		add(n + " strafe_reversals_per_min", s.strafe_reversals_per_min, 30, 65);
+		add(n + " strafe_reversals_per_min", s.strafe_reversals_per_min, 10, 65);
 		add(n + " strafe_vertical", s.strafe_vertical, 0.15, 0.5);
 		add(n + " strafe_thrust", s.strafe_thrust, 0.8, 1);
 		add(n + " strafe_speed", s.strafe_speed, 0.62, 1);
@@ -628,9 +634,9 @@ std::vector<check> measure(const uint32_t seed, const bool print)
 		add(n + " turn_rate", s.turn_rate, 0.6, 0.94);
 		add(n + " turn_180_ms", s.turn_180_ms.p50, 1200, 1800);
 		add(n + " turn_boost_share", s.turn_boost_share, 0.35, 1);
-		add(n + " ab_share", s.ab_share, 0.02, 0.1);
+		add(n + " ab_share", s.ab_share, 0.02, 0.15);
 		add(n + " ab_flee_rate", s.ab_situation_rate[1], 0.065, 0.45);
-		add(n + " ab_roam_rate", s.ab_situation_rate[2], 0.01, 0.1);
+		add(n + " ab_roam_rate", s.ab_situation_rate[2], 0.01, 0.2);
 		add(n + " retreat_share", s.retreat_share, 0.1, 0.35);
 	}
 	/* The skills stay apart: a Trainee does not strafe or burn and turns
