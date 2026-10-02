@@ -384,7 +384,14 @@ window_event_result bot_arena_frame()
 		const double wall{seconds_of(std::chrono::steady_clock::now() - A.wall_start)};
 		con_printf(CON_URGENT, "botarena: %.0f of %" PRIu32 " s (%.1f game seconds per wall second)", game_seconds, CGameArg.DbgBotArenaSeconds, wall > 0 ? game_seconds / wall : 0.0);
 	}
-	if (game_seconds < CGameArg.DbgBotArenaSeconds)
+	/* Section 9.16: the level ends (the reactor destroyed, the time or
+	 * kill limit): the end-of-level screens wait for players, and the
+	 * arena hung there.  It ends now, with the summary of the time
+	 * played.
+	 */
+	if (LevelUniqueObjectState.ControlCenterState.Control_center_destroyed)
+		con_printf(CON_URGENT, "botarena: the level ends after %.0f of %" PRIu32 " s (the reactor was destroyed); the arena ends here", game_seconds, CGameArg.DbgBotArenaSeconds);
+	else if (game_seconds < CGameArg.DbgBotArenaSeconds)
 		return window_event_result::ignored;
 	print_summary(game_seconds);
 	A.done = true;

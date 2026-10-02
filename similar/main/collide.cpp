@@ -1248,6 +1248,15 @@ void apply_damage_to_controlcen(const d_robot_info_array &Robot_info, const vmob
 		return;
 	}
 
+	/* Bots never attack the reactor (Documentation/multiplayer-bots.md,
+	 * decisions; section 9.16): their shots that miss a ship, their
+	 * splash and their mines do not damage it either.  Every machine
+	 * applies the damage of every ship's shots, and knows which slots are
+	 * bots (PLAYER_LIST), so none counts a bot's.
+	 */
+	if (+(Game_mode & GM_MULTI) && player_is_bot(get_player_id(who)))
+		return;
+
 	if (+(Game_mode & GM_MULTI) &&
 		!(Game_mode & GM_MULTI_COOP))
 	{
