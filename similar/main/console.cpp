@@ -35,6 +35,9 @@
 #include "cvar.h"
 
 #include <array>
+#include <cstdio>
+#include <ctime>
+#include <string>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -471,13 +474,85 @@ void con_flush_gamelog()
 		PHYSFS_flush(fp);
 }
 
+namespace {
+
+/* Rename a file of the PhysicsFS write directory (PhysicsFS has no
+ * rename).  Failure is ignored: rotation must never stop the game from
+ * starting.
+ */
+static void gamelog_rename(const std::string &directory, const char *const from, const char *const to)
+{
+	const std::string src{directory + from}, dst{directory + to};
+#ifdef _WIN32
+	/* The write directory is UTF-8; std::rename would take it as the
+	 * ANSI code page.
+	 */
+	std::array<wchar_t, 1024> wsrc, wdst;
+	if (MultiByteToWideChar(CP_UTF8, 0, src.c_str(), -1, wsrc.data(), static_cast<int>(wsrc.size())) <= 0 ||
+		MultiByteToWideChar(CP_UTF8, 0, dst.c_str(), -1, wdst.data(), static_cast<int>(wdst.size())) <= 0)
+		return;
+	MoveFileExW(wsrc.data(), wdst.data(), MOVEFILE_REPLACE_EXISTING);
+#else
+	std::rename(src.c_str(), dst.c_str());
+#endif
+}
+
+/* -gamelog-keep N: keep the logs of the last N runs.  gamelog.txt is
+ * this run's, gamelog.1.txt the run before, ..., gamelog.<N-1>.txt
+ * the oldest.  0 or 1: gamelog.txt is overwritten, as before.
+ */
+static void gamelog_rotate(const unsigned keep)
+{
+	if (keep < 2)
+		return;
+	const char *const write_dir{PHYSFS_getWriteDir()};
+	if (!write_dir || !*write_dir)
+		return;
+	std::string directory{write_dir};
+	if (const char *const sep{PHYSFS_getDirSeparator()}; !directory.ends_with(sep) && !directory.ends_with('/'))
+		directory += sep;
+	std::array<char, 32> from, to;
+	std::snprintf(to.data(), to.size(), "gamelog.%u.txt", keep - 1);
+	if (PHYSFS_exists(to.data()))
+		PHYSFS_delete(to.data());
+	for (unsigned i{keep - 1}; i > 1; --i)
+	{
+		std::snprintf(from.data(), from.size(), "gamelog.%u.txt", i - 1);
+		std::snprintf(to.data(), to.size(), "gamelog.%u.txt", i);
+		if (PHYSFS_exists(from.data()))
+			gamelog_rename(directory, from.data(), to.data());
+	}
+	if (PHYSFS_exists("gamelog.txt"))
+		gamelog_rename(directory, "gamelog.txt", "gamelog.1.txt");
+}
+
+/* The first line of each log: when the run started and which build it
+ * is, so that a rotated log can be told apart from the others.
+ */
+static void gamelog_write_header(PHYSFS_File *const fp)
+{
+	std::array<char, 32> when{};
+	const std::time_t now{std::time(nullptr)};
+	if (const auto tm{std::localtime(&now)})
+		std::strftime(when.data(), when.size(), "%Y-%m-%d %H:%M:%S", tm);
+	std::array<char, 256> line;
+	const int len{std::snprintf(line.data(), line.size(), "Log started %s (local time), %s  %s\n", when.data(), DESCENT_VERSION, g_descent_build_datetime)};
+	if (len > 0)
+		PHYSFS_writeBytes(fp, line.data(), std::min(static_cast<std::size_t>(len), line.size() - 1));
+}
+
+}
+
 void con_init(void)
 {
 	con_buffer = {};
+	gamelog_rotate(CGameArg.SysGamelogKeep);
 	if (CGameArg.DbgSafelog)
 		gamelog_fp.reset(PHYSFS_openWrite("gamelog.txt"));
 	else
 		gamelog_fp = PHYSFSX_openWriteBuffered("gamelog.txt").first;
+	if (const auto fp = gamelog_fp.get())
+		gamelog_write_header(fp);
 #ifdef _WIN32
 	/* A crash report (common/arch/win32/except.cpp) goes next to the
 	 * log.

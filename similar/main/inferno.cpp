@@ -267,6 +267,7 @@ static void print_commandline_help()
 	VERB("  -debug                        Enable debugging output.\n")	\
 	VERB("  -verbose                      Enable verbose output.\n")	\
 	VERB("  -safelog                      Write gamelog.txt unbuffered.\n\t\t\t\tUse to keep helpful output to trace program crashes.\n")	\
+	VERB("  -gamelog-keep <n>             Keep the logs of the last <n> runs: gamelog.txt,\n\t\t\t\tgamelog.1.txt (the run before), ... (default 5,\n\t\t\t\t0 = overwrite gamelog.txt)\n")	\
 	VERB("  -frametimes                   Show the frame time and where it went\n\t\t\t\tnext to the FPS counter, and log long frames\n\t\t\t\tto gamelog.txt (-verbose logs every second).\n")	\
 	VERB("  -lagtest <ms>                 As network host, delay your own pickups as a\n\t\t\t\tclient with a round trip of <ms> feels them (0-500)\n")	\
 	VERB("  -botarena <m> <l> <n> <s>     Headless test: <n> bots (1-7) fight on level <l>\n\t\t\t\tof mission <m> (name or file) for <s> game\n\t\t\t\tseconds, then print a summary and quit\n")	\

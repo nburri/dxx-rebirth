@@ -161,6 +161,7 @@ static void InitGameArg()
 #endif
 #endif
 	CGameArg.DbgVerbose = CON_NORMAL;
+	CGameArg.SysGamelogKeep = 5;
 	CGameArg.DbgBotArenaFps = 200;
 	CGameArg.DbgBotArenaSeed = 1;
 	CGameArg.DbgBotArenaReactor = 0;
@@ -416,6 +417,8 @@ static void ReadCmdArgs(Inilist &ini, Arglist &&Args)
 			CGameArg.DbgForbidConsoleGrab = true;
 		else if (!d_stricmp(p, "-safelog"))
 			CGameArg.DbgSafelog = true;
+		else if (!d_stricmp(p, "-gamelog-keep"))
+			CGameArg.SysGamelogKeep = static_cast<uint8_t>(std::clamp<long>(arg_integer(pp, end), 0, 99));
 		else if (!d_stricmp(p, "-frametimes"))
 			CGameArg.DbgFrameTimeHud = true;
 		else if (!d_stricmp(p, "-lagtest"))

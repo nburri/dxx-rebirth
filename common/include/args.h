@@ -127,6 +127,10 @@ struct CArg : prohibit_void_ptr<>
 	 * client's with that round trip do (net_objects.cpp).
 	 */
 	uint16_t DbgLagTestMs;
+	/* -gamelog-keep N: keep the logs of the last N runs (gamelog.txt,
+	 * gamelog.1.txt, ...; default 5, 0 = overwrite gamelog.txt).
+	 */
+	uint8_t SysGamelogKeep;
 	/* -botarena <mission> <level> <bots> <seconds> (Documentation/
 	 * multiplayer-bots.md section 8.2): a headless anarchy game of bots
 	 * on this machine, run for <seconds> of game time, then a summary
