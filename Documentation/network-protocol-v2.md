@@ -611,7 +611,10 @@ client allows for (protocol 108 builds):
 - Its game list (24) gives `a=` the address of the player *asking*, not the
   game's. A client joining a game from the tracker therefore asks the tracker
   for a hole punch at once (not after 4 s) and joins at the address the
-  host's one-byte answer (26) comes from. A host asking for the list finds
+  host's one-byte answer (26) comes from (only while it asks for the game
+  info: an answer counts within 5 s of a request of its own, not from the
+  tracker's address or port 0, and once the game info came the join stays at
+  that address). A host asking for the list finds
   its own entry by the session id in the blob; with either tracker version
   that entry's `a=` is the host's address as the tracker sees it (its public
   address), which feeds the public address (§8, protocol 108).

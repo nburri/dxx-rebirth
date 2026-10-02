@@ -3940,6 +3940,13 @@ std::vector<uint16_t> Tracker_list_ids;
  */
 std::optional<_sockaddr> Holepunch_reply;
 uint16_t Holepunch_logged_id;
+/* Client: when the last hole-punch request went out.  An answer counts
+ * only shortly after one (anyone can send the one-byte answer, and it
+ * moves the join to its sender).
+ */
+fix64 Holepunch_asked_at;
+bool Holepunch_asked;
+constexpr fix64 HOLEPUNCH_ANSWER_WINDOW{F1_0 * 5};
 /* Host: the client address of the last hole-punch request logged. */
 std::string Holepunch_logged_client;
 
@@ -4313,6 +4320,8 @@ void udp_tracker_request_holepunch(const tracker_game_id id)
 		Holepunch_logged_id = TrackerGameID;
 		con_printf(CON_NORMAL, "[Tracker] Asking the tracker to have the host of game [%i] answer (hole punch).", TrackerGameID);
 	}
+	Holepunch_asked = true;
+	Holepunch_asked_at = timer_query();
 	tracker_send(pBuf, "a hole-punch request");
 }
 
@@ -4325,8 +4334,11 @@ void udp_tracker_process_holepunch(const std::span<const uint8_t> data, const _s
 		/* The host's answer comes from the game's real address (the
 		 * tracker's game list may give another: the version of the
 		 * tracker program running since 2024 lists every game at the
-		 * address of the player asking).
+		 * address of the player asking).  Only as the answer to a
+		 * request of ours, not from the tracker, and from a port.
 		 */
+		if (!Holepunch_asked || timer_query() > Holepunch_asked_at + HOLEPUNCH_ANSWER_WINDOW || sender_is_tracker(sender_addr, TrackerSocket) || !dxx_sockaddr_port(sender_addr))
+			return;
 		if (!Holepunch_reply || *Holepunch_reply != sender_addr)
 			con_printf(CON_NORMAL, "[Tracker] Received hole-punch answer from a host at %s.", sockaddr_text(sender_addr).c_str());
 		Holepunch_reply = sender_addr;
@@ -4361,7 +4373,7 @@ void udp_tracker_process_holepunch(const std::span<const uint8_t> data, const _s
 	if (*porterror)
 		return;
 	const uint16_t iPort = myport;
-	if (iPort != myport)
+	if (iPort != myport || !iPort)
 		return;
 
 	// Get the DNS stuff
@@ -4840,17 +4852,14 @@ void client_join_frame()
 		return;
 	}
 #if DXX_USE_TRACKER
-	if (S.join_tracker_id != tracker_game_id{})
-	{
-		if (Holepunch_reply && *Holepunch_reply != S.join_addr)
-		{
-			con_printf(CON_NORMAL, "[Tracker] The host answered from %s; joining there", sockaddr_text(*Holepunch_reply).c_str());
-			S.join_addr = *Holepunch_reply;
-			Netgame.players[0].protocol.udp.addr = *Holepunch_reply;
-		}
-		if (S.join.holepunch_due(S.now))
-			udp_tracker_request_holepunch(S.join_tracker_id);
-	}
+	/* No move to a hole-punch answer here: the game info came from
+	 * S.join_addr (net_udp_game_connect already followed the answer), so
+	 * the host is known to answer there.  A late answer from another
+	 * address (the host's public address seen from its own LAN, or a
+	 * stray datagram) would split the join across two addresses.
+	 */
+	if (S.join_tracker_id != tracker_game_id{} && S.join.holepunch_due(S.now))
+		udp_tracker_request_holepunch(S.join_tracker_id);
 #endif
 	if (!S.join.due(S.now))
 		return;
@@ -5199,6 +5208,9 @@ void client_begin_join(const _sockaddr &host, const uint32_t session_id
 #endif
 	S.join_result = join_status::joining;
 	S.join.begin(timer_query(), random_nonzero_u32());
+#if DXX_USE_TRACKER
+	Holepunch_reply.reset();
+#endif
 }
 
 join_status client_join_status()
