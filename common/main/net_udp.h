@@ -66,6 +66,11 @@ void net_udp_arena_prepare(unsigned level, unsigned bots);
 bool net_udp_arena_start(uint32_t seed);
 /* Sizes of the network session's queues, for the -verbose frame probe. */
 void net_udp_probe_report();
+/* Ctrl+C in the waiting screen or the netgame info: a menu of this
+ * computer's addresses with the game port (the host) or the host's
+ * address (a client), the best copied to the clipboard.
+ */
+void net_udp_copy_game_address();
 }
 #endif
 void net_udp_manual_join_game();

@@ -51,6 +51,12 @@ If you host your game on the Online Tracker and other players join via this meth
 
 If you only want to join a game, or host a game on LAN (not online), port forwarding should not be necessary. If you do experience problems, please check your NAT settings and/or Firewall.
 
+### Copying and pasting game addresses
+
+- **Host:** in the screen that waits for players, press **Ctrl+C**; in a running game, open the netgame info with **Shift+Pause** and press **Ctrl+C**. A menu lists the addresses of this computer with the game port (for example `192.168.1.5:42424`) and copies the best one to the clipboard; select another with Enter to copy it instead. The game cannot see your public Internet address when you are behind a router: give players your router's public IP with the game port, and forward that UDP port to your computer. A client in a game gets the host's address the same way, to pass it on.
+- **Joining:** in *Join game manually*, **Ctrl+V** (or Shift+Insert) in the address field pastes the address; a pasted `address:port` or `[IPv6]:port` also fills the game port field.
+- In every text field of the menus and in the chat line (F8), **Ctrl+V** / **Shift+Insert** paste (the first line of the clipboard, trimmed, as far as it fits) and, in menu fields, **Ctrl+C** copies the field's text. On macOS, Cmd+V and Cmd+C work too.
+
 
 ## 4. Legal stuff:
 

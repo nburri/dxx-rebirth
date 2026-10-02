@@ -59,6 +59,8 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "compiler-range_for.h"
 #include "d_zip.h"
 #include "partial_range.h"
+#include "clipboard.h"
+#include "net_address_text.h"
 
 #if DXX_USE_OGL
 #include "ogl_init.h"
@@ -1079,6 +1081,31 @@ static window_event_result newmenu_mouse(const d_event &event, newmenu *menu, co
 	return window_event_result::ignored;
 }
 
+/* Ctrl+V or Shift+Insert in an input field: the clipboard's first line,
+ * trimmed, without the characters the field cannot hold, as far as it
+ * fits.  It goes where the next typed character would: over the initial
+ * text (value -1), else after the text.  False when nothing was added.
+ */
+static bool newmenu_paste(newmenu_item &citem)
+{
+	const auto im{citem.input_or_menu()};
+	if (!im)
+		return false;
+	const auto clip{clipboard_get_text()};
+	if (clip.empty())
+		return false;
+	const unsigned text_len{im->text_len};
+	const unsigned start{citem.value < 0 ? 0u : std::min(static_cast<unsigned>(citem.value), text_len)};
+	const auto add{filter_pasted_text(clip, im->allowed_chars, text_len - start)};
+	if (add.empty())
+		return false;
+	memcpy(citem.text + start, add.data(), add.size());
+	const unsigned end{start + static_cast<unsigned>(add.size())};
+	citem.text[end] = 0;
+	citem.value = end;
+	return true;
+}
+
 static window_event_result newmenu_key_command(const d_event &event, newmenu *const menu)
 {
 	int k = event_key_get(event);
@@ -1106,6 +1133,26 @@ static window_event_result newmenu_key_command(const d_event &event, newmenu *co
 
 	old_choice = menu->citem;
 	auto &citem = *std::next(menu->items.begin(), menu->citem);
+
+	if (menu->citem > -1 && (citem.type == nm_type::input || (citem.type == nm_type::input_menu && citem.imenu().group == 1)))
+	{
+		if (key_is_paste(k))
+		{
+			if (newmenu_paste(citem) && citem.type == nm_type::input)
+			{
+				if (menu->event_handler(d_change_event{menu->citem}) == window_event_result::close)
+					return window_event_result::close;
+			}
+			return window_event_result::handled;
+		}
+		if (key_is_copy(k))
+		{
+			/* value -1: the field shows its initial text. */
+			if (citem.text[0])
+				clipboard_set_text(citem.text);
+			return window_event_result::handled;
+		}
+	}
 
 	switch( k )	{
 		case KEY_HOME:
