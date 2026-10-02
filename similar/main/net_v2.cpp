@@ -86,6 +86,8 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <sys/socket.h>
+#include <ifaddrs.h>
+#include <net/if.h>
 #endif
 
 #ifndef _WIN32
@@ -480,6 +482,71 @@ uint16_t dxx_sockaddr_port(const _sockaddr &sa)
 		:
 #endif
 		sa.sin.sin_port);
+}
+
+namespace {
+
+void add_host_address_candidate(std::vector<host_address_candidate> &out, const sockaddr *const sa, const uint16_t port)
+{
+	_sockaddr a{};
+	host_address_kind kind;
+	if (sa->sa_family == AF_INET)
+	{
+		memcpy(&a.sin, sa, sizeof(a.sin));
+		kind = classify_ipv4(ntohl(a.sin.sin_addr.s_addr));
+	}
+#if DXX_USE_IPv6
+	else if (sa->sa_family == AF_INET6)
+	{
+		memcpy(&a.sin6, sa, sizeof(a.sin6));
+		kind = classify_ipv6(a.sin6.sin6_addr.s6_addr);
+	}
+#endif
+	else
+		return;
+	if (kind == host_address_kind::unusable)
+		return;
+	typename _sockaddr::presentation_buffer dbuf;
+	auto text{format_address_port(dxx_ntop(a, dbuf), port)};
+	if (std::ranges::any_of(out, [&text](const host_address_candidate &c) { return c.text == text; }))
+		return;
+	out.push_back({std::move(text), kind});
+}
+
+}
+
+std::vector<host_address_candidate> host_address_candidates(const uint16_t port)
+{
+	std::vector<host_address_candidate> out;
+#ifdef WIN32
+	/* No getifaddrs: the addresses the host name resolves to, which on
+	 * Windows are those of the interfaces.
+	 */
+	char name[256];
+	if (gethostname(name, sizeof(name)) == 0)
+	{
+		name[sizeof(name) - 1] = 0;
+		addrinfo hints{};
+		hints.ai_family = AF_UNSPEC;
+		hints.ai_socktype = SOCK_DGRAM;
+		RAIIaddrinfo result;
+		if (result.getaddrinfo(name, nullptr, &hints) == 0)
+			for (auto p{result.get()}; p; p = p->ai_next)
+				if (p->ai_addr)
+					add_host_address_candidate(out, p->ai_addr, port);
+	}
+#else
+	ifaddrs *list;
+	if (getifaddrs(&list) == 0)
+	{
+		for (auto p{list}; p; p = p->ifa_next)
+			if (p->ifa_addr && (p->ifa_flags & IFF_UP) && !(p->ifa_flags & IFF_LOOPBACK))
+				add_host_address_candidate(out, p->ifa_addr, port);
+		freeifaddrs(list);
+	}
+#endif
+	std::ranges::stable_sort(out, {}, &host_address_candidate::kind);
+	return out;
 }
 
 // Resolve address

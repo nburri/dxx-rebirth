@@ -5104,6 +5104,11 @@ class DXXArchive(DXXCommon):
 		RuntimeTest('test-net-score-carry', (
 			'common/unittest/net_score_carry.cpp',
 			)),
+		# Test of the text of pasted and copied game addresses
+		# (net_address_text.h).
+		RuntimeTest('test-net-address-text', (
+			'common/unittest/net_address_text.cpp',
+			)),
 		# Test of the game world time's pause count and of the demo
 		# write check (world_time_pause.h).
 		RuntimeTest('test-world-time-pause', (
@@ -5172,6 +5177,7 @@ class DXXArchive(DXXCommon):
 'common/3d/points.cpp',
 'common/3d/rod.cpp',
 'common/3d/setup.cpp',
+'common/arch/sdl/clipboard.cpp',
 'common/arch/sdl/event.cpp',
 'common/arch/sdl/key.cpp',
 'common/arch/sdl/mouse.cpp',

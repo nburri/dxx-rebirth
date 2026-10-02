@@ -25,6 +25,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 
 #include "dxxsconf.h"
 #include <bitset>
+#include <memory>
 #include <new>
 #include <stdexcept>
 #include <random>
@@ -63,6 +64,9 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "polyobj.h"
 #include "bm.h"
 #include "key.h"
+#include "clipboard.h"
+#include "net_address_text.h"
+#include "net_udp.h"
 #include "playsave.h"
 #include "timer.h"
 #include "digi.h"
@@ -1621,6 +1625,21 @@ window_event_result multi_message_input_sub(const d_robot_info_array &Robot_info
 			return window_event_result::handled;
 		default:
 		{
+			if (key_is_paste(key))
+			{
+				/* Ctrl+V: the clipboard's first line, as far as it fits
+				 * (unlike typing, a full line does not send).
+				 */
+				constexpr std::size_t last{MAX_MESSAGE_LEN - 2};
+				if (multi_message_index < last)
+				{
+					const auto add{filter_pasted_text(clipboard_get_text(), nullptr, last - multi_message_index)};
+					std::ranges::copy(add, std::next(Network_message.begin(), multi_message_index));
+					multi_message_index += add.size();
+					Network_message[multi_message_index] = 0;
+				}
+				return window_event_result::handled;
+			}
 			int ascii = key_ascii();
 			if ( ascii < 255 )     {
 				if (multi_message_index < MAX_MESSAGE_LEN-2 )   {
@@ -6018,13 +6037,27 @@ void show_netgame_info(const netgame_info &netgame)
 	};
 	struct netgame_info_menu : netgame_info_menu_items, passive_newmenu
 	{
-		netgame_info_menu(const netgame_info &netgame, grs_canvas &src) :
+		/* In a game, Ctrl+C copies the game's address
+		 * (net_udp_copy_game_address); not for a game of the game list.
+		 */
+		const bool in_game;
+		netgame_info_menu(const netgame_info &netgame, const bool in_game, grs_canvas &src) :
 			netgame_info_menu_items(netgame),
-			passive_newmenu(menu_title{nullptr}, menu_subtitle{"Netgame Info & Rules"}, menu_filename{nullptr}, tiny_mode_flag::tiny, tab_processing_flag::ignore, adjusted_citem::create(menu_items, 0), src)
+			passive_newmenu(menu_title{nullptr}, menu_subtitle{in_game ? "Netgame Info & Rules\nCtrl+C: copy game address" : "Netgame Info & Rules"}, menu_filename{nullptr}, tiny_mode_flag::tiny, tab_processing_flag::ignore, adjusted_citem::create(menu_items, 0), src),
+			in_game{in_game}
 			{
 			}
+		virtual window_event_result event_handler(const d_event &event) override
+		{
+			if (in_game && event.type == event_type::key_command && key_is_copy(event_key_get(event)))
+			{
+				net_udp_copy_game_address();
+				return window_event_result::handled;
+			}
+			return passive_newmenu::event_handler(event);
+		}
 	};
-	auto menu = window_create<netgame_info_menu>(netgame, grd_curscreen->sc_canvas);
+	auto menu = window_create<netgame_info_menu>(netgame, std::addressof(netgame) == std::addressof(Netgame) && Game_wind, grd_curscreen->sc_canvas);
 	(void)menu;
 }
 }

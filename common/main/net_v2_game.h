@@ -21,11 +21,14 @@
 #include <cstring>
 #include <optional>
 #include <span>
+#include <string>
+#include <vector>
 #include "dxxsconf.h"
 #include "dsx-ns.h"
 #include "maths.h"
 #include "multi.h"
 #include "net_udp.h"
+#include "net_address_text.h"
 
 #if DXX_USE_MULTIPLAYER
 
@@ -61,6 +64,24 @@ uint16_t dxx_sockaddr_port(const _sockaddr &sa);
  * `silent`.  Returns 0 on success.
  */
 int udp_dns_filladdr(_sockaddr &addr, const char *host, uint16_t port, bool numeric_only, bool silent);
+
+/* An address of this computer for "copy game address" (net_udp.cpp):
+ * "a.b.c.d:port" or "[v6]:port".
+ */
+struct host_address_candidate
+{
+	std::string text;
+	host_address_kind kind;
+};
+
+/* The addresses of this computer's network interfaces that a joiner
+ * could use, with `port`, best first (net_address_text.h): no loopback
+ * or link-local addresses, IPv6 only when the game socket is IPv6.  The
+ * public address behind a NAT router is not among them: nothing reports
+ * it to the game.
+ */
+[[nodiscard]]
+std::vector<host_address_candidate> host_address_candidates(uint16_t port);
 
 }
 

@@ -71,6 +71,8 @@
 #include "d_range.h"
 #include "d_zip.h"
 #include "partial_range.h"
+#include "clipboard.h"
+#include "net_address_text.h"
 #include <array>
 #include <utility>
 
@@ -406,11 +408,39 @@ struct manual_join_menu_items : direct_join, manual_join_user_inputs
 struct manual_join_menu : manual_join_menu_items, newmenu
 {
 	manual_join_menu(grs_canvas &src) :
-		newmenu(menu_title{nullptr}, menu_subtitle{"ENTER GAME ADDRESS"}, menu_filename{nullptr}, tiny_mode_flag::normal, tab_processing_flag::ignore, adjusted_citem::create(m, input_host_address), src)
+		newmenu(menu_title{nullptr}, menu_subtitle{"ENTER GAME ADDRESS\nCtrl+V pastes address or address:port"}, menu_filename{nullptr}, tiny_mode_flag::normal, tab_processing_flag::ignore, adjusted_citem::create(m, input_host_address), src)
 	{
 	}
 	virtual window_event_result event_handler(const d_event &event) override;
+	/* Ctrl+V into the address or the game port field: a pasted
+	 * "host:port" or "[ipv6]:port" fills both fields.  False when the
+	 * clipboard holds no such address (then the field gets the usual
+	 * paste).
+	 */
+	bool paste_address();
 };
+
+bool manual_join_menu::paste_address()
+{
+	const auto a{parse_pasted_address(clipboard_get_text())};
+	if (!a)
+		return false;
+	/* Into the port field only a full address: a bare number there is
+	 * a port, which the usual paste handles.
+	 */
+	if (citem == input_host_port && !a->port)
+		return false;
+	if (a->host.size() >= hostaddrbuf.size())
+		return false;
+	std::snprintf(hostaddrbuf.data(), hostaddrbuf.size(), "%s", a->host.c_str());
+	m[input_host_address].value = static_cast<int>(a->host.size());
+	if (a->port)
+	{
+		std::snprintf(hostportbuf.data(), hostportbuf.size(), "%u", static_cast<unsigned>(a->port));
+		m[input_host_port].value = -1;
+	}
+	return true;
+}
 
 struct netgame_list_game_menu_items
 {
@@ -644,6 +674,8 @@ window_event_result manual_join_menu::event_handler(const d_event &event)
 	switch (event.type)
 	{
 		case event_type::key_command:
+			if (connecting == direct_join::connect_type::idle && key_is_paste(event_key_get(event)) && (citem == input_host_address || citem == input_host_port) && paste_address())
+				return window_event_result::handled;
 			if (connecting != direct_join::connect_type::idle && event_key_get(event) == KEY_ESC)
 			{
 				if (connecting == direct_join::connect_type::joining)
@@ -1112,6 +1144,156 @@ static join_netgame_status_code net_udp_can_join_netgame(const netgame_info *con
 }
 }
 namespace dsx {
+namespace {
+
+/* "Copy game address" (Ctrl+C in the host's waiting screen and in the
+ * netgame info): the addresses a joiner could type into "join game
+ * manually", each selectable to copy it.  The best one is copied when
+ * the menu opens.
+ */
+struct host_address_menu_items
+{
+	enum
+	{
+		max_candidates = 8,
+		/* blank, status, blank, three note lines */
+		extra_rows = 6,
+	};
+	std::vector<host_address_candidate> candidates;
+	std::array<std::array<char, 80>, max_candidates> lines;
+	std::array<char, 80> status;
+	std::array<std::array<char, 48>, 3> notes;
+	std::array<newmenu_item, max_candidates + extra_rows> m;
+	unsigned count;
+	host_address_menu_items(std::vector<host_address_candidate> &&c, const uint16_t port, const bool own) :
+		candidates{std::move(c)}
+	{
+		if (candidates.size() > max_candidates)
+			candidates.resize(max_candidates);
+		const unsigned n = candidates.size();
+		const auto label = [own](const host_address_kind k) {
+			if (!own)
+				return "  (the host)";
+			switch (k)
+			{
+				case host_address_kind::public_ipv4:
+					return "  (Internet)";
+				case host_address_kind::lan_ipv4:
+					return "  (LAN / VPN)";
+				case host_address_kind::public_ipv6:
+					return "  (IPv6 Internet)";
+				case host_address_kind::lan_ipv6:
+					return "  (IPv6 LAN)";
+				case host_address_kind::unusable:
+					break;
+			}
+			return "";
+		};
+		for (unsigned i = 0; i < n; ++i)
+		{
+			auto &line{lines[i]};
+			std::snprintf(line.data(), line.size(), "%s%s", candidates[i].text.c_str(), label(candidates[i].kind));
+			nm_set_item_menu(m[i], line.data());
+		}
+		status[0] = 0;
+		for (auto &l : notes)
+			l[0] = 0;
+		if (own && std::ranges::none_of(candidates, [](const host_address_candidate &c) { return c.kind == host_address_kind::public_ipv4; }))
+		{
+			/* Behind a NAT router: the game cannot know the public
+			 * address, and asking an outside service is not wanted.
+			 */
+			std::snprintf(notes[0].data(), notes[0].size(), "Internet players need your public IP");
+			std::snprintf(notes[1].data(), notes[1].size(), "(see your router) and UDP port %u", static_cast<unsigned>(port));
+			std::snprintf(notes[2].data(), notes[2].size(), "forwarded to this computer.");
+		}
+		unsigned i = n;
+		nm_set_item_text(m[i++], "");
+		nm_set_item_text(m[i++], status.data());
+		if (notes[0][0])
+		{
+			nm_set_item_text(m[i++], "");
+			for (auto &l : notes)
+				nm_set_item_text(m[i++], l.data());
+		}
+		count = i;
+	}
+	void copy(const unsigned i)
+	{
+		if (i >= candidates.size())
+			return;
+		const auto &text{candidates[i].text};
+		if (clipboard_set_text(text.c_str()))
+		{
+			std::snprintf(status.data(), status.size(), "Copied %s", text.c_str());
+			if (Game_wind)
+				HUD_init_message(HM_MULTI, "Copied %s", text.c_str());
+		}
+		else
+			std::snprintf(status.data(), status.size(), "No clipboard: write it down");
+	}
+};
+
+struct host_address_menu : host_address_menu_items, newmenu
+{
+	host_address_menu(std::vector<host_address_candidate> &&c, const uint16_t port, const bool own, grs_canvas &src) :
+		host_address_menu_items(std::move(c), port, own),
+		newmenu(menu_title{nullptr}, menu_subtitle{own ? "GAME ADDRESS\nEnter: copy" : "HOST ADDRESS\nEnter: copy"}, menu_filename{nullptr}, tiny_mode_flag::normal, tab_processing_flag::ignore, adjusted_citem::create(unchecked_partial_range(m, count), 0), src)
+	{
+		copy(0);
+	}
+	virtual window_event_result event_handler(const d_event &event) override
+	{
+		switch (event.type)
+		{
+			case event_type::newmenu_selected:
+				copy(static_cast<const d_select_event &>(event).citem);
+				return window_event_result::handled;
+			case event_type::key_command:
+				if (key_is_copy(event_key_get(event)))
+				{
+					if (citem >= 0)
+						copy(citem);
+					return window_event_result::handled;
+				}
+				break;
+			default:
+				break;
+		}
+		return newmenu::event_handler(event);
+	}
+};
+
+}
+
+void net_udp_copy_game_address()
+{
+	const bool own{multi_i_am_master()};
+	std::vector<host_address_candidate> candidates;
+	uint16_t port;
+	if (own)
+	{
+		port = UDP_MyPort;
+		candidates = host_address_candidates(port);
+	}
+	else
+	{
+		/* A client: the host's address as this client reaches it, to
+		 * pass on to other players.
+		 */
+		const auto &addr{Netgame.players[0].protocol.udp.addr};
+		port = dxx_sockaddr_port(addr);
+		typename _sockaddr::presentation_buffer dbuf;
+		candidates.push_back({format_address_port(dxx_ntop(addr, dbuf), port), host_address_kind::public_ipv4});
+	}
+	if (candidates.empty())
+	{
+		nm_messagebox(menu_title{nullptr}, {TXT_OK}, "No network address found.\nThe game port is UDP %u.", static_cast<unsigned>(port));
+		return;
+	}
+	window_create<host_address_menu>(std::move(candidates), port, own, grd_curscreen->sc_canvas);
+}
+
 void net_udp_probe_report()
 {
 	net_v2::probe_report();
@@ -1201,6 +1383,11 @@ static int net_udp_sync_poll( newmenu *,const d_event &event, const unused_newme
 }
 static int net_udp_start_poll(newmenu *, const d_event &event, start_poll_menu_items *const items)
 {
+	if (event.type == event_type::key_command && key_is_copy(event_key_get(event)))
+	{
+		net_udp_copy_game_address();
+		return 1;
+	}
 	if (event.type != event_type::window_draw)
 		return 0;
 	assert(Network_status == network_state::starting);
@@ -2263,7 +2450,7 @@ static int net_udp_select_players()
 {
 	int j;
 	char text[MAX_PLAYERS+4][45];
-	char subtitle[50];
+	char subtitle[96];
 	unsigned save_nplayers;              //how may people would like to join
 
 	if (Netgame.ShufflePowerupSeed)
@@ -2302,7 +2489,7 @@ static int net_udp_select_players()
 	const auto &&rankstr = GetRankStringWithSpace(Netgame.players[Player_num].rank);
 	snprintf( text[0], sizeof(text[0]), "%d. %s%s%-20s", 1, rankstr.first, rankstr.second, static_cast<const char *>(get_local_player().callsign));
 
-	snprintf(subtitle, sizeof(subtitle), "%s %d %s", TXT_TEAM_SELECT, Netgame.max_numplayers, TXT_TEAM_PRESS_ENTER);
+	snprintf(subtitle, sizeof(subtitle), "%s %d %s\nCtrl+C: copy game address", TXT_TEAM_SELECT, Netgame.max_numplayers, TXT_TEAM_PRESS_ENTER);
 
 #if DXX_USE_TRACKER
 	if( Netgame.Tracker )
