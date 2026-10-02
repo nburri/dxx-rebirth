@@ -85,6 +85,10 @@ enum class session_msg : std::uint8_t
 	 * capture the flag, host to all (protocol 109).
 	 */
 	capture = 0x39,
+	/* Capture the flag (Classic): a flag returned home, a capture
+	 * refused (protocol 111).
+	 */
+	ctf_notice = 0x4a,
 	drop_request = 0x3b,
 	obj_settle = 0x47,
 	/* Host-assigned spawns (section 8, "Host-assigned spawns",

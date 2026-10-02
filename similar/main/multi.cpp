@@ -3252,6 +3252,8 @@ void multi_prep_level_objects(const d_powerup_info_array &Powerup_info, const d_
 		}
 	}
 
+	/* Capture the flag (Classic): the flags start at home. */
+	net_modes_prepare_level_flags();
 	// After everything is done, count initial level inventory.
 	MultiLevelInv_InitializeCount();
 	/* Every machine gives the level's powerups the same net ids. */
@@ -5903,6 +5905,12 @@ void show_netgame_info(const netgame_info &netgame)
 			reactor_life,
 			max_time,
 			kill_goal,
+#if DXX_BUILD_DESCENT == 2
+			/* Capture the flag (Classic): its flag rules. */
+			ctf_dropped_flag,
+			ctf_touch_return,
+			ctf_home_to_score,
+#endif
 			blank_2,
 			duplicate_powerups_header,
 			duplicate_primaries,
@@ -6015,6 +6023,12 @@ void show_netgame_info(const netgame_info &netgame)
 			array_snprintf(lines[mission_name], "Mission Name\t  %s", netgame.mission_title.data());
 			array_snprintf(lines[level_number], "Level\t  %s%i", (netgame.levelnum < 0) ? "S" : " ", abs(netgame.levelnum));
 			const auto gamemode{netgame.gamemode};
+#if DXX_BUILD_DESCENT == 2
+			const auto ctf_rules{::dcx::net_v2::ctf_rules::from_bits(gamemode == network_game_type::capture_flag ? netgame.CtfClassicFlags : 0)};
+			if (ctf_rules.classic)
+				array_snprintf(lines[game_mode], "Game Mode\t  %s (Classic)", GMNames[gamemode]);
+			else
+#endif
 			array_snprintf(lines[game_mode], "Game Mode\t  %s", GMNames.valid_index(gamemode) ? GMNames[gamemode] : "INVALID");
 			array_snprintf(lines[player_counts], "Players\t  %i/%i", netgame.numplayers, netgame.max_numplayers);
 			if (in_game)
@@ -6036,6 +6050,19 @@ void show_netgame_info(const netgame_info &netgame)
 			array_snprintf(lines[reactor_life], "Reactor Life\t  %i %s", netgame.control_invul_time / F1_0 / 60, TXT_MINUTES_ABBREV);
 			array_snprintf(lines[max_time], "Max Time\t  %i %s", netgame.PlayTimeAllowed.count() / (F1_0 * 60), TXT_MINUTES_ABBREV);
 			array_snprintf(lines[kill_goal], "Kill Goal\t  %i", netgame.KillGoal * 5);
+#if DXX_BUILD_DESCENT == 2
+			if (ctf_rules.classic)
+			{
+				array_snprintf(lines[ctf_dropped_flag], "Dropped Flag\t  %s", ctf_rules.dropped_returns ? "returns home" : "stays");
+				array_snprintf(lines[ctf_touch_return], "Own Team Returns Flag\t  %s", ctf_rules.touch_returns ? TXT_YES : TXT_NO);
+				array_snprintf(lines[ctf_home_to_score], "Score Only With Flag Home\t  %s", ctf_rules.home_to_score ? TXT_YES : TXT_NO);
+			}
+			else
+				menu_items[ctf_dropped_flag].text =
+					menu_items[ctf_touch_return].text =
+					menu_items[ctf_home_to_score].text =
+					const_cast<char *>(" ");
+#endif
 			array_snprintf(lines[duplicate_primaries], "Primaries\t  %i", static_cast<int>(netgame.DuplicatePowerups.get_primary_count()));
 			array_snprintf(lines[duplicate_secondaries], "Secondaries\t  %i", static_cast<int>(netgame.DuplicatePowerups.get_secondary_count()));
 #if DXX_BUILD_DESCENT == 2

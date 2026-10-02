@@ -187,8 +187,10 @@ static inline player_ship_color get_team_color(const team_number tnum)
  * 108: ADDRESS_SEEN, the client tells the host the address it reaches the
  * host at (the host's public address behind a NAT router).
  * 109: CAPTURE, the host decides captures in capture the flag.
+ * 111: capture the flag (Classic): its rules in GAME_SETTINGS, CTF_NOTICE
+ * (110 is ORB_BONUS, hoard).
  */
-constexpr std::uint16_t MULTI_PROTO_VERSION{109};
+constexpr std::uint16_t MULTI_PROTO_VERSION{111};
 // PROTOCOL VARIABLES AND DEFINES - END
 
 /* The network tick rate (positions per second, and the pacing of every
@@ -750,6 +752,20 @@ namespace dsx {
 
 #define NETGAME_NAME_LEN	25
 
+/* Capture the flag (Classic): netgame_info::CtfClassicFlags (the same
+ * bits as CTF_RULE_* in net_v2_modes.h, checked there by net_modes.cpp).
+ */
+namespace ctf_rule {
+constexpr uint8_t classic{1 << 0};
+constexpr uint8_t dropped_returns{1 << 1};
+constexpr uint8_t touch_returns{1 << 2};
+constexpr uint8_t home_to_score{1 << 3};
+/* A new game: a dropped flag stays, the own team returns it, a team
+ * scores only with its own flag at home.
+ */
+constexpr uint8_t defaults{touch_returns | home_to_score};
+}
+
 extern struct netgame_info Netgame;
 
 }
@@ -934,6 +950,10 @@ struct netgame_info : prohibit_void_ptr<>
 	int						monitor_vector;
 	/* Network tick rate in Hz (30, 60 or 120); replaces PacketsPerSec. */
 	uint8_t	TickRate{NETGAME_TICK_RATE_DEFAULT};
+	/* Capture the flag (Classic) and its options: ctf_rule bits (the
+	 * CTF_RULE_* bits of net_v2_modes.h, game modes, stage 6a).
+	 */
+	uint8_t CtfClassicFlags{};
 	ubyte						NoFriendlyFire;
 	per_team_array<callsign_t>						team_name;
 	per_player_array<uint32_t>						locations;
@@ -1215,6 +1235,34 @@ void net_modes_frame();
 void net_modes_receive(playernum_t from, uint8_t type, std::span<const uint8_t> payload);
 /* The bot arena's summary: the captures and the flag counts. */
 void net_modes_arena_summary();
+/* Capture the flag (Classic), every machine, while the level's objects
+ * are prepared (multi_prep_level_objects, before the level inventory is
+ * counted): each team's flag is put into its home in its goal.
+ */
+void net_modes_prepare_level_flags();
+/* The game is capture the flag (Classic). */
+[[nodiscard]]
+bool net_modes_ctf_classic();
+/* The flag object `flag` lies in a goal of its own team. */
+[[nodiscard]]
+bool net_modes_flag_at_home(const object_base &flag);
+/* Host: player `pnum` touched its own team's flag `flag` away from home
+ * and returns it (the pickup rules allowed it).
+ */
+void net_modes_host_return_flag(vmobjptridx_t flag, playernum_t pnum);
+/* Host: a dying or departing carrier's flag, if the rules send it home
+ * instead of dropping it.  Takes the flag from the ship; returns the team
+ * of the flag to put home after the drop.
+ */
+[[nodiscard]]
+std::optional<uint8_t> net_modes_host_take_dropped_flag(object &ship, playernum_t pnum);
+/* Host: put the flag of team `team` home (a return, a respawn). */
+void net_modes_host_flag_home(uint8_t team, playernum_t returned_by);
+/* Host: the level inventory found a flag missing: true if it went home
+ * (Classic), false to let the inventory place it.
+ */
+[[nodiscard]]
+bool net_modes_host_respawn_flag(powerup_type_t powerup);
 
 /* Where the remote ship of player `pnum` is shown this frame: the host
  * time of its pose (net_interp.cpp).  False if it is not shown by

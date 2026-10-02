@@ -1524,7 +1524,8 @@ Message type numbering: session 0x01–0x1F (§4), `INVENTORY` 0x20,
 Stage 3 adds `OBJ_SETTLE` 0x47 and does not use `OBJ_AMMO` 0x23 or
 `DROP_FLAG_REQUEST` 0x3C (§8, "Stage 3 as implemented"). Protocol 105 adds
 `SPAWN_REQUEST` 0x48 and `SPAWN_SITE` 0x49 (§8, "Host-assigned spawns").
-Protocol 109 uses `CAPTURE` 0x39 (§8, "Stage 6a: game modes").
+Protocol 109 uses `CAPTURE` 0x39, protocol 111 `CTF_NOTICE` 0x4A (§8,
+"Stage 6a: game modes"; 110 is `ORB_BONUS` 0x3A, hoard).
 The table lives in `net_v2.h` as a `for_each_net_v2_message(VALUE)` macro
 with `(NAME, id, min_len, max_len, allowed_sender)` so the length and
 direction checks of §3.7 are table-driven like v1's `command_length`.
@@ -2809,6 +2810,72 @@ triggers, robots). Rules and wire layouts in `common/main/net_v2_modes.h`
   captures, 293 flag pickups, 263 flags dropped on deaths, the flag count
   never broken in 10.8 million frames.
 - **Version.** `MULTI_PROTO_VERSION` and `NET_V2_PROTO_VERSION` are 109.
+
+**Capture the flag (Classic) (protocol 111).**
+
+- **What.** A variant of CTF the host chooses in the game setup ("Capture
+  the flag (Classic)", `Netgame.gamemode` stays `capture_flag`, the variant
+  is bit 0 of `Netgame.CtfClassicFlags`). Every flag starts at home, in its
+  own team's goal, and a captured flag comes back there: players know
+  where the flags are and fight through the other team for them. Three
+  host options (bits 1–3, "Advanced Options" → "CTF Classic: flag rules",
+  `ctf_rules`): a dropped flag returns home at once (else it stays where
+  it fell; default off), the own team returns its flag by touching it
+  (default on), a team scores only while its own flag is at home (default
+  on).
+- **Home.** A flag is at home while it lies in a goal segment of its own
+  team (a flag that comes to rest in its own goal counts as home). Its
+  home spot is the center of the team's largest goal segment (the sum of
+  the squared distances of its corners from its center), the lowest
+  segment number of equal ones (`choose_home`): every machine computes the
+  same. A level without a goal for a team keeps that team's flag where the
+  level has it, and its respawns go where the level inventory puts them.
+- **Level start, every machine** (`net_modes_prepare_level_flags`, in
+  `multi_prep_level_objects` before the level inventory is counted and
+  before the level's net ids are given): the level's flags are moved to
+  their homes, so no message is needed; a join in progress gets them from
+  the snapshot. A level without a flag of a team gets none.
+- **Host.**
+  - A capture (with the own flag home if the rule says so, else
+    `CTF_NOTICE own_flag_away` to the carrier, at most every 3 s) puts the
+    captured flag home (`net_modes_host_flag_home`: created at the home
+    spot, at rest, `OBJ_CREATE`), as does the level inventory when it
+    finds a flag missing (`maybe_drop_net_powerup`).
+  - A carrier's death or departure with "dropped flag returns": the flag
+    is taken from the ship before the drop and goes home after it
+    (`net_modes_host_take_dropped_flag`).
+  - The own team's touch: the pickup rules let a player take its own
+    team's flag as a *return* (`inventory_rules::own_flag_returns`; the
+    player gains nothing, `apply_pickup`); the host refuses it while the
+    flag is at home, else removes it (`OBJ_REMOVE`) and puts it home. A
+    client asks only for a flag away from home; a bot does not seek its
+    own flag (it returns one by flying through it).
+  - The idle return: with "score only with own flag home" and neither
+    return rule, two dropped flags could stop both teams from scoring
+    for the rest of the level; a flag that lies away from home for 30 s
+    then goes home (`idle_flag_returns`).
+- **`CTF_NOTICE` (0x4A, reliable, host → all or one, 3 bytes):** `kind` u8
+  (0 returned: the flag of `team` went home, touched by `pid` or on its
+  own with `pid` 0xFF; 1 own flag away: to player `pid` only), `team` u8,
+  `pid` u8. Clients show "Red flag returned", "Red flag returned by …",
+  "Your flag must be home to score"; a capture in Classic also shows
+  "Blue team scores!".
+- **Settings.** `GAME_SETTINGS` (and the game info that a join shows)
+  carry `CtfClassicFlags` in the byte that was reserved (once
+  `PacketLossPrevention`); unknown bits are dropped. The host keeps them in
+  its `.ngp` (`CtfClassic=`); the netgame info (Shift+Pause) shows the
+  mode as "Capture the flag (Classic)" and the three rules.
+- **Tests.** `test-net-v2-modes`: every option combination of the touch
+  and capture rules, the idle return, the home choice, `CTF_NOTICE`, the
+  own flag's return in the pickup rules, and a model of every combination
+  (50 seeds × 3000 steps each) that checks the flags' places after every
+  step. `-botarena-mode ctfclassic -botarena-ctf-rules N` (N: bits 1–3
+  as above, default 12): every combination on Tynos and SNYTEK-P 1, 2, 3,
+  6, 9, 2 seeds × 30 min each (96 games): the flags start at home in every
+  game, 278 captures, 71 flags returned by touch, 46 idle returns, 96
+  captures refused for an own flag away, the flag count never broken.
+- **Version.** `MULTI_PROTO_VERSION` and `NET_V2_PROTO_VERSION` are 111
+  (110 is hoard's `ORB_BONUS`).
 
 ### Stage 5 — Join in progress, level flow, level end
 

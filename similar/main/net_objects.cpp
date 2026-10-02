@@ -43,6 +43,7 @@
 
 #include "net_v2_objects.h"
 #include "net_v2_lagtest.h"
+#include "net_v2_modes.h"
 #include "args.h"
 #include "net_v2_session.h"
 #include "net_v2_game.h"
@@ -250,7 +251,11 @@ nv::inventory_rules rules_for(const playernum_t pnum)
 	r.max_orbs = player_info::max_hoard_orbs;
 	r.capture_mode = game_mode_capture_flag(Game_mode);
 	if (r.capture_mode)
+	{
 		r.host_owned_flags = r.has_team_flag_bit;
+		/* Classic: a touch returns the own team's flag (net_modes.cpp). */
+		r.own_flag_returns = nv::ctf_rules::from_bits(Netgame.CtfClassicFlags).touch_returns;
+	}
 	r.hoard_mode = game_mode_hoard(Game_mode);
 	r.max_omega_charge = MAX_OMEGA_CHARGE;
 #else
@@ -690,6 +695,15 @@ bool player_alive_for_authority(const playernum_t pnum)
 	return true;
 }
 
+/* The pickup `d` of player `pnum` is a return of its own team's flag
+ * (capture the flag, Classic), not a take.
+ */
+[[nodiscard]]
+bool is_flag_return(const nv::pickup_desc &d, const playernum_t pnum)
+{
+	return d.kind == nv::pickup_kind::team_flag && d.index != rules_for(pnum).team;
+}
+
 /* The host's decision on player `pnum` taking the powerup `id`. */
 [[nodiscard]]
 host_decision host_decide(const playernum_t pnum, const netid_t id, const uint8_t powerup_id)
@@ -736,12 +750,27 @@ host_decision host_decide(const playernum_t pnum, const netid_t id, const uint8_
 		}
 	}
 	r.d = nv::decide_pickup(o, q, for_rules(inv), rules_for(pnum), GameTime64);
+	/* Its own flag at home: there is nothing to return. */
+	if (r.d.grant && is_flag_return(r.desc, pnum) && net_modes_flag_at_home(*r.obj))
+	{
+		r.d.grant = false;
+		r.d.reason = nv::deny_reason::cannot_use;
+	}
 	return r;
 }
 
 /* The host grants a client's request. */
 void host_grant_remote(const playernum_t pnum, const netid_t id, const host_decision &h)
 {
+	if (is_flag_return(h.desc, pnum))
+	{
+		/* Its own flag goes home; the player gains nothing.  The
+		 * object's removal (OBJ_REMOVE) answers the request.
+		 */
+		A.table.unbind(id);
+		net_modes_host_return_flag(h.obj, pnum);
+		return;
+	}
 	auto &obj{*h.obj};
 	const auto powerup{get_powerup_id(obj)};
 	auto &mirror{A.mirrors[pnum]};
@@ -770,8 +799,14 @@ void host_touch(const vmobjptridx_t obj, const netid_t id)
 	const auto h{host_decide(Player_num, id, underlying_value(powerup))};
 	if (!h.d.grant)
 	{
-		if (h.d.reason == nv::deny_reason::cannot_use)
+		if (h.d.reason == nv::deny_reason::cannot_use && !is_flag_return(h.desc, Player_num))
 			show_cannot_use(powerup, h.desc, own_inventory());
+		return;
+	}
+	if (is_flag_return(h.desc, Player_num))
+	{
+		A.table.unbind(id);
+		net_modes_host_return_flag(obj, Player_num);
 		return;
 	}
 	const auto before{obj->ctype.powerup_info.count};
@@ -881,6 +916,11 @@ void lag_touch(const vmobjptridx_t powerup, const netid_t id)
 		return;
 	const auto powerup_id{get_powerup_id(powerup)};
 	const auto desc{desc_of(powerup_id)};
+	/* Its own team's flag: asked for only to return it (Classic) from
+	 * away from home; nothing to say otherwise.
+	 */
+	if (desc.kind == nv::pickup_kind::team_flag && is_flag_return(desc, Player_num) && (!rules_for(Player_num).own_flag_returns || net_modes_flag_at_home(powerup)))
+		return;
 	const auto inv{own_inventory()};
 	if (!nv::evaluate_pickup(for_rules(inv), rules_for(Player_num), desc, static_cast<uint32_t>(std::max(pinfo.count, 0))).usable)
 	{
@@ -1404,6 +1444,11 @@ bool net_objects_touch(const vmobjptridx_t powerup)
 	auto &pinfo{powerup->ctype.powerup_info};
 	if ((pinfo.flags & PF_SPAT_BY_PLAYER) && pinfo.creation_time > 0 && GameTime64 < pinfo.creation_time + SPAT_DELAY)
 		return true;
+	/* Its own team's flag: asked for only to return it (Classic) from
+	 * away from home; nothing to say otherwise.
+	 */
+	if (desc.kind == nv::pickup_kind::team_flag && is_flag_return(desc, Player_num) && (!rules_for(Player_num).own_flag_returns || net_modes_flag_at_home(powerup)))
+		return true;
 	const auto inv{own_inventory()};
 	if (!nv::evaluate_pickup(for_rules(inv), rules_for(Player_num), desc, static_cast<uint32_t>(std::max(pinfo.count, 0))).usable)
 	{
@@ -1482,6 +1527,10 @@ void net_objects_host_drop_player_eggs(const playernum_t pnum)
 		net_interp_snap_to_newest(pnum);
 		write_inventory(*objp, A.mirrors[pnum].current(), true);
 	}
+	/* Capture the flag (Classic): the carrier's flag goes home instead of
+	 * dropping, if the rules say so.
+	 */
+	const auto flag_home{net_modes_host_take_dropped_flag(*objp, pnum)};
 	Net_create_loc = 0;
 	drop_player_powerup_eggs(objp);
 	const auto created{std::min<unsigned>(Net_create_loc, MAX_NET_CREATE_OBJECTS)};
@@ -1510,6 +1559,8 @@ void net_objects_host_drop_player_eggs(const playernum_t pnum)
 		write_inventory(*objp, A.mirrors[pnum].current(), false);
 	}
 	con_printf(CON_NORMAL, "net: P#%u (%s) dropped %u powerups:%s", pnum, player_role(pnum), created, list);
+	if (flag_home)
+		net_modes_host_flag_home(*flag_home, MAX_PLAYERS);
 }
 
 void net_objects_player_reappeared(const playernum_t pnum)
@@ -1620,6 +1671,11 @@ bool net_objects_bot_can_use(const playernum_t pnum, const powerup_type_t id, co
 		return false;
 	const auto desc{desc_of(id)};
 	if (desc.kind == nv::pickup_kind::none)
+		return false;
+	/* A bot does not seek its own team's flag (it returns one only by
+	 * flying through it).
+	 */
+	if (is_flag_return(desc, pnum))
 		return false;
 	auto &Objects{LevelUniqueObjectState.Objects};
 	const auto &ship{*Objects.vcptr(vcplayerptr(pnum)->objnum)};

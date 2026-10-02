@@ -62,6 +62,18 @@ The game writes what happens with the tracker to `gamelog.txt`, in lines startin
 - **Joining:** in *Join game manually*, **Ctrl+V** (or Shift+Insert) in the address field pastes the address; a pasted `address:port` or `[IPv6]:port` also fills the game port field.
 - In every text field of the menus and in the chat line (F8), **Ctrl+V** / **Shift+Insert** paste (the first line of the clipboard, trimmed, as far as it fits) and, in menu fields, **Ctrl+C** copies the field's text. On macOS, Cmd+V and Cmd+C work too.
 
+### Capture the flag (Classic)
+
+A variant of capture the flag that the host picks in the game setup (*Capture the flag (Classic)*, next to *Capture the flag*). Each team's flag starts in the team's own goal instead of where the level designer put it, and a captured flag goes back to its own goal: you know where the enemy flag is, but you have to fight your way through the enemy team to get it. As before, you score by bringing the enemy flag into your own goal.
+
+The host sets three flag rules under *Advanced Options* → *CTF Classic: flag rules*. They are saved with the host's game settings, and players see them in the netgame info (Shift+Pause):
+
+- **Dropped flag returns home at once.** When a carrier is killed or leaves, the flag goes straight home. If off, it stays where it fell. Default: off.
+- **Own team returns its flag by touch.** Fly through your own team's flag lying away from home to send it home ("Red flag returned by …"). Default: on.
+- **Score only with own flag home.** A capture counts only while your own flag sits in your goal. Otherwise you see "Your flag must be home to score". Default: on.
+
+When neither return rule is on but *score only with own flag home* is, a flag lying away from home goes home by itself after 30 seconds. Without this, both teams could be stuck unable to score. The level needs a goal for each team. When a team has several goal segments, the flag goes to the largest one. All players need a build with this mode (network protocol 111).
+
 
 ## 4. Legal stuff:
 

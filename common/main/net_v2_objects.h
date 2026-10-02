@@ -280,6 +280,11 @@ struct inventory_rules
 	 * would lose it).
 	 */
 	std::uint32_t host_owned_flags{};
+	/* Capture the flag (Classic): a player's touch returns its own team's
+	 * flag (the host decides whether the flag is away from home, and
+	 * puts it there; the player gains nothing).
+	 */
+	bool own_flag_returns{};
 	bool capture_mode{};
 	bool hoard_mode{};
 	std::uint8_t team{};
@@ -378,10 +383,21 @@ constexpr pickup_outcome evaluate_pickup(const inventory &inv, const inventory_r
 				return {};
 			return {true, true, 0, 0};
 		case pickup_kind::team_flag:
+			if (!r.capture_mode)
+				return {};
+			if (r.team != d.index)
+			{
+				/* The player's own team's flag: a return, if the
+				 * rules have it.
+				 */
+				if (r.own_flag_returns)
+					return {true, true, 0, 0};
+				return {};
+			}
 			/* One flag at a time: the carried flag is one bit, and a
 			 * second would be lost with it.
 			 */
-			if (!r.capture_mode || r.team != d.index || (inv.powerup_flags & r.has_team_flag_bit))
+			if (inv.powerup_flags & r.has_team_flag_bit)
 				return {};
 			return {true, true, 0, 0};
 		case pickup_kind::orb:
@@ -450,7 +466,9 @@ constexpr void apply_pickup(inventory &inv, const inventory_rules &r, const pick
 			inv.powerup_flags |= d.bit;
 			break;
 		case pickup_kind::team_flag:
-			inv.powerup_flags |= r.has_team_flag_bit;
+			/* A return of the own team's flag gives nothing. */
+			if (r.team == d.index)
+				inv.powerup_flags |= r.has_team_flag_bit;
 			break;
 		case pickup_kind::orb:
 			if (inv.orbs < r.max_orbs)

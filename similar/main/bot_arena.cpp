@@ -281,7 +281,7 @@ std::optional<network_game_type> arena_mode(const std::string_view name)
 		return network_game_type::anarchy;
 	if (name == "team")
 		return network_game_type::team_anarchy;
-	if (name == "ctf")
+	if (name == "ctf" || name == "ctfclassic")
 		return network_game_type::capture_flag;
 	return std::nullopt;
 }
@@ -367,11 +367,16 @@ bool bot_arena_start()
 	const auto mode{arena_mode(CGameArg.DbgBotArenaMode)};
 	if (!mode)
 	{
-		con_printf(CON_URGENT, "botarena: unknown mode \"%s\" (anarchy, team, ctf)", CGameArg.DbgBotArenaMode.c_str());
+		con_printf(CON_URGENT, "botarena: unknown mode \"%s\" (anarchy, team, ctf, ctfclassic)", CGameArg.DbgBotArenaMode.c_str());
 		return false;
 	}
 	const unsigned bots{CGameArg.DbgBotArenaBots};
 	net_udp_arena_prepare(level, bots, *mode);
+	/* Capture the flag (Classic) and its options, or plain. */
+	if (*mode == network_game_type::capture_flag)
+		Netgame.CtfClassicFlags = CGameArg.DbgBotArenaMode == "ctfclassic"
+			? static_cast<uint8_t>(ctf_rule::classic | (CGameArg.DbgBotArenaCtfRules >= 0 ? CGameArg.DbgBotArenaCtfRules : ctf_rule::defaults))
+			: uint8_t{0};
 	if (!setup_bots(bots))
 		return false;
 	con_printf(CON_URGENT, "botarena: level %u of \"%s\" (%s), %u bots, %" PRIu32 " s at %u fps, seed %" PRIu32,
