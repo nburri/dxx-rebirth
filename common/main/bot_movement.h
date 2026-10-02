@@ -557,11 +557,19 @@ inline avoid_keys_result avoid_keys(thrust_keys k, const vec3 &avoid_local, cons
  * CORNER_SLOW_FULL and beyond, within CORNER_SLOW_DISTANCE of it.
  * Section 9.16: 0.75 within 20 units (was 0.55 within 30): the keys
  * slide through a bend, and the reverse key braked into every one.
+ * Section 9.18: 0.9 (the humans of the group flew 7 to 10 units/s
+ * faster than the bots on every map; the bots slowed into bends a human
+ * slides through).
  */
 constexpr double CORNER_SLOW_FROM{1.05};	// 60 degrees
 constexpr double CORNER_SLOW_FULL{2.36};	// 135 degrees
-constexpr double CORNER_SLOWEST{0.75};
+constexpr double CORNER_SLOWEST{0.9};
 constexpr double CORNER_SLOW_DISTANCE{20};
+/* Section 9.18: the speed toward the end of a path that is not a pickup
+ * (a hunt's or a roam's place): this much per unit of distance left (was
+ * 1.5: from 39 units on the bot braked).
+ */
+constexpr double PATH_END_SLOW_GAIN{3};
 
 [[nodiscard]]
 inline double corner_speed(const double bend, const double dist, const double max_speed)

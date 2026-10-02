@@ -1515,10 +1515,262 @@ void test_gauss_aim()
 	CHECK(GAUSS_AIM_ERROR_EXTRA > 0);
 }
 
+
+/* Section 9.18: the habits a style profile aims at, closed loop. */
+void test_habit_governor()
+{
+	constexpr double dt{HABIT_SAMPLE_TICKS / static_cast<double>(BOT_TICK_RATE)};
+	/* No aim: inactive, the juke's defaults. */
+	{
+		habit_governor g;
+		g.set({});
+		CHECK(!g.active());
+		CHECK(g.rhythm().flip == STRAFE_FLIP_SHARE && g.rhythm().pause == STRAFE_PAUSE_SHARE && g.rhythm().offset == 0 && g.rhythm().weave == 0 && g.rhythm().vertical < 0);
+		CHECK(!g.burn_governed(burn_situation::chasing));
+	}
+	/* The reversals as the analysis counts them: a key turned round at
+	 * once, or within 300 ms, is one; after a longer pause it is not;
+	 * outside a fight nothing counts.
+	 */
+	{
+		habit_aims a;
+		a.strafe_reversals = 40;
+		habit_governor g;
+		g.set(a);
+		CHECK(g.active());
+		const auto hold{[&](const int side, const int vertical, const double seconds, const bool fight = true) {
+			for (double t{}; t < seconds - 1e-9; t += dt)
+				g.strafe_tick(dt, fight, side, vertical);
+		}};
+		hold(1, 0, 0.5);
+		hold(-1, 0, 0.5);
+		hold(0, 0, 0.2);
+		hold(1, 0, 0.5);
+		hold(0, 0, 0.6);
+		hold(-1, 0, 0.5);
+		/* up after right: 90 degrees, a reversal too (scan_strafe) */
+		hold(0, 1, 0.5);
+		/* right and up after up: the same run */
+		hold(1, 1, 0.5);
+		const double fight_s{3.8};
+		CHECK(near(g.reversals_per_min(), 3 / fight_s * 60, 1));
+		CHECK(near(g.strafe_share(), 3.0 / fight_s, 0.02));
+		const double before{g.reversals_per_min()};
+		hold(1, 0, 5, false);
+		hold(-1, 0, 5, false);
+		CHECK(near(g.reversals_per_min(), before, 1e-9));
+	}
+	/* Too few reversals: the flip share rises; too many: it falls; it
+	 * stays in its bounds.
+	 */
+	{
+		habit_aims a;
+		a.strafe_reversals = 60;
+		habit_governor g;
+		g.set(a);
+		for (int i{}; i < 600; ++i)
+			g.strafe_tick(dt, true, 1, 0);
+		CHECK(g.rhythm().flip > STRAFE_FLIP_SHARE);
+		CHECK(g.rhythm().flip <= HABIT_FLIP_MAX);
+		habit_aims b;
+		b.strafe_reversals = 5;
+		habit_governor h;
+		h.set(b);
+		for (int i{}; i < 6000; ++i)
+			h.strafe_tick(dt, true, (i / 6) % 2 ? 1 : -1, 0);
+		CHECK(h.reversals_per_min() > 100);
+		CHECK(h.rhythm().flip == HABIT_FLIP_MIN);
+	}
+	/* The strafe share: below the aim the pauses become rarer, then the
+	 * runs are held on the path too; above it, more pauses.
+	 */
+	{
+		habit_aims a;
+		a.strafe_share = 0.9;
+		habit_governor g;
+		g.set(a);
+		for (int i{}; i < 3000; ++i)
+			g.strafe_tick(dt, true, 0, 0);
+		CHECK(near(g.rhythm().pause, HABIT_PAUSE_MIN, 1e-9));
+		CHECK(g.rhythm().weave > 0.5);
+		habit_aims b;
+		b.strafe_share = 0.2;
+		habit_governor h;
+		h.set(b);
+		for (int i{}; i < 3000; ++i)
+			h.strafe_tick(dt, true, 1, 0);
+		CHECK(h.rhythm().pause > STRAFE_PAUSE_SHARE);
+		CHECK(h.rhythm().weave == 0);
+	}
+	/* The vertical share follows its aim. */
+	{
+		habit_aims a;
+		a.strafe_vertical = 0.3;
+		habit_governor g;
+		g.set(a);
+		for (int i{}; i < 3000; ++i)
+			g.strafe_tick(dt, true, 1, 1);
+		CHECK(near(g.strafe_vertical(), 1, 1e-9));
+		CHECK(g.rhythm().vertical < 0.3 && g.rhythm().vertical >= 0);
+	}
+	/* The afterburner: wanted below the aim of the situation, not above;
+	 * a situation without an aim is the rule's.
+	 */
+	{
+		habit_aims a;
+		a.burn = {{0.3, -1, 0, 0.1}};
+		habit_governor g;
+		g.set(a);
+		CHECK(g.burn_governed(burn_situation::chasing) && !g.burn_governed(burn_situation::fleeing) && g.burn_governed(burn_situation::roam));
+		CHECK(g.burn_wanted(burn_situation::chasing));
+		CHECK(!g.burn_wanted(burn_situation::roam));
+		for (int i{}; i < 600; ++i)
+			g.burn_tick(1.0 / BOT_TICK_RATE, burn_situation::chasing, true);
+		CHECK(g.burn_share(burn_situation::chasing) > 0.99);
+		CHECK(!g.burn_wanted(burn_situation::chasing));
+		for (int i{}; i < 6000; ++i)
+			g.burn_tick(1.0 / BOT_TICK_RATE, burn_situation::chasing, false);
+		CHECK(g.burn_wanted(burn_situation::chasing));
+	}
+	/* The distance: the median of the shots; the offset moves the juke's
+	 * preferred distance toward the aim, within its bounds.
+	 */
+	{
+		habit_aims a;
+		a.fire_distance = 70;
+		habit_governor g;
+		g.set(a);
+		for (int i{}; i < 200; ++i)
+			g.fired(i % 2 ? 30 : 50, 60);
+		CHECK(g.fire_distance() == 30 || g.fire_distance() == 50);
+		CHECK(g.rhythm().offset > 0 && g.rhythm().offset <= HABIT_OFFSET_MAX * 60);
+		juke_state j;
+		bot_rng rng{3};
+		j.update(rng, 10, 20, 35, 95, 0, g.rhythm());
+		CHECK(j.range() >= 35 + g.rhythm().offset - 1e-9);
+		habit_aims b;
+		b.fire_distance = 20;
+		habit_governor h;
+		h.set(b);
+		for (int i{}; i < 2000; ++i)
+			h.fired(80, 60);
+		CHECK(h.fire_distance() == 80);
+		CHECK(h.rhythm().offset == HABIT_OFFSET_MIN * 60);
+		juke_state k;
+		k.update(rng, 10, 20, 35, 95, 0, h.rhythm());
+		CHECK(k.range() >= 35 * 0.5 - 1e-9);
+	}
+	/* The same aims again (a respawn) keep what was learnt; new ones
+	 * start afresh.
+	 */
+	{
+		habit_aims a;
+		a.strafe_reversals = 60;
+		habit_governor g;
+		g.set(a);
+		for (int i{}; i < 600; ++i)
+			g.strafe_tick(dt, true, 1, 0);
+		const double flip{g.rhythm().flip};
+		g.set(a);
+		CHECK(g.rhythm().flip == flip);
+		a.strafe_reversals = 50;
+		g.set(a);
+		CHECK(g.rhythm().flip == STRAFE_FLIP_SHARE);
+	}
+	/* The juke flies the rhythm: no flip, every run the same way; full
+	 * flip, every run the other way; no pause.
+	 */
+	{
+		bot_rng rng{11};
+		for (const double flip : {0.0, 1.0})
+		{
+			juke_rhythm r;
+			r.flip = flip;
+			r.pause = 0;
+			juke_state j;
+			int last{}, flips{}, runs{};
+			for (int t{}; t < 6000; ++t)
+			{
+				j.update(rng, 10, 20, 35, 95, 0, r);
+				if (j.started())
+				{
+					CHECK(j.side() != 0);
+					if (last)
+						flips += j.side() != last;
+					++runs;
+					last = j.side();
+				}
+			}
+			CHECK(runs > 100);
+			CHECK(flip == 0 ? flips == 0 : flips == runs - 1);
+		}
+	}
+	/* The weave: the juke's keys on the axes the path leaves free. */
+	{
+		juke_state j;
+		bot_rng rng{5};
+		juke_rhythm r;
+		r.pause = 0;
+		r.vertical = 1;
+		j.update(rng, 10, 20, 35, 95, 0, r);
+		CHECK(j.side() && j.vertical());
+		thrust_keys path;
+		path.forward = 1;
+		path.sideways = -1;
+		const auto w{path_weave(path, j, 0.9)};
+		CHECK(w.forward == 1 && w.sideways == -1 && w.vertical == j.vertical() * 0.9);
+		const auto free{path_weave({}, j, 1)};
+		CHECK(free.sideways == j.side() && free.vertical == j.vertical());
+	}
+}
+
+/* Section 9.18: the situations as the analysis has them. */
+void test_burn_situation()
+{
+	situation_view v;
+	v.max_speed = 58;
+	v.max_turn_rate = 3;
+	v.nose = {0, 0, 1};
+	CHECK(situation_of(v) == burn_situation::roam);
+	v.attacked = true;
+	CHECK(situation_of(v) == burn_situation::fighting);
+	v.attacked = false;
+	v.enemy_in_sight = true;
+	v.to_enemy = {0, 0, 100};
+	v.vel = {0, 0, 40};
+	CHECK(situation_of(v) == burn_situation::chasing);
+	v.turn_rate = 2;
+	CHECK(situation_of(v) == burn_situation::fighting);
+	v.turn_rate = 0;
+	v.vel = {0, 0, 5};
+	CHECK(situation_of(v) == burn_situation::fighting);
+	/* behind and moving away */
+	v.to_enemy = {0, 0, -100};
+	v.vel = {0, 0, 40};
+	CHECK(situation_of(v) == burn_situation::fleeing);
+	/* behind, unseen, but it hits the ship */
+	v.enemy_in_sight = false;
+	v.attacked = true;
+	CHECK(situation_of(v) == burn_situation::fleeing);
+	/* off to the side: neither */
+	v.to_enemy = {100, 0, 0};
+	CHECK(situation_of(v) == burn_situation::fighting);
+	/* The defaults by skill. */
+	CHECK(default_burn_aims(bot_skill::trainee)[0] < 0);
+	CHECK(default_burn_aims(bot_skill::rookie)[0] > 0 && default_burn_aims(bot_skill::rookie)[1] < 0);
+	for (std::size_t i{}; i != BURN_SITUATIONS; ++i)
+	{
+		CHECK(default_burn_aims(bot_skill::insane)[i] > default_burn_aims(bot_skill::hotshot)[i]);
+		CHECK(default_burn_aims(bot_skill::insane)[i] < 0.5);
+	}
+}
+
 }
 
 int main()
 {
+	test_habit_governor();
+	test_burn_situation();
 	test_gauss_aim();
 	test_pursuit_target_and_corner();
 	test_intercept();

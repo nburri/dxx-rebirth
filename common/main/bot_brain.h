@@ -1097,6 +1097,26 @@ constexpr unsigned FIGHT_RANGE_MIN_MS{1000};
 constexpr unsigned FIGHT_RANGE_MAX_MS{2500};
 constexpr double FIGHT_RANGE_DRAW_SHARE{0.4};
 
+/* Section 9.18: the rhythm of the juke: the share of the runs followed
+ * by a pause, of the runs that go the other way, and what is added to
+ * the preferred distance drawn.  A bot that flies a style profile has
+ * its own (habit_governor).
+ */
+struct juke_rhythm
+{
+	double pause{STRAFE_PAUSE_SHARE};
+	double flip{STRAFE_FLIP_SHARE};
+	double offset{};
+	/* The share of the runs whose key is held on a path flown in a fight
+	 * too, on an axis the path leaves free (path_weave).
+	 */
+	double weave{};
+	/* The share of the runs with an up or down key too (negative: the
+	 * skill's strafe_vertical).
+	 */
+	double vertical{-1};
+};
+
 class juke_state
 {
 	int8_t m_side{}, m_vertical{};
@@ -1112,17 +1132,17 @@ public:
 		*this = {};
 	}
 	/* Once per tick. */
-	void update(bot_rng &rng, const unsigned min_ticks, const unsigned max_ticks, const double lo, const double hi, const double vertical)
+	void update(bot_rng &rng, const unsigned min_ticks, const unsigned max_ticks, const double lo, const double hi, const double vertical, const juke_rhythm &r = {})
 	{
 		m_started = false;
 		/* The preferred distance: its own time, a new one when the band
 		 * moved off it.
 		 */
-		if (m_range_left && m_range >= lo && m_range <= hi)
+		if (m_range_left && m_range >= std::max(lo * 0.5, lo + r.offset) && m_range <= hi + std::max(r.offset, 0.0))
 			--m_range_left;
 		else
 		{
-			m_range = rng.uniform(lo, lo + (hi - lo) * FIGHT_RANGE_DRAW_SHARE);
+			m_range = std::max(lo * 0.5, rng.uniform(lo, lo + (hi - lo) * FIGHT_RANGE_DRAW_SHARE) + r.offset);
 			const unsigned a{ticks_from_ms(FIGHT_RANGE_MIN_MS)};
 			m_range_left = a + rng.below(ticks_from_ms(FIGHT_RANGE_MAX_MS) - a + 1);
 		}
@@ -1133,7 +1153,7 @@ public:
 		}
 		const bool was_run{m_side != 0};
 		m_started = true;
-		if (was_run && rng.uniform() < STRAFE_PAUSE_SHARE)
+		if (was_run && rng.uniform() < r.pause)
 		{
 			m_last_side = m_side;
 			m_side = m_vertical = 0;
@@ -1146,8 +1166,8 @@ public:
 		if (!last)
 			m_side = static_cast<int8_t>(rng.uniform() < 0.5 ? -1 : 1);
 		else
-			m_side = rng.uniform() < STRAFE_FLIP_SHARE ? static_cast<int8_t>(-last) : last;
-		m_vertical = static_cast<int8_t>(rng.uniform() < vertical ? (rng.uniform() < 0.5 ? -1 : 1) : 0);
+			m_side = rng.uniform() < r.flip ? static_cast<int8_t>(-last) : last;
+		m_vertical = static_cast<int8_t>(rng.uniform() < (r.vertical >= 0 ? r.vertical : vertical) ? (rng.uniform() < 0.5 ? -1 : 1) : 0);
 		const unsigned a{std::max(1u, min_ticks)};
 		const unsigned b{std::max(a, max_ticks)};
 		m_left = a + rng.below(b - a + 1);
@@ -1290,6 +1310,20 @@ inline thrust_keys fight_keys(const juke_state &juke, const double forward, cons
 		k.forward = 0;
 	k.sideways = juke.side() * strafe;
 	k.vertical = juke.vertical() * strafe;
+	return k;
+}
+
+/* Section 9.18: a path flown with keys in a fight, with the juke's keys
+ * on the axes the path leaves free (a profile's strafe on its way to a
+ * pickup; habit_governor decides how many runs).
+ */
+[[nodiscard]]
+inline thrust_keys path_weave(thrust_keys k, const juke_state &juke, const double strafe)
+{
+	if (!k.sideways)
+		k.sideways = juke.side() * strafe;
+	if (!k.vertical)
+		k.vertical = juke.vertical() * strafe;
 	return k;
 }
 
@@ -1707,6 +1741,28 @@ constexpr double FLEE_BURN_SHARE{0.5};
  * file, apply_style_profile), per bot.  The defaults are the code's
  * constants: a bot of a built-in style flies with these.
  */
+/* Section 9.18: the aims of a bot's habits (habit_governor); negative:
+ * no aim.
+ */
+struct habit_aims
+{
+	/* Strafe reversals per minute of fight, the share of the fight with
+	 * a strafe key.
+	 */
+	double strafe_reversals{-1}, strafe_share{-1};
+	/* The vertical against the sideways thrust of the strafe (the
+	 * analysis' vertical share).
+	 */
+	double strafe_vertical{-1};
+	/* The share of the time with the afterburner lit, by situation
+	 * (burn_situation: chasing, fleeing, roam, fighting).
+	 */
+	std::array<double, 4> burn{{-1, -1, -1, -1}};
+	/* The median distance when firing. */
+	double fire_distance{-1};
+	constexpr bool operator==(const habit_aims &) const = default;
+};
+
 struct tune_params
 {
 	/* The fight band before the style's range_scale (BOT_RANGE_LO/HI). */
@@ -1739,6 +1795,326 @@ struct tune_params
 	 * (heavy_fire_delay).
 	 */
 	double heavy_fire_delay{-1};
+	/* Section 9.18: what the bot reaches by watching itself
+	 * (habit_governor).
+	 */
+	habit_aims habits;
+};
+
+/* Section 9.18: the afterburner of a bot that flies no profile, by
+ * situation (chasing, fleeing, roam, fighting): about the group's
+ * pilots' (the Pyroglyphic game of 2026-10-02 and the Corona and
+ * Schwarzbrenner games before it: chasing 12-53 %, fleeing 15-53 %, no
+ * enemy in sight 2-36 %, the rest 8-38 %; the middle 30, 35, 13 and
+ * 14 %) at Insane, less below; Rookie only chases with it (its rule),
+ * Trainee never burns.
+ */
+inline constexpr std::array<double, BOT_SKILL_COUNT> default_burn_scale{{0, 0.5, 0.6, 0.8, 1}};
+inline constexpr std::array<double, 4> default_burn_insane{{0.3, 0.35, 0.13, 0.14}};
+
+[[nodiscard]]
+constexpr std::array<double, 4> default_burn_aims(const bot_skill skill)
+{
+	const auto i{static_cast<std::size_t>(skill)};
+	if (i == 0 || i >= BOT_SKILL_COUNT)
+		return {{-1, -1, -1, -1}};
+	const double k{default_burn_scale[i]};
+	if (i == 1)
+		return {{default_burn_insane[0] * k, -1, -1, -1}};
+	return {{default_burn_insane[0] * k, default_burn_insane[1] * k, default_burn_insane[2] * k, default_burn_insane[3] * k}};
+}
+
+/* Section 9.18: the situations of the analysis' afterburner shares
+ * (movement_analysis.h, situation_of): chasing (the enemy in sight
+ * ahead, closing in, the nose steady), fleeing (an enemy in sight or an
+ * attacker behind, moving away), roam (no enemy in sight, not under
+ * attack), fighting (the rest).
+ */
+enum class burn_situation : uint8_t
+{
+	chasing,
+	fleeing,
+	roam,
+	fighting,
+};
+constexpr std::size_t BURN_SITUATIONS{4};
+
+/* The analysis' thresholds (movement_analysis.h, limits): moving toward
+ * or away faster than APPROACH_SHARE of the top speed; the nose turning
+ * slower than TURN_RATE_SHARE of the top turn rate; the enemy in the
+ * 30-degree cone of the nose; behind beyond 100 degrees.
+ */
+constexpr double SITUATION_APPROACH_SHARE{0.15};
+constexpr double SITUATION_TURN_SHARE{0.35};
+constexpr double SITUATION_CONE_COS{0.8660254037844387};
+constexpr double SITUATION_BEHIND_COS{-0.17364817766693033};	// 100 degrees
+
+struct situation_view
+{
+	/* An enemy in sight; under attack (hit within the last 2 s); the
+	 * offset of the nearest enemy in sight, else of the nearest enemy.
+	 */
+	bool enemy_in_sight{}, attacked{};
+	vec3 to_enemy;
+	/* The ship's nose, velocity, top speed, turn rate and top turn rate
+	 * (radians per second).
+	 */
+	vec3 nose, vel;
+	double max_speed{}, turn_rate{}, max_turn_rate{};
+};
+
+[[nodiscard]]
+inline burn_situation situation_of(const situation_view &v)
+{
+	const double d{length(v.to_enemy)};
+	const double approach{d > 0 ? dot(v.vel, v.to_enemy) / d : 0};
+	const double approach_speed{SITUATION_APPROACH_SHARE * v.max_speed};
+	if (v.enemy_in_sight && d > 0)
+	{
+		if (dot(v.nose, v.to_enemy) > SITUATION_CONE_COS * d && approach > approach_speed && v.turn_rate < SITUATION_TURN_SHARE * v.max_turn_rate)
+			return burn_situation::chasing;
+	}
+	if ((v.enemy_in_sight || v.attacked) && d > 0 && dot(v.nose, v.to_enemy) < SITUATION_BEHIND_COS * d && approach < -approach_speed)
+		return burn_situation::fleeing;
+	if (!v.enemy_in_sight && !v.attacked)
+		return burn_situation::roam;
+	return burn_situation::fighting;
+}
+
+/* Section 9.18: a bot that flies a style profile watches its own flight
+ * as the analysis measures it and steers the habits the profile names
+ * toward the pilot's: the keys alone did not get there (the strafe of a
+ * profile reversed 41 times a minute where the pilot reversed 66; the
+ * afterburner burnt half as much; the bots fired 12 units nearer).  The
+ * walls, the dodges and the paths add to what the bot's own rhythm does,
+ * by level and by fight, so no fixed setting can hit the measured value;
+ * slow integral steps over the bot's own recent flight do.
+ *
+ * - The strafe: the runs and reversals as scan_strafe counts them (a run
+ *   is a lateral key held; the next one within 300 ms that goes at least
+ *   90 degrees the other way is a reversal), over the fight time.  The
+ *   juke's share of runs that go the other way (flip) follows the
+ *   reversals; the share followed by a pause, the share of the fight
+ *   with a strafe key.
+ * - The afterburner: the share of each situation's time burnt; below
+ *   the aim the bot may light it in that situation (the charge and the
+ *   way permitting), above it does not.
+ * - The distance: a running median of the distance at each shot; the
+ *   preferred distance of the juke moves by what it misses by.
+ */
+constexpr double HABIT_WINDOW_S{60};
+/* The analysis' fight: an enemy in sight within this (FIGHT_RANGE). */
+constexpr double HABIT_FIGHT_RANGE{400};
+constexpr double HABIT_BURN_WINDOW_S{30};
+constexpr unsigned HABIT_REVERSAL_GAP_MS{300};
+/* The recorder's rate: the strafe is looked at as the analysis sees it
+ * (a key of one tick of the bot's 60 is not in the recording).
+ */
+constexpr unsigned HABIT_SAMPLE_TICKS{2};
+/* Per second of fight: how far the flip share and the strafe amount move
+ * for a miss of the whole aim.
+ */
+constexpr double HABIT_FLIP_GAIN{0.02};
+constexpr double HABIT_AMOUNT_GAIN{0.03};
+constexpr double HABIT_VERTICAL_GAIN{0.02};
+constexpr double HABIT_FLIP_MIN{0.05};
+constexpr double HABIT_FLIP_MAX{0.95};
+/* The strafe amount: from 0 (a pause after HABIT_PAUSE_MAX of the runs)
+ * through 1 (after HABIT_PAUSE_MIN) to 2 (and every run held on the
+ * path too, path_weave).
+ */
+constexpr double HABIT_PAUSE_MIN{0.02};
+constexpr double HABIT_PAUSE_MAX{0.85};
+/* The shots whose median distance is watched; the offset's step per shot
+ * as a share of the miss, and its bounds as shares of the band.
+ */
+constexpr std::size_t HABIT_SHOTS{63};
+constexpr double HABIT_OFFSET_GAIN{0.02};
+constexpr double HABIT_OFFSET_MIN{-0.5};
+constexpr double HABIT_OFFSET_MAX{1.0};
+
+class habit_governor
+{
+	habit_aims m_aim;
+	bool m_any{};
+	/* The strafe: decaying sums over the fight time. */
+	double m_fight_s{}, m_strafe_s{}, m_reversals{}, m_side_s{}, m_vert_s{};
+	bool m_in_run{}, m_have_last{};
+	int8_t m_dir_side{}, m_dir_vert{}, m_last_side{}, m_last_vert{};
+	double m_since_run_s{1e9};
+	/* The strafe amount (0 to 2, HABIT_PAUSE_MAX). */
+	double m_amount{(HABIT_PAUSE_MAX - STRAFE_PAUSE_SHARE) / (HABIT_PAUSE_MAX - HABIT_PAUSE_MIN)};
+	juke_rhythm m_rhythm;
+	/* The afterburner: decaying time and burnt time by situation. */
+	std::array<double, BURN_SITUATIONS> m_sit_s{}, m_sit_burn_s{};
+	/* The distances of the last shots (a ring). */
+	std::array<double, HABIT_SHOTS> m_shots{};
+	std::size_t m_shot_count{}, m_shot_next{};
+	double m_median{-1};
+	void apply_amount()
+	{
+		m_rhythm.pause = HABIT_PAUSE_MAX - (HABIT_PAUSE_MAX - HABIT_PAUSE_MIN) * std::min(m_amount, 1.0);
+		m_rhythm.weave = std::clamp(m_amount - 1, 0.0, 1.0);
+	}
+public:
+	void set(const habit_aims &aim)
+	{
+		if (m_any && aim == m_aim)
+			return;
+		*this = {};
+		m_aim = aim;
+		m_any = aim.strafe_reversals >= 0 || aim.strafe_share >= 0 || aim.strafe_vertical >= 0 || aim.fire_distance >= 0 || std::ranges::any_of(aim.burn, [](const double b) { return b >= 0; });
+	}
+	[[nodiscard]]
+	bool active() const
+	{
+		return m_any;
+	}
+	[[nodiscard]]
+	const habit_aims &aim() const
+	{
+		return m_aim;
+	}
+	/* Every HABIT_SAMPLE_TICKS ticks alive (`dt` seconds): in a fight (an
+	 * enemy in sight within HABIT_FIGHT_RANGE), the lateral keys held
+	 * (-1, 0, 1).
+	 */
+	void strafe_tick(const double dt, const bool fight, const int side, const int vertical)
+	{
+		const bool active{fight && (side || vertical)};
+		/* A run ends when the keys let go or turn 90 degrees or more. */
+		if (m_in_run && (!active || side * m_dir_side + vertical * m_dir_vert <= 0))
+		{
+			m_in_run = false;
+			m_last_side = m_dir_side;
+			m_last_vert = m_dir_vert;
+			m_have_last = true;
+			m_since_run_s = 0;
+		}
+		if (!fight)
+		{
+			m_since_run_s += dt;
+			return;
+		}
+		const double keep{std::exp(-dt / HABIT_WINDOW_S)};
+		m_fight_s = m_fight_s * keep + dt;
+		m_strafe_s *= keep;
+		m_reversals *= keep;
+		m_side_s *= keep;
+		m_vert_s *= keep;
+		if (active)
+		{
+			if (!m_in_run)
+			{
+				m_in_run = true;
+				m_dir_side = static_cast<int8_t>(side);
+				m_dir_vert = static_cast<int8_t>(vertical);
+				if (m_have_last && m_since_run_s * 1000 <= HABIT_REVERSAL_GAP_MS && side * m_last_side + vertical * m_last_vert <= 0)
+					m_reversals += 1;
+			}
+			m_strafe_s += dt;
+			m_side_s += side ? dt : 0;
+			m_vert_s += vertical ? dt : 0;
+		}
+		else
+			m_since_run_s += dt;
+		/* The steps, once the window holds a few seconds of fight. */
+		if (m_fight_s < 5)
+			return;
+		if (m_aim.strafe_reversals > 0)
+		{
+			const double miss{(m_aim.strafe_reversals - reversals_per_min()) / m_aim.strafe_reversals};
+			m_rhythm.flip = std::clamp(m_rhythm.flip + HABIT_FLIP_GAIN * miss * dt, HABIT_FLIP_MIN, HABIT_FLIP_MAX);
+		}
+		if (m_aim.strafe_vertical >= 0 && m_side_s + m_vert_s > 1)
+		{
+			if (m_rhythm.vertical < 0)
+				m_rhythm.vertical = m_aim.strafe_vertical;
+			m_rhythm.vertical = std::clamp(m_rhythm.vertical + HABIT_VERTICAL_GAIN * (m_aim.strafe_vertical - strafe_vertical()) * dt, 0.0, 1.0);
+		}
+		if (m_aim.strafe_share >= 0)
+		{
+			const double miss{(m_aim.strafe_share - strafe_share()) / std::max(m_aim.strafe_share, 0.1)};
+			m_amount = std::clamp(m_amount + HABIT_AMOUNT_GAIN * miss * dt, 0.0, 2.0);
+			apply_amount();
+		}
+	}
+	[[nodiscard]]
+	double reversals_per_min() const
+	{
+		return m_fight_s > 0 ? m_reversals / m_fight_s * 60 : 0;
+	}
+	/* The vertical against the sideways keys (1 with no sideways). */
+	[[nodiscard]]
+	double strafe_vertical() const
+	{
+		return m_side_s > 0 ? std::min(m_vert_s / m_side_s, 1.0) : m_vert_s > 0 ? 1 : 0;
+	}
+	[[nodiscard]]
+	double strafe_share() const
+	{
+		return m_fight_s > 0 ? m_strafe_s / m_fight_s : 0;
+	}
+	/* Once per tick alive: the situation and whether it burnt. */
+	void burn_tick(const double dt, const burn_situation s, const bool burning)
+	{
+		const auto i{static_cast<std::size_t>(s)};
+		const double keep{std::exp(-dt / HABIT_BURN_WINDOW_S)};
+		m_sit_s[i] = m_sit_s[i] * keep + dt;
+		m_sit_burn_s[i] = m_sit_burn_s[i] * keep + (burning ? dt : 0);
+	}
+	[[nodiscard]]
+	double burn_share(const burn_situation s) const
+	{
+		const auto i{static_cast<std::size_t>(s)};
+		return m_sit_s[i] > 0 ? m_sit_burn_s[i] / m_sit_s[i] : 0;
+	}
+	/* Whether the situation has an aim, and whether the bot is below it. */
+	[[nodiscard]]
+	bool burn_governed(const burn_situation s) const
+	{
+		return m_aim.burn[static_cast<std::size_t>(s)] >= 0;
+	}
+	[[nodiscard]]
+	bool burn_wanted(const burn_situation s) const
+	{
+		const auto i{static_cast<std::size_t>(s)};
+		return m_aim.burn[i] > 0 && burn_share(s) < m_aim.burn[i];
+	}
+	/* A shot at `distance` (the band's width for the offset's bounds):
+	 * the median of the last HABIT_SHOTS, and the offset of the juke's
+	 * preferred distance by what it misses the aim by.  (Backing off
+	 * sooner as well, the range key reverse below up to 0.9 of the
+	 * preferred distance, cost the -botarena games 6 kills in 90 and
+	 * gained 4 units.)
+	 */
+	void fired(const double distance, const double band)
+	{
+		if (m_aim.fire_distance <= 0 || !(distance > 0))
+			return;
+		m_shots[m_shot_next] = distance;
+		m_shot_next = (m_shot_next + 1) % m_shots.size();
+		m_shot_count = std::min(m_shot_count + 1, m_shots.size());
+		std::array<double, HABIT_SHOTS> v{m_shots};
+		const auto mid{v.begin() + static_cast<std::ptrdiff_t>(m_shot_count / 2)};
+		std::nth_element(v.begin(), mid, v.begin() + static_cast<std::ptrdiff_t>(m_shot_count));
+		m_median = *mid;
+		if (m_shot_count < 9)
+			return;
+		const double w{std::max(band, 10.0)};
+		m_rhythm.offset = std::clamp(m_rhythm.offset + HABIT_OFFSET_GAIN * (m_aim.fire_distance - m_median), HABIT_OFFSET_MIN * w, HABIT_OFFSET_MAX * w);
+	}
+	[[nodiscard]]
+	double fire_distance() const
+	{
+		return m_median;
+	}
+	/* The juke's rhythm (the defaults without an aim). */
+	[[nodiscard]]
+	const juke_rhythm &rhythm() const
+	{
+		return m_rhythm;
+	}
 };
 
 /* The evasion: across the line from the attacker, the side the ship
