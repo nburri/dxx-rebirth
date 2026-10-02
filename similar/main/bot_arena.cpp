@@ -142,6 +142,16 @@ std::string_view trim(std::string_view s)
 	return s;
 }
 
+/* A loaded style profile by its /bot word, else by its name. */
+[[nodiscard]]
+const b::loaded_style *find_profile(const std::string_view s)
+{
+	const auto &lib{bots_style_library()};
+	if (const auto ls{lib.find_word(s)})
+		return ls;
+	return lib.find(s);
+}
+
 /* -botarena-bots "skill:style[:name],...": the bots, in order; a bot the
  * list leaves out (or a field it leaves empty) plays the setup's default.
  * False (and a log line) if a word is no skill or style.
@@ -189,14 +199,24 @@ bool parse_bot_list(const std::string_view list, const unsigned count, b::bot_pr
 		}
 		if (!field[1].empty())
 		{
-			const auto st{b::parse_style(field[1])};
-			if (!st)
+			if (const auto st{b::parse_style(field[1])})
 			{
-				con_printf(CON_URGENT, "botarena: \"%.*s\" is no style (balanced, aggressive, cautious, collector)", static_cast<int>(field[1].size()), field[1].data());
+				e.style = *st;
+				e.profile = {};
+			}
+			/* Section 9.18: a style profile of botstyles/, by its /bot
+			 * word or its name; the bot flies it as in a game.
+			 */
+			else if (const auto ls{find_profile(field[1])})
+			{
+				e.style = ls->profile.base_style;
+				e.profile = ls->name;
+			}
+			else
+			{
+				con_printf(CON_URGENT, "botarena: \"%.*s\" is no style (balanced, aggressive, cautious, collector) and no style profile's word or name in botstyles/", static_cast<int>(field[1].size()), field[1].data());
 				return false;
 			}
-			e.style = *st;
-			e.profile = {};
 		}
 		const auto n{std::min(field[2].size(), e.name.size() - 1)};
 		std::copy_n(field[2].data(), n, e.name.data());

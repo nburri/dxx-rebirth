@@ -928,6 +928,41 @@ void test_afterburner()
 	CHECK(!want_afterburner(v));
 	/* An out-of-range skill: the default's rule. */
 	CHECK(afterburner_of(static_cast<bot_skill>(99)) == afterburner_of(BOT_DEFAULT_SKILL));
+	/* Section 9.18: a situation with an aim (habit_burn). */
+	{
+		habit_burn_view h{.have = true, .charge = 0.5, .wanted = true, .roam = false, .along = 0.9, .burning = false};
+		CHECK(habit_burn(h));
+		h.wanted = false;
+		CHECK(!habit_burn(h));
+		h.wanted = true;
+		h.have = false;
+		CHECK(!habit_burn(h));
+		h.have = true;
+		/* The forward key and both strafe keys: 55 degrees, in the cone;
+		 * without the forward key, none.
+		 */
+		h.along = 1 / std::sqrt(3.0);
+		CHECK(habit_burn(h));
+		h.along = 0;
+		CHECK(!habit_burn(h));
+		h.along = 1;
+		/* Lit from HABIT_BURN_LIGHT, kept to HABIT_BURN_KEEP; roaming
+		 * above a reserve.
+		 */
+		h.charge = HABIT_BURN_LIGHT - 0.01;
+		CHECK(!habit_burn(h));
+		h.burning = true;
+		CHECK(habit_burn(h));
+		h.charge = HABIT_BURN_KEEP - 0.01;
+		CHECK(!habit_burn(h));
+		h.roam = true;
+		h.charge = HABIT_BURN_ROAM_KEEP + 0.01;
+		CHECK(habit_burn(h));
+		h.burning = false;
+		CHECK(!habit_burn(h));
+		h.charge = HABIT_BURN_ROAM_LIGHT + 0.01;
+		CHECK(habit_burn(h));
+	}
 }
 
 /* Section 9.8: a high-value powerup close by is worth a detour, in a

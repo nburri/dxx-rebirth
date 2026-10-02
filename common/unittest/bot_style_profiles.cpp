@@ -265,6 +265,23 @@ void test_real_profile()
 		CHECK(c.tune.missile_interval_scale < 0 && c.tune.volley_size < 0 && c.tune.pursuit_seconds < 0 && c.tune.grab_detour_scale == 1);
 		CHECK(c.style.range_scale == balanced.range_scale);
 	}
+	/* Section 9.18: the aims of the habits.  The file of before has the
+	 * afterburner's fleeing and roaming shares, nothing else.
+	 */
+	{
+		const auto &a{b.tune.habits};
+		CHECK(close_to(a.burn[1], *p->value("tune.burn_retreat")) && close_to(a.burn[2], *p->value("tune.burn_roam")));
+		CHECK(a.burn[0] < 0 && a.burn[3] < 0 && a.strafe_reversals < 0 && a.strafe_share < 0 && a.strafe_vertical < 0 && a.fire_distance < 0);
+		const auto q{parse_style_profile("format = 1\nskill.strafe_vertical = 0.4\ntune.strafe_reversals = 66\ntune.strafe_share = 0.8\ntune.burn_chase = 0.45\ntune.burn_fight = 0.2\ntune.fire_distance = 69\ntune.burn_roam = 0.3\nconfidence.tune.burn_roam = low\ntune.burn_retreat = 2\n")};
+		CHECK(q);
+		const auto c{apply_style_profile(*q, bot_skill::insane).tune.habits};
+		CHECK(c.strafe_reversals == 66 && close_to(c.strafe_share, 0.8) && close_to(c.strafe_vertical, 0.4) && c.fire_distance == 69);
+		/* chasing, fleeing (clamped to 1), roam (low confidence: none), fighting */
+		CHECK(close_to(c.burn[0], 0.45) && c.burn[1] == 1 && c.burn[2] < 0 && close_to(c.burn[3], 0.2));
+		/* A skill that neither strafes nor burns keeps that. */
+		const auto t{apply_style_profile(*q, bot_skill::trainee).tune.habits};
+		CHECK(t.strafe_reversals < 0 && t.strafe_share < 0 && t.strafe_vertical < 0 && t.burn[0] < 0 && t.burn[3] < 0 && t.fire_distance == 69);
+	}
 	/* One edge alone: the band is the profile's too, never scaled. */
 	{
 		const auto q{parse_style_profile("format = 1\nstyle.range_scale = 3\ntune.range_lo = 400\n")};
@@ -294,6 +311,13 @@ void check_sane(const style_profile_params &b)
 	CHECK(b.tune.missile_interval_scale < 0 || in(b.tune.missile_interval_scale, 0.3, 4));
 	CHECK(b.tune.volley_size < 0 || in(b.tune.volley_size, 1, 8));
 	CHECK(b.tune.pursuit_seconds < 0 || in(b.tune.pursuit_seconds, 0, 30));
+	const auto &a{b.tune.habits};
+	CHECK(a.strafe_reversals < 0 || in(a.strafe_reversals, 0, 150));
+	CHECK(a.strafe_share < 0 || in(a.strafe_share, 0, 1));
+	CHECK(a.strafe_vertical < 0 || in(a.strafe_vertical, 0, 1));
+	CHECK(a.fire_distance < 0 || in(a.fire_distance, 10, 400));
+	for (const double x : a.burn)
+		CHECK(x < 0 || in(x, 0, 1));
 }
 
 /* Files from anywhere: the parser and the library take anything. */

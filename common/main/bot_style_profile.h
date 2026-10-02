@@ -83,7 +83,7 @@ struct style_profile_key
 	std::string_view text;
 };
 
-inline constexpr std::array<style_profile_key, 33> style_profile_keys{{
+inline constexpr std::array<style_profile_key, 38> style_profile_keys{{
 	/* style_params */
 	{"style.retreat_shields", 5, 90, "shields below which the bot retreats"},
 	{"style.engage_weight", 0.5, 1.8, "weight of fighting against everything else"},
@@ -93,7 +93,7 @@ inline constexpr std::array<style_profile_key, 33> style_profile_keys{{
 	{"style.dodge_bonus", -0.3, 0.3, "added to the skill's dodge probability"},
 	{"style.mine_interval", 0.5, 3.0, "scale of the time between two mines"},
 	{"style.strafe_scale", 0.5, 1.3, "scale of the strafe speed"},
-	{"style.close_scale", 0.5, 1.25, "scale of the speed closing in and backing off"},
+	{"style.close_scale", 0.5, 1.25, "scale of the speed backing off (closing in is a full key)"},
 	{"style.behind_engage", 0.3, 1.0, "share of the engage weight left when behind in a fight"},
 	{"style.outgunned_retreat", 0, 40, "shields added to the retreat threshold when outgunned"},
 	{"style.burn_chase_distance", 40, 1000, "afterburner when chasing a target further than this"},
@@ -126,6 +126,14 @@ inline constexpr std::array<style_profile_key, 33> style_profile_keys{{
 	 */
 	{"tune.heavy_fire_delay", 0.5, 60, "seconds from a heavy missile's pickup to its shot (heavy_fire_delay, median)"},
 	{"style.cover", 0, 2, "how strongly a weak or collecting bot keeps out of exposed places (cover_appetite)"},
+	/* Section 9.18 of Documentation/multiplayer-bots.md: what the bot
+	 * aims for by watching its own flight (habit_governor).
+	 */
+	{"tune.strafe_reversals", 0, 150, "strafe reversals per minute of fight (the bot's aim)"},
+	{"tune.strafe_share", 0, 1, "share of the fight time with a strafe key (the bot's aim)"},
+	{"tune.burn_chase", 0, 1, "share of the time chasing with the afterburner"},
+	{"tune.burn_fight", 0, 1, "share of the other fight time with the afterburner"},
+	{"tune.fire_distance", 10, 400, "median distance when firing (the bot's aim)"},
 }};
 
 [[nodiscard]]
@@ -412,7 +420,12 @@ inline std::optional<style_profile> parse_style_profile(std::string_view text)
  *   and the style's (power_pickup_weight, section 9.14);
  * - `tune.heavy_fire_delay` (seconds from a heavy missile's pickup to
  *   its shot, median): in place of the skill's (heavy_fire_delay,
- *   section 9.17).
+ *   section 9.17);
+ * - section 9.18: `tune.strafe_reversals`, `tune.strafe_share`,
+ *   `tune.burn_chase`, `tune.burn_retreat`, `tune.burn_roam`,
+ *   `tune.burn_fight` and `tune.fire_distance` are the aims of the bot's
+ *   habit_governor (a value of low confidence is no aim; the
+ *   afterburner's aims only for a skill that uses it).
  */
 struct style_profile_params
 {
@@ -509,6 +522,26 @@ inline style_profile_params apply_style_profile(const style_profile &p, const bo
 		t.power_pickup = blend("tune.power_pickup", power_pickup_weight(skill, p.base_style), same);
 	if (p.find("tune.heavy_fire_delay"))
 		t.heavy_fire_delay = blend("tune.heavy_fire_delay", heavy_fire_delay(skill), same);
+	/* Section 9.18: the aims of the habits. */
+	const auto aim{[&p](const std::string_view key) {
+		const auto e{p.find(key)};
+		if (!e || e->confidence == style_confidence::low)
+			return -1.0;
+		const auto k{find_style_profile_key(key)};
+		return k ? std::clamp(e->value, k->lo, k->hi) : e->value;
+	}};
+	auto &a{t.habits};
+	if (k.strafe)
+	{
+		a.strafe_reversals = aim("tune.strafe_reversals");
+		a.strafe_share = aim("tune.strafe_share");
+		/* The measured vertical share is the key's own value. */
+		if (a.strafe_reversals >= 0 || a.strafe_share >= 0)
+			a.strafe_vertical = aim("skill.strafe_vertical");
+	}
+	if (afterburner_of(skill) != afterburner_use::never)
+		a.burn = {{aim("tune.burn_chase"), aim("tune.burn_retreat"), aim("tune.burn_roam"), aim("tune.burn_fight")}};
+	a.fire_distance = aim("tune.fire_distance");
 	return r;
 }
 
