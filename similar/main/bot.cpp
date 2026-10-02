@@ -3793,11 +3793,11 @@ void missile_tick(bot_state &bs, object &obj, const uint32_t tick, const percept
 	 * that makes it.
 	 */
 	{
-		const unsigned heavies{pi.secondary_ammo[secondary_weapon_index::mega]
+		const unsigned heavies = pi.secondary_ammo[secondary_weapon_index::mega]
 #if DXX_BUILD_DESCENT == 2
 			+ pi.secondary_ammo[secondary_weapon_index::earthshaker]
 #endif
-		};
+			;
 		if (!heavies)
 			bs.heavy_since = 0;
 		else if (!bs.heavy_since)
