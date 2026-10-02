@@ -278,6 +278,8 @@ static void ReadCmdArgs(Inilist &ini, Arglist &&Args)
 		}
 		else if (!d_stricmp(p, "-nostickykeys"))
 			CGameArg.CtlNoStickyKeys	= true;
+		else if (!d_stricmp(p, "-keep-accessibility-keys"))
+			CGameArg.CtlKeepAccessibilityKeys	= true;
 
 	// Sound Options
 

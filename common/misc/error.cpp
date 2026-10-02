@@ -32,6 +32,7 @@ COPYRIGHT 1993-1998 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "pstypes.h"
 #include "console.h"
 #include "dxxerror.h"
+#include "accessibility_keys.h"
 
 namespace dcx {
 
@@ -74,6 +75,8 @@ namespace {
 
 static void print_exit_message(const std::span<const char> exit_message)
 {
+	/* Before the message box, and abort() skips atexit handlers. */
+	accessibility_keys_restore();
 	con_puts(CON_CRITICAL, exit_message);
 	msgbox_error(exit_message.data());
 }

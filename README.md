@@ -30,6 +30,7 @@ For example:
 * The ingame Demo-recording system has been improved. Demos are less glitchy and smaller while still being backwards-compatible to earlier versions of the games.
 * Higher game speed will not cause glitches such as unacceptable fast homing projectiles, incredible high damage caused by several collisions or Fusion cannon, etc.
 * Player files, Savegames, Demos and Missions from DOS-Versions of the games can freely be used in DXX-Rebirth.
+* On Windows, the StickyKeys, FilterKeys and ToggleKeys shortcut keys (e.g. "press Shift 5 times") are switched off while the game has the focus, unless the feature itself is switched on; the settings are restored on alt-tab, exit and crash. `-keep-accessibility-keys` keeps them.
 * Mac Command keys are now working - see F1 Help. Command-Q works much like a normal Mac program
 * Even more ...
 

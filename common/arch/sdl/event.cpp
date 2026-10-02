@@ -28,6 +28,7 @@
 #include "args.h"
 #include "partial_range.h"
 #include "frame_probe.h"
+#include "accessibility_keys.h"
 
 namespace dcx {
 
@@ -56,6 +57,15 @@ static void windowevent_handler(const SDL_WindowEvent &windowevent)
 				event_send(e);
 				break;
 			}
+		/* Windows accessibility shortcut keys: off only while the game
+		 * has the focus, so that they work as usual on the desktop.
+		 */
+		case SDL_WINDOWEVENT_FOCUS_LOST:
+			accessibility_keys_restore();
+			break;
+		case SDL_WINDOWEVENT_FOCUS_GAINED:
+			accessibility_keys_suspend();
+			break;
 	}
 }
 #endif

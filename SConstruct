@@ -5265,6 +5265,7 @@ class DXXArchive(DXXCommon):
 ))
 	class Win32PlatformSettings(DXXCommon.Win32PlatformSettings):
 		__get_platform_objects = LazyObjectConstructor.create_lazy_object_getter((
+'common/arch/win32/accessibility_keys.cpp',
 'common/arch/win32/except.cpp',
 'common/arch/win32/messagebox.cpp',
 ))

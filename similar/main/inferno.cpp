@@ -203,6 +203,8 @@ static void print_commandline_help()
 	VERB("  -nomouse                      Deactivate mouse\n")	\
 	VERB("  -nojoystick                   Deactivate joystick\n")	\
 	VERB("  -nostickykeys                 Make CapsLock and NumLock non-sticky\n")	\
+	VERB("  -keep-accessibility-keys      Windows: keep the StickyKeys/FilterKeys/\n")	\
+	VERB("                                ToggleKeys shortcut keys while playing\n")	\
 	VERB("\n Sound:\n\n")	\
 	VERB("  -nosound                      Disables sound output\n")	\
 	VERB("  -nomusic                      Disables music output\n")	\

@@ -71,6 +71,7 @@ struct CArg : prohibit_void_ptr<>
 	bool CtlNoCursor;
 	bool CtlNoMouse;
 	bool CtlNoStickyKeys;
+	bool CtlKeepAccessibilityKeys;
 	bool DbgForbidConsoleGrab;
 	bool DbgShowMemInfo;
 	bool DbgSafelog;
