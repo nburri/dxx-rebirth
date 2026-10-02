@@ -3,6 +3,7 @@
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <cwchar>
 #include <exception>
 #include <stdexcept>
@@ -17,6 +18,15 @@
 using path_buffer = std::array<wchar_t, MAX_PATH>;
 void d_set_exception_handler();
 void d_set_exception_report_directory(const char *utf8_directory);
+
+/* Where crash reports go: the directory of gamelog.txt, once the log
+ * is open (d_set_exception_report_directory).
+ */
+static path_buffer g_report_directory;
+/* The same directory, in UTF-8, for the report text: the log of the
+ * crashed run is gamelog.txt in it.
+ */
+static std::array<char, 3 * MAX_PATH> g_report_directory_utf8;
 
 namespace {
 
@@ -526,11 +536,13 @@ L"Rebirth encountered a fatal error.  Please report this to the developers.\n"
 L"\nInclude in your report:\n"
 L"%s%hs%s"
 L"* The level(s) played this session, including download URLs for any add-on missions\n"
-L"%s%s\n\n"
+L"%s%s\n"
+L"%s%s%s\n\n"
 DXX_PATH_DUMP_FORMAT_STRING
 L"\nTo the extent possible, provide steps to reproduce, starting from the game main menu.",
 what.empty() ? L"" : L"* The exception message text:\n  \"", what.c_str(), what.empty() ? L"" : L"\"\n",
-path_stack.front() ? L"* The contents of the text file:\n  " : L"", path_stack.data()
+path_stack.front() ? L"* The contents of the text file:\n  " : L"", path_stack.data(),
+g_report_directory.front() ? L"* The log of this run (gamelog.1.txt is the run before):\n  " : L"", g_report_directory.data(), g_report_directory.front() ? L"gamelog.txt" : L""
 DXX_PATH_DUMP_ARGUMENTS
 );
 #undef DXX_PATH_DUMP_ARGUMENTS
@@ -575,7 +587,6 @@ namespace dcx {
 void con_flush_gamelog();
 }
 
-static path_buffer g_report_directory;
 static LPTOP_LEVEL_EXCEPTION_FILTER g_previous_exception_filter;
 static volatile LONG g_exception_report_started;
 
@@ -595,6 +606,8 @@ void d_set_exception_report_directory(const char *const utf8_directory)
 		w[len] = 0;
 	}
 	g_report_directory = w;
+	const char last{utf8_directory[std::strlen(utf8_directory) - 1]};
+	std::snprintf(g_report_directory_utf8.data(), g_report_directory_utf8.size(), "%s%s", utf8_directory, last == '\\' || last == '/' ? "" : "\\");
 }
 
 namespace {
@@ -749,6 +762,8 @@ static void write_fault_report(exception_report_file &f, const EXCEPTION_POINTER
 		g_descent_version, g_descent_build_datetime, g_strctxuuid.data(),
 		st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
 		GetCurrentProcessId(), GetCurrentThreadId());
+	if (g_report_directory_utf8.front())
+		f.print("Log of this run: %sgamelog.txt (earlier runs: gamelog.1.txt, gamelog.2.txt, ...)\r\n\r\n", g_report_directory_utf8.data());
 	f.print("Exception code: 0x%.8lx (%s), flags 0x%lx\r\n", er.ExceptionCode, exception_code_name(er.ExceptionCode), er.ExceptionFlags);
 	f.print_address("Exception address: ", reinterpret_cast<uintptr_t>(er.ExceptionAddress));
 	if ((er.ExceptionCode == EXCEPTION_ACCESS_VIOLATION || er.ExceptionCode == EXCEPTION_IN_PAGE_ERROR) && er.NumberParameters >= 2)
@@ -885,7 +900,8 @@ static LONG WINAPI unhandled_exception_filter(EXCEPTION_POINTERS *const ep)
 		_snwprintf(msg.data(), msg.size() - 1,
 L"Rebirth crashed (exception 0x%.8lx).  Please report this to the developers.\n\n"
 L"Include in your report the file:\n  %s\n"
-L"and gamelog.txt from the same directory.",
+L"and the log of this run, gamelog.txt, from the same directory\n"
+L"(gamelog.1.txt is the log of the run before).",
 			ep->ExceptionRecord->ExceptionCode, path.data());
 		msg.back() = 0;
 		MessageBoxW(NULL, msg.data(), L"Rebirth - Fatal Error", MB_ICONERROR | MB_TOPMOST | MB_TASKMODAL);

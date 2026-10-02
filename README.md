@@ -75,3 +75,7 @@ See [COPYING.txt](COPYING.txt) and [GPL-3.txt](GPL-3.txt)
 ## 6. Issue Reporting
 
 Use GitHub issues tab report a [new issue](https://github.com/dxx-rebirth/dxx-rebirth/issues/new), be sure to add as much detail as possible in the template provided.
+
+### Log files
+
+The game writes what it does to `gamelog.txt` in the folder it writes the pilot files to (`~/.d2x-rebirth` on Linux). Each log starts with a line giving the date and time the game was started and its version. The logs of the last 5 runs are kept: `gamelog.txt` is the current (or last) run, `gamelog.1.txt` the run before, up to `gamelog.4.txt`; so a log that shows a problem is still there after a restart. `-gamelog-keep <n>` keeps <n> runs instead (0 overwrites `gamelog.txt` every time). After a crash, attach the crash report the game names and the `gamelog.txt` (or, if you started the game again since, the matching `gamelog.N.txt`) to the issue.
