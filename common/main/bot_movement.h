@@ -6,7 +6,7 @@
  */
 /*
  * How a bot moves in a fight, the game-independent part
- * (Documentation/multiplayer-bots.md section 9.15): the movement mode of
+ * (Documentation/multiplayer-bots.md sections 9.15 and 9.16): the movement mode of
  * a tick and how long it is held, a path flown with keys, the dodge and
  * the push off a wall as single keys, the corner speed, the string
  * pulling far ahead and the straight flight ahead.  bot_tick
@@ -37,11 +37,15 @@ enum class move_mode : uint8_t
 {
 	/* Not flying (dead, no ship). */
 	none = 0,
-	/* The velocity controller along the path: no enemy about. */
+	/* The velocity controller along the path: no enemy about (section
+	 * 9.16: only for a while after a stuck recovery).
+	 */
 	path = 1,
 	/* The fight's keys: the strafe and the range key. */
 	fight_keys = 2,
-	/* The path (or a turn to an attacker) flown with keys in a fight. */
+	/* The path (or a turn to an attacker) flown with keys in a fight
+	 * (section 9.16: out of a fight too).
+	 */
 	path_keys = 3,
 	/* Turning round to a target behind, flown with keys. */
 	turn_keys = 4,
@@ -199,6 +203,12 @@ public:
 constexpr double PATH_KEY_ON{0.4};
 constexpr double PATH_KEY_ON_VERTICAL{0.85};
 constexpr double PATH_KEY_ON_FORWARD{0.25};
+/* Section 9.16: the reverse key of a path braked into every bend (the
+ * command's forward part goes below zero while the nose comes round): a
+ * sixth of the time on the paths of the -botarena games, where EC held
+ * reverse a twelfth of his time and slid through.  Reverse takes more.
+ */
+constexpr double PATH_KEY_ON_BACK{0.6};
 constexpr double PATH_KEY_OFF{0.15};
 constexpr unsigned PATH_KEY_HOLD_MS{250};
 /* With the nose along the path (not aiming at an enemy), the sideways
@@ -209,9 +219,12 @@ constexpr double PATH_KEY_ON_FACING{0.75};
 /* The velocity controller corrects with a gain of 2 (velocity_command):
  * as keys, every correction across the nose was a strafe key flipped
  * (the strafe reversed 100 times a minute on the paths of the level
- * simulation).  The keys take a quarter of it.
+ * simulation).  The keys take a quarter of it (section 9.16: three
+ * twentieths; with 0.5 the corrections of the velocity's drift as the
+ * nose followed a target were a third of the -botarena games' strafe
+ * reversals).
  */
-constexpr double PATH_KEY_GAIN{0.5};
+constexpr double PATH_KEY_GAIN{0.3};
 
 /* The command the path's keys are taken from (world). */
 [[nodiscard]]
@@ -222,10 +235,26 @@ inline vec3 path_key_command(const vec3 &wanted, const vec3 &vel, const double m
 	return (wanted + (wanted - vel) * PATH_KEY_GAIN) * (1 / max_speed);
 }
 
+/* Section 9.16: in the -botarena games the path flown with keys in a
+ * fight (60 % of the fight time: collect, retreat, refuel goals, the
+ * line of fire blocked, the target out of sight) reversed the strafe 40
+ * times a minute: the nose follows the target (it aims while it flies
+ * its path), so the path's direction sweeps across the ship's axes and
+ * the strafe key went this way and that.  A lateral key let go is not
+ * pressed the other way for PATH_KEY_REVERSE_MS unless the command is
+ * beyond PATH_KEY_ON_REVERSE (a large correction): a pause of forward
+ * flight between the strafe runs, as EC flies.
+ */
+constexpr double PATH_KEY_ON_REVERSE{0.9};
+constexpr unsigned PATH_KEY_REVERSE_MS{400};
+
 class path_keys
 {
 	std::array<int8_t, 3> m_key{};
 	std::array<uint32_t, 3> m_since{};
+	/* The lateral keys last held, and when they were let go. */
+	std::array<int8_t, 2> m_last{};
+	std::array<uint32_t, 2> m_released{};
 public:
 	void reset()
 	{
@@ -244,25 +273,111 @@ public:
 			const double v{c[i]};
 			auto &k{m_key[i]};
 			int8_t want{k};
-			if (v > on[i])
+			/* Section 9.16: the other way soon after a lateral key was
+			 * let go takes a large command.
+			 */
+			const auto on_for{[&](const int8_t sign) {
+				if (i < 2 && !k)
+				{
+					const auto recent{[&](const std::size_t a) {
+						return m_last[a] && tick - m_released[a] < ticks_from_ms(PATH_KEY_REVERSE_MS);
+					}};
+					const std::size_t j{1 - i};
+					/* The other way on this axis, or (the other axis's key
+					 * let go, none held there) a turn to this one.
+					 */
+					if ((m_last[i] == -sign && recent(i)) || (!m_key[j] && recent(j) && !(m_last[i] == sign && recent(i))))
+						return std::max(on[i], PATH_KEY_ON_REVERSE);
+				}
+				return on[i];
+			}};
+			if (v > on_for(1))
 				want = 1;
-			else if (v < -on[i])
+			else if (v < -(i == 2 ? std::max(on[i], PATH_KEY_ON_BACK) : on_for(-1)))
 				want = -1;
 			else if ((k > 0 && v < PATH_KEY_OFF) || (k < 0 && v > -PATH_KEY_OFF))
+				want = 0;
+			/* A lateral key turned round is let go first. */
+			if (i < 2 && k && want == -k)
 				want = 0;
 			if (want == k)
 				continue;
 			/* Held long enough (a key not pressed is free). */
 			if (k && tick - m_since[i] < ticks_from_ms(PATH_KEY_HOLD_MS))
 				continue;
+			if (i < 2 && k)
+			{
+				m_last[i] = k;
+				m_released[i] = tick;
+			}
 			k = want;
 			m_since[i] = tick;
 		}
+		return keys();
+	}
+	/* Section 9.16: a key the movement holds itself (the strafe run's),
+	 * as if this pressed it.
+	 */
+	void hold(const std::size_t axis, const int8_t key, const uint32_t tick)
+	{
+		if (axis >= 3 || m_key[axis] == key)
+			return;
+		if (axis < 2 && m_key[axis])
+		{
+			m_last[axis] = m_key[axis];
+			m_released[axis] = tick;
+		}
+		m_key[axis] = key;
+		m_since[axis] = tick;
+	}
+	[[nodiscard]]
+	thrust_keys keys() const
+	{
 		thrust_keys out;
 		out.sideways = m_key[0];
 		out.vertical = m_key[1];
 		out.forward = m_key[2];
 		return out;
+	}
+};
+
+/* Section 9.16: engaged with a pickup on its path (collect, refuel), the
+ * bot aimed at its target and flew the path with keys, whatever the
+ * angle between them: three fifths of the fight time on the path's keys,
+ * which turned this way and that as the nose followed the target across
+ * the path's way (two thirds of the strafe reversals), slowly (the path
+ * often behind the nose: reverse a fifth of the time), and aimed worse
+ * than in the fight's keys.  With the target more than ASIDE_START off
+ * the path's way the bot fights with the fight's keys (the pickup waits),
+ * back to the path within ASIDE_END, or when the pickup is nearer than
+ * ASIDE_NEAR along the path.
+ */
+constexpr double ASIDE_START{1.31};	// 75 degrees
+constexpr double ASIDE_END{0.96};	// 55 degrees
+constexpr double ASIDE_NEAR{50};
+
+class pickup_aside
+{
+	bool m_on{};
+public:
+	void reset()
+	{
+		m_on = false;
+	}
+	/* Once per engaged tick with such a goal: `off` the angle between the
+	 * path's way and the target, `left` the path's length left.  Whether
+	 * the bot fights instead of flying the path.
+	 */
+	[[nodiscard]]
+	bool update(const double off, const double left)
+	{
+		if (left < ASIDE_NEAR)
+			m_on = false;
+		else if (!m_on && off > ASIDE_START)
+			m_on = true;
+		else if (m_on && off < ASIDE_END)
+			m_on = false;
+		return m_on;
 	}
 };
 
@@ -275,7 +390,8 @@ public:
  * wall nearer than JUKE_RELEASE_ROOM is let go (the run ends: no
  * reversal), and the reverse key with a wall behind nearer than that
  * (keys_off_walls).  In a corridor (both sides near) the strafe goes on
- * until the wall is close.
+ * until the wall is close.  Section 9.16: the forward key with a wall
+ * ahead nearer than that too.
  */
 constexpr double JUKE_WALL_ROOM{18};
 constexpr double JUKE_RELEASE_ROOM{8};
@@ -283,6 +399,8 @@ constexpr double JUKE_RELEASE_ROOM{8};
 struct fight_room
 {
 	double left{JUKE_WALL_ROOM}, right{JUKE_WALL_ROOM}, down{JUKE_WALL_ROOM}, up{JUKE_WALL_ROOM}, back{JUKE_WALL_ROOM};
+	/* Section 9.16: ahead too (the forward key let go short of a wall). */
+	double front{JUKE_WALL_ROOM};
 };
 
 inline void juke_turn_from_walls(juke_state &juke, const fight_room &r)
@@ -306,6 +424,8 @@ inline thrust_keys keys_off_walls(thrust_keys k, const fight_room &r)
 		k.vertical = 0;
 	if (k.forward < 0 && r.back < JUKE_RELEASE_ROOM)
 		k.forward = 0;
+	if (k.forward > 0 && r.front < JUKE_RELEASE_ROOM)
+		k.forward = 0;
 	return k;
 }
 
@@ -318,6 +438,15 @@ inline thrust_keys keys_off_walls(thrust_keys k, const fight_room &r)
  * dodge is no reversal of the strafe unless it has to be.
  */
 constexpr double DODGE_KEEP_SHARE{0.3};
+
+/* Section 9.16: the dodge pressed its key against the strafe key held
+ * (a reversal of the strafe after every shot dodged: a sixth to a
+ * quarter of the bots' reversals in the -botarena games).  A strafe key
+ * held is kept; the dodge adds the other lateral axis's key its way if
+ * it lies DODGE_ADD_SHARE along it and the two keys together still push
+ * along the dodge (the run goes on, diagonally); else the dodge turns it.
+ */
+constexpr double DODGE_ADD_SHARE{0.25};
 
 [[nodiscard]]
 inline thrust_keys dodge_key(thrust_keys k, const vec3 &dodge_local)
@@ -336,6 +465,18 @@ inline thrust_keys dodge_key(thrust_keys k, const vec3 &dodge_local)
 		k.vertical = k.vertical < 0 ? -1 : 1;
 		return k;
 	}
+	if (k.sideways && !k.vertical && ay > DODGE_ADD_SHARE * l && k.sideways * dodge_local.x + ay > 0)
+	{
+		k.sideways = k.sideways < 0 ? -1 : 1;
+		k.vertical = dodge_local.y < 0 ? -1 : 1;
+		return k;
+	}
+	if (k.vertical && !k.sideways && ax > DODGE_ADD_SHARE * l && k.vertical * dodge_local.y + ax > 0)
+	{
+		k.vertical = k.vertical < 0 ? -1 : 1;
+		k.sideways = dodge_local.x < 0 ? -1 : 1;
+		return k;
+	}
 	if (ax >= ay && ax >= az)
 		k.sideways = dodge_local.x < 0 ? -1 : 1;
 	else if (ay >= az)
@@ -352,10 +493,19 @@ inline thrust_keys dodge_key(thrust_keys k, const vec3 &dodge_local)
  * near); a free key pushes off.  Only such a turned key skips the
  * strafe's flip filter (lateral_keys, `immediate` per axis); PR #63
  * skipped it for every axis whenever the bot avoided a wall, and a
- * fight near a wall flipped its strafe at the tick rate.
+ * fight near a wall flipped its strafe at the tick rate.  Section 9.16:
+ * turned only for a push of 0.8 (was 0.5; EC touched the walls 13 times
+ * a minute and slid on).
  */
 constexpr double AVOID_KEY_SHARE{0.15};
-constexpr double AVOID_FLIP_SHARE{0.5};
+constexpr double AVOID_FLIP_SHARE{0.8};
+/* Section 9.16: a free key pressed off every wall the probe saw was a
+ * fifth to a third of the bots' strafe reversals in the -botarena games
+ * (the push was a run of its own, the other way of the last).  A free
+ * key is pressed only for a push of AVOID_PRESS_SHARE (the wall is
+ * near); a lesser push only lets go of a key into the wall.
+ */
+constexpr double AVOID_PRESS_SHARE{0.8};
 
 struct avoid_keys_result
 {
@@ -389,7 +539,7 @@ inline avoid_keys_result avoid_keys(thrust_keys k, const vec3 &avoid_local, cons
 					*immediate = true;
 			}
 		}
-		else if (!key)
+		else if (!key && std::abs(a) >= AVOID_PRESS_SHARE)
 			key = s;
 	}};
 	one(k.sideways, avoid_local.x, &out.immediate[0]);
@@ -405,11 +555,13 @@ inline avoid_keys_result avoid_keys(thrust_keys k, const vec3 &avoid_local, cons
  * flew their paths at 30 units/s.  Now the slowing grows with the bend,
  * from none at CORNER_SLOW_FROM to CORNER_SLOWEST of the top speed at
  * CORNER_SLOW_FULL and beyond, within CORNER_SLOW_DISTANCE of it.
+ * Section 9.16: 0.75 within 20 units (was 0.55 within 30): the keys
+ * slide through a bend, and the reverse key braked into every one.
  */
 constexpr double CORNER_SLOW_FROM{1.05};	// 60 degrees
 constexpr double CORNER_SLOW_FULL{2.36};	// 135 degrees
-constexpr double CORNER_SLOWEST{0.55};
-constexpr double CORNER_SLOW_DISTANCE{30};
+constexpr double CORNER_SLOWEST{0.75};
+constexpr double CORNER_SLOW_DISTANCE{20};
 
 [[nodiscard]]
 inline double corner_speed(const double bend, const double dist, const double max_speed)
@@ -491,6 +643,79 @@ inline std::size_t advance_skipped(const std::span<const vec3> points, const std
 		}
 	return best;
 }
+
+/* Section 9.16: EC flies his ways with forward and a strafe key held
+ * together (the nose a little off the way, the thrust of both keys
+ * along it), a third to a half of his time at 58-64 units/s, with the
+ * afterburner 86-96; the bots flew their paths with the nose along the
+ * way and the forward key alone (the top speed, 58, at best: 35 on
+ * average).  On a straight of RUN_MIN_STRAIGHT ahead or more, with the
+ * nose along its path (not aiming), the bot turns the nose RUN_ANGLE
+ * off the way and holds forward and the strafe key of that side, until
+ * the straight ahead is shorter than RUN_END_STRAIGHT (a bend).  The
+ * next run keeps the side (RUN_SAME_SIDE: a run the other way right after
+ * a bend is a strafe reversal).  With the afterburner lit the nose is
+ * along the way (the afterburner pushes along the nose).
+ */
+constexpr double RUN_ANGLE{0.7};	// 40 degrees
+constexpr double RUN_MIN_STRAIGHT{70};
+constexpr double RUN_END_STRAIGHT{35};
+constexpr double RUN_MIN_SPEED{20};
+
+constexpr double RUN_SAME_SIDE{0.75};
+
+class strafe_run
+{
+	int8_t m_side{}, m_last{};
+public:
+	void reset()
+	{
+		if (m_side)
+			m_last = m_side;
+		m_side = 0;
+	}
+	/* Once per tick of a path flown facing it: `straight` the straight
+	 * flight ahead, `speed` the ship's.  The side of the run (-1 left,
+	 * 1 right), 0 for none.
+	 */
+	[[nodiscard]]
+	int update(bot_rng &rng, const double straight, const double speed)
+	{
+		if (!m_side && straight >= RUN_MIN_STRAIGHT && speed >= RUN_MIN_SPEED)
+			m_side = static_cast<int8_t>(m_last && rng.uniform() < RUN_SAME_SIDE ? m_last : rng.uniform() < 0.5 ? -1 : 1);
+		else if (m_side && straight < RUN_END_STRAIGHT)
+			reset();
+		return m_side;
+	}
+	[[nodiscard]]
+	int side() const
+	{
+		return m_side;
+	}
+};
+
+/* The nose of a run: `way` (unit) turned RUN_ANGLE away from the side
+ * whose key is held (`right` the ship's right axis), so that forward and
+ * that strafe key push along the way.
+ */
+[[nodiscard]]
+inline vec3 strafe_run_face(const vec3 &way, const vec3 &right, const int side)
+{
+	const auto r{normalized(right - way * dot(right, way))};
+	if (r == vec3{} || !side)
+		return way;
+	return normalized(way * std::cos(RUN_ANGLE) - r * (side * std::sin(RUN_ANGLE)));
+}
+
+/* Section 9.16: the path is flown with keys everywhere now (the velocity
+ * controller held the top speed at best, and reversed the strafe at
+ * every correction).  Keys are coarse: in a tight bend of Earth Shaker
+ * (segments 28 and 29) a bot stuck 70-140 times in a game (two of the
+ * -botarena games), the keys' corrections too late for the turn.
+ * After a stuck recovery the bot flies its path with the velocity
+ * controller for this long.
+ */
+constexpr unsigned PRECISE_AFTER_STUCK_MS{4000};
 
 /* Section 9.15: how far the bot flies straight on: to the point it
  * steers at, then along the path while each leg stays within

@@ -153,9 +153,9 @@ inline constexpr std::array<skill_params, BOT_SKILL_COUNT> skill_table{{
 	/* reaction, sigma, drift, lead, turn, cone, fov, aware, hear, memory, dodge, smarts, map, strafe, runs, vertical, strafe speed, duty */
 	{550, 7.0, 600, 0.0, 0.45, 12, 45, 150, 0, 2000, 0.0, 0, 0, false, 1200, 2000, 0.0, 0.0, 0.55},
 	{400, 4.5, 500, 0.4, 0.60, 9, 60, 250, 80, 3000, 0.2, 1, 3, true, 400, 1000, 0.1, 0.7, 0.8},
-	{280, 2.8, 400, 0.7, 0.75, 6, 70, 350, 150, 5000, 0.45, 2, 8, true, 250, 700, 0.2, 0.95, 1.0},
-	{200, 1.7, 300, 0.9, 0.90, 4, 80, 450, 250, 7000, 0.7, 3, 15, true, 220, 650, 0.2, 1.0, 1.0},
-	{140, 1.0, 250, 1.0, 1.00, 3, 90, 600, 350, 10000, 0.85, 4, 0xffff, true, 200, 600, 0.22, 1.0, 1.0},
+	{280, 2.8, 400, 0.7, 0.75, 6, 70, 350, 150, 5000, 0.45, 2, 8, true, 250, 750, 0.2, 0.95, 1.0},
+	{200, 1.7, 300, 0.9, 0.90, 4, 80, 450, 250, 7000, 0.7, 3, 15, true, 230, 700, 0.2, 1.0, 1.0},
+	{140, 1.0, 250, 1.0, 1.00, 3, 90, 600, 350, 10000, 0.85, 4, 0xffff, true, 230, 700, 0.22, 1.0, 1.0},
 }};
 
 [[nodiscard]]
@@ -199,16 +199,19 @@ struct style_params
 	 * threshold rises by this many shields: the bot breaks off.
 	 */
 	double outgunned_retreat;
-	/* Chasing a target further than this lights the afterburner. */
+	/* Chasing a target further than this lights the afterburner.
+	 * Section 9.16: EC chased with it from 48-87 units (median), the bots
+	 * from 120-250: the distances are three fifths of section 9.7's.
+	 */
 	double burn_chase_distance;
 };
 
 inline constexpr std::array<style_params, BOT_STYLE_COUNT> style_table{{
 	/* retreat, engage, collect, range, chase, dodge, mines, strafe, close, behind, outgunned, burn */
-	{45, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0, 150},	/* balanced */
-	{30, 1.5, 0.6, 0.75, 2.0, 0.0, 2.0, 0.9, 1.15, 1.0, 0, 100},	/* aggressive */
-	{65, 0.8, 1.2, 1.25, 0.8, 0.1, 0.7, 1.1, 0.85, 0.8, 25, 200},	/* cautious */
-	{50, 0.7, 1.8, 1.0, 1.0, 0.05, 1.0, 1.0, 1.0, 0.5, 15, 150},	/* collector */
+	{45, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0, 90},	/* balanced */
+	{30, 1.5, 0.6, 0.75, 2.0, 0.0, 2.0, 0.9, 1.15, 1.0, 0, 60},	/* aggressive */
+	{65, 0.8, 1.2, 1.25, 0.8, 0.1, 0.7, 1.1, 0.85, 0.8, 25, 120},	/* cautious */
+	{50, 0.7, 1.8, 1.0, 1.0, 0.05, 1.0, 1.0, 1.0, 0.5, 15, 90},	/* collector */
 }};
 
 [[nodiscard]]
@@ -1039,14 +1042,34 @@ public:
  * the other way (STRAFE_FLIP_SHARE) or the same way on (a longer run).
  * Every FIGHT_RANGE_MIN_MS to FIGHT_RANGE_MAX_MS the bot draws a new
  * preferred distance inside the band, so it closes in and backs off.
+ *
+ * Section 9.16: EC's strafe (the exp-31 recordings of Corona and Earth
+ * Shaker, his controls) is runs of a median 0.4 s (a quarter longer
+ * than 0.7 s) with the forward key held through four fifths of them,
+ * and between the runs, a third to a half of the time, more than 0.3 s
+ * of forward flight with no strafe key: 65-78 runs a minute of fight,
+ * 33-47 reversals.  The bots paused after 30 % of their runs for
+ * 0.15-0.45 s (mostly too short to be anything but a reversal), held
+ * reverse a fifth of the fight, and reversed their strafe 75-80 times
+ * a minute.  Now a run is followed by a pause of forward flight
+ * (STRAFE_PAUSE_SHARE) of STRAFE_PAUSE_MIN_MS to STRAFE_PAUSE_MAX_MS,
+ * and the preferred distance is drawn in the near FIGHT_RANGE_DRAW_SHARE
+ * of the band (EC fired at a median 53-61 units, the bots at 80-85):
+ * the range key is forward unless the target is near (approach_key).
+ * The next run goes the other way less often (STRAFE_FLIP_SHARE 0.4,
+ * was 0.75): on real levels the walls, the dodges and the paths turn the
+ * strafe often enough, and a run the same way on builds up the speed
+ * across that EC flies with.  The runs of Hotshot to Insane are a little
+ * longer (230-750 ms: EC's quartiles 233 and 667-700 ms).
  */
-constexpr double STRAFE_PAUSE_SHARE{0.3};
-constexpr unsigned STRAFE_PAUSE_MIN_MS{150};
-constexpr unsigned STRAFE_PAUSE_MAX_MS{450};
-constexpr double STRAFE_FLIP_SHARE{0.75};
+constexpr double STRAFE_PAUSE_SHARE{0.45};
+constexpr unsigned STRAFE_PAUSE_MIN_MS{350};
+constexpr unsigned STRAFE_PAUSE_MAX_MS{1100};
+constexpr double STRAFE_FLIP_SHARE{0.4};
 /* The preferred distance is drawn anew after this long. */
 constexpr unsigned FIGHT_RANGE_MIN_MS{1000};
 constexpr unsigned FIGHT_RANGE_MAX_MS{2500};
+constexpr double FIGHT_RANGE_DRAW_SHARE{0.4};
 
 class juke_state
 {
@@ -1073,7 +1096,7 @@ public:
 			--m_range_left;
 		else
 		{
-			m_range = rng.uniform(lo, hi);
+			m_range = rng.uniform(lo, lo + (hi - lo) * FIGHT_RANGE_DRAW_SHARE);
 			const unsigned a{ticks_from_ms(FIGHT_RANGE_MIN_MS)};
 			m_range_left = a + rng.below(ticks_from_ms(FIGHT_RANGE_MAX_MS) - a + 1);
 		}
@@ -1168,6 +1191,15 @@ struct thrust_keys
  * (effective_close_speed).
  */
 constexpr double FIGHT_RANGE_DEADBAND{15};
+/* Section 9.16: EC held reverse in a tenth of his fights, the bots in a
+ * fifth (every time the target came nearer than the preferred distance
+ * less the deadband), and coasted (no forward key) inside the band: a
+ * ship with no key held loses half its speed in half a second.  The
+ * range key is now forward unless the target is nearer than
+ * FIGHT_REVERSE_SHARE of the preferred distance (and a deadband below
+ * it); reverse then, until it is a deadband beyond that.
+ */
+constexpr double FIGHT_REVERSE_SHARE{0.6};
 
 class approach_key
 {
@@ -1177,17 +1209,19 @@ public:
 	{
 		m_sign = 0;
 	}
-	/* Once per tick: 1 forward, -1 reverse, 0 none.  `band`: the width
+	/* Once per tick: 1 forward, -1 reverse (0 only before the first
+	 * update).  `band`: the width
 	 * of the fight band; a narrower one than 60 narrows the hysteresis
 	 * to a quarter of it.
 	 */
 	int update(const double dist, const double range, const double band = 60)
 	{
 		const double deadband{std::clamp(band / 4, 2.0, FIGHT_RANGE_DEADBAND)};
-		if (dist > range + deadband)
-			m_sign = 1;
-		else if (dist < range - deadband)
+		const double reverse_below{std::min(range - deadband, range * FIGHT_REVERSE_SHARE)};
+		if (dist < reverse_below)
 			m_sign = -1;
+		else if (m_sign >= 0 || dist > reverse_below + deadband)
+			m_sign = 1;
 		return m_sign;
 	}
 	[[nodiscard]]
@@ -1634,7 +1668,7 @@ constexpr hit_reaction react_to_hit(const hit_view &v)
  * in this share of the time: drawn when the retreat starts and again
  * every FLEE_ROLL_TICKS (a human turns to run and back to shoot).
  */
-constexpr double FLEE_TURNED_SHARE{0.4};
+constexpr double FLEE_TURNED_SHARE{0.7};
 constexpr unsigned FLEE_ROLL_TICKS{ticks_from_ms(2000)};
 /* A flight turned away lights the afterburner (by skill, with charge)
  * in this share of the draws: burning whenever it may, the bots burnt
@@ -1807,6 +1841,23 @@ constexpr double effective_shot_speed(const double speed, const bool thrust)
 inline bool should_fire(const double aim_angle, const double fire_cone, const bool shot_clear, const double dist, const double max_range)
 {
 	return shot_clear && aim_angle <= fire_cone && dist <= max_range;
+}
+
+/* Section 9.16: a fixed fire cone (Insane 3 degrees) is narrower than the
+ * target itself near: a ship of radius 5 at 30 units is 9 degrees
+ * across.  The bots of the -botarena games, flying keys, held their nose
+ * within the cone a sixth of the engaged time and fired a fifth less than
+ * before PR #74; EC fired twice as often.  Near, the cone is at least
+ * the angle FIRE_CONE_TARGET_SIZE of the target's radius takes up.
+ */
+constexpr double FIRE_CONE_TARGET_SIZE{0.7};
+
+[[nodiscard]]
+inline double fire_cone_near(const double cone, const double dist, const double target_radius)
+{
+	if (dist <= 1 || target_radius <= 0)
+		return cone;
+	return std::max(cone, std::atan(target_radius * FIRE_CONE_TARGET_SIZE / dist));
 }
 
 /* The angle (radians) between two directions. */

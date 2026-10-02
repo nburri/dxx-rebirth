@@ -902,6 +902,10 @@ tools/botarena-run.sh [-n bots] [-b list] [-s seconds] [-f fps] [-o dir] DATA <m
   stdout on Linux/macOS), the game window closes (the recording is closed
   as usual) and the program exits with status 0 (1 if the game did not
   start or ended early). A line every 60 game seconds shows the progress.
+  If the level ends first (the reactor destroyed, a time or kill limit;
+  section 9.16: the end-of-level screens waited for players and the
+  arena hung), the arena ends there the same way, with a line saying so
+  and the summary of the time played.
 - **Summary.** Per bot: kills (of others), deaths, suicides, primary shots,
   direct hits on others and hits per primary shot (as movrec-analyse counts
   them: each bolt of a volley and a missile's direct hit is a hit), splash
@@ -3640,6 +3644,150 @@ The level is the HOG's level with the track's segment count (else the
 first, or `-level NAME`); the track's enemy is the recording machine's
 human. About 10 s a map; `-v` prints every bot's report, `-o` writes
 the recordings.
+
+### 9.16 Round 2 after PR #74: strafe, speed, kills, reactor, walls
+
+**What `-botarena` showed after PR #74** (5 bots of the group's games,
+10-minute games, seeds 1–12): the strafe reversed 75–78 times a minute
+(EC 36–52), the speed was 44 (EC 54–60), the bots killed a tenth to a
+seventh less than before PR #74, a bot destroyed the reactor on Corona
+(seed 1) and the arena then hung on the end-of-level screen, and out of
+sight a bot pressed forward into a wall for up to 1.5 s.
+
+- *Where the reversals came from* (the bots' own movement counted per
+  mode, and EC's controls of the exp-31 recordings): the path flown with
+  keys in a fight was three fifths of the fight time and gave two thirds
+  of the reversals (the nose follows the target while the bot flies its
+  path, so the path's direction sweeps across the ship's axes; the
+  velocity correction flipped the keys), the push off a wall pressed a
+  free key the other way (a fifth to a third), the dodge pressed its key
+  against the strafe held (a sixth to a quarter), and the juke itself
+  reversed after 75 % of its runs and paused after 30 % for 0.15–0.45 s.
+  EC's runs last a median 0.4 s like the bots', but a third to a half of
+  them follow more than 0.3 s of forward flight with no strafe key, and
+  he holds forward through four fifths of them.
+- *Why so slow.* Held, the forward key alone gives the top speed, 58;
+  even a forward key never let go gave only 52 in the arena. EC flies at
+  58–64 with forward and a strafe key held together, a third to half of
+  his time, in and out of fights (86–96 with the afterburner); his thrust
+  pushes along his motion (0.93 of it on average, the bots 0.72–0.75:
+  reversals, the reverse key a fifth of the time, braking into bends,
+  coasting inside the fight band with no key, slowing for every pickup).
+- *Why fewer kills.* Not less engagement: the bots were engaged as long
+  as before, and their primary hits a game even rose. Their nose was
+  within the fire cone a sixth of the engaged time instead of a quarter
+  (the targets jink with full keys, and the lead jumps with each run), so
+  they fired a fifth less, and fewer missiles and splash hits: the
+  damage dealt fell, the kills with it. EC fires about twice as often.
+- *The reactor.* The bots never aim at it (decision 6), but their shots
+  that miss, their splash and their mines hit it; before PR #74 too
+  (none of 24 arena games, but the damage path was the same), more
+  often after (one of 24, and with the reactor's damage switched back on
+  for a test, an Earth Shaker game ended after 54 s).
+- *The wall.* Out of sight, the fight's keys flew on toward where the
+  target was reckoned to be for up to `MODE_HOLD_MS`, with the forward
+  key, whether or not a wall was between: about 15 s a game of the five
+  bots on Corona with the forward key held within 10 units of a wall.
+
+**Changes** (`bot_brain.h`, `bot_movement.h`, `bot.cpp`):
+
+- *The juke* pauses after 45 % of its runs for 0.35–1.1 s of forward
+  flight, the next run goes the other way 40 % of the time (was 75 %),
+  the runs of Hotshot to Insane last 230–750 ms, and the preferred
+  distance is drawn in the near 40 % of the band
+  (`FIGHT_RANGE_DRAW_SHARE`; EC fired at a median 53–61 units, the bots
+  80–85). The range key is forward unless the target is nearer than 0.6
+  of the preferred distance (`FIGHT_REVERSE_SHARE`), reverse then until
+  a deadband beyond: no coasting.
+- *The path's keys*: a lateral key let go is not pressed the other way
+  (nor the other axis's key) for 400 ms unless the command is beyond 0.9
+  (`PATH_KEY_REVERSE_MS`, `PATH_KEY_ON_REVERSE`); a key turned round is
+  let go first; reverse needs 0.6 (`PATH_KEY_ON_BACK`); the velocity
+  correction is 0.3 (was 0.5). The path is flown with keys out of a
+  fight too (the velocity controller only for 4 s after a stuck
+  recovery, `PRECISE_AFTER_STUCK_MS`: without it a bend of Earth
+  Shaker, segments 28–29, trapped a bot 70–140 times in two games).
+- *Strafe runs on straights* (`strafe_run`): with the nose along its path
+  and 70 units or more straight ahead, the bot turns its nose 40° off
+  the way and holds forward and the strafe key of that side, until a
+  bend comes within 35 units; the next run keeps the side three times
+  in four; the afterburner brings the nose back along the way.
+- *Dodge and walls*: a dodge across the strafe key held adds the other
+  axis's key (the run goes on, diagonally) and turns the key only if
+  nothing lies on the other axis (`DODGE_ADD_SHARE`); the push off a wall
+  presses a free key or turns one only for a push of 0.8 of the top
+  speed (`AVOID_PRESS_SHARE`, `AVOID_FLIP_SHARE`), a lesser push lets go
+  of the key into the wall. Corners slow to 0.75 of the top speed within
+  20 units (was 0.55 within 30). Retreats are flown turned away 70 % of
+  the time (was 40 %; EC flew away 29–31 % of his fights, backed off
+  facing 8–11 %). The afterburner chases from 60–120 units by style
+  (was 100–200) and burns on straights of 100 (was 150).
+- *Review fixes*: a strafe run turns only the nose the path set (not a
+  turn to an unseen attacker or to a corner's exit); a dodge adds the
+  other axis only if both keys still push along the dodge; the
+  out-of-sight latch is per target; out of a fight the refuel hover (no
+  path) keeps the velocity controller.
+- *The pickup aside* (`pickup_aside`): engaged with a collect or refuel
+  goal and the target more than 75° off the path's way, the bot fights
+  with the fight's keys (back to the path within 55°, or with the pickup
+  within 50 units along the path).
+- *The fire cone near* (`fire_cone_near`): at least the angle 0.7 of
+  the target's radius takes up at its distance (a ship of radius 5 at 30
+  units is 9° across; Insane's cone is 3°).
+- *Out of sight*: the fight's keys fly on toward the target only while
+  the line to where it is reckoned to be is clear (`lost_clear`, a cast
+  a perception tick, once broken for the rest of that loss of sight),
+  then the path; the forward key is let go with a wall nearer than 8
+  units ahead (`fight_room::front`).
+- *The reactor*: a bot's weapons do not damage it
+  (`apply_damage_to_controlcen`; every machine knows the bots' slots from
+  `PLAYER_LIST`). *The arena* ends when the level ends (the reactor
+  destroyed, a time or kill limit): the summary of the time played, exit
+  status 0 (section 8.2).
+
+**Measured.** `-botarena`, seeds 1–12 on each map, the bots' means,
+mean ± spread (standard deviation over the seeds); before is
+experimental-netcode after PR #74, the kills also before PR #74:
+
+| | Corona before | after | EC | Earth Shaker before | after | EC |
+|---|---|---|---|---|---|---|
+| speed | 44.4 ± 0.5 | 44.5 ± 1.2 | 56–60 | 44.6 ± 0.4 | 49.7 ± 0.7 | 54–58 |
+| strafe reversals a minute | 74.9 ± 1.6 | 50.1 ± 1.8 | 52 | 78.2 ± 3.2 | 46.4 ± 1.8 | 36–44 |
+| vertical share | 0.59 | 0.50 | 0.58–0.73 | 0.56 | 0.42 | 0.29–0.37 |
+| speed across | 71 % | 75 % | 81 % | 59 % | 70 % | 77–79 % |
+| afterburner fleeing | 13.7 % | 15.7 % | 24 % | 5.7 % | 8.7 % | 9–16 % |
+| forward / reverse thrust | 62 / 21 % | 65 / 14 % | 73 / 8 % | 71 / 15 % | 70 / 12 % | 81 / 7 % |
+| keys share of the fight | 90 % | 97 % | | 80 % | 94 % | |
+| mode changes a minute | 29 | 29 | | 21 | 16 | |
+| kills a game (before PR #74: 84.0 ± 7.8, 87.4 ± 5.6) | 74.6 ± 7.2 | 89.2 ± 7.1 | | 74.8 ± 5.4 | 84.4 ± 5.2 | |
+| stuck recoveries a game | 14.3 ± 3.5 | 17.2 ± 5.2 | | 17.1 ± 5.0 | 17.3 ± 6.2 | |
+
+The power pickups (section 9.14) are unchanged: of those in sight the
+bots went for 56 % and took 31 % on Corona (58 and 29 % after), 74 and
+50 % on Earth Shaker (74 and 48 %). Forward into a wall out of sight
+(the forward key within 10 units of a wall, the five bots, seeds 2–3):
+860–880 ticks (60 Hz) a game on Corona and 180 on Earth Shaker before,
+under 40 after. No reactor was destroyed in the 24 games after.
+
+The speed stays below the human's (and below the 52 aimed at for
+Insane): in fights the nose is on the target and the keys go where the
+fight goes; the strafe runs on straights help most on Earth Shaker's
+long tunnels. The level simulation (`test-bot-level-sim`, which now has
+the pickup aside and the fire cone near; it does not fly the strafe runs
+and keys out of a fight): Corona speed 45.2, 41.9 reversals a minute,
+kills 125 (before section 9.15's movement 113); Earth Shaker 48.9, 32.4,
+62 (75).
+
+**Tests.** `test-bot-brain`: the range key, the path's keys (the other
+way and the other axis soon after a key let go, a key turned round, the
+reverse threshold, a key held by the movement), the wall push, the
+corner speed, the dodge across the strafe, the forward key short of a
+wall, the strafe run (straight, speed, bend, side kept, the nose), the
+pickup aside, the fire cone near. `test-bot-fight-sim`: in the open the
+strafe reverses 12–20 times a minute now (the bounds 10–65; on real
+levels the walls, dodges and paths bring it to the human's), the
+afterburner's bounds 0.15 and 0.2 (it burns nearer and on shorter
+straights). `test-bot-level-sim` passing on both maps.
 
 ---
 

@@ -685,22 +685,27 @@ void test_fight_pieces()
 			CHECK(!flat.vertical());
 		}
 	}
-	/* The fight's keys: the range key with hysteresis about the preferred
-	 * distance, the strafe keys at the strafe's thrust, nothing toward the
-	 * blast or back into a wall.
+	/* The fight's keys: the range key (section 9.16: forward unless the
+	 * target is nearer than FIGHT_REVERSE_SHARE of the preferred distance,
+	 * with a deadband's hysteresis above that), the strafe keys at the
+	 * strafe's thrust, nothing toward the blast or back into a wall.
 	 */
 	{
 		approach_key a;
-		CHECK(a.update(60, 60) == 0);
-		CHECK(a.update(60 + FIGHT_RANGE_DEADBAND + 1, 60) == 1);
+		const double near_edge{60 * FIGHT_REVERSE_SHARE};
 		CHECK(a.update(60, 60) == 1);
-		CHECK(a.update(60 - FIGHT_RANGE_DEADBAND - 1, 60) == -1);
-		CHECK(a.update(60, 60) == -1);
+		CHECK(a.update(near_edge + 1, 60) == 1);
+		CHECK(a.update(near_edge - 1, 60) == -1);
+		CHECK(a.update(near_edge + FIGHT_RANGE_DEADBAND - 1, 60) == -1);
+		CHECK(a.update(near_edge + FIGHT_RANGE_DEADBAND + 1, 60) == 1);
+		CHECK(a.update(60 + FIGHT_RANGE_DEADBAND + 1, 60) == 1);
 		/* A narrow band (hugging): a narrow hysteresis. */
 		approach_key hug;
 		CHECK(hug.update(14, 11, 8) == 1);
-		CHECK(hug.update(10, 11, 8) == 1);
-		CHECK(hug.update(8.5, 11, 8) == -1);
+		CHECK(hug.update(8.5, 11, 8) == 1);
+		CHECK(hug.update(6, 11, 8) == -1);
+		CHECK(hug.update(8, 11, 8) == -1);
+		CHECK(hug.update(9, 11, 8) == 1);
 		bot_rng rng{2};
 		juke_state j;
 		do
@@ -1192,9 +1197,41 @@ void test_fight_movement()
 		t += ticks_from_ms(PATH_KEY_HOLD_MS);
 		out = k.update({0.05, 0, 0.05}, t);
 		CHECK(out.sideways == 0 && out.forward == 0);
-		/* The other way at once from a free key. */
-		out = k.update({-0.9, -0.9, -0.5}, ++t);
+		/* Section 9.16: the other way soon after a key was let go takes
+		 * PATH_KEY_ON_REVERSE (a large command); reverse PATH_KEY_ON_BACK.
+		 */
+		out = k.update({-0.6, 0, -0.5}, ++t);
+		CHECK(out.sideways == 0 && out.forward == 0);
+		out = k.update({-0.95, -0.95, -0.7}, ++t);
 		CHECK(out.sideways == -1 && out.vertical == -1 && out.forward == -1);
+		{
+			/* After PATH_KEY_REVERSE_MS an ordinary command will do. */
+			path_keys r;
+			uint32_t u{10};
+			CHECK(r.update({0.5, 0, 1}, u).sideways == 1);
+			u += ticks_from_ms(PATH_KEY_HOLD_MS);
+			CHECK(r.update({0, 0, 1}, u).sideways == 0);
+			CHECK(r.update({-0.6, 0, 1}, ++u).sideways == 0);
+			u += ticks_from_ms(PATH_KEY_REVERSE_MS);
+			CHECK(r.update({-0.6, 0, 1}, u).sideways == -1);
+			/* A key held turned round is let go first. */
+			u += ticks_from_ms(PATH_KEY_HOLD_MS);
+			CHECK(r.update({0.95, 0, 1}, u).sideways == 0);
+			CHECK(r.update({0.95, 0, 1}, ++u).sideways == 1);
+			/* The other axis right after a key let go takes more too, the
+			 * same key again does not.
+			 */
+			u += ticks_from_ms(PATH_KEY_HOLD_MS);
+			CHECK(r.update({0, 0, 1}, u).sideways == 0);
+			CHECK(r.update({0, 0.88, 1}, ++u).vertical == 0);
+			CHECK(r.update({0.5, 0, 1}, ++u).sideways == 1);
+			/* A key the movement holds itself. */
+			path_keys h;
+			h.hold(0, -1, 5);
+			h.hold(2, 1, 5);
+			CHECK(h.keys().sideways == -1 && h.keys().forward == 1);
+			CHECK(h.update({0.2, 0, 0.5}, 6).sideways == -1);
+		}
 		/* Facing the path: the strafe keys need PATH_KEY_ON_FACING. */
 		path_keys f;
 		out = f.update({0.6, 0.6, 1}, 1, true);
@@ -1275,6 +1312,9 @@ void test_fight_movement()
 		k.forward = 1;
 		r.back = close;
 		CHECK(keys_off_walls(k, r).forward == 1);
+		/* Section 9.16: the forward key with a wall ahead. */
+		r.front = close;
+		CHECK(keys_off_walls(k, r).forward == 0);
 	}
 	/* The dodge: one key, the strafe kept when it already goes away. */
 	{
@@ -1285,8 +1325,22 @@ void test_fight_movement()
 		CHECK(d.sideways == 1 && d.forward == 1 && d.vertical == 0);
 		d = dodge_key(k, {-0.8, 0.1, 0.1});
 		CHECK(d.sideways == -1 && d.forward == 1);
+		/* Section 9.16: across the strafe key held, the other axis is
+		 * added (the run goes on); against it with nothing there, turned.
+		 */
 		d = dodge_key(k, {0.1, -0.9, 0.1});
-		CHECK(d.sideways == 0.9 && d.vertical == -1);
+		CHECK(d.sideways == 1 && d.vertical == -1);
+		d = dodge_key(k, {-0.4, 0.6, 0});
+		CHECK(d.sideways == 1 && d.vertical == 1);
+		/* Both keys would push against the dodge: turned. */
+		d = dodge_key(k, {-0.95, 0.3, 0});
+		CHECK(d.sideways == -1 && d.vertical == 0);
+		{
+			thrust_keys v;
+			v.vertical = 1;
+			d = dodge_key(v, {-0.5, -0.3, 0});
+			CHECK(d.vertical == 1 && d.sideways == -1);
+		}
 		d = dodge_key({}, {0.1, 0.1, -0.9});
 		CHECK(d.forward == -1 && d.sideways == 0 && d.vertical == 0);
 		d = dodge_key(k, {});
@@ -1303,10 +1357,15 @@ void test_fight_movement()
 		auto a{avoid_keys(k, {-0.3 * vmax, 0, 0}, vmax)};
 		CHECK(a.keys.sideways == 0 && a.keys.vertical == -1 && !a.immediate[0] && !a.immediate[1]);
 		a = avoid_keys(k, {-0.7 * vmax, 0, 0}, vmax);
+		CHECK(a.keys.sideways == 0 && !a.immediate[0]);
+		a = avoid_keys(k, {-0.9 * vmax, 0, 0}, vmax);
 		CHECK(a.keys.sideways == -1 && a.immediate[0] && !a.immediate[1]);
 		a = avoid_keys(k, {0, 0.2 * vmax, 0}, vmax);
 		CHECK(a.keys.vertical == 0 && a.keys.sideways == 1);
+		/* Section 9.16: a free key only for a strong push. */
 		a = avoid_keys({}, {0, 0.2 * vmax, -0.2 * vmax}, vmax);
+		CHECK(a.keys.vertical == 0 && a.keys.forward == 0);
+		a = avoid_keys({}, {0, 0.9 * vmax, -0.9 * vmax}, vmax);
 		CHECK(a.keys.vertical == 1 && a.keys.forward == -1);
 		/* A small push changes nothing. */
 		a = avoid_keys(k, {-0.1 * vmax, 0.1 * vmax, 0}, vmax);
@@ -1324,8 +1383,8 @@ void test_fight_movement()
 		const double sharp{corner_speed(radians(170), 1, vmax)};
 		CHECK(sharp < mid && mid < vmax);
 		CHECK(std::abs(sharp - vmax * CORNER_SLOWEST) < 1e-9);
-		/* Far enough from the point, the distance's speed. */
-		CHECK(corner_speed(radians(170), 25, vmax) == std::min(vmax, 50.0));
+		/* Near the point, the floor or the distance's speed. */
+		CHECK(corner_speed(radians(170), CORNER_SLOW_DISTANCE - 1, vmax) == std::min(vmax, std::max(vmax * CORNER_SLOWEST, (CORNER_SLOW_DISTANCE - 1) * 2)));
 	}
 	/* The string pulled far ahead, a few probes a tick. */
 	{
@@ -1383,6 +1442,61 @@ void test_fight_movement()
 		CHECK(advance_skipped(pts, 2, 2, {20, 30, 0}) == 2);
 		CHECK(advance_skipped(pts, 0, 1, {20, 30, 0}) == 0);
 		CHECK(advance_skipped(pts, 0, 6, {20, 30, 0}) == 0);
+	}
+	/* Section 9.16: the strafe run on a straight (forward and a strafe
+	 * key, the nose off the way), the side kept mostly, over at a bend.
+	 */
+	{
+		bot_rng rng{4};
+		strafe_run r;
+		CHECK(r.update(rng, RUN_MIN_STRAIGHT - 1, 50) == 0);
+		CHECK(r.update(rng, RUN_MIN_STRAIGHT + 1, RUN_MIN_SPEED - 1) == 0);
+		const int s0{r.update(rng, RUN_MIN_STRAIGHT + 1, 50)};
+		CHECK(s0 == 1 || s0 == -1);
+		CHECK(r.update(rng, RUN_END_STRAIGHT + 1, 50) == s0);
+		CHECK(r.update(rng, RUN_END_STRAIGHT - 1, 50) == 0);
+		unsigned same{}, n{};
+		int last{s0};
+		for (unsigned i{}; i != 2000; ++i)
+		{
+			const int s{r.update(rng, RUN_MIN_STRAIGHT + 1, 50)};
+			same += s == last;
+			++n;
+			last = s;
+			CHECK(r.update(rng, 0, 50) == 0);
+		}
+		/* Kept, or drawn afresh (half of those the same side). */
+		const double kept{RUN_SAME_SIDE + (1 - RUN_SAME_SIDE) / 2};
+		CHECK(same > n * (kept - 0.05) && same < n * (kept + 0.05));
+		/* The nose turned away from the key's side (so that forward and
+		 * the key push along the way), in the plane of the way and the
+		 * ship's right axis.
+		 */
+		const vec3 way{0, 0, 1}, right{1, 0, 0};
+		const auto f{strafe_run_face(way, right, 1)};
+		CHECK(near(angle_between(f, way), RUN_ANGLE, 1e-9) && f.x < 0 && f.y == 0);
+		CHECK(strafe_run_face(way, right, -1).x > 0);
+		CHECK(strafe_run_face(way, way, 1) == way);
+		CHECK(strafe_run_face(way, right, 0) == way);
+	}
+	/* Section 9.16: a pickup aside while the target is far off its way:
+	 * the fight first, back to the path within ASIDE_END, never near the
+	 * pickup.
+	 */
+	{
+		pickup_aside a;
+		CHECK(!a.update(ASIDE_START - 0.1, 200));
+		CHECK(a.update(ASIDE_START + 0.1, 200));
+		CHECK(a.update(ASIDE_END + 0.1, 200));
+		CHECK(!a.update(ASIDE_END - 0.1, 200));
+		CHECK(!a.update(ASIDE_START + 0.1, ASIDE_NEAR - 1));
+	}
+	/* Section 9.16: near, the fire cone is the target's size. */
+	{
+		const double c{radians(3)};
+		CHECK(fire_cone_near(c, 400, 5) == c);
+		CHECK(near(fire_cone_near(c, 30, 5), std::atan(5 * FIRE_CONE_TARGET_SIZE / 30), 1e-12));
+		CHECK(fire_cone_near(c, 0.5, 5) == c);
 	}
 	/* lateral_keys: immediate per axis. */
 	{

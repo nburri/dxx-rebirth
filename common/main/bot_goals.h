@@ -2061,9 +2061,10 @@ constexpr double AFTERBURNER_CHASE_DISTANCE{150};
  */
 constexpr double AFTERBURNER_ROAM_LIGHT{0.9};
 /* A straight flight is long when the point the bot steers at is further
- * than this (section 4.7 had 100).
+ * than this (section 4.7 had 100; section 9.16: 100 again, the straight
+ * flight ahead along the path, straight_ahead, is measured since 9.15).
  */
-constexpr double BOT_LONG_STRAIGHT{150};
+constexpr double BOT_LONG_STRAIGHT{100};
 constexpr double AFTERBURNER_ROAM_KEEP{0.5};
 constexpr double AFTERBURNER_ROAM_LIGHT_INSANE{0.7};
 constexpr double AFTERBURNER_ROAM_KEEP_INSANE{0.35};
