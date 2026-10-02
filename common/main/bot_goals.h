@@ -1701,9 +1701,9 @@ constexpr bool weak_armament(const weapon_view &w, const std::array<uint8_t, BOT
  * into exposed segments (cover_extra_cost: COVER_PATH_FACTOR times the
  * edge, the appetite and the excess; the route goes round the hall by the
  * tunnels where there are any), and both signs weigh the places a roaming
- * bot picks (cover_roam_scale).  The fights themselves, the target
- * choice and the goal utilities (the path costs of bot_state::dist) are
- * left as they are.
+ * bot picks (cover_roam_scale).  The fights themselves, the hunt of a
+ * target (no cover on its path), the target choice and the goal
+ * utilities (the path costs of bot_state::dist) are left as they are.
  */
 constexpr double COVER_EXPOSURE_LOW{40};
 constexpr double COVER_EXPOSURE_HIGH{65};

@@ -812,7 +812,7 @@ children 54. A weapon's **hits** are the player's hits on other players
 blast radius, so its hits come as splash. Per primary and secondary the
 report gives the shots, the hits and the damage per shot, and the median
 distance of the primary's shots with the enemy in sight; the traits
-those primaries with 30 shots or more (`ACCURACY_MIN_SHOTS`). A shot of
+name those primaries with 30 shots or more (`ACCURACY_MIN_SHOTS`). A shot of
 several bolts (quad lasers, spreadfire, helix) can hit more than once;
 the hits are those the recording saw (section 3.2).
 
@@ -851,7 +851,8 @@ as much exposed, `EXPOSURE_CHOICE_SHARE`) the report gives the share of
 the time alive in each class, of all of it, **weak** (below 50 shields,
 or the laser, vulcan or spreadfire in hand without a heavy missile
 selected) and **armed** (70 shields and more with a better gun or a
-heavy missile in hand), and the levels' volume shares (time-weighted).
+heavy missile in hand), and the levels' volume shares (time-weighted). Hits on teammates count
+as hits (the group plays deathmatch).
 On levels with much exposed volume (30 %, `COVER_LEVEL_EXPOSED`: open
 halls) it also gives the share in exposed segments over the exposed
 volume share; `style.cover` is how far below the bots without cover the

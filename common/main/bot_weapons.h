@@ -495,8 +495,9 @@ constexpr risk_profile risk_profile_of(const bot_skill k, const bot_style s)
  * recordings of exp-33 (Corona): the human fired its earthshakers 2-10 s
  * after the pickup (median about 6 over six games, mega and smart
  * alike) and seldom died with one; the bots held theirs 11-20 s and two
- * of nine died holding one.  A bot that holds a heavy missile (smart,
- * mega, earthshaker) grows eager from half its fire delay on, fully at
+ * of nine died holding one.  A bot that holds a heavy missile (mega,
+ * earthshaker; the smart missile is fired whenever its rules allow)
+ * grows eager from half its fire delay on, fully at
  * one and a half (heavy_eagerness): its risk budget and chance rise, the
  * trade and the value it asks for fall, it keeps less of a standoff and
  * ducks less (eager_risk); its heavy cooldown halves and a target it

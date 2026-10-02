@@ -681,7 +681,6 @@ inline std::vector<vec3> room_directions()
 	return d;
 }
 
-[[nodiscard]]
 /* The free distances from a segment's centre (a little off it: not on
  * a plane of symmetry) over room_directions, sorted.
  */

@@ -3816,16 +3816,19 @@ makes up for their less human positioning; the aim waits for recordings
 of the stronger players. Only the gauss is made a little weaker: it aims
 with GAUSS_AIM_ERROR_EXTRA (1.5°) more aim error (`aim_sigma_for`). The
 gauss is a fast round with a blast: neither a lead error (up to 0.55 of
-the target's velocity, also on the reaction's dead reckoning) nor more
-aim error at the skill's scale moved its hits much, a wider fire cone
-made more shots and more hits in all; the extra error takes a tenth off
-without more shots. Arena, all shots of both lineups on the three maps:
+the target's velocity, also on the reaction's dead reckoning) nor 1.3–1.6
+times the skill's aim error moved its hits by more than the noise, a
+wider fire cone made more shots and more hits in all; 2.5 times took 13 %
+off at both Hotshot and Insane, the extra 1.5° (the same for every skill)
+takes about a tenth off Insane's and less off Hotshot's, without more
+shots. Arena, all gauss shots of both lineups on the three maps, 12
+seeds (two runs of the final code for Hotshot: 0.27 and 0.29):
 
 | Gauss | before: hits / damage per shot | after |
 |---|---|---|
-| Insane | 0.50 / 6.1 (7378 shots) | 0.44 / 5.4 (5534) |
-| Ace | 0.41 / 4.9 | 0.35 / 4.2 |
-| Hotshot | 0.30 / 3.5 (3077) | 0.27 / 3.1 (2623) |
+| Insane | 0.50 / 6.1 (7378 shots) | 0.44 / 5.4 (5355) |
+| Ace | 0.41 / 4.9 | 0.38 / 4.5 |
+| Hotshot | 0.30 / 3.5 (3077) | 0.28 / 3.3 (5473, both runs) |
 
 The other weapons aim as before (laser on Corona, Insane: 0.31 and 0.31;
 omega 0.80 and 0.76). The omega's hits (0.55–0.83 against EC's 0.25) come
@@ -3834,11 +3837,11 @@ from its lock: the bots fire it only within 18° of the nose and 80 units
 46: they do not hold an unrealistic range.
 
 **Heavy missiles fired soon** (`heavy_fire_delay`, `heavy_eagerness`,
-`eager_risk`). EC fired heavy missiles a median 6.8 s after the pickup
+`eager_risk`). EC fired heavy missiles (smart, mega, earthshaker) a median 6.8 s after the pickup
 over six games (Corona: earthshakers 4.7–8.1 s, none of 31 lost in a
 death; Earth Shaker 35–40 % died holding); the bots of the recording
 held earthshakers 11–20 s and two of nine died with one. A bot holding a
-heavy missile (smart, mega, earthshaker) grows eager from half its fire
+heavy missile (mega, earthshaker; the smart missile is fired whenever its rules allow) grows eager from half its fire
 delay (Hotshot 6 s, Ace 5 s, Insane 4 s; a profile's
 `tune.heavy_fire_delay`) to one and a half of it, and at once with a
 stack (two held: a third of the way, four and more: fully,
@@ -3847,24 +3850,27 @@ chance of self-damage by 0.25, the trade it asks for and the value of a
 blast fall (to 0.6 and 0.5), its standoff to 0.8 and it ducks half as
 much; the heavy cooldown halves and a target it fired at may have
 another. The point blank and lethal rules (`judge_blast`) hold at any
-eagerness. A shot of one restarts the wait of the next (`heavy_since`).
+eagerness. A mega or earthshaker shot restarts the wait of the next
+(`heavy_since`); the smart missile is not part of it (its own rules fire
+it at once: a median 4–5 s after the pickup at Insane before and after;
+the review of PR #76: counting it reset the earthshaker's wait at every
+smart shot).
 
-| Five bots, 12 seeds | Corona: delay, died holding (all heavy) | Earth Shaker | Pyroglyphic (smart only) |
-|---|---|---|---|
-| Insane before | 5.0 s, 19 % (earthshakers 37 %) | 8.4 s, 44 % | 8.7 s, 6 % |
-| Insane after | 4.4 s, 18 % (36 %) | 8.7 s, 46 % | 8.1 s, 6 % |
-| Hotshot before | 5.0 s, 24 % | 10.8 s, 58 % | 7.0 s, 17 % |
-| Hotshot after | 5.2 s, 28 % | 9.1 s, 57 % | 7.5 s, 17 % |
+| Five bots, 12 seeds: delay, died holding (smart, mega, earthshaker) | Corona | Earth Shaker |
+|---|---|---|
+| Insane before | 5.0 s, 19 % (earthshakers 6.2 s, 37 %) | 8.4 s, 44 % (14.5 s, 79 %) |
+| Insane after | 4.2 s, 12 % (5.5 s, 21 %) | 8.8 s, 45 % (10.5 s, 74 %) |
+| Hotshot before | 5.0 s, 24 % | 10.8 s, 58 % |
+| Hotshot after | 5.1 s, 21 % | 8.9 s, 56 % |
 
-(delays: the median of the bots' medians.) Bot against bot the delays
-were already about the human's; the eagerness shortens them a little and
-leaves the deaths holding one about as they were. What remains is the
-fight's distance: in the arena's fights the target is mostly within the
-earthshaker's blast (its rules said `lethal` and `too-close` 66 times,
-`fire` 52, in one game's log), and on Earth Shaker the bots pick up
-dozens of earthshakers a game and die with a stack. The playtest's long
-holds (11–20 s) were against a human; a recording against the new bots
-will tell.
+(delays: the median of the bots' medians; Pyroglyphic has only smart
+missiles.) Bot against bot the delays were already about the human's on
+Corona; the eagerness shortens them and halves the earthshakers lost in
+a death there. On Earth Shaker the bots pick up dozens of earthshakers a
+game and die with a stack (in its fights the target is mostly within
+the blast: `lethal` and `too-close` outnumbered `fire` in a game's log).
+The playtest's long holds (11–20 s) were against a human; a recording
+against the new bots will tell.
 
 **Power pickups** (`power_pickup_weight`: Hotshot 0.6 → 0.75, Ace 0.8 →
 0.9, Insane 0.95 → 1). EC went for 66–86 % of the power pickups he saw on
@@ -3879,8 +3885,8 @@ lead (the flight numbers of §9.16).
 
 | Went for (five bots) | Corona | Earth Shaker | Pyroglyphic |
 |---|---|---|---|
-| Insane before / after | 0.59 / 0.58 | 0.75 / 0.75 | 0.86 / 0.78 |
-| Hotshot before / after | 0.58 / 0.60 | 0.73 / 0.70 | 0.83 / 0.86 |
+| Insane before / after | 0.59 / 0.58 | 0.75 / 0.75 | 0.86 / 0.82 |
+| Hotshot before / after | 0.58 / 0.55 | 0.73 / 0.74 | 0.83 / 0.79 |
 | EC | 0.66–0.86 | 0.74–0.79 | 1.00 (11 seen) |
 
 **Knowledge of the map** (the hidden omega cannon): only Havoc (Insane)
@@ -3902,8 +3908,9 @@ segment above 40, Pyroglyphic 18 % of its volume above 65 (its larger
 rooms), Corona 56 % (the hall). The appetite is the style's weight when
 the bot is weak (`weak_armament`, or below 50 shields), collecting,
 refuelling or retreating; 0.4 of it otherwise; and well armed (an
-armament of 3 or a heavy missile, 80 shields) minus half of it; going
-for a power pickup none (the shortest way wins the race). With an
+armament of 3 or a mega or earthshaker it fires, 80 shields) minus half
+of it; going for a power pickup or hunting none (the shortest way wins
+the race; the fights stay as they were). With an
 appetite, a path's edge into a segment costs 1.5 × appetite × excess
 more (the route goes round the hall by the tunnels where there are any),
 and a roaming bot weighs its places by it (exposed ones less, or with a
@@ -3914,8 +3921,8 @@ utilities are untouched.
 |---|---|---|---|
 | EC (recordings) | 26–32 % / 55–58 % | 87 % / 1 % | (none exposed) |
 | Insane before | 14 % / 71 % | 81 % / 2 % | — |
-| Insane after | 17 % / 62 % | 78 % / 3 % | — |
-| Hotshot before / after | 15 % / 70 %, 17 % / 62 % | 79 % / 3 %, 78 % / 4 % | — |
+| Insane after | 16 % / 64 % | 80 % / 2 % | — |
+| Hotshot before / after | 15 % / 70 %, 17 % / 62 % | 79 % / 3 %, 80 % / 2 % | — |
 
 With cover weights of 0, the styles' first (Balanced 0.6 …) and 1.8 times
 those, the bots spent 68, 64 and 59 % of their time in Corona's exposed
@@ -3927,17 +3934,17 @@ mean weight, which is how the analysis turns a pilot's share into
 
 | | Corona | Earth Shaker | Pyroglyphic |
 |---|---|---|---|
-| kills a game | 89.2 ± 7.1 → 81.2 ± 9.3 | 84.4 ± 5.2 → 89.6 ± 5.7 | 87.8 ± 10.8 → 82.8 ± 5.0 |
-| K/D Insane | 1.13 → 1.08 | 1.04 → 1.06 | 1.14 → 1.07 |
-| K/D Hotshot | 0.43 → 0.47 | 0.47 → 0.44 | 0.29 → 0.44 |
-| speed Insane (units/s) | 44.6 → 45.3 | 49.8 → 49.9 | 45.4 → 45.6 |
-| strafe reversals a minute, Insane | 50.3 → 49.3 | 46.4 → 47.7 | 50.5 → 49.6 |
+| kills a game | 89.2 ± 7.1 → 81.2 ± 8.6 | 84.4 ± 5.2 → 87.0 ± 6.9 | 87.8 ± 10.8 → 86.2 ± 6.3 |
+| K/D Insane | 1.13 → 1.09 | 1.04 → 1.04 | 1.14 → 1.10 |
+| K/D Hotshot | 0.43 → 0.47 | 0.47 → 0.51 | 0.29 → 0.40 |
+| speed Insane (units/s) | 44.6 → 45.3 | 49.8 → 49.9 | 45.4 → 45.2 |
+| strafe reversals a minute, Insane | 50.3 → 48.9 | 46.4 → 46.8 | 50.5 → 49.9 |
 
 One bot per skill (K/D, Corona / Earth Shaker / Pyroglyphic): Trainee
-0.03/0.06/0.04 → 0.03/0.06/0.05, Rookie 0.22/0.14/0.23 →
-0.21/0.10/0.28, Hotshot 1.13/1.41/0.74 → 1.30/1.19/0.96, Ace
-1.51/1.70/1.72 → 1.79/2.03/1.45, Insane 3.69/2.83/4.95 →
-3.30/2.44/3.54 (spreads of ±0.3–2: the order by skill holds). Corona has
+0.03/0.06/0.04 → 0.04/0.05/0.04, Rookie 0.22/0.14/0.23 →
+0.19/0.14/0.23, Hotshot 1.13/1.41/0.74 → 1.33/1.16/0.87, Ace
+1.51/1.70/1.72 → 1.44/1.90/1.60, Insane 3.69/2.83/4.95 →
+3.37/2.97/3.87 (spreads of ±0.3–2: the order by skill holds). Corona has
 fewer kills a game with the bots less in the hall; the flight numbers of
 §9.15–9.16 are unchanged.
 

@@ -531,7 +531,7 @@ public:
  * arena; a wider fire cone made more shots, more hits in all) and a near
  * miss still hits.  GAUSS_AIM_ERROR_EXTRA degrees more aim error (per
  * axis) take about a tenth off the gauss's hits and damage per shot at
- * Insane and Hotshot without more shots (Documentation/multiplayer-
+ * Insane, less at Hotshot, without more shots (Documentation/multiplayer-
  * bots.md section 9.17); every other weapon aims as before (the user,
  * 2026-10-02: the bots stay dangerous; better players than the
  * recordings' are in the group).

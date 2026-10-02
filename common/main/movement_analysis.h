@@ -2586,13 +2586,9 @@ inline std::size_t exposure_state(const sample &s)
 {
 	const unsigned primary{s.weapons & 0xfu}, secondary{static_cast<unsigned>(s.weapons >> 4)};
 	const bool light_gun{primary == 0 || primary == 1 || primary == 2};
-	if (s.shields < limits::WEAK_SHIELDS || light_gun)
-	{
-		/* A heavy missile in hand is no weak ship (but with few shields). */
-		if (s.shields >= limits::WEAK_SHIELDS && heavy_of_slot(static_cast<std::uint8_t>(secondary)))
-			return 2;
+	const bool heavy{heavy_of_slot(static_cast<std::uint8_t>(secondary)).has_value()};
+	if (s.shields < limits::WEAK_SHIELDS || (light_gun && !heavy))
 		return 0;
-	}
 	return s.shields >= limits::ARMED_SHIELDS ? 1 : 2;
 }
 

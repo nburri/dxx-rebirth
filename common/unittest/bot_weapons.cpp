@@ -1880,7 +1880,6 @@ void test_release_aim()
 	CHECK(s == secondary::homing);
 	CHECK(s && release_aim_of({.role = role_of(*s), .has_target_pos = true, .corner_shot = homing_round_corner(m), .pursuing = m.pursuing}) == release_aim::corner);
 }
-}
 
 /* Section 9.17: the eagerness to use a heavy missile held for a while. */
 void test_heavy_eagerness()
@@ -1950,6 +1949,8 @@ void test_heavy_eagerness()
 	o.target_damage = o.target_nominal = 15;
 	CHECK(judge_blast(o, sc, md, rp) == risk_verdict::low_value);
 	CHECK(judge_blast(o, sc, md, bold) == risk_verdict::fire);
+}
+
 }
 
 int main()
