@@ -796,6 +796,8 @@ void multi_send_sound_function (char,char, playernum_t pnum = Player_num);
 void DropFlag();
 void multi_send_finish_game ();
 void init_hoard_data(d_vclip_array &Vclip);
+/* Frees what init_hoard_data loaded; call before the game data is freed. */
+void close_hoard_data();
 void multi_apply_goal_textures();
 void multi_send_escort_goal(const d_unique_buddy_state &);
 

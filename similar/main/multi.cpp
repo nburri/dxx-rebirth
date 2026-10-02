@@ -5089,12 +5089,30 @@ class hoard_resources_type
 public:
 	bitmap_index bm_idx = invalid_bm_idx;
 	unsigned snd_idx = invalid_snd_idx;
+	/* The orb vclip, the goal effect and the goal texture are appended to
+	 * Vclip, Effects and TmapInfo.  A later hoard game reuses these slots
+	 * instead of appending new ones each time (which overflowed the
+	 * tables after some 20 hoard levels in one session).
+	 */
+	unsigned vclip_slot = UINT_MAX, effect_slot = UINT_MAX, texture_slot = UINT_MAX;
 	void reset();
-	~hoard_resources_type()
-	{
-		reset();
-	}
+	/* No destructor: freeing at program exit touched Orb_icons and
+	 * GameSounds after their own destructors had run (static destruction
+	 * order), a double free that aborted every hoard game's exit in
+	 * optimised (LTO) builds.  close_hoard_data() frees the data while the
+	 * game data is still alive.
+	 */
 };
+
+/* The slot `slot` of a table with `count` entries if it is still the last
+ * one, otherwise a newly appended one.
+ */
+static unsigned hoard_reuse_or_append(unsigned &slot, unsigned &count)
+{
+	if (slot == UINT_MAX || slot + 1 != count)
+		slot = count++;
+	return slot;
+}
 
 static hoard_resources_type hoard_resources;
 
@@ -5129,6 +5147,11 @@ void hoard_resources_type::reset()
 		i.reset();
 }
 
+void close_hoard_data()
+{
+	hoard_resources.reset();
+}
+
 void init_hoard_data(d_vclip_array &Vclip)
 {
 	auto &Effects = LevelUniqueEffectsClipState.Effects;
@@ -5158,10 +5181,9 @@ void init_hoard_data(d_vclip_array &Vclip)
 	MALLOC( bitmap_data1, ubyte, n_orb_frames*orb_w*orb_h + n_goal_frames*64*64 );
 
 	//Create orb vclip
-	const auto nvc = Vclip.valid_index(Num_vclips);
+	const auto nvc = Vclip.valid_index(hoard_reuse_or_append(hoard_resources.vclip_slot, Num_vclips));
 	if (!nvc)
 		throw std::runtime_error("too many vclips");
-	++ Num_vclips;
 	const auto orb_vclip{*nvc};
 	auto &vcorb = Vclip[orb_vclip];
 	vcorb.play_time = F1_0/2;
@@ -5188,17 +5210,19 @@ void init_hoard_data(d_vclip_array &Vclip)
 	Powerup_info[powerup_type_t::POW_HOARD_ORB].light = Powerup_info[powerup_type_t::POW_SHIELD_BOOST].light;
 
 	//Create orb goal wall effect
-	const auto opt_goal_eclip{Effects.valid_index(Num_effects++)};
-	assert(opt_goal_eclip);
+	const auto opt_goal_eclip{Effects.valid_index(hoard_reuse_or_append(hoard_resources.effect_slot, Num_effects))};
+	if (!opt_goal_eclip)
+		throw std::runtime_error("too many effects");
 	Effects[*opt_goal_eclip] = Effects[(effect_index{94})];        //copy from blue goal
-	Effects[*opt_goal_eclip].changing_wall_texture = static_cast<texture_index>(NumTextures);
+	const auto goal_texture{hoard_reuse_or_append(hoard_resources.texture_slot, NumTextures)};
+	if (goal_texture >= MAX_TEXTURES)
+		throw std::runtime_error("too many textures");
+	Effects[*opt_goal_eclip].changing_wall_texture = static_cast<texture_index>(goal_texture);
 	Effects[*opt_goal_eclip].vc.num_frames=n_goal_frames;
 
-	TmapInfo[NumTextures] = find_required_goal_texture(LevelUniqueTmapInfoState, tmapinfo_flag::goal_blue);
-	TmapInfo[NumTextures].eclip_num = *opt_goal_eclip;
-	TmapInfo[NumTextures].flags = static_cast<tmapinfo_flags>(tmapinfo_flag::goal_hoard);
-	NumTextures++;
-	Assert(NumTextures < MAX_TEXTURES);
+	TmapInfo[goal_texture] = find_required_goal_texture(LevelUniqueTmapInfoState, tmapinfo_flag::goal_blue);
+	TmapInfo[goal_texture].eclip_num = *opt_goal_eclip;
+	TmapInfo[goal_texture].flags = static_cast<tmapinfo_flags>(tmapinfo_flag::goal_hoard);
 	range_for (auto &i, partial_range(Effects[*opt_goal_eclip].vc.frames, n_goal_frames))
 	{
 		const bitmap_index bi{bitmap_num};
