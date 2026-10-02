@@ -5058,6 +5058,15 @@ class DXXArchive(DXXCommon):
 		RuntimeTest('test-bot-fight-sim', (
 			'common/unittest/bot_fight_sim.cpp',
 			)),
+		# Test of how the bots fly a free-for-all on a real level (its
+		# geometry from a mission's HOG, which the test takes from its
+		# arguments or BOT_LEVEL_SIM_HOG and skips without), against a
+		# human's replayed track (BOT_LEVEL_SIM_TRACK) or a scripted
+		# enemy (bot_movement.h, bot_nav.h, bot_goals.h,
+		# level_geometry.h, movement_analysis.h).
+		RuntimeTest('test-bot-level-sim', (
+			'common/unittest/bot_level_sim.cpp',
+			)),
 		# Test of the bots that fly a style profile: a real profile
 		# applied, the styles folder, the netgame profile, the chat
 		# (bot_style_profile.h, bot_style_library.h, bot_profile.h,

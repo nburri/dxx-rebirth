@@ -40,6 +40,8 @@
 #include "bot.h"
 #include "bot_arena.h"
 #include "bot_goals.h"
+#include "bot_movement.h"
+#include "movement_record_format.h"
 #include "bot_nav.h"
 #include "bot_weapons.h"
 #include "net_v2_objects.h"
@@ -282,6 +284,25 @@ enum class bot_goal : uint8_t
 	refuel,
 };
 
+/* Section 9.15: the movement recorder writes the goal and the movement
+ * mode as they are here (format minor 4).
+ */
+namespace mrb = ::dcx::movrec;
+static_assert(static_cast<uint8_t>(bot_goal::none) == mrb::bot_goals::none);
+static_assert(static_cast<uint8_t>(bot_goal::roam) == mrb::bot_goals::roam);
+static_assert(static_cast<uint8_t>(bot_goal::hunt) == mrb::bot_goals::hunt);
+static_assert(static_cast<uint8_t>(bot_goal::collect) == mrb::bot_goals::collect);
+static_assert(static_cast<uint8_t>(bot_goal::retreat) == mrb::bot_goals::retreat);
+static_assert(static_cast<uint8_t>(bot_goal::refuel) == mrb::bot_goals::refuel);
+static_assert(static_cast<uint8_t>(b::move_mode::path) == mrb::bot_modes::path);
+static_assert(static_cast<uint8_t>(b::move_mode::fight_keys) == mrb::bot_modes::fight);
+static_assert(static_cast<uint8_t>(b::move_mode::path_keys) == mrb::bot_modes::path_keys);
+static_assert(static_cast<uint8_t>(b::move_mode::turn_keys) == mrb::bot_modes::turn);
+static_assert(static_cast<uint8_t>(b::move_mode::slide) == mrb::bot_modes::slide);
+static_assert(static_cast<uint8_t>(b::move_mode::duck) == mrb::bot_modes::duck);
+static_assert(static_cast<uint8_t>(b::move_mode::recover) == mrb::bot_modes::recover);
+static_assert(b::MOVE_MODE_COUNT == mrb::bot_modes::count);
+
 struct bot_controls
 {
 	double pitch{}, heading{}, forward{}, sideways{}, vertical{};
@@ -402,6 +423,18 @@ struct bot_state
 	b::slide_state slide;
 	b::approach_key approach;
 	b::lateral_keys lateral;
+	/* Section 9.15: the path flown with keys in a fight, the hold of the
+	 * choice between the fight's keys and the path, the movement of the
+	 * last tick (the movement recorder writes it).
+	 */
+	b::path_keys path_keys;
+	b::mode_hold hold;
+	b::fire_blocked blocked;
+	b::move_mode mode{b::move_mode::none};
+	/* Section 9.15: the free distance along the ship's axes (perceive,
+	 * fighting with keys), for the juke.
+	 */
+	b::fight_room room;
 	/* Section 9.12: retreating (at the last tick), flown turned away and
 	 * with the afterburner (drawn until flee_roll_at).
 	 */
@@ -658,6 +691,11 @@ struct bot_state
 		slide.reset();
 		approach.reset();
 		lateral.reset();
+		path_keys.reset();
+		hold.reset();
+		blocked.reset();
+		mode = b::move_mode::none;
+		room = {};
 		fleeing = flee_turned = flee_burn = false;
 		flee_roll_at = 0;
 		roam_burn_ok = true;
@@ -1496,6 +1534,9 @@ void notice_heavy_holders(bot_state &bs, const object &obj, const uint32_t tick)
 #endif
 }
 
+[[nodiscard]]
+double wall_distance(const object &obj, const vec3 &dir, double limit);
+
 void perceive(bot_state &bs, const object &obj, const uint32_t tick)
 {
 	auto &Objects = LevelUniqueObjectState.Objects;
@@ -1562,11 +1603,13 @@ void perceive(bot_state &bs, const object &obj, const uint32_t tick)
 			bs.shot_clear = shot_line_clear(bs, obj, *Objects.vcptr(vcplayerptr(t)->objnum), bs.shot_first_hit);
 	}
 	bs.seen.push(p);
-	/* Section 4.3: string pulling, at most `lookahead` probes. */
+	/* Section 4.3: string pulling; section 9.15: far along the path, at
+	 * most b::PULL_PROBES probes.
+	 */
 	if (!bs.points.empty())
 	{
 		const fix rad{obj.size * 2 / 3};
-		bs.steer_index = b::pull_string(bs.point_index, bs.points.size(), 4, [&](const std::size_t k) {
+		bs.steer_index = b::pull_string_ahead(bs.point_index, bs.steer_index, bs.points.size(), [&](const std::size_t k) {
 			return line_clear(obj, obj.pos, obj.segnum, to_fixvec(bs.points[k]), rad, false);
 		});
 	}
@@ -1580,7 +1623,10 @@ void perceive(bot_state &bs, const object &obj, const uint32_t tick)
 	const double speed{b::length(vel)};
 	if (speed > 5)
 	{
-		constexpr double probe_time{0.4};
+		/* Section 9.15: fighting with keys, only a wall near enough to
+		 * matter (it fired all through the fights of exp-31).
+		 */
+		const double probe_time{bs.mode == b::move_mode::fight_keys ? 0.25 : 0.4};
 		const auto end{to_fixvec(pos + vel * probe_time)};
 		fvi_info hit;
 		const auto type{find_vector_intersection(fvi_query{
@@ -1595,8 +1641,12 @@ void perceive(bot_state &bs, const object &obj, const uint32_t tick)
 		if (type == fvi_hit_type::Wall)
 		{
 			const double hit_distance{b::distance(pos, to_vec(hit.hit_pnt))};
-			/* Fighting in the open, the bot does not follow its path. */
-			const bool following{!(p.visible && bs.shot_clear)};
+			/* Fighting in the open, the bot does not follow its path.
+			 * Section 9.15: what it flies is the movement of its last
+			 * tick (the fight's keys, the slide, the turn round): the
+			 * path flown with keys in a fight bends with its path.
+			 */
+			const bool following{b::follows_path(bs.mode)};
 			const bool bend{following && bs.steer_index < bs.points.size() && b::wall_hit_is_bend(pos, vel, bs.points[bs.steer_index], hit_distance, BOT_BEND_MAX_ANGLE)};
 			const auto normal{b::normalized(to_vec(hit.hit_wallnorm))};
 			const double into{-b::dot(vel, normal)};
@@ -1608,6 +1658,19 @@ void perceive(bot_state &bs, const object &obj, const uint32_t tick)
 			}
 		}
 	}
+	/* Section 9.15: the room along the ship's axes, for the juke of the
+	 * fight's keys (b::juke_turn_from_walls, b::keys_off_walls).
+	 */
+	if (bs.mode == b::move_mode::fight_keys)
+		bs.room = {
+			.left = wall_distance(obj, -frame.r, b::JUKE_WALL_ROOM),
+			.right = wall_distance(obj, frame.r, b::JUKE_WALL_ROOM),
+			.down = wall_distance(obj, -frame.u, b::JUKE_WALL_ROOM),
+			.up = wall_distance(obj, frame.u, b::JUKE_WALL_ROOM),
+			.back = wall_distance(obj, -frame.f, b::JUKE_WALL_ROOM),
+		};
+	else
+		bs.room = {};
 	/* Section 4.6, dodge: each projectile coming at the bot gets one roll
 	 * (b::dodge_roll); with the skill's probability the bot thrusts across
 	 * its flight for a moment, a reaction time later.  The bot's own shots
@@ -2874,6 +2937,10 @@ vec3 follow_path(bot_state &bs, object &obj, const bool engaged)
 	 */
 	const bool collecting{bs.goal == bot_goal::collect};
 	bs.point_index = b::advance_along(bs.points, bs.point_index, pos, reach);
+	/* The review of PR #74: the points the string skipped are passed
+	 * (b::advance_skipped).
+	 */
+	bs.point_index = b::advance_skipped(bs.points, bs.point_index, bs.steer_index, pos);
 	if (bs.steer_index < bs.point_index)
 		bs.steer_index = bs.point_index;
 	const auto &target{bs.points[bs.steer_index]};
@@ -2885,10 +2952,10 @@ vec3 follow_path(bot_state &bs, object &obj, const bool engaged)
 		speed = std::min(speed, collecting ? dist * 3 + 8 : dist * 1.5);
 	else
 	{
-		/* Slow down before a sharp turn. */
-		const auto turn{b::angle_between(to, bs.points[bs.steer_index + 1] - target)};
-		if (turn > b::radians(60) && dist < 40)
-			speed = std::min(speed, std::max(max_speed * 0.4, dist * 1.5));
+		/* Slow down before a sharp turn (section 9.15: the more the
+		 * sharper).
+		 */
+		speed = b::corner_speed(b::angle_between(to, bs.points[bs.steer_index + 1] - target), dist, max_speed);
 	}
 	if (!engaged)
 	{
@@ -2969,7 +3036,10 @@ void decide_afterburner(bot_state &bs, object &obj, const vec3 &wanted, const ui
 		chasing_far = b::distance(pos, bs.memory[*bs.target].pos) > bs.style.burn_chase_distance;
 	bool long_straight{false};
 	if ((bs.goal == bot_goal::roam || bs.goal == bot_goal::collect) && bs.steer_index < bs.points.size())
-		long_straight = b::distance(pos, bs.points[bs.steer_index]) > b::BOT_LONG_STRAIGHT;
+		/* Section 9.15: straight on along the path, past the point it
+		 * steers at.
+		 */
+		long_straight = b::straight_ahead(bs.points, bs.steer_index, pos) > b::BOT_LONG_STRAIGHT;
 	/* Section 9.13: the style profile's share of long flights burnt. */
 	if (long_straight)
 	{
@@ -4245,7 +4315,20 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 	 */
 	bool engaged{false};
 	double engaged_dist{1e9};
-	if (p && p->visible && bs.target && *bs.target == p->target && bs.visible_now[p->target])
+	const bool engaged_now{p && p->visible && bs.target && *bs.target == p->target && bs.visible_now[p->target]};
+	/* Section 9.15: in a fight the bot flies with keys: engaged, or a
+	 * moment (b::FIGHT_KEYS_MS) after it last saw its target or was hit.
+	 * The movement of this tick (bs.mode at its end); engaged, the path
+	 * flown instead of the fight's keys.
+	 */
+	const uint32_t fight_ticks{b::ticks_from_ms(b::FIGHT_KEYS_MS)};
+	const bool in_fight{engaged_now ||
+		(bs.target && bs.memory[*bs.target].valid && tick - bs.memory[*bs.target].tick < fight_ticks) ||
+		(bs.last_attacker < MAX_PLAYERS && tick - bs.attacked_tick < fight_ticks)};
+	if (!in_fight)
+		bs.hold.release();
+	auto mode{b::move_mode::path};
+	if (engaged_now)
 	{
 		engaged = true;
 		/* Where the target is now, reckoned from what the bot saw a
@@ -4300,7 +4383,14 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 		 * heavy shot, facing it (it comes round the corner, or the
 		 * corner is hit).
 		 */
-		const auto move_mode{b::engaged_movement(bs.shot_clear, path_goal, bs.duck_point && tick < bs.duck_until)};
+		/* Section 9.15: a line of fire blocked a moment is no path. */
+		auto move_mode{b::engaged_movement(bs.blocked.fight_on(bs.shot_clear, tick), path_goal, bs.duck_point && tick < bs.duck_until)};
+		/* Section 9.15: the fight's keys or the path, held at least
+		 * b::MODE_HOLD_MS (a line of fire that comes and goes, a pickup
+		 * goal of a moment).
+		 */
+		if (move_mode != b::engaged_move::duck)
+			move_mode = bs.hold.update(move_mode == b::engaged_move::combat, tick) ? b::engaged_move::combat : b::engaged_move::path;
 		switch (move_mode)
 		{
 			case b::engaged_move::combat:
@@ -4320,10 +4410,17 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 				const double forward{band < b::FIGHT_KEY_MIN_BAND
 					? b::approach_thrust(dist, bs.juke.range(), b::dot(vel, b::normalized(to)), close, max_speed)
 					: bs.approach.update(dist, bs.juke.range(), band) * close};
-				const bool no_closer{tick < bs.blast_hold_until};
+				/* Section 9.15: nor (its line of fire blocked a moment,
+				 * b::fire_blocked) into what blocks it: the strafe clears the
+				 * line.
+				 */
+				const bool no_closer{tick < bs.blast_hold_until || !bs.shot_clear};
 				const bool no_back{forward < 0 && bs.standoff > 0 && !bs.hugging && wall_distance(obj, -b::normalized(to), BOT_BACK_WALL_CLEARANCE) < BOT_BACK_WALL_CLEARANCE};
-				keys = b::fight_keys(bs.juke, forward, b::effective_strafe_speed(sk, bs.style), no_closer, no_back);
+				/* Section 9.15: no run into a wall. */
+				b::juke_turn_from_walls(bs.juke, bs.room);
+				keys = b::keys_off_walls(b::fight_keys(bs.juke, forward, b::effective_strafe_speed(sk, bs.style), no_closer, no_back), bs.room);
 				use_keys = true;
+				mode = b::move_mode::fight_keys;
 				break;
 			}
 			case b::engaged_move::path:
@@ -4334,6 +4431,7 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 				break;
 			case b::engaged_move::duck:
 				wanted = duck_velocity(pos, *bs.duck_point, max_speed);
+				mode = b::move_mode::duck;
 				break;
 		}
 		const double err{b::angle_between(frame.f, bs.face_dir)};
@@ -4358,9 +4456,11 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 				const auto v{b::turn_round_velocity(turn, {}, to, vel, frame.r * static_cast<double>(bs.heading_pref), max_speed, bs.tune.turns.reverse_speed)};
 				if (turn != b::turn_phase::reversing || b::reverse_turn_has_room(wall_distance(obj, b::normalized(v), b::REVERSE_TURN_CLEARANCE)))
 				{
+					/* Section 9.15: flown with keys (below). */
 					wanted = v;
 					use_keys = false;
 					reversing = true;
+					mode = b::move_mode::turn_keys;
 				}
 			}
 			/* Section 9.5 and 9.12: turning far round (or a reverse
@@ -4371,6 +4471,7 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 			{
 				keys = b::slide_keys(side);
 				use_keys = true;
+				mode = b::move_mode::slide;
 			}
 		}
 		const double aim_err{b::angle_between(frame.f, bs.aim_dir)};
@@ -4399,12 +4500,33 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 		 * sight does not carry its key into the next fight.
 		 */
 		bs.slide.reset();
+		bs.blocked.reset();
 		wanted = follow_path(bs, obj, false);
+		/* Section 9.15: the target out of sight a moment, the fight's
+		 * keys go on (b::MODE_HOLD_MS since they began) toward where it
+		 * went, facing there.
+		 */
+		const auto *const m{bs.target && bs.memory[*bs.target].valid ? &bs.memory[*bs.target] : nullptr};
+		if (in_fight && m && bs.hold.update(false, tick) && !bs.stuck.recovering())
+		{
+			const auto est{m->pos + m->vel * tick_seconds(tick - m->tick)};
+			const auto to{est - pos};
+			const double dist{b::length(to)};
+			bs.face_dir = b::normalized(to);
+			bs.face_rate = {};
+			if (bs.turning.phase == b::turn_phase::boost)
+				bs.turning.reset();
+			const double forward{bs.approach.update(dist, bs.juke.range(), range_hi - range_lo) * b::effective_close_speed(bs.style)};
+			b::juke_turn_from_walls(bs.juke, bs.room);
+			keys = b::keys_off_walls(b::fight_keys(bs.juke, forward, b::effective_strafe_speed(sk, bs.style), tick < bs.blast_hold_until, false), bs.room);
+			use_keys = true;
+			mode = b::move_mode::fight_keys;
+		}
 		/* Section 9.5: hit by an attacker it did not see, the bot turns
 		 * to where it was, a reaction time after the hit, and keeps
 		 * moving while it turns.
 		 */
-		if (bs.turn_to < MAX_PLAYERS && tick >= bs.turn_from && tick < bs.turn_until && bs.memory[bs.turn_to].valid)
+		else if (bs.turn_to < MAX_PLAYERS && tick >= bs.turn_from && tick < bs.turn_until && bs.memory[bs.turn_to].valid)
 		{
 			const auto to{bs.memory[bs.turn_to].pos - pos};
 			bs.face_dir = b::normalized(to);
@@ -4445,6 +4567,7 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 				bs.face_dir = b::normalized(bs.pursuit.peek_aim - pos);
 				bs.face_rate = {};
 				wanted = duck_velocity(pos, bs.pursuit.peek_point, max_speed * BOT_PEEK_SPEED);
+				mode = b::move_mode::duck;
 			}
 		}
 		/* The PR #47 review: the homing shot round the corner pending,
@@ -4470,6 +4593,8 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 			bs.face_dir = b::apply_aim_offset(bs.heavy_aim->point - shooter, frame.u, bs.aim.yaw(), bs.aim.pitch());
 			bs.face_rate = {};
 			wanted = bs.duck_point && tick < bs.duck_until ? duck_velocity(pos, *bs.duck_point, max_speed) : vec3{};
+			use_keys = false;
+			mode = b::move_mode::duck;
 		}
 		else if (bs.duck_point && tick < bs.duck_until && bs.target && bs.memory[*bs.target].valid)
 		{
@@ -4477,6 +4602,8 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 			bs.face_dir = b::normalized(bs.memory[*bs.target].pos - pos);
 			bs.face_rate = {};
 			wanted = duck_velocity(pos, *bs.duck_point, max_speed);
+			use_keys = false;
+			mode = b::move_mode::duck;
 		}
 	}
 	/* Section 9.5: the fusion cannon is charged, then released on the
@@ -4504,38 +4631,74 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 	(void)engaged_dist;
 #endif
 	const bool dodging{tick >= bs.dodge_from && tick < bs.dodge_until};
+	const bool avoiding{tick < bs.avoid_until};
 	if (bs.stuck.recovering())
 	{
 		wanted = bs.recover_dir * max_speed;
 		use_keys = false;
+		mode = b::move_mode::recover;
 	}
-	else if (dodging && !use_keys)
-		wanted += bs.dodge_dir * max_speed;
-	if (tick < bs.avoid_until && !use_keys)
-		wanted += bs.avoid;
+	/* Section 9.15: in a fight, the path (and the turn round, the turn to
+	 * an attacker) is flown with keys too: the wanted velocity, a key per
+	 * axis (b::path_keys); not aiming (the nose along the path), fewer
+	 * strafe keys.  (A juke across the path as in the fight was tried:
+	 * the -botarena games of exp-31's levels reversed the strafe 90 to
+	 * 93 times a minute with it, 72 to 77 without, the human 36 to 52.)
+	 */
+	else if (!use_keys && in_fight && mode != b::move_mode::duck)
+	{
+		keys = bs.path_keys.update(frame.to_local(b::path_key_command(wanted, vel, max_speed)), tick, !aim_set || (bs.fleeing && bs.flee_turned));
+		use_keys = true;
+		if (mode != b::move_mode::turn_keys)
+			mode = b::move_mode::path_keys;
+	}
+	/* The path's keys start afresh after another movement. */
+	if (mode != b::move_mode::path_keys && mode != b::move_mode::turn_keys)
+		bs.path_keys.reset();
+	std::array<bool, 2> immediate{};
 	if (use_keys)
 	{
-		/* Section 9.12: the keys, with the dodge at full thrust and the
-		 * push off a wall as the velocity controller gives it from rest.
+		/* Section 9.15: the dodge is one key at full thrust; the push off
+		 * a wall turns a key held into it (only that one skips the
+		 * strafe's filter) or presses a free one.
 		 */
-		auto cmd{frame.to_world(keys.local())};
 		if (dodging)
-			cmd += bs.dodge_dir;
-		if (tick < bs.avoid_until)
-			cmd += bs.avoid * (3 / max_speed);
-		bs.move_cmd = cmd;
+			keys = b::dodge_key(keys, frame.to_local(bs.dodge_dir));
+		if (avoiding)
+		{
+			const auto a{b::avoid_keys(keys, frame.to_local(bs.avoid), max_speed)};
+			keys = a.keys;
+			immediate = a.immediate;
+		}
+		bs.move_cmd = frame.to_world(keys.local());
 	}
 	else
+	{
+		if (dodging && mode != b::move_mode::recover)
+			wanted += bs.dodge_dir * max_speed;
+		if (avoiding)
+			wanted += bs.avoid;
 		bs.move_cmd = b::velocity_command(wanted, vel, max_speed);
-	/* Section 9.12: the strafe keys do not flip at the tick rate.  The
-	 * review of PR #63: nor does the push off a wall wait for the filter
-	 * (a strafe key held toward the wall, the push the other way was
-	 * released for up to b::KEY_FLIP_TICKS: the bot slid on into it).
-	 */
-	bs.move_cmd = frame.to_world(bs.lateral.apply(frame.to_local(bs.move_cmd), tick, dodging || bs.stuck.recovering() || tick < bs.avoid_until));
+		/* The review of PR #63: the push off a wall does not wait for
+		 * the filter (a strafe key held toward the wall, the push the
+		 * other way was released for up to b::KEY_FLIP_TICKS: the bot
+		 * slid on into it).
+		 */
+		immediate.fill(dodging || bs.stuck.recovering() || avoiding);
+	}
+	/* Section 9.12: the strafe keys do not flip at the tick rate. */
+	bs.move_cmd = frame.to_world(bs.lateral.apply(frame.to_local(bs.move_cmd), tick, immediate));
+	bs.mode = mode;
 	if (!aim_set)
 		bs.aim_dir = bs.face_dir;
-	decide_afterburner(bs, obj, use_keys ? vec3{} : wanted, tick);
+	/* Section 9.15: the afterburner's check of the way the bot wants to
+	 * go: the fight's keys and the slide by their thrust (full forward
+	 * alone is the nose's way), a path or a turn flown with keys by the
+	 * velocity wanted (the keys follow it; the afterburner pushes along
+	 * the nose while the strafe keys correct).  PR #63 gave it nothing
+	 * for keys, and a bot never burnt in a fight.
+	 */
+	decide_afterburner(bs, obj, use_keys && mode != b::move_mode::path_keys && mode != b::move_mode::turn_keys ? frame.to_world(keys.local()) * max_speed : wanted, tick);
 	missile_tick(bs, obj, tick, p);
 	if (bot_log_on() && tick >= bs.next_log_tick)
 	{
@@ -4849,6 +5012,16 @@ void put_out_afterburner(bot_state &bs)
 bool bot_is_local(const playernum_t pnum)
 {
 	return find_bot(pnum) != nullptr;
+}
+
+bool bot_movement_state(const playernum_t pnum, uint8_t &mode, uint8_t &goal)
+{
+	const auto bs{find_bot(pnum)};
+	if (!bs)
+		return false;
+	mode = static_cast<uint8_t>(bs->life == bot_life::alive ? bs->mode : b::move_mode::none);
+	goal = static_cast<uint8_t>(bs->goal);
+	return true;
 }
 
 void bot_slot_released(const playernum_t pnum)

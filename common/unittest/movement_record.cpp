@@ -654,8 +654,9 @@ void test_minor_2()
 			std::string text(static_cast<std::size_t>(size), '\0');
 			CHECK(std::fread(text.data(), 1, text.size(), f) == text.size());
 			std::fclose(f);
-			CHECK(text.find("aimed_at_mask,controls_shared\n") != std::string::npos);
-			CHECK(text.ends_with(",1\n"));
+			CHECK(text.find("aimed_at_mask,controls_shared,bot_mode,bot_goal\n") != std::string::npos);
+			/* controls_shared, then (minor 4) no bot mode or goal. */
+			CHECK(text.ends_with(",1,,\n"));
 		}
 	}
 }
@@ -679,7 +680,7 @@ namespace {
  */
 void test_minor_3()
 {
-	static_assert(FORMAT_MINOR == 3);
+	static_assert(FORMAT_MINOR >= 3);
 	{
 		record_buffer buf;
 		const auto bytes{encode_level(buf, 3, 412, 0x21, "Pyroglyphic (Sny)", "Pyro Level", "PYGL", "pygl03.rl2")};
@@ -718,6 +719,71 @@ void test_minor_3()
 
 }
 
+namespace {
+
+/* Minor 4: a bot's movement mode and goal appended to its samples.  A
+ * minor 3 reader reads the fields it knows and ignores the two bytes; a
+ * minor 4 reader reads a sample without them as not known.
+ */
+void test_minor_4()
+{
+	static_assert(FORMAT_MINOR == 4);
+	record_buffer buf;
+	for (const bool ctl : {false, true})
+	{
+		auto s{make_sample(3, ctl)};
+		s.flags2 |= sample_flag2::bot;
+		s.bot_known = true;
+		s.bot_mode = bot_modes::path_keys;
+		s.bot_goal = bot_goals::retreat;
+		const auto bytes{encode(buf, s)};
+		CHECK(bytes.size() == RECORD_HEADER_SIZE + SAMPLE_BASE_SIZE + (ctl ? SAMPLE_CONTROLS_SIZE : 0) + SAMPLE_BOT_SIZE);
+		const auto payload{bytes.subspan(RECORD_HEADER_SIZE)};
+		const auto d{decode_sample(payload)};
+		CHECK(d && *d == s);
+		/* As minor 3 wrote it: the same sample, the mode not known. */
+		const auto old{decode_sample(payload.first(payload.size() - SAMPLE_BOT_SIZE))};
+		CHECK(old && !old->bot_known && old->controls == s.controls && old->pos == s.pos);
+		/* One of the two bytes: not known (a later field would be the
+		 * next minor's).
+		 */
+		const auto cut{decode_sample(payload.first(payload.size() - 1))};
+		CHECK(cut && !cut->bot_known);
+		/* Not a bot: nothing appended, trailing bytes are ignored. */
+		auto human{s};
+		human.flags2 = static_cast<std::uint8_t>(human.flags2 & ~sample_flag2::bot);
+		const auto hb{encode(buf, human)};
+		CHECK(hb.size() + SAMPLE_BOT_SIZE == bytes.size());
+		std::vector<std::uint8_t> longer(hb.begin() + RECORD_HEADER_SIZE, hb.end());
+		longer.push_back(1);
+		longer.push_back(2);
+		const auto dl{decode_sample(longer)};
+		CHECK(dl && !dl->bot_known);
+	}
+	CHECK(bot_mode_is_keys(bot_modes::fight) && bot_mode_is_keys(bot_modes::path_keys) && bot_mode_is_keys(bot_modes::turn) && bot_mode_is_keys(bot_modes::slide));
+	CHECK(!bot_mode_is_keys(bot_modes::path) && !bot_mode_is_keys(bot_modes::duck) && !bot_mode_is_keys(bot_modes::recover) && !bot_mode_is_keys(bot_modes::none));
+	CHECK(std::string_view{bot_mode_name(bot_modes::path_keys)} == "path-keys" && std::string_view{bot_goal_name(bot_goals::collect)} == "collect");
+	CHECK(std::string_view{bot_mode_name(200)} == "?" && std::string_view{bot_goal_name(200)} == "?");
+	/* The CSV's last two columns. */
+	if (const auto f{std::tmpfile()})
+	{
+		auto s{make_sample(1, true)};
+		s.bot_known = true;
+		s.bot_mode = bot_modes::fight;
+		s.bot_goal = bot_goals::hunt;
+		write_sample_csv_row(f, tick_record{1, 33}, 1, s);
+		std::fflush(f);
+		const auto size{std::ftell(f)};
+		std::rewind(f);
+		std::string text(static_cast<std::size_t>(size), '\0');
+		CHECK(std::fread(text.data(), 1, text.size(), f) == text.size());
+		std::fclose(f);
+		CHECK(text.ends_with(",fight,hunt\n"));
+	}
+}
+
+}
+
 int main()
 {
 	test_crc();
@@ -733,6 +799,7 @@ int main()
 	test_minor_1();
 	test_minor_2();
 	test_minor_3();
+	test_minor_4();
 	std::puts("test-movement-record: all checks passed");
 	return 0;
 }

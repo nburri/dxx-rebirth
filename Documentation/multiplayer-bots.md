@@ -836,6 +836,10 @@ The new `test-bot-brain` and `test-bot-nav` cover:
 - **Tick accumulator**: the brain's decision sequence is identical for frame
   times from 2 ms to 100 ms (reusing the harness of `test-net-v2-interp`).
 - **`.ngp` bot line parser**: round trip, truncation, bad values.
+- **A real level** (`test-bot-level-sim`, section 9.15): the bots' brain
+  and movement on the geometry of a mission's HOG, against a human's
+  replayed track; it takes the HOG and the track from its arguments or
+  the environment and skips without them (no level data in the source).
 
 ### 8.2 Offline arena test (local, needs game data)
 
@@ -3462,6 +3466,180 @@ synthetic pilot that flies to every power pickup it sees (earthshaker,
 mega, omega and smart missile in turn; in a fight
 too) and lets the other pickups go, one that lets all go and one that
 takes all; their shares, distances, times and the profile key.
+
+### 9.15 After the Corona and Earth Shaker games of exp-31 (2026-10-01): the whole fight with keys
+
+**What the recordings showed.** PR #63 (section 9.12) gave the fight
+keys, and in the open (`test-bot-fight-sim`) the bots flew near the
+human. In the recordings of exp-31 on Corona and Earth Shaker they did
+not: speed 37–43 (EC 54–60), 76–102 strafe reversals a minute (EC
+36–52), vertical share 0.53–1.0, speed across 44–48 % (EC 77–81 %), the
+afterburner in 0–7 % of the flights away (EC 9–24 %). The keys flew only
+about 30 % of the fight time (an enemy in sight within 400 units); the
+rest fell back to the velocity controller. The reasons, by fight time:
+a pickup goal (collect, retreat, refuel: the path was flown with the
+velocity controller), the enemy out of the field of view, the shields
+below the retreat level, the first reaction time after sight, a line of
+fire blocked a moment; about 40 changes of the movement a bot-minute;
+the dodge and the wall avoidance added to the keys (no key any more)
+and switched the strafe's filter off; the afterburner's check got no
+wanted velocity with keys (0 % burn in a fight); the string pulling
+looked 4 path points (40 units) ahead, so the "long straight" of the
+afterburner (150 units) never came; corners slowed the path to 0.4 of
+the top speed; and the bots held an afterburner 39–54 % of their lives.
+
+**The movement now** (`common/main/bot_movement.h`, `bot_tick`):
+
+- *Keys for the whole fight.* While the bot engages its target, and for
+  `FIGHT_KEYS_MS` (1.5 s) after it last saw it or was hit, it flies with
+  keys: the fight's keys, or its path (a pickup, a retreat, the way
+  round) as keys: `path_keys` turns the wanted velocity (with a quarter
+  of the velocity controller's correction, `PATH_KEY_GAIN`) into a key
+  per axis, pressed beyond 0.4 of full thrust (up and down 0.85, forward
+  0.25), released below 0.15, held at least 250 ms; with the nose along
+  the path (not aiming) the strafe keys need 0.75. The turn round and
+  the turn to an unseen attacker are keys the same way. Only ducking,
+  the corner's peek, a hold for a heavy missile and the stuck recovery
+  stay with the velocity controller, and the path with no enemy about.
+- *Movement held.* Engaged, the choice between the fight's keys and the
+  path is held at least `MODE_HOLD_MS` (1.5 s, `mode_hold`); a blocked
+  line of fire keeps the fight's keys for `FIRE_BLOCKED_MS` (1 s,
+  `fire_blocked`), without closing in on what blocks it; the target out
+  of sight a moment, the fight's keys go on toward where it went until
+  the hold ends.
+- *Walls.* Fighting with keys the bot measures the room along its axes
+  (5 casts a perception tick): a juke's run that starts toward a wall
+  nearer than 18 units goes the other way if there is more room there,
+  a key toward a wall nearer than 8 is let go, and the reverse key with
+  a wall behind (`juke_turn_from_walls`, `keys_off_walls`). The wall
+  avoidance's probe looks 0.25 s ahead in the fight (0.4 s on a path),
+  and its bend exemption follows the movement flown (`follows_path`):
+  a path flown with keys bends with its path.
+- *Dodge and push as single keys.* The dodge presses one key at full
+  thrust (a strafe key already taking the ship out of the shot's way is
+  kept); the push off a wall lets go of a key held into the wall, or
+  turns it when the push is strong (`AVOID_FLIP_SHARE`), and only that
+  axis skips the strafe's flip filter (`lateral_keys::apply` with an
+  `immediate` per axis).
+- *Afterburner.* Its check of the way the bot wants to go takes the
+  fight's keys' thrust (full forward alone is the nose's way) and, for a
+  path or a turn flown with keys, the velocity wanted. The string
+  pulling moves the point steered at on along the path, up to 24 points,
+  at most 4 casts a perception tick (`pull_string_ahead`), and "long
+  straight" is the straight flight ahead (`straight_ahead`). The
+  afterburner powerup is worth 3 (it was 2: above a cloak, below
+  invulnerability).
+- *Corners.* The path slows for a bend from none at 60° to 0.55 of the
+  top speed at 135° within 30 units (`corner_speed`); B1 slowed to 0.4
+  for every bend of more than 60° within 40.
+
+A juke across the path while engaged (as the diagnosis proposed) was
+tried: on the arena's games it raised the strafe reversals from 72–77 to
+90–93 a minute, so the path's keys do not juke. A lower flip share of
+the juke (0.55–0.6) moved the reversals of real levels by less than the
+seeds' spread; the juke keeps the timings of section 9.12.
+
+**The recorder** writes each bot's movement mode and goal (format minor
+4, Documentation/movement-recording.md section 3.1); `movrec-dump`
+prints a bot's keys share of the fight time, its modes, mode changes and
+goals, `movrec-analyse --bots` the keys share and the mode changes.
+
+**Measured.** `-botarena` (section 8.2; 5 bots of the group's games,
+10-minute games, seeds 1–6, `tools/botarena-run.sh`), means of the bots,
+before (experimental-netcode) and after; EC from the recordings (the
+old code wrote no movement mode: its keys share and mode changes are
+those the diagnosis read from the exp-31 recordings):
+
+| | Corona before | after | EC | Earth Shaker before | after | EC |
+|---|---|---|---|---|---|---|
+| keys share of the fight | (≈ 30 %) | 91 % | | (≈ 30 %) | 81 % | |
+| mode changes a minute | (≈ 40) | 33 | | | 22 | |
+| speed | 37.3 | 44.3 | 56–60 | 42.1 | 44.2 | 54–58 |
+| strafe reversals a minute | 73 | 77 | 52 | 81 | 79 | 36–44 |
+| vertical share | 0.66 | 0.59 | ≈ 0.6 | 0.64 | 0.56 | 0.29–0.37 |
+| speed across | 58 % | 71 % | 81 % | 49 % | 58 % | 77–79 % |
+| push after a turn | 35 % | 44 % | 53–67 % | 48 % | 47 % | |
+| afterburner fleeing | 4.4 % | 13.5 % | 24 % | 1.9 % | 5.6 % | 9–16 % |
+
+The level simulation (below) on the same maps and EC's tracks:
+
+| | Corona before | after | Earth Shaker before | after |
+|---|---|---|---|---|
+| keys share of the fight | 59 % | 95 % | 42 % | 93 % |
+| mode changes a minute (median spell) | 89 (0.35 s) | 28 (1.5 s) | 82 (0.25 s) | 22 (1.5 s) |
+| speed | 39.8 | 44.8 | 42.2 | 45.6 |
+| strafe reversals a minute | 92 | 81 | 106 | 82 |
+| vertical share | 0.41 | 0.40 | 0.48 | 0.41 |
+| speed across | 56 % | 63 % | 48 % | 59 % |
+| afterburner fleeing | 0 % | 2 % | 8 % | 7 % |
+| walls touched a minute | 8.7 | 1.0 | 18.0 | 1.6 |
+
+What stays apart from the human: the speed (the human flies diagonal
+thrust and the afterburner most of the time) and the strafe reversals
+(the juke's own rhythm on real levels: its open-space numbers of
+`test-bot-fight-sim` are diluted by the scripted turns and pauses).
+They are the next steps, to be measured with `-botarena` and the mode
+byte of the next real games.
+
+**The review of PR #74.** The string pulled up to 24 points ahead skips
+points the bot never flies near (it cuts the corner, often further than
+3 `reach` from them), so `advance_along` never passed them: the path's
+point stayed behind, the stuck detector's remaining length grew as the
+bot flew on, the string could not be pulled beyond 24 points of it, and
+a broken string went back to points behind the bot.  In `-botarena`
+(seeds 1–3) the stuck recoveries went from 36–56 to 90–92 a game on
+Corona and from 12–16 to 52–58 on Earth Shaker, on the paths of collect
+and retreat goals.  The bot's point on the path is now the skipped
+point nearest to it, never back (`advance_skipped`, after
+`advance_along`): 11–14 recoveries a game on Corona (seeds 2–5), 11–26
+on Earth Shaker (seeds 1–3); the flight's numbers above are unchanged
+(speed 44.3 and 44.4, strafe reversals 76 and 77 a minute, keys 91 % and
+82 %).  The kills of a game are still below experimental-netcode's (Corona
+62–80 against 79–108, Earth Shaker 68–77 against 84–89), as in the level
+simulation.
+
+**Tests.** `test-bot-brain`: the modes, the hold, the blocked line, the
+path's keys (thresholds, release, hold, facing the path, the command),
+the walls round a fight (turned at a run's start, let go during it, a
+corridor, the reverse key), the dodge key, the push off a wall, the
+corner speed, the string pulled far ahead (probes, a wall, a broken
+string), the straight flight ahead, the filter's axis. `test-movement-record`:
+the bot movement of minor 4 (round trip, a minor 3 sample, a cut byte,
+not a bot, the names, the CSV columns). `test-bot-level-sim` (new): the
+bots on a real level (section 8.1), skipped without a HOG.
+`test-bot-fight-sim` unchanged and passing.
+
+**The level simulation** (`common/unittest/bot_level_sim.cpp`,
+`test-bot-level-sim`). Five bots (two Insane, an Ace, two Hotshots; the
+styles mixed) fly a free-for-all on the geometry of a real level read
+from the mission's HOG (`level_geometry.h`, with `trace_ray`: the ships
+stop short of the walls and slide along them), with the navigation of
+`bot_nav.h` (the graph of the level's segments, A*, the string pulling,
+the stuck recovery), the goals of `bot_goals.h` (hunt, collect,
+retreat, roam; shield, energy and afterburner pickups that come back
+after 30 s), shields, shots (lasers; a bot that dies leaves its
+afterburner to the level), the dodge and the
+movement of `bot_tick` (the same order, the same functions). The enemy
+is a human's track replayed from a movement recording (where he flew,
+and his shots, aimed at the bot nearest his nose) or, without one, a
+scripted pilot. The flight is written as the recorder writes it, with
+the bots' modes, and `movrec-analyse`'s analysis reads it. Each map is
+flown twice, with the movement before this section and with it, and
+checked: the keys' share of the fight time at least 70 % and 15 points
+above before, at most 40 mode changes a minute (15 fewer than before),
+a median spell of 0.7 s, faster and faster across than before, no more
+strafe reversals (8 a minute of slack) and no more up and down, the
+afterburner fleeing not less, stuck under 3 % of the time, at most 6
+walls a minute touched while retreating, an afterburner picked up.
+The level data are not part of the source:
+
+    test-bot-level-sim [-v] [-o DIR] -hog Corona.HOG -track moves-….dmr -hog ESHAKER.HOG -track moves-….dmr
+    BOT_LEVEL_SIM_HOG='Corona.HOG;ESHAKER.HOG' BOT_LEVEL_SIM_TRACK='a.dmr;b.dmr' test-bot-level-sim
+
+The level is the HOG's level with the track's segment count (else the
+first, or `-level NAME`); the track's enemy is the recording machine's
+human. About 10 s a map; `-v` prints every bot's report, `-o` writes
+the recordings.
 
 ---
 

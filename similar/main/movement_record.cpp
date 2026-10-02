@@ -689,7 +689,12 @@ void sample_player(const unsigned pid, const d_robot_info_array &Robot_info)
 	if (local)
 		s.flags2 |= mr::sample_flag2::local | mr::sample_flag2::vitals_exact;
 	if (is_bot(pid))
+	{
 		s.flags2 |= mr::sample_flag2::bot;
+		/* Format minor 4: how a bot flown here moves, and its goal. */
+		if (local)
+			s.bot_known = bot_movement_state(static_cast<playernum_t>(pid), s.bot_mode, s.bot_goal);
+	}
 #if DXX_BUILD_DESCENT == 2
 	if (+(pi.powerup_flags & player_flag::headlight_on))
 		s.flags2 |= mr::sample_flag2::headlight;

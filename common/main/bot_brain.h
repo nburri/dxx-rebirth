@@ -1052,6 +1052,8 @@ class juke_state
 {
 	int8_t m_side{}, m_vertical{};
 	int8_t m_last_side{};
+	/* A run (or a pause) began at this update. */
+	bool m_started{};
 	double m_range{};
 	unsigned m_left{};
 	unsigned m_range_left{};
@@ -1063,6 +1065,7 @@ public:
 	/* Once per tick. */
 	void update(bot_rng &rng, const unsigned min_ticks, const unsigned max_ticks, const double lo, const double hi, const double vertical)
 	{
+		m_started = false;
 		/* The preferred distance: its own time, a new one when the band
 		 * moved off it.
 		 */
@@ -1080,6 +1083,7 @@ public:
 			return;
 		}
 		const bool was_run{m_side != 0};
+		m_started = true;
 		if (was_run && rng.uniform() < STRAFE_PAUSE_SHARE)
 		{
 			m_last_side = m_side;
@@ -1109,6 +1113,23 @@ public:
 	int vertical() const
 	{
 		return m_vertical;
+	}
+	/* Section 9.15: the run goes the other way (a wall on its side:
+	 * juke_away_from_wall).
+	 */
+	void turn_side()
+	{
+		m_side = static_cast<int8_t>(-m_side);
+	}
+	void turn_vertical()
+	{
+		m_vertical = static_cast<int8_t>(-m_vertical);
+	}
+	/* A run or a pause began at the last update. */
+	[[nodiscard]]
+	bool started() const
+	{
+		return m_started;
 	}
 	/* The preferred distance to the target. */
 	[[nodiscard]]
@@ -1287,6 +1308,12 @@ public:
 	[[nodiscard]]
 	vec3 apply(vec3 local, const uint32_t tick, const bool immediate = false)
 	{
+		return apply(local, tick, std::array<bool, 2>{{immediate, immediate}});
+	}
+	/* Section 9.15: `immediate` per axis (sideways, vertical). */
+	[[nodiscard]]
+	vec3 apply(vec3 local, const uint32_t tick, const std::array<bool, 2> immediate)
+	{
 		for (std::size_t i{}; i != 2; ++i)
 		{
 			double &v{i ? local.y : local.x};
@@ -1294,7 +1321,7 @@ public:
 			/* A small push is no key. */
 			if (!s)
 				continue;
-			if (s == m_held[i] || !m_held[i] || immediate || tick - m_pushed[i] >= KEY_FLIP_TICKS)
+			if (s == m_held[i] || !m_held[i] || immediate[i] || tick - m_pushed[i] >= KEY_FLIP_TICKS)
 			{
 				m_held[i] = s;
 				m_pushed[i] = tick;

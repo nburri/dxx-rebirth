@@ -1274,6 +1274,11 @@ struct player_stats
 	double forward_share{}, reverse_share{}, strafe_share{}, vertical_share{}, coast_share{}, roll_share{};
 	/* The same in a fight (an enemy in sight within FIGHT_RANGE). */
 	double fight_s{}, fight_strafe_share{}, fight_side_share{}, fight_vertical_share{}, fight_reverse_share{};
+	/* Format minor 4, a bot only: the time its movement mode is known,
+	 * the share of its fight time flown with keys (bot_mode_is_keys),
+	 * its mode changes per minute alive.
+	 */
+	double bot_mode_s{}, bot_keys_fight_share{}, bot_mode_changes_per_min{};
 
 	/* Strafing in a fight: how long a run in one direction lasts (ms),
 	 * reversals per minute of fight, the vertical against the sideways
@@ -1476,6 +1481,11 @@ struct accum
 	double fast_s{}, slow_s{};
 	double ctl_s{}, forward_s{}, reverse_s{}, side_s{}, vert_s{}, coast_s{}, roll_s{};
 	double fight_ctl_s{}, fight_strafe_s{}, fight_side_s{}, fight_vert_s{}, fight_reverse_s{}, fight_s{};
+	/* Format minor 4: a bot's movement modes (time alive, in a fight,
+	 * and with keys in a fight) and its mode changes.
+	 */
+	double bot_s{}, bot_fight_s{}, bot_fight_keys_s{};
+	unsigned bot_mode_changes{};
 	std::vector<double> strafe_run_ms, lateral_speed;
 	double strafe_side_sum{}, strafe_vert_sum{}, strafe_thrust_sum{};
 	unsigned strafe_reversals{};
@@ -1603,6 +1613,18 @@ inline void scan_samples(const track &tr, accum &a, const ship_model &ship, cons
 		}
 		if (p.fight)
 			a.fight_s += w;
+		if (p.m.s.bot_known)
+		{
+			a.bot_s += w;
+			if (p.fight)
+			{
+				a.bot_fight_s += w;
+				if (bot_mode_is_keys(p.m.s.bot_mode))
+					a.bot_fight_keys_s += w;
+			}
+			if (i && tr.pts[i - 1].alive && tr.pts[i - 1].m.s.bot_known && tr.pts[i - 1].m.s.bot_mode != p.m.s.bot_mode)
+				++a.bot_mode_changes;
+		}
 		if (p.has_ctl)
 		{
 			(p.exact ? a.exact_s : a.estimated_s) += w;
@@ -2612,6 +2634,9 @@ inline player_stats analyse(const std::span<const track> tracks, const ship_mode
 	s.coast_share = ratio(a.coast_s, a.ctl_s);
 	s.roll_share = ratio(a.roll_s, a.ctl_s);
 	s.fight_s = a.fight_s;
+	s.bot_mode_s = a.bot_s;
+	s.bot_keys_fight_share = ratio(a.bot_fight_keys_s, a.bot_fight_s);
+	s.bot_mode_changes_per_min = ratio(a.bot_mode_changes, a.bot_s / 60);
 	s.fight_strafe_share = ratio(a.fight_strafe_s, a.fight_ctl_s);
 	s.fight_side_share = ratio(a.fight_side_s, a.fight_ctl_s);
 	s.fight_vertical_share = ratio(a.fight_vert_s, a.fight_ctl_s);
@@ -3267,6 +3292,8 @@ inline std::string write_report(const player_stats &s, const bot::style_profile 
 		appendf(o, "level: %s (%s), %.1f min alive here: %s\n", l.label.c_str(), l.source.c_str(), l.all.alive_s / 60, l.character.c_str());
 	if (s.levels.empty() && s.room_known_s <= 0)
 		o += "level: geometry not known (movrec-analyse --missions DIR)\n";
+	if (s.bot_mode_s > 0)
+		appendf(o, "bot movement: keys %.0f%% of the fight time, %.1f mode changes a minute (format minor 4)\n", pct(s.bot_keys_fight_share), s.bot_mode_changes_per_min);
 	o += "\nTraits\n";
 	for (const auto &t : describe_traits(s, ship))
 		o += "  - " + t + "\n";

@@ -86,6 +86,22 @@ and then one `sample` per recorded player:
 | enemy relative position | enemy minus me, world frame; beyond 2048 units the whole vector is scaled down to fit, keeping its direction, and the context says so (`rel_pos_scaled`) | 1/16 unit |
 | enemy relative velocity | enemy minus me, world frame; scaled likewise beyond 512 units/s (`rel_vel_scaled`) | 1/64 unit/s |
 | controls (optional) | forward, sideways, vertical thrust; pitch, heading, bank: 1.0 = full deflection, forward up to 2.0 with the afterburner | 1/60 |
+| bot movement (minor 4, bots flown here only) | the bot's movement mode at its last brain tick and its goal (below) | |
+
+**Bot movement (minor 4).** A bot flown on the recording machine (the
+host's bots, with `-recordmoves-bots`) appends two bytes to its samples:
+its movement mode and its goal (Documentation/multiplayer-bots.md section
+9.15). The modes: 0 none (not flying), 1 path (the velocity controller
+along its path, no enemy about), 2 fight (the fight's keys: the strafe and
+the range key), 3 path-keys (its path, or a turn to an attacker, flown with
+keys in a fight), 4 turn (turning round to a target behind, flown with
+keys), 5 slide (the slide while the nose comes round), 6 duck (ducking out
+of sight, the peek round a corner, a hold: the velocity controller to a
+point), 7 recover (the stuck recovery). Modes 2 to 5 are keys, as a human
+flies; 1 and 6 are not. The goals: 0 none, 1 roam, 2 hunt (a target known
+or in sight), 3 collect, 4 retreat, 5 refuel. So a real game shows directly
+how much of its fights a bot flew with keys and what it was after;
+`movrec-dump` and `movrec-analyse` report it (sections 5 and 8).
 
 **Controls.** The controls are the thrust and rotational thrust the ship was
 given in the frame of the sample (`apply_pilot_controls`), normalised to the
@@ -200,7 +216,7 @@ controls) change.
 
 ## 4. File format
 
-All integers little-endian. Version 1, minor 3. The minor counts additions
+All integers little-endian. Version 1, minor 4. The minor counts additions
 that an older reader skips without harm (new record types, new flag bits,
 fields appended to the header); the version changes only when old fields
 change. Minor 0 is the first release (v0.61-exp-25); minor 1 adds the
@@ -215,7 +231,11 @@ mission's file name (without extension) and the level's file name to the
 `level` record and, after `minor`, to the header (each at most 20 bytes); a
 minor 2 reader reads the fields it knows and skips them, a minor 3 reader
 reads an older file without them (empty), and a damaged name costs the
-names, not the record. A minor 0 file reads as
+names, not the record. Minor 4 appends a bot's movement mode and goal (two
+bytes, after the controls) to the samples of bots flown here (flags2 bit 2
+`bot`); a minor 3 reader ignores them, a minor 4 reader reads a sample
+without them as not known, and trailing bytes of any sample that is not a
+bot's are a later version's. A minor 0 file reads as
 before (its header has no `minor` field: 0).
 
 ```
@@ -242,7 +262,7 @@ Record payloads (sizes without the 2 byte record header):
 | 1 `level` | level_num i8, segments u16, game_mode u32, mission str8, level_name str8, [mission_file str8, level_file str8 (minor 3)] |
 | 2 `player` | pid u8, flags u8 (1 connected, 2 bot, 4 flown here, 8 recorded, 16 shares its controls (minor 2)), team u8 (255 no teams), callsign str8 |
 | 3 `tick` (8) | tick u32 (counts from 0 at the session start at `tick_rate`), time_ms u32 (game time since the session start) |
-| 4 `sample` (54, 60 with controls) | pid u8, flags u8, flags2 u8, segment u16, position 3 × i24, quaternion 4 × i16, velocity 3 × i16, rotvel 3 × i16, weapons u8, shields u8, energy u8, attacked u8, aimed_at u8, context u8, enemy_id u16, enemy_rel_pos 3 × i16, enemy_rel_vel 3 × i16, [controls 6 × i8] |
+| 4 `sample` (54, 60 with controls, 2 more for a bot's movement) | pid u8, flags u8, flags2 u8, segment u16, position 3 × i24, quaternion 4 × i16, velocity 3 × i16, rotvel 3 × i16, weapons u8, shields u8, energy u8, attacked u8, aimed_at u8, context u8, enemy_id u16, enemy_rel_pos 3 × i16, enemy_rel_vel 3 × i16, [controls 6 × i8], [bot_mode u8, bot_goal u8 (minor 4, a bot's sample only)] |
 | 5–12 events (11) | time_ms u32, pid u8, other u8, kind u8, id u8, value u16, flags u8 |
 | 13 `sync` (17, minor 1) | time_ms u32, session_id u32 (0: no network session), host_ms i64 (the host's clock at `time_ms`, milliseconds), flags u8 (1 the clock is known, 2 this machine is the host) |
 
@@ -308,12 +328,15 @@ their files, minor 3), and per
 player: time alive, mean speed, share of time reversing / strafing /
 climbing, afterburner share, the samples with controls (flown here, or
 shared by the player's machine), turning hard and the share of that with
-reverse thrust (players with controls), enemy in sight and mean distance, under
+reverse thrust (players with controls), for a bot (minor 4) the share of its
+fight time (an enemy in sight within 400 units) flown with keys and in each
+mode, its mode changes per minute and its goals, enemy in sight and mean distance, under
 attack, aimed at, shots, hits dealt and taken with damage (and how many of
 them splash), kills, deaths, suicides, respawns, pickups, weapon switches;
 for a network game the session id and the number of `sync` records. `--csv DIR` writes
 `DIR/<file>-p<N>-<callsign>.csv` (one row per sample, in game units and in
-the ship's frame; the last column `controls_shared` tells shared controls)
+the ship's frame; the column `controls_shared` tells shared controls, the
+last two `bot_mode` and `bot_goal` a bot's movement, by name, minor 4)
 and `DIR/<file>-events.csv`, ready for a spreadsheet,
 Python or R. `--records` prints every record.
 
@@ -458,6 +481,7 @@ deflection. The thresholds are the constants of `analysis::limits`.
 | Thrust | share with forward, reverse, sideways, vertical thrust, none, roll; the same in a fight | samples with controls |
 | Strafe | length of a run in one direction (median, quartiles), reversals per minute, vertical share (0 flat, 1 as much up/down as left/right), thrust and speed across | in a fight: a run lasts while the sideways/vertical thrust keeps its direction (less than 90° change) |
 | Large turns | how many; share flown with reverse, sideways, forward thrust; time per 180°; rotation rate; backward speed reached; push forward afterwards, with afterburner | runs of rotation above 35 % of the top rate through at least 110° in at most 2.5 s per 180° (the bots' `REVERSE_TURN_START`); the thrust during 40 % or more of the turn names it; the push is a mean forward thrust above 0.6 in the 0.8 s after |
+| Bot movement (minor 4, bots only) | share of the fight time flown with keys (modes fight, path-keys, turn, slide); mode changes per minute alive | samples with the bot's mode |
 | Afterburner | share of the time; share while chasing (enemy in sight ahead, closing in, nose steady), fleeing (enemy behind, moving away), with no enemy in sight, otherwise; distance to the enemy while chasing with it | samples with the afterburner known (or estimated) |
 | Distance | to the enemy in sight: p10 … p90, seconds per band (35, 60, 95, 150, 250: the bots' fight band and weapon bands); distance at each primary shot | |
 | Approach and retreat | by shields (25 each): own speed toward the enemy; share closing in, backing off while facing it, flying away turned from it. The **retreat level**: the shields that split "flies away" below from "does not" above most clearly (at least 3 s of fight on each side, a difference of 15 percentage points) | fight samples |
