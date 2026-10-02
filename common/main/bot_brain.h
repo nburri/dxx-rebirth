@@ -204,14 +204,18 @@ struct style_params
 	 * from 120-250: the distances are three fifths of section 9.7's.
 	 */
 	double burn_chase_distance;
+	/* Section 9.17: how strongly a weak or collecting bot keeps out of
+	 * the level's exposed places (cover_appetite; 0: not at all).
+	 */
+	double cover;
 };
 
 inline constexpr std::array<style_params, BOT_STYLE_COUNT> style_table{{
-	/* retreat, engage, collect, range, chase, dodge, mines, strafe, close, behind, outgunned, burn */
-	{45, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0, 90},	/* balanced */
-	{30, 1.5, 0.6, 0.75, 2.0, 0.0, 2.0, 0.9, 1.15, 1.0, 0, 60},	/* aggressive */
-	{65, 0.8, 1.2, 1.25, 0.8, 0.1, 0.7, 1.1, 0.85, 0.8, 25, 120},	/* cautious */
-	{50, 0.7, 1.8, 1.0, 1.0, 0.05, 1.0, 1.0, 1.0, 0.5, 15, 90},	/* collector */
+	/* retreat, engage, collect, range, chase, dodge, mines, strafe, close, behind, outgunned, burn, cover */
+	{45, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0, 90, 0.9},	/* balanced */
+	{30, 1.5, 0.6, 0.75, 2.0, 0.0, 2.0, 0.9, 1.15, 1.0, 0, 60, 0.4},	/* aggressive */
+	{65, 0.8, 1.2, 1.25, 0.8, 0.1, 0.7, 1.1, 0.85, 0.8, 25, 120, 1.4},	/* cautious */
+	{50, 0.7, 1.8, 1.0, 1.0, 0.05, 1.0, 1.0, 1.0, 0.5, 15, 90, 1.2},	/* collector */
 }};
 
 [[nodiscard]]
@@ -517,6 +521,28 @@ public:
 		return m_factor;
 	}
 };
+
+/* Section 9.17: the gauss, the deadliest gun of the bots in the
+ * playtest of exp-33 (Corona: 0.38-0.54 hits and 4.2-6.6 shields per
+ * shot against the human's 0.13 and 1.7), aimed with a wider error: a
+ * fast round (near hitscan) with a blast, so the lead and the reaction
+ * hardly matter (a lead error of up to 0.55 of the target's velocity,
+ * applied to the reaction's dead reckoning too, changed nothing in the
+ * arena; a wider fire cone made more shots, more hits in all) and a near
+ * miss still hits.  GAUSS_AIM_ERROR_EXTRA degrees more aim error (per
+ * axis) take about a tenth off the gauss's hits and damage per shot at
+ * Insane and Hotshot without more shots (Documentation/multiplayer-
+ * bots.md section 9.17); every other weapon aims as before (the user,
+ * 2026-10-02: the bots stay dangerous; better players than the
+ * recordings' are in the group).
+ */
+constexpr double GAUSS_AIM_ERROR_EXTRA{1.5};
+
+[[nodiscard]]
+constexpr double aim_sigma_for(const double sigma_deg, const bool gauss)
+{
+	return gauss ? sigma_deg + GAUSS_AIM_ERROR_EXTRA : sigma_deg;
+}
 
 /* Section 9.7: a beginner's trigger.  With a duty below 1 the trigger
  * is held in bursts of FIRE_BURST_MIN_S to FIRE_BURST_MAX_S and released
@@ -1708,6 +1734,11 @@ struct tune_params
 	 * the skill's and the style's.
 	 */
 	double power_pickup{-1};
+	/* Section 9.17: the seconds from a heavy missile's pickup to its
+	 * shot the bot aims for (heavy_eagerness); negative: the skill's
+	 * (heavy_fire_delay).
+	 */
+	double heavy_fire_delay{-1};
 };
 
 /* The evasion: across the line from the attacker, the side the ship

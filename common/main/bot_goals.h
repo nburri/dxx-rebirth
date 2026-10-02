@@ -1432,13 +1432,19 @@ constexpr bool power_in_sight(const uint32_t sighted, const uint32_t tick, const
 
 /* The power weight of a skill and style (a style profile's
  * tune.power_pickup in place of it): Trainee 0.15, Rookie 0.35,
- * Hotshot 0.6, Ace 0.8, Insane 0.95, times Balanced 1, Aggressive 0.95
+ * Hotshot 0.75, Ace 0.9, Insane 1, times Balanced 1, Aggressive 0.95
  * (it gets the kills with them), Cautious 0.85, Collector 1.1; at most 1.
+ * Section 9.17: Hotshot 0.6, Ace 0.8 and Insane 0.95 before; the human
+ * went for 66-86 % of the power pickups it saw on Corona, the bots for
+ * 46-56 %.  The arena showed that the weight is not what holds them
+ * back (even 2.5 times the utility left the share at 0.58): most of the
+ * ones they let go were taken by a nearer enemy before they got half
+ * way (they fly at 45 units/s, the human at 62).
  */
 [[nodiscard]]
 constexpr double power_pickup_weight(const bot_skill k, const bot_style s)
 {
-	constexpr std::array<double, BOT_SKILL_COUNT> by_skill{{0.15, 0.35, 0.6, 0.8, 0.95}};
+	constexpr std::array<double, BOT_SKILL_COUNT> by_skill{{0.15, 0.35, 0.75, 0.9, 1.0}};
 	constexpr std::array<double, BOT_STYLE_COUNT> by_style{{1, 0.95, 0.85, 1.1}};
 	const auto ki{static_cast<unsigned>(k)};
 	const auto si{static_cast<unsigned>(s)};
@@ -1673,6 +1679,98 @@ constexpr bool strong_secondaries(const std::array<uint8_t, BOT_SECONDARY_COUNT>
 constexpr bool weak_armament(const weapon_view &w, const std::array<uint8_t, BOT_SECONDARY_COUNT> &ammo)
 {
 	return armament_score(w) < WEAK_ARMAMENT && !strong_secondaries(ammo);
+}
+
+/* Section 9.17, cover: the user's group (and the recording of exp-33 on
+ * Corona: the human 57 % of the time in the exposed segments, the bots
+ * 67-74 %) collects in the side tunnels where it is seen less and comes
+ * into the open hall when it must or is well armed.  A segment's
+ * exposure (level_geometry.h, segment_exposures: the mean free distance
+ * from its centre, capped) is measured once per level, the same way the
+ * analysis does; its excess (exposure_excess) is 0 up to
+ * COVER_EXPOSURE_LOW (covered and the lower middle) and 1 from
+ * COVER_EXPOSURE_HIGH (exposed), absolute, so that a level of tunnels and
+ * small rooms (Earth Shaker: none above 40) changes nothing.
+ *
+ * A bot's appetite for cover (cover_appetite): its style's cover weight
+ * when it is weak (weak_armament, or shields below COVER_WEAK_SHIELDS),
+ * or collecting, refuelling or retreating; COVER_MIDDLE_SHARE of it
+ * otherwise; and well armed (ARMED_ARMAMENT or a heavy missile, shields
+ * from COVER_ARMED_SHIELDS) negative, COVER_ARMED_SHARE of it: it seeks
+ * the open.  A positive appetite adds to the cost of the path's edges
+ * into exposed segments (cover_extra_cost: COVER_PATH_FACTOR times the
+ * edge, the appetite and the excess; the route goes round the hall by the
+ * tunnels where there are any), and both signs weigh the places a roaming
+ * bot picks (cover_roam_scale).  The fights themselves, the target
+ * choice and the goal utilities (the path costs of bot_state::dist) are
+ * left as they are.
+ */
+constexpr double COVER_EXPOSURE_LOW{40};
+constexpr double COVER_EXPOSURE_HIGH{65};
+constexpr double COVER_WEAK_SHIELDS{50};
+constexpr double COVER_ARMED_SHIELDS{80};
+/* armament_score: gauss 3.3, plasma 3.8, helix and fusion 3.5, the super
+ * lasers with quad 3.0 (mid band).
+ */
+constexpr double ARMED_ARMAMENT{3.0};
+constexpr double COVER_MIDDLE_SHARE{0.4};
+constexpr double COVER_ARMED_SHARE{0.5};
+constexpr double COVER_PATH_FACTOR{1.5};
+constexpr double COVER_ROAM_FACTOR{0.6};
+
+[[nodiscard]]
+constexpr double exposure_excess(const double exposure)
+{
+	return std::clamp((exposure - COVER_EXPOSURE_LOW) / (COVER_EXPOSURE_HIGH - COVER_EXPOSURE_LOW), 0.0, 1.0);
+}
+
+struct cover_view
+{
+	/* weak_armament */
+	bool weak{};
+	/* armament_score, and a heavy missile held */
+	double armament{};
+	bool heavy{};
+	double shields{100};
+	/* Collecting, refuelling or retreating. */
+	bool away{};
+	/* Going for a power pickup (section 9.14): no cover, the human goes
+	 * for them in the open too (the shortest way wins the race).
+	 */
+	bool power{};
+	/* The style's cover weight. */
+	double cover{};
+};
+
+[[nodiscard]]
+constexpr double cover_appetite(const cover_view &v)
+{
+	if (!(v.cover > 0) || v.power)
+		return 0;
+	if (v.weak || v.shields < COVER_WEAK_SHIELDS || v.away)
+		return v.cover;
+	if (v.shields >= COVER_ARMED_SHIELDS && (v.armament >= ARMED_ARMAMENT || v.heavy))
+		return -COVER_ARMED_SHARE * v.cover;
+	return COVER_MIDDLE_SHARE * v.cover;
+}
+
+/* The extra cost of a path's edge of cost `edge_cost` into a segment of
+ * excess `excess` (exposure_excess).
+ */
+[[nodiscard]]
+constexpr double cover_extra_cost(const double edge_cost, const double appetite, const double excess)
+{
+	return appetite > 0 ? edge_cost * COVER_PATH_FACTOR * appetite * excess : 0;
+}
+
+/* The scale of a roam place's score (pick_explore_goal: its path cost):
+ * below 1 for an exposed place when the bot wants cover, above when it
+ * seeks the open.
+ */
+[[nodiscard]]
+constexpr double cover_roam_scale(const double appetite, const double excess)
+{
+	return std::max(0.2, 1 - COVER_ROAM_FACTOR * appetite * excess);
 }
 
 /* The powerups that count as weapons for the level's supply: the laser

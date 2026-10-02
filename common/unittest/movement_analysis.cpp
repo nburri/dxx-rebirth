@@ -1126,6 +1126,70 @@ void test_power_pickups()
 	CHECK(applied.tune.power_pickup <= 1);
 }
 
+/* Section 8.10: accuracy per weapon and the heavy missiles from the
+ * pickup: a pilot fires 40 gauss rounds, a quarter of them hit another
+ * player (splash, as the gauss's are), one hits itself; it fires 20
+ * laser shots of which 2 hit; it picks up an earthshaker and fires it
+ * 3 s later, a smart missile fired 2 s later, picks up a mega and dies
+ * holding it.
+ */
+void test_accuracy_and_heavy()
+{
+	auto f{fly_pickups("marksman", false, false, 8)};
+	const auto ev{[&f](const std::uint32_t ms, const record_type t, const unsigned pid, const unsigned other, const unsigned kind, const unsigned id, const unsigned value, const unsigned flags) {
+		f.events.push_back({ms, {t, ms, static_cast<std::uint8_t>(pid), static_cast<std::uint8_t>(other), static_cast<std::uint8_t>(kind), static_cast<std::uint8_t>(id), static_cast<std::uint16_t>(value), static_cast<std::uint8_t>(flags)}});
+	}};
+	for (unsigned i{}; i != 40; ++i)
+	{
+		const std::uint32_t ms{1000 + i * 500};
+		ev(ms, record_type::fire, 0, PLAYER_NONE, fire_kind::primary, 6, 0, 0);
+		if (i % 4 == 0)
+			ev(ms + 50, record_type::hit, 1, 0, attacker_kind::player, 32, 12 * 256, hit_flag::splash);
+	}
+	ev(1100, record_type::hit, 0, 0, attacker_kind::player, 32, 5 * 256, hit_flag::splash);
+	for (unsigned i{}; i != 20; ++i)
+	{
+		const std::uint32_t ms{30000 + i * 300};
+		ev(ms, record_type::fire, 0, PLAYER_NONE, fire_kind::primary, 0, 0, 0);
+		if (i % 10 == 0)
+			ev(ms + 30, record_type::hit, 1, 0, attacker_kind::player, 30, 10 * 256, 0);
+	}
+	ev(40000, record_type::pickup, 0, PLAYER_NONE, 0, 45, 0, 0);
+	ev(43000, record_type::fire, 0, PLAYER_NONE, fire_kind::secondary, 9, 0, 0);
+	ev(43500, record_type::hit, 1, 0, attacker_kind::player, 54, 50 * 256, hit_flag::splash);
+	ev(44000, record_type::pickup, 0, PLAYER_NONE, 0, 20, 0, 0);
+	ev(46000, record_type::fire, 0, PLAYER_NONE, fire_kind::secondary, 3, 0, 0);
+	ev(50000, record_type::pickup, 0, PLAYER_NONE, 0, 21, 0, 0);
+	ev(60000, record_type::death, 0, PLAYER_NONE, 0, 0, 0, 0);
+	std::stable_sort(f.events.begin(), f.events.end(), [](const happening &a, const happening &b) { return a.ms < b.ms; });
+	const auto r{analyse_flight(f)};
+	const auto &s{r.stats};
+	const auto &gauss{s.primary_accuracy[6]}, &laser{s.primary_accuracy[0]};
+	CHECK(gauss.shots == 40 && gauss.hits == 10);
+	CHECK_RANGE(gauss.hits_per_shot, 0.25, 0.25);
+	CHECK_RANGE(gauss.damage_per_shot, 3, 3);
+	CHECK(laser.shots == 20 && laser.hits == 2);
+	CHECK_RANGE(laser.damage_per_shot, 1, 1);
+	const auto &shaker{s.secondary_accuracy[9]};
+	CHECK(shaker.shots == 1 && shaker.hits == 1);
+	CHECK(weapon_slot_of_hit(19)->secondary && weapon_slot_of_hit(19)->slot == 3);
+	CHECK(!weapon_slot_of_hit(31)->secondary && weapon_slot_of_hit(31)->slot == 0);
+	CHECK(!weapon_slot_of_hit(250));
+	const auto &e{s.heavy[2]}, &m{s.heavy[1]};
+	CHECK(e.picked == 1 && e.fired == 1 && e.died_holding == 0);
+	CHECK_RANGE(e.delay_s.p50, 3, 3);
+	CHECK(m.picked == 1 && m.fired == 0 && m.died_holding == 1);
+	CHECK(s.heavy[0].picked == 1 && s.heavy[0].fired == 1);
+	CHECK(s.heavy_all.picked == 3 && s.heavy_all.fired == 2 && s.heavy_all.died_holding == 1);
+	CHECK_RANGE(s.heavy_all.died_share, 0.33, 0.34);
+	CHECK_RANGE(value(r.profile, "tune.heavy_fire_delay"), 2.5, 2.5);
+	CHECK_RANGE(value(r.profile, "measured.hit_rate_gauss"), 0.25, 0.25);
+	CHECK(write_report(s, r.profile).find("; mega picked 1, fired 0, died holding 1 (100%)") != std::string::npos);
+	/* The profile drives the bot: its fire delay. */
+	const auto applied{bot::apply_style_profile(r.profile, bot::bot_skill::insane)};
+	CHECK(applied.tune.heavy_fire_delay > 0 && applied.tune.heavy_fire_delay < bot::heavy_fire_delay(bot::bot_skill::insane));
+}
+
 /* The dodger sidesteps 80 % of the bursts, 250 ms late; pilots that
  * weave all the time (on the clock, or in runs of varying length) and
  * never dodge must not look like dodgers; one that weaves and dodges by
@@ -1865,6 +1929,27 @@ void test_level_geometry()
 	CHECK_RANGE(g.rooms[5].volume, 7.99e6, 8.01e6);
 	CHECK_RANGE(g.volume_share[static_cast<std::size_t>(geo::room_class::open)], 0.99, 1.0);
 	CHECK(g.character().starts_with("large open spaces"));
+	/* Section 8.11: the exposure, the same in the game's measure
+	 * (segment_exposures, capped rays): the tunnel covered, the room
+	 * exposed.
+	 */
+	{
+		const auto e{geo::segment_exposures(*l)};
+		CHECK(e.size() == g.rooms.size());
+		for (std::size_t i{}; i != e.size(); ++i)
+			CHECK_RANGE(e[i], g.rooms[i].exposure - 1e-9, g.rooms[i].exposure + 1e-9);
+		CHECK(g.rooms[0].exposed == geo::exposure_class::covered);
+		CHECK(g.rooms[0].exposure < geo::EXPOSURE_COVERED);
+		CHECK(g.rooms[5].exposed == geo::exposure_class::exposed);
+		CHECK(g.rooms[5].exposure <= geo::EXPOSURE_CAP);
+		double sum{};
+		for (const double v : g.exposure_share)
+			sum += v;
+		CHECK_RANGE(sum, 0.999, 1.001);
+		CHECK(geo::exposure_class_of(geo::EXPOSURE_COVERED - 1) == geo::exposure_class::covered);
+		CHECK(geo::exposure_class_of(geo::EXPOSURE_COVERED) == geo::exposure_class::middle);
+		CHECK(geo::exposure_class_of(geo::EXPOSURE_EXPOSED) == geo::exposure_class::exposed);
+	}
 
 	/* The mission files. */
 	const auto m{geo::parse_mission("name = Test Tunnels \r\ntype = anarchy\r\n; a comment\r\nnum_levels = 2\r\ntunnel.rl2\r\nother.rl2 ; the second\r\nnum_secrets = 1\r\nsecret.rl2,1\r\n")};
@@ -2088,6 +2173,7 @@ int main(const int argc, char **const argv)
 	test_sniper();
 	test_brawler();
 	test_power_pickups();
+	test_accuracy_and_heavy();
 	test_dodger();
 	test_afterburner();
 	test_estimated_controls();

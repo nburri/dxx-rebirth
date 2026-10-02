@@ -789,6 +789,32 @@ constexpr std::int64_t BURST_HIT_MS{1500};
 constexpr double DODGE_MIN_ROOM{4};
 /* Missiles at most this far apart are one volley. */
 constexpr std::int64_t VOLLEY_GAP_MS{700};
+/* Section 8.10: a weapon's accuracy is a trait (and a profile value)
+ * from this many shots of it.
+ */
+constexpr unsigned ACCURACY_MIN_SHOTS{30};
+/* Section 8.11: the exposure is measured on levels with room to choose:
+ * at least this share of their volume covered and as much exposed.
+ */
+constexpr double EXPOSURE_CHOICE_SHARE{0.1};
+/* A state of the ship: weak below WEAK_SHIELDS or with only the laser,
+ * vulcan or spreadfire in hand; armed from ARMED_SHIELDS with a better
+ * gun or a heavy missile selected.
+ */
+constexpr unsigned WEAK_SHIELDS{50};
+constexpr unsigned ARMED_SHIELDS{70};
+/* style.cover from the time in exposed segments over their share of
+ * the volume, on levels with much exposed volume (at least
+ * COVER_LEVEL_EXPOSED: open halls, Corona; on a level of tunnels the
+ * bots keep out of the few exposed places with or without cover): in the
+ * arena on Corona (12 seeds, the group's five bots) the bots without
+ * cover spent 1.21 times the exposed volume share in exposed segments,
+ * and each unit of the styles' mean cover weight took 0.134 off that
+ * ratio (Documentation/multiplayer-bots.md section 9.17).
+ */
+constexpr double COVER_LEVEL_EXPOSED{0.3};
+constexpr double COVER_BASE_RATIO{1.21};
+constexpr double COVER_RATIO_PER_WEIGHT{0.134};
 /* Two volleys further apart than this are not of one fight: the time
  * between them says nothing about how fast the player fires missiles.
  */
@@ -883,6 +909,9 @@ struct track_point
 	bool room_known{};
 	geometry::room_class room{};
 	double room_size{};
+	/* Section 8.11: the segment's exposure and its class. */
+	double exposure{};
+	geometry::exposure_class exposed{};
 	std::array<double, 6> free{};
 	bool line_known{};
 	double sight{}, line{};
@@ -953,6 +982,8 @@ inline void measure_room(track_point &p, const geometry::level_geometry &g)
 	p.room_known = true;
 	p.room = r->kind;
 	p.room_size = r->room;
+	p.exposure = r->exposure;
+	p.exposed = r->exposed;
 	const auto &o{p.u.orient};
 	const std::array<vec3, 3> axes{{o.forward, o.right, o.up}};
 	for (std::size_t k{}; k != 3; ++k)
@@ -1235,6 +1266,93 @@ constexpr std::size_t pickup_class_of(const std::uint8_t powerup_id)
 	return powerup_id == 20 || powerup_id == 21 || powerup_id == 31 || powerup_id == 45 ? 0 : 1;
 }
 
+/* Section 8.10: accuracy per weapon.  A `fire` event names the weapon by
+ * its slot (primary or secondary index), a `hit` by its `Weapon_info`
+ * index; this is the slot a hit's weapon belongs to.  The super lasers
+ * (30, 31) are fired from the laser slot (the recorder writes slot 0
+ * for them), the smart missile's blobs (19) belong to the smart missile,
+ * the smart mine's homing blobs (47) to the smart mine and the
+ * earthshaker's children (54) to the earthshaker.  Gauss hits come as
+ * splash (the gauss has a blast radius), so the hits of a weapon are its
+ * direct and splash hits on other players together.
+ */
+struct weapon_slot
+{
+	bool secondary{};
+	std::uint8_t slot{};
+};
+
+[[nodiscard]]
+constexpr std::optional<weapon_slot> weapon_slot_of_hit(const std::uint8_t weapon_id)
+{
+	switch (weapon_id)
+	{
+		case 0: case 1: case 2: case 3: case 30: case 31:
+			return weapon_slot{false, 0};
+		case 11: return weapon_slot{false, 1};
+		case 12: return weapon_slot{false, 2};
+		case 13: return weapon_slot{false, 3};
+		case 14: return weapon_slot{false, 4};
+		case 32: return weapon_slot{false, 6};
+		case 33: return weapon_slot{false, 7};
+		case 34: return weapon_slot{false, 8};
+		case 35: return weapon_slot{false, 9};
+		case 8: return weapon_slot{true, 0};
+		case 15: return weapon_slot{true, 1};
+		case 16: return weapon_slot{true, 2};
+		case 17: case 19: return weapon_slot{true, 3};
+		case 18: return weapon_slot{true, 4};
+		case 36: return weapon_slot{true, 5};
+		case 37: return weapon_slot{true, 6};
+		case 38: case 47: return weapon_slot{true, 7};
+		case 39: return weapon_slot{true, 8};
+		case 40: case 54: return weapon_slot{true, 9};
+		default:
+			return std::nullopt;
+	}
+}
+
+/* The primaries in the profile's `measured.hit_rate_<name>` and
+ * `measured.damage_per_shot_<name>` keys.
+ */
+inline constexpr std::array<const char *, WEAPON_SLOTS> accuracy_key_names{{"laser", "vulcan", "spreadfire", "plasma", "fusion", "super_laser", "gauss", "helix", "phoenix", "omega"}};
+
+/* The slot a primary `fire` event counts for: the super laser's slot
+ * (5) with the laser's, as its hits.
+ */
+[[nodiscard]]
+constexpr std::uint8_t primary_accuracy_slot(const std::uint8_t slot)
+{
+	return slot == 5 ? 0 : slot;
+}
+
+/* Section 8.10: the heavy missiles, from their pickup to their shot:
+ * smart (secondary slot 3, POW_SMARTBOMB_WEAPON 20), mega (4,
+ * POW_MEGA_WEAPON 21), earthshaker (9, POW_EARTHSHAKER_MISSILE 45).
+ */
+constexpr std::size_t HEAVY_KINDS{3};
+inline constexpr std::array<const char *, HEAVY_KINDS> heavy_names{{"smart", "mega", "earthshaker"}};
+inline constexpr std::array<std::uint8_t, HEAVY_KINDS> heavy_slots{{3, 4, 9}};
+inline constexpr std::array<std::uint8_t, HEAVY_KINDS> heavy_powerups{{20, 21, 45}};
+
+[[nodiscard]]
+constexpr std::optional<std::size_t> heavy_of_slot(const std::uint8_t slot)
+{
+	for (std::size_t k{}; k != HEAVY_KINDS; ++k)
+		if (heavy_slots[k] == slot)
+			return k;
+	return std::nullopt;
+}
+
+[[nodiscard]]
+constexpr std::optional<std::size_t> heavy_of_powerup(const std::uint8_t powerup_id)
+{
+	for (std::size_t k{}; k != HEAVY_KINDS; ++k)
+		if (heavy_powerups[k] == powerup_id)
+			return k;
+	return std::nullopt;
+}
+
 struct shield_bucket
 {
 	double seconds{};
@@ -1422,6 +1540,46 @@ struct player_stats
 	 * than once).
 	 */
 	double hits_per_shot{};
+	/* Section 8.10: per weapon slot, its shots, its hits on other
+	 * players (direct and splash) and their damage, and the two per
+	 * shot.
+	 */
+	struct weapon_accuracy
+	{
+		unsigned shots{}, hits{};
+		double damage{}, hits_per_shot{}, damage_per_shot{};
+		/* The distance to the enemy in sight at the shots (median). */
+		double distance{};
+	};
+	std::array<weapon_accuracy, WEAPON_SLOTS> primary_accuracy{}, secondary_accuracy{};
+	/* Section 8.10: the heavy missiles (heavy_names), and all three: how
+	 * many were picked up, fired (each shot matched to the oldest pickup
+	 * of its kind in that life), lost in a death, still held at the end;
+	 * the time from the pickup to the shot.
+	 */
+	struct heavy_hold
+	{
+		unsigned picked{}, fired{}, died_holding{}, kept{};
+		summary delay_s;
+		double died_share{};
+	};
+	std::array<heavy_hold, HEAVY_KINDS> heavy{};
+	heavy_hold heavy_all;
+	/* Section 8.11: on the levels with room to choose
+	 * (EXPOSURE_CHOICE_SHARE), the share of the time alive per exposure
+	 * class, of all of it, weak and armed (exposure_states), and of the
+	 * levels' volume; the seconds behind each.
+	 */
+	std::array<std::array<double, geometry::EXPOSURE_CLASSES>, 3> exposure_share{};
+	std::array<double, 3> exposure_s{};
+	std::array<double, geometry::EXPOSURE_CLASSES> exposure_volume{};
+	/* The time alive on levels without that choice. */
+	double exposure_no_choice_s{};
+	/* On the levels with much exposed volume (COVER_LEVEL_EXPOSED): the
+	 * time alive, the share of it in exposed segments, and the exposed
+	 * volume share (time-weighted).
+	 */
+	double exposure_open_s{}, exposure_open_share{}, exposure_open_volume{};
 
 	/* Section 8.8: by level and by room class (where the level's
 	 * geometry is known).
@@ -1537,6 +1695,20 @@ struct accum
 	std::vector<double> pursuit_s;
 	unsigned hits_dealt{}, splash_dealt{}, hits_taken{}, kills{}, deaths{}, suicides{};
 	double damage_dealt{}, damage_taken{};
+	/* Section 8.10. */
+	std::array<player_stats::weapon_accuracy, WEAPON_SLOTS> primary_accuracy{}, secondary_accuracy{};
+	std::array<std::vector<double>, WEAPON_SLOTS> primary_distance;
+	struct heavy_acc
+	{
+		unsigned picked{}, fired{}, died_holding{}, kept{};
+		std::vector<double> delay_s;
+	};
+	std::array<heavy_acc, HEAVY_KINDS> heavy{};
+	/* Section 8.11. */
+	std::array<std::array<double, geometry::EXPOSURE_CLASSES>, 3> exposure_s{};
+	std::array<double, geometry::EXPOSURE_CLASSES> exposure_volume_s{};
+	double exposure_no_choice_s{};
+	double exposure_open_s{}, exposure_open_exposed_s{}, exposure_open_volume_s{};
 	/* Section 8.8: per level (by its geometry) and room class. */
 	struct room_acc
 	{
@@ -2103,6 +2275,17 @@ inline void scan_events(const track &tr, accum &a)
 			a.volley_sizes.push_back(volley);
 		volley = 0;
 	}};
+	/* Section 8.10: the heavy missiles held in this life, per kind the
+	 * times they were picked up (oldest first).
+	 */
+	std::array<std::vector<std::int64_t>, HEAVY_KINDS> held;
+	const auto drop_held{[&](const bool died) {
+		for (std::size_t k{}; k != HEAVY_KINDS; ++k)
+		{
+			(died ? a.heavy[k].died_holding : a.heavy[k].kept) += static_cast<unsigned>(held[k].size());
+			held[k].clear();
+		}
+	}};
 	for (const auto &e : tr.own)
 	{
 		const auto i{tr.at(e.t, 150)};
@@ -2112,6 +2295,8 @@ inline void scan_events(const track &tr, accum &a)
 				if (e.e.kind == fire_kind::primary)
 				{
 					++a.primary_shots;
+					if (e.e.id < WEAPON_SLOTS)
+						++a.primary_accuracy[primary_accuracy_slot(e.e.id)].shots;
 					if (i && pts[*i].los && !pts[*i].u.enemy_distance_scaled)
 					{
 						const double d{pts[*i].u.enemy_distance};
@@ -2126,14 +2311,26 @@ inline void scan_events(const track &tr, accum &a)
 								++f->second;
 						}
 						if (e.e.id < WEAPON_SLOTS)
+						{
 							++a.primary_by_band[static_cast<std::size_t>(bot::band_of(d))][e.e.id];
+							a.primary_distance[primary_accuracy_slot(e.e.id)].push_back(d);
+						}
 					}
 				}
 				else if (e.e.kind == fire_kind::secondary)
 				{
 					++a.secondary_shots;
 					if (e.e.id < WEAPON_SLOTS)
+					{
 						++a.secondary_count[e.e.id];
+						++a.secondary_accuracy[e.e.id].shots;
+					}
+					if (const auto k{heavy_of_slot(e.e.id)}; k && !held[*k].empty())
+					{
+						++a.heavy[*k].fired;
+						a.heavy[*k].delay_s.push_back(static_cast<double>(e.t - held[*k].front()) / 1000.0);
+						held[*k].erase(held[*k].begin());
+					}
 					if (i && pts[*i].los && !pts[*i].u.enemy_distance_scaled)
 						a.secondary_distance.push_back(pts[*i].u.enemy_distance);
 					/* Mines are dropped, not fired in volleys. */
@@ -2155,6 +2352,11 @@ inline void scan_events(const track &tr, accum &a)
 			case record_type::pickup:
 			{
 				++a.pickups;
+				if (const auto k{heavy_of_powerup(e.e.id)})
+				{
+					++a.heavy[*k].picked;
+					held[*k].push_back(e.t);
+				}
 				if (!i)
 					break;
 				const auto &p{pts[*i]};
@@ -2189,6 +2391,13 @@ inline void scan_events(const track &tr, accum &a)
 				break;
 			case record_type::death:
 				++a.deaths;
+				drop_held(true);
+				break;
+			case record_type::respawn:
+				/* A new ship holds no missile (a slot that changed hands
+				 * gives no death).
+				 */
+				drop_held(false);
 				break;
 			case record_type::kill:
 				if (e.other == e.who)
@@ -2199,19 +2408,25 @@ inline void scan_events(const track &tr, accum &a)
 		}
 	}
 	end_volley();
+	drop_held(false);
 	for (const auto &e : tr.dealt)
 	{
 		if (e.e.type == record_type::kill)
+		{
 			++a.kills;
-		else if (e.e.flags & hit_flag::splash)
-		{
-			++a.splash_dealt;
-			a.damage_dealt += e.e.value / 256.0;
+			continue;
 		}
+		if (e.e.flags & hit_flag::splash)
+			++a.splash_dealt;
 		else
-		{
 			++a.hits_dealt;
-			a.damage_dealt += e.e.value / 256.0;
+		a.damage_dealt += e.e.value / 256.0;
+		/* Section 8.10: tr.dealt holds no hit of the player on itself. */
+		if (const auto w{weapon_slot_of_hit(e.e.id)})
+		{
+			auto &acc{(w->secondary ? a.secondary_accuracy : a.primary_accuracy)[w->slot]};
+			++acc.hits;
+			acc.damage += e.e.value / 256.0;
 		}
 	}
 }
@@ -2363,9 +2578,51 @@ inline void scan_pursuit(const track &tr, accum &a, const ship_model &ship)
 }
 
 /* Section 8.8: the main traits per level and room class. */
+/* Section 8.11: the ship's state for the exposure (0: weak, 1: armed,
+ * 2: neither).
+ */
+[[nodiscard]]
+inline std::size_t exposure_state(const sample &s)
+{
+	const unsigned primary{s.weapons & 0xfu}, secondary{static_cast<unsigned>(s.weapons >> 4)};
+	const bool light_gun{primary == 0 || primary == 1 || primary == 2};
+	if (s.shields < limits::WEAK_SHIELDS || light_gun)
+	{
+		/* A heavy missile in hand is no weak ship (but with few shields). */
+		if (s.shields >= limits::WEAK_SHIELDS && heavy_of_slot(static_cast<std::uint8_t>(secondary)))
+			return 2;
+		return 0;
+	}
+	return s.shields >= limits::ARMED_SHIELDS ? 1 : 2;
+}
+
 inline void scan_rooms(const track &tr, accum &a)
 {
 	const auto &pts{tr.pts};
+	for (const auto &p : pts)
+	{
+		if (!p.alive || !p.room_known)
+			continue;
+		const auto &share{p.geo->exposure_share};
+		if (share[static_cast<std::size_t>(geometry::exposure_class::covered)] < limits::EXPOSURE_CHOICE_SHARE || share[static_cast<std::size_t>(geometry::exposure_class::exposed)] < limits::EXPOSURE_CHOICE_SHARE)
+		{
+			a.exposure_no_choice_s += p.w;
+			continue;
+		}
+		const auto c{static_cast<std::size_t>(p.exposed)};
+		a.exposure_s[2][c] += p.w;
+		if (const auto st{exposure_state(p.m.s)}; st < 2)
+			a.exposure_s[st][c] += p.w;
+		for (std::size_t k{}; k != geometry::EXPOSURE_CLASSES; ++k)
+			a.exposure_volume_s[k] += p.w * share[k];
+		if (const double open{share[static_cast<std::size_t>(geometry::exposure_class::exposed)]}; open >= limits::COVER_LEVEL_EXPOSED)
+		{
+			a.exposure_open_s += p.w;
+			a.exposure_open_volume_s += p.w * open;
+			if (p.exposed == geometry::exposure_class::exposed)
+				a.exposure_open_exposed_s += p.w;
+		}
+	}
 	const auto level_of{[&a](const geometry::level_geometry *const g) -> accum::level_acc & {
 		for (auto &l : a.levels)
 			if (l.geo == g)
@@ -2768,6 +3025,61 @@ inline player_stats analyse(const std::span<const track> tracks, const ship_mode
 	s.damage_dealt = a.damage_dealt;
 	s.damage_taken = a.damage_taken;
 	s.hits_per_shot = ratio(a.hits_dealt, a.primary_shots);
+	{
+		const auto finish{[](auto &out, const auto &in) {
+			for (std::size_t w{}; w != WEAPON_SLOTS; ++w)
+			{
+				out[w] = in[w];
+				out[w].hits_per_shot = ratio(in[w].hits, in[w].shots);
+				out[w].damage_per_shot = ratio(in[w].damage, in[w].shots);
+			}
+		}};
+		finish(s.primary_accuracy, a.primary_accuracy);
+		finish(s.secondary_accuracy, a.secondary_accuracy);
+		for (std::size_t w{}; w != WEAPON_SLOTS; ++w)
+			s.primary_accuracy[w].distance = summarise(a.primary_distance[w]).p50;
+		std::vector<double> all_delays;
+		auto &all{s.heavy_all};
+		for (std::size_t k{}; k != HEAVY_KINDS; ++k)
+		{
+			const auto &in{a.heavy[k]};
+			auto &out{s.heavy[k]};
+			out.picked = in.picked;
+			out.fired = in.fired;
+			out.died_holding = in.died_holding;
+			out.kept = in.kept;
+			out.delay_s = summarise(in.delay_s);
+			out.died_share = ratio(in.died_holding, in.picked);
+			all.picked += in.picked;
+			all.fired += in.fired;
+			all.died_holding += in.died_holding;
+			all.kept += in.kept;
+			all_delays.insert(all_delays.end(), in.delay_s.begin(), in.delay_s.end());
+		}
+		all.delay_s = summarise(std::move(all_delays));
+		all.died_share = ratio(all.died_holding, all.picked);
+	}
+	/* Section 8.11: exposure_share rows weak, armed, all. */
+	{
+		double all_s{};
+		for (std::size_t st{}; st != 3; ++st)
+		{
+			double t{};
+			for (const double x : a.exposure_s[st])
+				t += x;
+			s.exposure_s[st] = t;
+			for (std::size_t k{}; k != geometry::EXPOSURE_CLASSES; ++k)
+				s.exposure_share[st][k] = ratio(a.exposure_s[st][k], t);
+			if (st == 2)
+				all_s = t;
+		}
+		for (std::size_t k{}; k != geometry::EXPOSURE_CLASSES; ++k)
+			s.exposure_volume[k] = ratio(a.exposure_volume_s[k], all_s);
+		s.exposure_no_choice_s = a.exposure_no_choice_s;
+		s.exposure_open_s = a.exposure_open_s;
+		s.exposure_open_share = ratio(a.exposure_open_exposed_s, a.exposure_open_s);
+		s.exposure_open_volume = ratio(a.exposure_open_volume_s, a.exposure_open_s);
+	}
 
 	s.room_known_s = a.room_known_s;
 	s.line_share = summarise(a.line_share);
@@ -3007,6 +3319,20 @@ inline bot::style_profile propose_profile(const player_stats &s, const bot::bot_
 		p.set("tune.power_pickup", pw.went_share, c);
 	}
 
+	/* Section 8.10: the accuracy per primary (hits on other players per
+	 * shot), the bot's accuracy target for that weapon (a bot of the
+	 * profile's skill relative to Hotshot); and the time from a heavy
+	 * missile's pickup to its shot.
+	 */
+	for (std::size_t w{}; w != WEAPON_SLOTS; ++w)
+		if (const auto &a{s.primary_accuracy[w]}; a.shots >= limits::ACCURACY_MIN_SHOTS)
+			p.set(std::string{"measured.hit_rate_"} + accuracy_key_names[w], a.hits_per_shot, confidence_of(s, a.shots, 100, 400));
+	if (const auto &h{s.heavy_all}; h.delay_s.n >= 2)
+		p.set("tune.heavy_fire_delay", h.delay_s.p50, confidence_of(s, static_cast<double>(h.delay_s.n), 4, 12));
+	/* Section 8.11: style.cover, at most medium (one calibration level). */
+	if (s.exposure_open_s >= 60 && s.exposure_open_volume > 0)
+		p.set("style.cover", (limits::COVER_BASE_RATIO - s.exposure_open_share / s.exposure_open_volume) / limits::COVER_RATIO_PER_WEIGHT, std::min(confidence_of(s, s.exposure_open_s, 120, 600), style_confidence::medium));
+
 	/* The built-in style nearest to what was measured: the bot takes
 	 * from it what the profile leaves out.
 	 */
@@ -3067,6 +3393,14 @@ inline bot::style_profile propose_profile(const player_stats &s, const bot::bot_
 		info("measured.afterburner_share", s.ab_share);
 	if (s.primary_shots)
 		info("measured.hits_per_shot", s.hits_per_shot);
+	for (std::size_t w{}; w != WEAPON_SLOTS; ++w)
+		if (const auto &a{s.primary_accuracy[w]}; a.shots >= limits::ACCURACY_MIN_SHOTS)
+			info(std::string{"measured.damage_per_shot_"} + accuracy_key_names[w], a.damage_per_shot);
+	if (const auto &h{s.heavy_all}; h.picked)
+	{
+		info("measured.heavy_picked", h.picked);
+		info("measured.heavy_died_holding_share", h.died_share);
+	}
 	if (const auto &pw{s.pickup_sight[0]}; pw.seen)
 	{
 		info("measured.power_seen", pw.seen);
@@ -3243,6 +3577,31 @@ inline std::vector<std::string> describe_traits(const player_stats &s, const shi
 			appendf(l, ", for %.1f s (up to %.1f s)", s.pursuit_s.p50, s.pursuit_s.p90);
 		l += '.';
 	}
+	/* Section 8.10. */
+	{
+		std::string l;
+		for (std::size_t w{}; w != WEAPON_SLOTS; ++w)
+			if (const auto &a{s.primary_accuracy[w]}; a.shots >= limits::ACCURACY_MIN_SHOTS)
+				appendf(l, "%s %s %.2f (%.1f damage)", l.empty() ? "Accuracy, hits per shot:" : ",", primary_names[w], a.hits_per_shot, a.damage_per_shot);
+		if (!l.empty())
+			line() = l + ".";
+	}
+	if (const auto &h{s.heavy_all}; h.picked >= 2)
+	{
+		auto &l{line()};
+		appendf(l, "Heavy missiles (smart, mega, earthshaker): of %u picked up fired %u", h.picked, h.fired);
+		if (h.delay_s.n)
+			appendf(l, ", %.1f s after the pickup (median, half of them %.1f to %.1f s)", h.delay_s.p50, h.delay_s.p25, h.delay_s.p75);
+		appendf(l, "; died holding %u (%.0f%%).", h.died_holding, pct(h.died_share));
+	}
+	/* Section 8.11. */
+	if (s.exposure_s[2] >= limits::MIN_ALIVE_S)
+	{
+		const auto &x{s.exposure_share[2]};
+		const auto &v{s.exposure_volume};
+		const char *const kind{x[2] > v[2] + 0.08 ? "Stays in the open" : x[2] + 0.08 < v[2] ? "Keeps to cover" : "Uses the level evenly"};
+		appendf(line(), "%s: %.0f%% of the time in covered, %.0f%% in exposed segments (of %.0f%% and %.0f%% of the volume); weak %.0f%% exposed, armed %.0f%%.", kind, pct(x[0]), pct(x[2]), pct(v[0]), pct(v[2]), pct(s.exposure_share[0][2]), pct(s.exposure_share[1][2]));
+	}
 	if (s.secondary_shots >= 4 && s.volleys)
 	{
 		auto &l{line()};
@@ -3375,6 +3734,62 @@ inline std::string write_report(const player_stats &s, const bot::style_profile 
 		appendf(o, "    (sight judged with the level's geometry: %.0f%% of the sightings)\n", pct(s.pickup_sight_geometry_share));
 	appendf(o, "  lost sight of the enemy %u times, followed %.0f%%; for %.1f s (median), p90 %.1f s\n", s.sight_losses, pct(s.pursue_share), s.pursuit_s.p50, s.pursuit_s.p90);
 	appendf(o, "  hits: dealt %u direct and %u splash (%.0f shields), taken %u (%.0f shields); %.2f direct hits per primary shot\n", s.hits_dealt, s.splash_dealt, s.damage_dealt, s.hits_taken, s.damage_taken, s.hits_per_shot);
+	/* Section 8.10. */
+	const auto accuracy_line{[&o](const char *const label, const auto &acc, const auto &names) {
+		bool any{};
+		for (std::size_t w{}; w != WEAPON_SLOTS; ++w)
+		{
+			const auto &a{acc[w]};
+			if (!a.shots)
+				continue;
+			appendf(o, "%s %s %u shots, %.2f hits and %.1f damage per shot", any ? ";" : label, names[w], a.shots, a.hits_per_shot, a.damage_per_shot);
+			if (a.distance > 0)
+				appendf(o, " from %.0f units", a.distance);
+			any = true;
+		}
+		if (any)
+			o += '\n';
+	}};
+	accuracy_line("  accuracy (hits on other players, direct and splash), primaries:", s.primary_accuracy, primary_names);
+	accuracy_line("  accuracy, secondaries:", s.secondary_accuracy, secondary_names);
+	if (s.exposure_s[2] > 0)
+	{
+		const auto row{[&o, &s](const char *const label, const std::size_t st) {
+			const auto &x{s.exposure_share[st]};
+			appendf(o, "%s %.0f%%/%.0f%%/%.0f%% (%.0f s)", label, pct(x[0]), pct(x[1]), pct(x[2]), s.exposure_s[st]);
+		}};
+		o += "  exposure (covered/middle/exposed segments, levels with both):";
+		row(" time alive", 2);
+		row("; weak", 0);
+		row("; armed", 1);
+		appendf(o, "; the levels' volume %.0f%%/%.0f%%/%.0f%%", pct(s.exposure_volume[0]), pct(s.exposure_volume[1]), pct(s.exposure_volume[2]));
+		if (s.exposure_no_choice_s > 0)
+			appendf(o, "; %.0f s on levels without that choice", s.exposure_no_choice_s);
+		if (s.exposure_open_s > 0)
+			appendf(o, "; on open levels %.0f%% exposed of %.0f%% of the volume (%.0f s)", pct(s.exposure_open_share), pct(s.exposure_open_volume), s.exposure_open_s);
+		o += '\n';
+	}
+	else if (s.exposure_no_choice_s > 0)
+		appendf(o, "  exposure: %.0f s alive on levels without both covered and exposed areas\n", s.exposure_no_choice_s);
+	if (s.heavy_all.picked)
+	{
+		o += "  heavy missiles from the pickup:";
+		const auto one{[&o](const char *const name, const player_stats::heavy_hold &h, const bool first) {
+			appendf(o, "%s %s picked %u, fired %u", first ? "" : ";", name, h.picked, h.fired);
+			if (h.delay_s.n)
+				appendf(o, " %.1f s later (median; p25 %.1f, p75 %.1f, p90 %.1f)", h.delay_s.p50, h.delay_s.p25, h.delay_s.p75, h.delay_s.p90);
+			appendf(o, ", died holding %u (%.0f%%), held at the end %u", h.died_holding, pct(h.died_share), h.kept);
+		}};
+		bool first{true};
+		for (std::size_t k{}; k != HEAVY_KINDS; ++k)
+			if (s.heavy[k].picked)
+			{
+				one(heavy_names[k], s.heavy[k], first);
+				first = false;
+			}
+		one("all", s.heavy_all, false);
+		o += '\n';
+	}
 	if (!s.levels.empty())
 	{
 		o += "  by level and room (time alive; speed; sideways/vertical thrust in the fights; distance to the enemy in sight, median, of a line of fire of, the share of it; free room to the nearer side in the fights; large turns: reverse/slide/forward):\n";

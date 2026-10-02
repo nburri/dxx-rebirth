@@ -441,6 +441,11 @@ struct risk_profile
 	 */
 	double duck_share{0.6};
 	double duck_closing{5};
+	/* The least value of a blast worth a heavy missile: this share of
+	 * the missile's damage (or of the target's shields if fewer;
+	 * judge_blast, low_value).
+	 */
+	double value_share{0.2};
 };
 
 [[nodiscard]]
@@ -484,6 +489,60 @@ constexpr risk_profile risk_profile_of(const bot_skill k, const bot_style s)
 		.duck_share = st[5],
 		.duck_closing = st[6],
 	};
+}
+
+/* Section 9.17: the heavy missiles fired soon, as humans do.  The
+ * recordings of exp-33 (Corona): the human fired its earthshakers 2-10 s
+ * after the pickup (median about 6 over six games, mega and smart
+ * alike) and seldom died with one; the bots held theirs 11-20 s and two
+ * of nine died holding one.  A bot that holds a heavy missile (smart,
+ * mega, earthshaker) grows eager from half its fire delay on, fully at
+ * one and a half (heavy_eagerness): its risk budget and chance rise, the
+ * trade and the value it asks for fall, it keeps less of a standoff and
+ * ducks less (eager_risk); its heavy cooldown halves and a target it
+ * already fired one at may have another.  The point blank and lethal
+ * rules hold at any eagerness (judge_blast): no suicide.  By skill the
+ * delay is Hotshot 6 s, Ace 5 s, Insane 4 s (a style profile's
+ * tune.heavy_fire_delay in place of it); below Hotshot no heavy missile
+ * is fired at all.
+ */
+[[nodiscard]]
+constexpr double heavy_fire_delay(const bot_skill k)
+{
+	constexpr std::array<double, BOT_SKILL_COUNT> by_skill{{8, 7, 6, 5, 4}};
+	const auto ki{static_cast<unsigned>(k)};
+	return by_skill[ki < BOT_SKILL_COUNT ? ki : static_cast<unsigned>(BOT_DEFAULT_SKILL)];
+}
+
+/* `held`: how many heavy missiles the bot holds; with several it is
+ * eager at once (HEAVY_EAGER_COUNT and more: fully), as a human with a
+ * stack fires them off (the arena on Earth Shaker, a level full of
+ * earthshakers: bots holding four and more died with most of them).
+ */
+constexpr unsigned HEAVY_EAGER_COUNT{4};
+
+[[nodiscard]]
+constexpr double heavy_eagerness(const double held_s, const double delay, const unsigned held = 1)
+{
+	const double by_count{held > 1 ? std::min(1.0, (held - 1.0) / (HEAVY_EAGER_COUNT - 1.0)) : 0.0};
+	if (!(delay > 0) || !(held_s > 0))
+		return held_s > 0 ? by_count : 0;
+	return std::max(by_count, std::clamp((held_s - 0.5 * delay) / delay, 0.0, 1.0));
+}
+
+/* The risk profile at eagerness `e` (0: as it is). */
+[[nodiscard]]
+constexpr risk_profile eager_risk(risk_profile rp, const double e)
+{
+	if (!(e > 0))
+		return rp;
+	rp.self_budget *= 1 + 1.5 * e;
+	rp.self_chance = std::min(1.0, rp.self_chance + 0.25 * e);
+	rp.trade *= 1 - 0.4 * e;
+	rp.standoff_scale *= 1 - 0.2 * e;
+	rp.duck_share *= 1 - 0.5 * e;
+	rp.value_share *= 1 - 0.5 * e;
+	return rp;
 }
 
 /* The game's blast (object_create_explosion_with_damage): the damage
@@ -802,7 +861,7 @@ constexpr risk_verdict judge_blast(const blast_outcome &o, const blast_scene &sc
 	if (o.self_nominal >= sc.shields)
 		return risk_verdict::lethal;
 	const double value{blast_value(o, sc)};
-	if (value < std::max(5.0, 0.2 * std::min(md.damage, std::max(sc.target_shields, 20.0))))
+	if (value < std::max(5.0, rp.value_share * std::min(md.damage, std::max(sc.target_shields, 20.0))))
 		return risk_verdict::low_value;
 	if (o.self_damage > rp.self_budget * std::clamp(sc.shields, 0.0, 200.0) + 0.5 || o.self_chance > rp.self_chance + 1e-6)
 		return risk_verdict::over_budget;
@@ -1405,6 +1464,11 @@ struct missile_situation
 	std::array<std::optional<heavy_verdict>, BOT_SECONDARY_COUNT> heavy_risk{};
 	std::array<aim_kind, BOT_SECONDARY_COUNT> heavy_aim{};
 	double standoff_scale{1};
+	/* Section 9.17: the bot's eagerness to use its heavy missile
+	 * (heavy_eagerness): from one half on, the heavy cooldown is shorter
+	 * and a target fired at may have another.
+	 */
+	double heavy_eagerness{};
 };
 
 
@@ -1441,7 +1505,7 @@ constexpr heavy_verdict heavy_check(const missile_situation &m, const secondary 
 		return heavy_verdict::skill;
 	if (!m.has_target)
 		return heavy_verdict::no_target;
-	if (m.since_missile < missile_interval(m.smarts) * m.missile_interval_scale || m.since_heavy < heavy_interval(m.smarts))
+	if (m.since_missile < missile_interval(m.smarts) * m.missile_interval_scale || m.since_heavy < heavy_interval(m.smarts) * (1 - 0.5 * m.heavy_eagerness))
 		return heavy_verdict::cooldown;
 	/* Section 9.6: a favourable aim at a wall or a corner needs no clear
 	 * line to the target (a hidden one seen lately).
@@ -1460,7 +1524,7 @@ constexpr heavy_verdict heavy_check(const missile_situation &m, const secondary 
 	 */
 	if (m.cloaked && (m.smarts < 3 || m.target_distance > CLOAKED_MISSILE_DISTANCE))
 		return heavy_verdict::cloaked;
-	if (m.heavy_used_on_target)
+	if (m.heavy_used_on_target && m.heavy_eagerness < 0.5)
 		return heavy_verdict::used_on_target;
 	const auto &md{m.data[i]};
 	const double d{m.target_distance};
@@ -1549,13 +1613,13 @@ constexpr double HEAVY_SOON_SECONDS{2};
 [[nodiscard]]
 constexpr bool heavy_usable_soon(const missile_situation &m)
 {
-	if (m.cloaked || m.heavy_used_on_target)
+	if (m.cloaked || (m.heavy_used_on_target && m.heavy_eagerness < 0.5))
 		return false;
 	for (const auto s : {secondary::earthshaker, secondary::mega})
 	{
 		if (!m.ammo[static_cast<unsigned>(s)] || m.smarts < min_smarts(s))
 			continue;
-		const double wait{std::max(missile_interval(m.smarts) * m.missile_interval_scale - m.since_missile, heavy_interval(m.smarts) - m.since_heavy)};
+		const double wait{std::max(missile_interval(m.smarts) * m.missile_interval_scale - m.since_missile, heavy_interval(m.smarts) * (1 - 0.5 * m.heavy_eagerness) - m.since_heavy)};
 		if (wait <= HEAVY_SOON_SECONDS)
 			return true;
 	}
