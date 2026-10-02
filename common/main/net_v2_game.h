@@ -72,6 +72,10 @@ struct host_address_candidate
 {
 	std::string text;
 	host_address_kind kind;
+	/* What the menu says about it, if not the kind's usual words (the
+	 * public address the players report: "Public, seen by 2 players").
+	 */
+	std::string label{};
 };
 
 /* The addresses of this computer's network interfaces that a joiner
@@ -264,11 +268,30 @@ void probe_report();
  */
 void apply_level_go();
 
+/* Host: the game's public address as the players (ADDRESS_SEEN,
+ * protocol 108) and the tracker see it, the one most of them agree on
+ * (net_public_address.h): "a.b.c.d:port" and a label such as "Public,
+ * seen by 2 players".  None before anyone outside reported it.
+ */
+struct public_address_view
+{
+	std::string text;
+	std::string label;
+};
+[[nodiscard]]
+std::optional<public_address_view> host_public_address();
+
 #if DXX_USE_TRACKER
 void tracker_register();
 void tracker_unregister();
 void tracker_request_games();
 void tracker_request_holepunch(tracker_game_id id);
+/* Client: the address a host answered a hole-punch request from (the
+ * game's real address, which the tracker's game list may not give),
+ * once; none if no answer came since the last call.
+ */
+[[nodiscard]]
+std::optional<_sockaddr> tracker_take_holepunch_reply();
 #endif
 
 }

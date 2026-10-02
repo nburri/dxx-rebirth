@@ -311,6 +311,13 @@ class start_poll_menu_items
 	unsigned playercount{1};
 public:
 	std::array<newmenu_item, MAX_PLAYERS + 4> m;
+	/* "Select up to n players / Press ENTER" and the game's address
+	 * (always five lines: the menu's layout is computed once).
+	 */
+	std::array<char, 256> subtitle{};
+	/* This computer's best interface address, looked up once. */
+	std::string own_address, own_kind;
+	void update_subtitle();
 	unsigned get_player_count() const
 	{
 		return playercount;
@@ -320,6 +327,16 @@ public:
 		playercount = c;
 	}
 };
+
+void start_poll_menu_items::update_subtitle()
+{
+	if (auto pub{net_v2::host_public_address()})
+		std::snprintf(subtitle.data(), subtitle.size(), "%s %d %s\nAddress: %s\n%s\nCtrl+C: copy game address", TXT_TEAM_SELECT, Netgame.max_numplayers, TXT_TEAM_PRESS_ENTER, pub->text.c_str(), pub->label.c_str());
+	else if (own_kind == "LAN")
+		std::snprintf(subtitle.data(), subtitle.size(), "%s %d %s\nAddress: %s (LAN)\nPublic address: once a player joins\nCtrl+C: copy game address", TXT_TEAM_SELECT, Netgame.max_numplayers, TXT_TEAM_PRESS_ENTER, own_address.c_str());
+	else
+		std::snprintf(subtitle.data(), subtitle.size(), "%s %d %s\nAddress: %s\n%s\nCtrl+C: copy game address", TXT_TEAM_SELECT, Netgame.max_numplayers, TXT_TEAM_PRESS_ENTER, own_address.c_str(), own_kind.c_str());
+}
 
 static void reset_UDP_MyPort()
 {
@@ -626,12 +643,26 @@ static int net_udp_game_connect(direct_join *const dj)
 
 	if (timer_query() >= dj->last_time + F1_0)
 	{
-		net_v2::request_game_info(dj->host_addr);
 #if DXX_USE_TRACKER
 		if (const auto g = dj->gameid; g != tracker_game_id{})
-			if (timer_query() >= dj->start_time + (F1_0*4))
-				net_v2::tracker_request_holepunch(g);
+		{
+			/* A game from the tracker: the address in the tracker's
+			 * list may be wrong (the tracker program running since 2024
+			 * lists every game at the address of the player asking), so
+			 * ask the tracker at once to have the host answer, and use
+			 * the address the answer comes from.
+			 */
+			if (const auto reply{net_v2::tracker_take_holepunch_reply()}; reply && *reply != dj->host_addr)
+			{
+				typename _sockaddr::presentation_buffer dbuf;
+				con_printf(CON_NORMAL, "[Tracker] Game [%u]: the host answered from %s; joining there", static_cast<unsigned>(underlying_value(g)), format_address_port(dxx_ntop(*reply, dbuf), dxx_sockaddr_port(*reply)).c_str());
+				dj->host_addr = *reply;
+				Netgame.players[0].protocol.udp.addr = *reply;
+			}
+			net_v2::tracker_request_holepunch(g);
+		}
 #endif
+		net_v2::request_game_info(dj->host_addr);
 		dj->last_time = timer_query();
 	}
 	timer_delay2(5);
@@ -1173,17 +1204,17 @@ struct host_address_menu_items
 		const unsigned n = candidates.size();
 		const auto label = [own](const host_address_kind k) {
 			if (!own)
-				return "  (the host)";
+				return "the host";
 			switch (k)
 			{
 				case host_address_kind::public_ipv4:
-					return "  (Internet)";
+					return "Internet";
 				case host_address_kind::lan_ipv4:
-					return "  (LAN / VPN)";
+					return "LAN / VPN";
 				case host_address_kind::public_ipv6:
-					return "  (IPv6 Internet)";
+					return "IPv6 Internet";
 				case host_address_kind::lan_ipv6:
-					return "  (IPv6 LAN)";
+					return "IPv6 LAN";
 				case host_address_kind::unusable:
 					break;
 			}
@@ -1192,7 +1223,8 @@ struct host_address_menu_items
 		for (unsigned i = 0; i < n; ++i)
 		{
 			auto &line{lines[i]};
-			std::snprintf(line.data(), line.size(), "%s%s", candidates[i].text.c_str(), label(candidates[i].kind));
+			const auto &c{candidates[i]};
+			std::snprintf(line.data(), line.size(), "%s  (%s)", c.text.c_str(), c.label.empty() ? label(c.kind) : c.label.c_str());
 			nm_set_item_menu(m[i], line.data());
 		}
 		status[0] = 0;
@@ -1200,12 +1232,13 @@ struct host_address_menu_items
 			l[0] = 0;
 		if (own && std::ranges::none_of(candidates, [](const host_address_candidate &c) { return c.kind == host_address_kind::public_ipv4; }))
 		{
-			/* Behind a NAT router: the game cannot know the public
-			 * address, and asking an outside service is not wanted.
+			/* Behind a NAT router: the public address is known once a
+			 * player outside joined (ADDRESS_SEEN) or the tracker
+			 * listed the game.
 			 */
-			std::snprintf(notes[0].data(), notes[0].size(), "Internet players need your public IP");
-			std::snprintf(notes[1].data(), notes[1].size(), "(see your router) and UDP port %u", static_cast<unsigned>(port));
-			std::snprintf(notes[2].data(), notes[2].size(), "forwarded to this computer.");
+			std::snprintf(notes[0].data(), notes[0].size(), "Public address appears once a player");
+			std::snprintf(notes[1].data(), notes[1].size(), "has joined; or use your router's public");
+			std::snprintf(notes[2].data(), notes[2].size(), "IP with UDP port %u forwarded.", static_cast<unsigned>(port));
 		}
 		unsigned i = n;
 		nm_set_item_text(m[i++], "");
@@ -1275,6 +1308,13 @@ void net_udp_copy_game_address()
 	{
 		port = UDP_MyPort;
 		candidates = host_address_candidates(port);
+		/* The public address the players and the tracker see first. */
+		if (auto pub{net_v2::host_public_address()})
+		{
+			std::erase_if(candidates, [&pub](const host_address_candidate &c) { return c.text == pub->text; });
+			const bool v6{pub->text.front() == '['};
+			candidates.insert(candidates.begin(), {std::move(pub->text), v6 ? host_address_kind::public_ipv6 : host_address_kind::public_ipv4, std::move(pub->label)});
+		}
 	}
 	else
 	{
@@ -1292,6 +1332,35 @@ void net_udp_copy_game_address()
 		return;
 	}
 	window_create<host_address_menu>(std::move(candidates), port, own, grd_curscreen->sc_canvas);
+}
+
+void net_udp_game_address_summary(std::string &address, std::string &kind)
+{
+	if (!multi_i_am_master())
+	{
+		const auto &addr{Netgame.players[0].protocol.udp.addr};
+		typename _sockaddr::presentation_buffer dbuf;
+		address = format_address_port(dxx_ntop(addr, dbuf), dxx_sockaddr_port(addr));
+		kind = "the host, as you reach it";
+		return;
+	}
+	if (auto pub{net_v2::host_public_address()})
+	{
+		address = std::move(pub->text);
+		kind = std::move(pub->label);
+		return;
+	}
+	const auto c{host_address_candidates(UDP_MyPort)};
+	if (c.empty())
+	{
+		char buf[16];
+		std::snprintf(buf, sizeof(buf), "port %u", static_cast<unsigned>(UDP_MyPort));
+		address = buf;
+		kind = "LAN";
+		return;
+	}
+	address = c.front().text;
+	kind = c.front().kind == host_address_kind::public_ipv4 || c.front().kind == host_address_kind::public_ipv6 ? "Internet" : "LAN";
 }
 
 void net_udp_probe_report()
@@ -1391,6 +1460,7 @@ static int net_udp_start_poll(newmenu *, const d_event &event, start_poll_menu_i
 	if (event.type != event_type::window_draw)
 		return 0;
 	assert(Network_status == network_state::starting);
+	items->update_subtitle();
 
 	auto &menus = items->m;
 	const unsigned nitems = menus.size();
@@ -2450,7 +2520,6 @@ static int net_udp_select_players()
 {
 	int j;
 	char text[MAX_PLAYERS+4][45];
-	char subtitle[96];
 	unsigned save_nplayers;              //how may people would like to join
 
 	if (Netgame.ShufflePowerupSeed)
@@ -2489,7 +2558,8 @@ static int net_udp_select_players()
 	const auto &&rankstr = GetRankStringWithSpace(Netgame.players[Player_num].rank);
 	snprintf( text[0], sizeof(text[0]), "%d. %s%s%-20s", 1, rankstr.first, rankstr.second, static_cast<const char *>(get_local_player().callsign));
 
-	snprintf(subtitle, sizeof(subtitle), "%s %d %s\nCtrl+C: copy game address", TXT_TEAM_SELECT, Netgame.max_numplayers, TXT_TEAM_PRESS_ENTER);
+	net_udp_game_address_summary(spd.own_address, spd.own_kind);
+	spd.update_subtitle();
 
 #if DXX_USE_TRACKER
 	if( Netgame.Tracker )
@@ -2497,7 +2567,7 @@ static int net_udp_select_players()
 #endif
 
 GetPlayersAgain:
-	j = newmenu_do2(menu_title{nullptr}, menu_subtitle{subtitle}, spd.m, net_udp_start_poll, &spd, 1);
+	j = newmenu_do2(menu_title{nullptr}, menu_subtitle{spd.subtitle.data()}, spd.m, net_udp_start_poll, &spd, 1);
 
 	save_nplayers = N_players;
 
