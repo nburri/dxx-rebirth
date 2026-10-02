@@ -19,6 +19,7 @@
 #include "window.h"
 #include "console.h"
 #include "dxxsconf.h"
+#include "accessibility_keys.h"
 
 #if DXX_USE_SDLIMAGE
 #include <SDL_image.h>
@@ -151,6 +152,7 @@ static void arch_close(void)
 	IMG_Quit();
 #endif
 	SDL_Quit();
+	accessibility_keys_restore();
 }
 
 arch_atexit::~arch_atexit()
@@ -187,6 +189,12 @@ arch_atexit arch_init()
 	 */
 	SDL_SetHint(SDL_HINT_WINDOWS_NO_CLOSE_ON_ALT_F4, "1");
 #endif
+
+	/* Windows: no StickyKeys/FilterKeys/ToggleKeys prompt mid-fight.
+	 * Restored when the window loses the focus and on exit.
+	 */
+	if (!CGameArg.CtlKeepAccessibilityKeys)
+		accessibility_keys_init();
 
 	key_init();
 

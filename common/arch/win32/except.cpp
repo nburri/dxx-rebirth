@@ -12,6 +12,7 @@
 #include <dbghelp.h>
 #endif
 #include "vers_id.h"
+#include "accessibility_keys.h"
 
 using path_buffer = std::array<wchar_t, MAX_PATH>;
 void d_set_exception_handler();
@@ -540,6 +541,8 @@ DXX_PATH_DUMP_ARGUMENTS
 [[noreturn]]
 static void terminate_handler()
 {
+	/* ExitProcess below skips atexit handlers. */
+	dcx::accessibility_keys_restore();
 	const uint8_t *sp;
 	asm(
 #ifdef WIN64
@@ -828,6 +831,11 @@ static LONG WINAPI unhandled_exception_filter(EXCEPTION_POINTERS *const ep)
 	/* One report: a fault while writing it ends here. */
 	if (InterlockedExchange(&g_exception_report_started, 1) || !ep || !ep->ExceptionRecord || !ep->ContextRecord)
 		return g_previous_exception_filter ? g_previous_exception_filter(ep) : EXCEPTION_CONTINUE_SEARCH;
+	/* First, before anything that may fault again: the player's
+	 * accessibility settings (only SystemParametersInfo with saved
+	 * structs).
+	 */
+	dcx::accessibility_keys_restore();
 	SYSTEMTIME st{};
 	GetSystemTime(&st);
 	path_buffer path{};
