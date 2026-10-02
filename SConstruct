@@ -5110,6 +5110,11 @@ class DXXArchive(DXXCommon):
 		RuntimeTest('test-net-score-carry', (
 			'common/unittest/net_score_carry.cpp',
 			)),
+		# Test of the reactor countdown in a network game: a kill
+		# during it, a client following the host's (net_countdown.h).
+		RuntimeTest('test-net-countdown', (
+			'common/unittest/net_countdown.cpp',
+			)),
 		# Test of the text of pasted and copied game addresses
 		# (net_address_text.h).
 		RuntimeTest('test-net-address-text', (

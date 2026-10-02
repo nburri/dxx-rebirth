@@ -1056,4 +1056,11 @@ void movement_record_pickup(const unsigned pnum, const unsigned powerup)
 	put_event(mr::record_type::pickup, pnum, mr::PLAYER_NONE, 0, powerup, 0, 0);
 }
 
+void movement_record_level_event(const std::uint8_t kind, const unsigned pid, const int value, const std::uint8_t flags)
+{
+	if (!R.file)
+		return;
+	put_event(mr::record_type::level_event, pid < MAX_PLAYERS ? pid : mr::PLAYER_NONE, mr::PLAYER_NONE, kind, 0, value < 0 ? 0xffffu : static_cast<unsigned>(value), flags);
+}
+
 }

@@ -1840,6 +1840,47 @@ The implementation (`similar/main/net_v2.cpp`, `common/main/net_v2_game.h`,
   change at a level start (`net: level start: ...`, urgent on the host,
   where it would be a bug), and with `-verbose` every slot's counts at the
   level load and every player kill with both totals.)
+- **Reactor countdown** (`net_countdown.h`, tested by `test-net-countdown`).
+  The reactor itself keeps the v1 handling: every machine applies the
+  damage of every ship's shots that hit it there, the first to destroy it
+  sends `MULTI_CONTROLCEN`, and each machine opens the exit and runs the
+  countdown with its own frame time while its own player is `playing`.
+  The host's countdown is the game's: the countdown byte of
+  `LEGACY_ENDLEVEL_HOST` (every second) sets a playing client's timer when
+  they differ by more than a second; while the host does not play the
+  level itself (slot 0 not `playing`: it escaped, died in the mine or
+  looks at the score screen, and its value is the lowest of the clients'
+  reports) it only moves a client's countdown down. A kill during the
+  countdown marks the victim "died in the mine" (D2) on the other machines
+  only; the victim's own machine marks itself when its death sequence ends
+  (`DoPlayerDead`). (Playtest report, exp-34: after the reactor the
+  countdown stopped, at 50 s on one machine and 42 s on another, and the
+  exit could no longer be passed. A player killed during the countdown was
+  marked died in the mine by the kill itself, so the host-judged death
+  (`PLAYER_KILLED`, `kill_local_ship`) refused to start: the ship flew on,
+  its machine's countdown stopped and the exit trigger ignored it, and the
+  other machines no longer applied its positions. Second report: a player
+  escaped at once and its score screen showed the countdown standing
+  still, since the player left behind had stopped the same way and the
+  score screen waits for every player still in the level. The host's
+  movement recording of that game shows it: three humans and then the host
+  itself lost their connected flag at the moment of a kill during the
+  countdown, without a death following, 8.2 s apart for the machines that
+  stopped at 50 s and 42 s; the host's own countdown stopped with its own
+  kill, so it never ended the level and its bots flew on for 90 s.) A
+  machine whose player is marked died in the mine while still in the
+  level keeps running its countdown (`do_controlcen_dead_frame`) and still
+  follows the host's, so no such mark can stop a countdown. As a backstop
+  the host ends a countdown that stands still: once the real time since
+  the reactor died exceeds the countdown by 5 s it sends 0, and every
+  machine still in the level blows up (`countdown_overdue`). Arena check:
+  `-botarena-reactor <s>` destroys the reactor after `<s>` game seconds
+  and plays the countdown to 0 (it fails if the countdown stands still).
+  Gamelog lines
+  `reactor: ...` (destroyed, countdown start and end, escapes, deaths in
+  the mine, corrections from the host) and `level end: ...`; the movement
+  recording has the same as `level_event` records (format minor 5,
+  Documentation/movement-recording.md).
 - **Leaving**: a client sends `LEAVE` (also after the v1 `MULTI_QUIT`, which
   the gameplay layer still sends), the host `HOST_SHUTDOWN`; the connection
   lingers for one second so that the message is acknowledged, and a peer the

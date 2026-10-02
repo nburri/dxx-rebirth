@@ -344,6 +344,7 @@ inline const char *record_type_name(const record_type t)
 		case record_type::weapon: return "weapon";
 		case record_type::end: return "end";
 		case record_type::sync: return "sync";
+		case record_type::level_event: return "level_event";
 	}
 	return "unknown";
 }

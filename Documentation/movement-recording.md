@@ -205,6 +205,16 @@ interpolation uses) and names the network session (`session_id`). With it,
 recordings of one game made on several machines can be put on one time line
 (section 8.2).
 
+**Level events (minor 5).** A `level_event` record (the event layout) marks
+the level's course as this machine sees it: `kind` 0 the reactor destroyed
+(`pid` who destroyed it, `value` the countdown's length in seconds), 1 the
+countdown ran out here, 2 a player escaped (`pid`), 3 a player died in the
+mine (`pid`, killed during the countdown), 4 the countdown here was set to
+the host's (`value` seconds; flags 1 by the host's backstop), 5 this machine
+left the level for the score screen (`value` the countdown then, 65535
+none). `value` is the countdown's seconds left unless said otherwise
+(Documentation/network-protocol-v2.md, "Reactor countdown").
+
 `level` and `player` records describe the context: a `level` record at the
 start of every level (number, name, mission, segment count, game mode, and
 since minor 3 the mission's file name without extension, the stem of its
@@ -216,7 +226,7 @@ controls) change.
 
 ## 4. File format
 
-All integers little-endian. Version 1, minor 4. The minor counts additions
+All integers little-endian. Version 1, minor 5. The minor counts additions
 that an older reader skips without harm (new record types, new flag bits,
 fields appended to the header); the version changes only when old fields
 change. Minor 0 is the first release (v0.61-exp-25); minor 1 adds the
@@ -235,7 +245,9 @@ names, not the record. Minor 4 appends a bot's movement mode and goal (two
 bytes, after the controls) to the samples of bots flown here (flags2 bit 2
 `bot`); a minor 3 reader ignores them, a minor 4 reader reads a sample
 without them as not known, and trailing bytes of any sample that is not a
-bot's are a later version's. A minor 0 file reads as
+bot's are a later version's. Minor 5 adds the `level_event` record (type
+14, the event layout); older readers count it as unknown and skip it. A
+minor 0 file reads as
 before (its header has no `minor` field: 0).
 
 ```
@@ -265,6 +277,7 @@ Record payloads (sizes without the 2 byte record header):
 | 4 `sample` (54, 60 with controls, 2 more for a bot's movement) | pid u8, flags u8, flags2 u8, segment u16, position 3 × i24, quaternion 4 × i16, velocity 3 × i16, rotvel 3 × i16, weapons u8, shields u8, energy u8, attacked u8, aimed_at u8, context u8, enemy_id u16, enemy_rel_pos 3 × i16, enemy_rel_vel 3 × i16, [controls 6 × i8], [bot_mode u8, bot_goal u8 (minor 4, a bot's sample only)] |
 | 5–12 events (11) | time_ms u32, pid u8, other u8, kind u8, id u8, value u16, flags u8 |
 | 13 `sync` (17, minor 1) | time_ms u32, session_id u32 (0: no network session), host_ms i64 (the host's clock at `time_ms`, milliseconds), flags u8 (1 the clock is known, 2 this machine is the host) |
+| 14 `level_event` (11, minor 5) | the event layout; `kind` as in section 3.2, "Level events" |
 
 The bit assignments are in `common/main/movement_record_format.h`
 (`sample_flag`, `sample_flag2`, `context_flag`, ...), which is the normative
@@ -333,7 +346,8 @@ fight time (an enemy in sight within 400 units) flown with keys and in each
 mode, its mode changes per minute and its goals, enemy in sight and mean distance, under
 attack, aimed at, shots, hits dealt and taken with damage (and how many of
 them splash), kills, deaths, suicides, respawns, pickups, weapon switches;
-for a network game the session id and the number of `sync` records. `--csv DIR` writes
+for a network game the session id and the number of `sync` records; the
+level events (minor 5) in a list after the header lines. `--csv DIR` writes
 `DIR/<file>-p<N>-<callsign>.csv` (one row per sample, in game units and in
 the ship's frame; the column `controls_shared` tells shared controls, the
 last two `bot_mode` and `bot_goal` a bot's movement, by name, minor 4)
