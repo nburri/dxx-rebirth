@@ -4073,18 +4073,41 @@ static int GetOrbBonus (char num)
 
 void multi_do_orb_bonus(const playernum_t pnum, const multiplayer_rspan<multiplayer_command_t::MULTI_ORB_BONUS> buf)
 {
+	/* Protocol v2: the host decides scored orbs (ORB_BONUS,
+	 * net_modes.cpp); the v1 message is only played in a demo.
+	 */
+	if (net_objects_active())
+	{
+		con_printf(CON_VERBOSE, "net: MULTI_ORB_BONUS from P#%u ignored (the host decides scores)", pnum);
+		return;
+	}
+	auto &Objects = LevelUniqueObjectState.Objects;
+	auto &player_info = Objects.vmptr(vcplayerptr(pnum)->objnum)->ctype.player_info;
+	const int bonus{GetOrbBonus(buf[2])};
+	const auto team{multi_get_team_from_player(Netgame, pnum)};
+	multi_apply_orb_bonus(pnum, buf[2], (team_kills[team] + bonus) % 1000, (player_info.net_kills_total + bonus) % 1000, (player_info.KillGoalCount + bonus) % 1000, false);
+}
+
+}
+
+/* Orbs scored (the host's ORB_BONUS, or a v1 MULTI_ORB_BONUS in a demo):
+ * the messages, the sounds, the record and the scores.  `team_goal`: the
+ * kill goal counts the team's score.
+ */
+void multi_apply_orb_bonus(const playernum_t pnum, const unsigned orbs, const int team_score, const int kills, const int kill_goal_count, const bool team_goal)
+{
 	auto &Objects = LevelUniqueObjectState.Objects;
 	auto &vmobjptr = Objects.vmptr;
 	// Figure out the results of a network kills and add it to the
 	// appropriate player's tally.
 
 	int TheGoal;
-	int bonus=GetOrbBonus (buf[2]);
+	const int bonus{GetOrbBonus(static_cast<char>(orbs))};
 
 	if (pnum==Player_num)
 		HUD_init_message(HM_MULTI, "You have scored %d points!",bonus);
 	else
-		HUD_init_message(HM_MULTI, "%s has scored with %d orbs!",static_cast<const char *>(vcplayerptr(pnum)->callsign), buf[2]);
+		HUD_init_message(HM_MULTI, "%s has scored with %u orbs!",static_cast<const char *>(vcplayerptr(pnum)->callsign), orbs);
 
 	if (pnum==Player_num)
 		digi_start_sound_queued (sound_effect::SOUND_HUD_YOU_GOT_GOAL,F1_0*2);
@@ -4107,22 +4130,19 @@ void multi_do_orb_bonus(const playernum_t pnum, const multiplayer_rspan<multipla
 	}
 
 
-	team_kills[multi_get_team_from_player(Netgame, pnum)] += bonus;
+	team_kills[multi_get_team_from_player(Netgame, pnum)] = static_cast<int16_t>(team_score);
 	auto &plr = *vcplayerptr(pnum);
 	auto &player_info = vmobjptr(plr.objnum)->ctype.player_info;
 	player_info.powerup_flags &= ~player_flag::has_team_flag;  // Clear orb flag
-	player_info.net_kills_total += bonus;
-	player_info.KillGoalCount += bonus;
-
-	team_kills[multi_get_team_from_player(Netgame, pnum)]%=1000;
-	player_info.net_kills_total%=1000;
-	player_info.KillGoalCount %= 1000;
+	player_info.hoard.orbs = 0;
+	player_info.net_kills_total = static_cast<int16_t>(kills);
+	player_info.KillGoalCount = static_cast<int16_t>(kill_goal_count);
 
 	if (Netgame.KillGoal>0)
 	{
 		TheGoal=Netgame.KillGoal*5;
 
-		if (player_info.KillGoalCount >= TheGoal)
+		if ((team_goal ? team_score : player_info.KillGoalCount) >= TheGoal)
 		{
 			if (pnum==Player_num)
 			{
@@ -4136,8 +4156,6 @@ void multi_do_orb_bonus(const playernum_t pnum, const multiplayer_rspan<multipla
 	}
 	multi_sort_kill_list();
 	multi_show_player_list();
-}
-
 }
 
 namespace {

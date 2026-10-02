@@ -1728,7 +1728,10 @@ static void start_player_death_sequence(object &player)
 	{
 #if DXX_BUILD_DESCENT == 2
 		// If Hoard, increase number of orbs by 1. Only if you haven't killed yourself. This prevents cheating
-		if (game_mode_hoard(Game_mode))
+		/* In a network game the host decides it for every player, bots
+		 * included, from its verdict on the kill (net_modes.cpp).
+		 */
+		if (game_mode_hoard(Game_mode) && !(Game_mode & GM_NETWORK))
 		{
 			auto &player_info = player.ctype.player_info;
 			auto &proximity = player_info.hoard.orbs;
@@ -1959,7 +1962,13 @@ static window_event_result object_move_one(const d_level_shared_robot_info_state
 				fuelcen_check_for_goal(obj, segp);
 		}
 		else if (game_mode_hoard(Game_mode))
-			fuelcen_check_for_hoard_goal(obj, segp);
+		{
+			/* In a network game the host tests every ship
+			 * (net_modes.cpp, ORB_BONUS).
+			 */
+			if (!(Game_mode & GM_NETWORK))
+				fuelcen_check_for_hoard_goal(obj, segp);
+		}
 #endif
 
 		auto &player_info = obj->ctype.player_info;
