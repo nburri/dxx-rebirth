@@ -866,7 +866,8 @@ d2x-rebirth -hogdir DATA -botarena <mission> <level> <bots> <seconds>
             [-fixedfps N] [-botarena-bots "skill:style[:name],..."]
             [-botarena-seed N] [-botarena-reactor S] [-pilot NAME]
             [-recordmoves -recordmoves-bots]
-tools/botarena-run.sh [-n bots] [-b list] [-s seconds] [-f fps] [-o dir] DATA <mission> [<level>]
+tools/botarena-run.sh [-n bots] [-b list] [-s seconds] [-f fps] [-o dir]
+                      [-S profile.botstyle]... [-F profile.botstyle[@BOT]]... DATA <mission> [<level>]
 ```
 
 - **Start.** Instead of the main menu: the mission is found by its file
@@ -926,6 +927,12 @@ tools/botarena-run.sh [-n bots] [-b list] [-s seconds] [-f fps] [-o dir] DATA <m
 - **`tools/botarena-run.sh`** runs one arena game with `-recordmoves
   -recordmoves-bots` in a fresh user folder (the data folder is only read)
   and `movrec-analyse --bots --missions DATA/missions` on its recording.
+- **Style profiles** (section 9.18): the style of `-botarena-bots` may be
+  a loaded profile's `/bot` word or name (`insane:w:wbot` for a profile whose word is `w`); the
+  script's `-S FILE` copies a `.botstyle` file into the fresh user
+  folder's `botstyles/`, and `-F FILE` has `movrec-analyse --fidelity FILE`
+  compare the bot that flew it with the file's measured values
+  (Documentation/movement-recording.md §8.12), printed after the summary.
 
 Measured on the sandbox (aarch64, one core used): 5 bots run at about 100
 to 150 (Corona, 805 segments) and 160 to 270 (Earth Shaker) game seconds
@@ -3189,7 +3196,8 @@ own random numbers (deterministic on the host), no protocol change:
   way on. The preferred distance is drawn every 1–2.5 s. The range is a
   key too (`approach_key`): forward beyond the preferred distance plus
   15 units, reverse inside it less 15, held in between, at the style's
-  closing thrust (`COMBAT_CLOSE_SPEED` 0.9 × `close_scale`); a band
+  closing thrust (`COMBAT_CLOSE_SPEED` 0.9 × `close_scale`; section
+  9.18: closing in is a full key, the scale backing off only); a band
   narrower than 30 units (hugging an enemy within its own blast) keeps
   the proportional thrust of before (`approach_thrust`), which does not
   overshoot into the enemy.
@@ -3327,7 +3335,8 @@ go 0.25 and 0.7 of the way from the base value):
 | `tune.pursuit_seconds` | how long a lost target is pursued, in place of the skill's and style's (0: it lets it go, no pursuit starts) |
 | `tune.grab_detour` | a scale of the detour a grab may take in a fight: the measured share of pickups off course over 0.45, the bots' with the scale 1 |
 | `tune.power_pickup` | the bot's power weight (§9.14), in place of the skill's and style's: the measured share of the power pickups in sight the pilot went for |
-| `measured.*` | not read: statistics for people |
+| `tune.strafe_reversals`, `strafe_share`, `burn_chase`, `burn_fight`, `fire_distance`; with them `skill.strafe_vertical` | the aims of the bot's habits (section 9.18); `tune.burn_retreat` and `burn_roam` are aims too |
+| `measured.*` | not read: statistics for people, and what the fidelity check compares with (section 9.18) |
 
 No key is left unapplied. One caveat: the analysis counts a large turn
 as reversed only with reverse thrust in 40 % of it, and the bot's
@@ -3974,6 +3983,189 @@ heavy missiles' delay and death, the profile keys and the bot they make)
 and the exposure of the test level's tunnel and room.
 
 ---
+
+### 9.18 Profile fidelity and speed (2026-10-02)
+
+In the Pyroglyphic game of exp-34 two bots flew the profiles of player S
+and player W (made from their Corona and Schwarzbrenner games). Measured
+on Pyroglyphic, human → profile bot: S speed 55 → 48.5, strafe reversals
+42 → 41, vertical 0.62 → 0.58, speed across 82 → 76 %, afterburner 16 →
+12 % (chasing 33 → 19 %), firing distance 64 → 52; W speed 58.5 → 50,
+reversals 66 → 41, vertical 0.43 → 0.56, speed across 84 → 69 %,
+afterburner 33 → 16 % (chasing 46 → 26 %), firing distance 69 → 56. The
+keys reached the bot (section 9.13), but not the flight: the strafe
+filter of sections 9.15–9.16 held every bot near 41 reversals a minute,
+the afterburner burnt only for the skill's reasons, and the fight band
+was the pilot's while the bots fought 12 units nearer. And every bot flew
+7 to 10 units/s slower than the humans on every map.
+
+**The fidelity check** (`movrec-analyse --fidelity`, Documentation/
+movement-recording.md §8.12). The profile carries the measurements to
+compare with (`measured.strafe_reversals_per_min`, `strafe_fight_share`,
+`speed_across`, `afterburner_<situation>`, `fire_distance_median`, …);
+`tools/botarena-run.sh -S FILE -F FILE` flies the profile in the arena
+(section 8.2) and prints, per trait, the pilot's value, the bot's and
+whether it is within the tolerance. The arena takes a profile in
+`-botarena-bots` by its word or name.
+
+**The afterburner owned.** The analysis now gives the time with the
+afterburner powerup owned and the share of it burnt. In the exp-34 game
+the bot flying W's profile owned it 95 % of its time alive and burnt 17.5 % of that; W
+owned it 98 % and burnt 33 % (the charge allows about 27 %: 3 s of
+burning, 8 s to recharge, plus a full charge at every pickup). The bots
+pick it up and keep it as the humans do (they value it, section 9.15);
+what held them back was the rule of when to burn.
+
+**Habits, closed loop** (`habit_governor`, `bot_brain.h`). A bot whose
+profile names an aim watches its own flight as the analysis measures it
+and steers toward the aim in slow integral steps over a window of the
+last minute of fight (half a minute per afterburner situation); what it
+learnt survives its deaths while the aims stay. No fixed setting could
+do it: the walls, dodges and paths add reversals and keys by level and
+by fight.
+
+- *Strafe reversals* (`tune.strafe_reversals`): counted as `scan_strafe`
+  does (a run is a lateral key held, a reversal the next run within
+  300 ms that goes 90° or more the other way), sampled at the recorder's
+  30 Hz; the juke's share of runs that go the other way (`juke_rhythm::
+  flip`, 0.05–0.95) follows.
+- *Strafe share* (`tune.strafe_share`): the share of the fight with a
+  strafe key; the juke's pauses follow (0.85 of the runs down to 0.02),
+  and below that the juke's keys are held on the path of a fight too, on
+  an axis the path leaves free (`path_weave`, a share of the runs up to
+  all): W strafed 81 % of his fights, mostly on his way to pickups.
+- *Vertical share* (`skill.strafe_vertical`, with the strafe aims): the
+  juke's share of runs with an up or down key follows.
+- *Afterburner by situation* (`tune.burn_chase`, `burn_retreat`,
+  `burn_roam`, `burn_fight`): the situations of the analysis (chasing:
+  the nearest enemy in sight in the 30° cone, closing, the nose steady;
+  fleeing: an enemy in sight or an attacker behind, moving away; roam: no
+  enemy in sight and not under attack; fighting: the rest; the nearest
+  enemy with a line of sight at any angle, perceived for this). In a
+  situation with an aim the bot lights it below the aim (`habit_burn`:
+  with the forward key held and the keys within 60° of the nose, a charge
+  of 0.1, in roam 0.5 with a reserve of 0.25) and not above, besides the
+  push after a turn round (section 9.12); the skill's rules decide the
+  situations without an aim (for the bots without a profile from Hotshot
+  on there are none: the retreat's drawn burn of section 9.12 and the
+  chase, dodge and straight-flight rules give way to the aims). The
+  nearest enemy in sight is found with the lines perceive cast anyway
+  and at most three more a perception tick; a cloaked enemy only near,
+  as perceive sees it. "Under attack" is a hit within 2 s, not the
+  spawn.
+- *Firing distance* (`tune.fire_distance`): the median of the last 63
+  primary shots' distances to the target engaged (not while keeping a
+  heavy missile's standoff or hugging, nor is the offset applied then); the juke's preferred distance moves by the miss
+  (`juke_rhythm::offset`, −0.5 to 1 band). (Backing off sooner as well
+  — the range key reverse below up to 0.9 of the preferred distance —
+  gained 4 units and cost 6 kills in 90.)
+
+The analysis writes the aims into every profile (Documentation/
+movement-recording.md §8.5); a profile of before has `tune.burn_retreat`
+and `burn_roam` only, which are aims now too. A skill that does not
+strafe (Trainee) or burn keeps that.
+
+**Speed.** Alone on a level a bot flies at 51 (Pyroglyphic) to 58
+(Corona): the deficit is in sight of an enemy. Humans fly faster in
+fights than out (W 59 with an enemy in sight, 51 without); the bots
+slower (40–45 within 60 units, against the humans' 55). Tried in the
+arena (four seeds each, the group's five bots): the path's key
+thresholds, the corner speed, a lower turn rate on the path or
+everywhere, the range keeping (the preferred distance drawn over the
+whole band, reverse from 0.3 or 0.85 of it, no forward key with a
+strafe key inside it), no pauses in the strafe, twice the afterburner:
+none moved the mean speed by more than a unit, several cost kills. A
+cost for a path that starts against the ship's motion (turning round for
+a pickup behind) gained 0.3 and cost 3 kills in 80. Kept:
+
+- *Through a pickup at full speed* (`follow_path`): a pickup is taken by
+  touching it; the bot slowed to 8 units/s at every one (dist × 3 + 8).
+  +1 unit/s.
+- *The end of other paths* braked from 20 units, not 39
+  (`PATH_END_SLOW_GAIN` 3, was 1.5); *corners* slow to 0.9 of the top
+  speed (`CORNER_SLOWEST`, was 0.75).
+- *The range key* closing in is a full key (was the style's closing
+  speed, 0.78–0.9 of the thrust): without it the arena had 4 kills less
+  a game.
+- *The afterburner of the bots without a profile* by situation too
+  (`default_burn_aims`): Insane 30 % chasing, 35 % fleeing, 13 % with no
+  enemy in sight, 14 % otherwise (the middle of the group's pilots:
+  12–53, 15–53, 2–36, 8–38 %), Ace 0.8, Hotshot 0.6 of it, Rookie only
+  chasing (its rule); 10 → 16 % of the time.
+
+**Measured** (`-botarena`, 600 s, seeds 1–8, mean ± spread; before is
+experimental-netcode after PR #81; the profiles made from the
+Pyroglyphic game for Pyroglyphic, from the Corona and Schwarzbrenner
+games for Corona; Insane:S and Insane:W with Hotshot/Balanced,
+Insane/Balanced, Insane/Aggressive):
+
+| Pyroglyphic: pilot, bot before → after | player S | player W |
+|---|---|---|
+| speed | 55.1: 44.5 → 46.3 | 58.5: 45.3 → 48.0 |
+| strafe reversals a minute | 42.3: 40.7 → 47.2 | 65.7: 44.5 → 65.2 |
+| strafing, share of the fight | 0.57: 0.59 → 0.62 | 0.81: 0.61 → 0.73 |
+| vertical share | 0.62: 0.58 → 0.65 | 0.43: 0.57 → 0.52 |
+| speed across | 82 %: 67 → 69 % | 84 %: 68 → 65 % |
+| afterburner | 15.7 %: 10.4 → 16.5 % | 32.6 %: 12.2 → 24.8 % |
+| afterburner chasing / fleeing | 33 / 32 %: 17 / 23 → 31 / 33 % | 46 / 48 %: 16 / 29 → 43 / 46 % |
+| afterburner roam / otherwise | 10 / 14 %: 10 / 8 → 14 / 15 % | 36 / 20 %: 13 / 8 → 23 / 20 % |
+| firing distance, median | 64: 39 → 43 | 69: 40 → 46 |
+
+| Corona: pilot, bot before → after | player S | player W |
+|---|---|---|
+| speed | 57.8: 45.2 → 47.5 | 61.7: 46.0 → 46.9 |
+| strafe reversals a minute | 47.8: 46.2 → 47.7 | 60.8: 47.0 → 70.0 |
+| strafing, share of the fight | 0.62: 0.65 → 0.65 | 0.78: 0.65 → 0.76 |
+| vertical share | 0.74: 0.64 → 0.69 | 0.60: 0.64 → 0.62 |
+| afterburner | 15.7 %: 10.3 → 16.4 % | 35.7 %: 12.1 → 23.6 % |
+| afterburner chasing / fleeing | 26 / 23 %: 13 / 19 → 25 / 25 % | 44 / 53 %: 12 / 27 → 27 / 37 % |
+| firing distance, median | 67: 53 → 49 | 57: 50 → 48 |
+
+The strafe and S's afterburner now match (W's reversals overshoot on
+Corona: the walls and paths there add more than the juke can take back
+at its least flip share). W's afterburner is at the charge's limit (the
+bot burns 26–30 % of the time it owns it, W 33 %: the arena's bots die
+half again as often as W and lose it with the ship). The firing distance
+gained 4–6 units on Pyroglyphic only: bot against bot both close in,
+and in most of a fight the bot flies its path to a pickup, where the
+band does not reach (in the exp-34 game the bots fired 12 units nearer
+than their pilots, in the arena 20–25).
+
+| The group's five bots | Pyroglyphic before → after | Corona before → after |
+|---|---|---|
+| speed, Insane | 45.2 → 47.9 | 45.6 → 47.1 |
+| kills a game | 86.0 ± 7.3 → 82.8 ± 6.8 | 77.6 ± 5.5 → 79.1 ± 5.5 |
+| K/D Insane / Hotshot | 1.11 / 0.37 → 1.12 / 0.33 | 1.06 / 0.52 → 1.03 / 0.51 |
+| stuck recoveries a bot | 3.8 → 2.7 | 3.8 → 3.4 |
+| strafe reversals a minute, Insane | 49.6 → 56.4 | 48.6 → 54.4 |
+| afterburner | 10 → 16 % | 9 → 16 % |
+| power pickups in sight gone for | 83 → 76 % | 58 → 60 % |
+| time covered / exposed | 81 / 1 → 80 / 2 % | 16 / 65 → 16 / 64 % |
+
+With the two profile bots the kills a game were 98.8 ± 6.9 → 83.5 ± 9.0
+(Pyroglyphic) and 83.4 ± 8.5 → 80.6 ± 7.0 (Corona): every bot of that
+lineup kills a little less (W's bot 20.2 → 17.6, S's 19.4 → 19.1, the
+others 59 → 47 together on Pyroglyphic); without the profiles' aims the
+same build had 91.6. The speed stays below the 52 aimed at for Insane:
++2 to +3 here; in the exp-34 game the bots flew 4 units faster than in
+the arena (bot against bot fights closer). The flight through pickups
+adds strafe reversals (the path's keys turn more often near a pickup):
+54–56 a minute, above EC's 36–52. The bots' code takes as long as before
+(1.5–2 ms a game second for five bots, single runs).
+
+**Tests.** `test-bot-brain` `test_habit_governor` (the reversals and the
+share counted as the analysis does, outside a fight not; the flip, the
+pauses and the weave, the vertical share, the afterburner below and
+above its aim, the median distance and the offset in its bounds, the
+aims kept over a respawn and new ones afresh, the juke flying the
+rhythm, the weave on free axes) and `test_burn_situation` (the four
+situations, the default aims by skill); `test-bot-goals` (`habit_burn`:
+the aim, the cone with both strafe keys, the charge to light and keep,
+the roam reserve); `test-bot-style-profiles` (the aims of the new keys,
+low confidence no aim, a profile of before, Trainee; every aim in its
+range for any file); `test-movement-analysis` (the aims and measured
+keys written, the afterburner owned, the fidelity of a flight against
+its own profile and another's).
 
 ## 10. Risks
 

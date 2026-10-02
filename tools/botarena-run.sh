@@ -16,7 +16,13 @@
 #   -b LIST     the bots, skill:style[:name] by commas (default with 5
 #               bots: those of the group's games, Hotshot/Balanced,
 #               Insane/Balanced, Insane/Aggressive, Insane/Cautious,
-#               Insane/Collector; with another -n: the pilot's setup)
+#               Insane/Collector; with another -n: the pilot's setup);
+#               the style may be a style profile's /bot word or name
+#   -S FILE     a style profile (.botstyle) for the game's botstyles/
+#               folder (repeatable)
+#   -F FILE[@BOT]  compare the bot BOT (else the bots named like the
+#               profile's callsign) with this profile's measured values
+#               (movrec-analyse --fidelity, repeatable)
 #   -s SECONDS  game time (default 600)
 #   -f FPS      frames per game second (default 200)
 #   -r SEED     random seed (default 1)
@@ -45,13 +51,17 @@ pilot=
 out=
 build="$here/build"
 extra=
+styles=
+fidelity=
+nl='
+'
 
 usage() {
-	sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '2,39p' "$0" | sed 's/^# \{0,1\}//'
 	exit "${1:-2}"
 }
 
-while getopts n:b:s:f:r:p:o:B:x:h opt; do
+while getopts n:b:s:f:r:p:o:B:x:S:F:h opt; do
 	case $opt in
 		n) bots=$OPTARG ;;
 		b) list=$OPTARG; list_given=1 ;;
@@ -62,6 +72,8 @@ while getopts n:b:s:f:r:p:o:B:x:h opt; do
 		o) out=$OPTARG ;;
 		B) build=$OPTARG ;;
 		x) extra="$extra $OPTARG" ;;
+		S) styles="$styles$nl$OPTARG" ;;
+		F) fidelity="$fidelity$nl$OPTARG" ;;
 		h) usage 0 ;;
 		*) usage ;;
 	esac
@@ -95,6 +107,15 @@ mkdir -p "$home"
 userdir="$home/.d2x-rebirth"
 mkdir -p "$userdir"
 : > "$userdir/d2x.ini"
+# Section 9.18 of multiplayer-bots.md: the style profiles the bots fly.
+if [ -n "$styles" ]; then
+	mkdir -p "$userdir/botstyles"
+	oldifs=$IFS; IFS=$nl; set -f
+	for f in $styles; do
+		[ -z "$f" ] || cp "$f" "$userdir/botstyles/"
+	done
+	IFS=$oldifs; set +f
+fi
 
 # With -n but no -b, the bots play the pilot's setup (or the default).
 if [ -n "$list_given" ] || [ "$bots" = 5 ]; then
@@ -129,6 +150,11 @@ if [ -n "$missions" ]; then
 else
 	set --
 fi
+oldifs=$IFS; IFS=$nl; set -f
+for f in $fidelity; do
+	[ -z "$f" ] || set -- "$@" --fidelity "$f"
+done
+IFS=$oldifs; set +f
 "$analyse" --bots "$@" --out "$out/analysis" "$recording" > "$out/analysis.log" 2>&1 || {
 	status=$?
 	tail -20 "$out/analysis.log" >&2
@@ -137,3 +163,4 @@ fi
 }
 echo "botarena-run: recording $recording"
 echo "botarena-run: reports in $out/analysis (analysis log $out/analysis.log)"
+[ -z "$fidelity" ] || sed -n '/^== fidelity/,/^$/p' "$out/analysis.log"

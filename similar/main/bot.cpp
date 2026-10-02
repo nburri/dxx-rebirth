@@ -438,6 +438,31 @@ struct bot_state
 	 * fighting with keys), for the juke.
 	 */
 	b::fight_room room;
+	/* Section 9.18: the habits of its style profile, as it flies them;
+	 * the distance to the target engaged and the band's width (for the
+	 * shots' distance).
+	 */
+	b::habit_governor habits;
+	double engaged_distance{-1}, band_width{60};
+	/* The nearest enemy with a line of sight, whatever the field of view,
+	 * else the nearest enemy (as the recorder's context has it; perceive,
+	 * only with habits).
+	 */
+	std::optional<vec3> sight_enemy, near_enemy;
+	/* The lines of sight perceive cast this tick, by player (for
+	 * sense_nearest_enemies).
+	 */
+	per_player_array<int8_t> los_cast{};
+	/* The juke's run is held on the path too (b::path_weave). */
+	bool weave_run{};
+	/* The band is the heavy missile's standoff or a hug (no habits'
+	 * offset, no shot's distance).
+	 */
+	bool band_special{};
+	/* The last hit taken (0: none this life), for the habits' "under
+	 * attack" (attacked_tick starts at the spawn).
+	 */
+	uint32_t hit_tick{};
 	/* Section 9.12: retreating (at the last tick), flown turned away and
 	 * with the afterburner (drawn until flee_roll_at).
 	 */
@@ -658,6 +683,13 @@ struct bot_state
 			}
 		}
 		retreat_shields = style.retreat_shields;
+		/* Section 9.18: the afterburner of a bot without a profile is
+		 * kept near the group's pilots' too.
+		 */
+		if (!profile_applied)
+			tune.habits.burn = b::default_burn_aims(cfg.skill);
+		/* Section 9.18: kept over lives while the aims stay. */
+		habits.set(tune.habits);
 		risk = b::risk_profile_of(cfg.skill, cfg.style);
 		risk_now = risk;
 	}
@@ -674,6 +706,10 @@ struct bot_state
 			if (i != last_attacker)
 				m = {};
 		visible_now = {};
+		sight_enemy.reset();
+		near_enemy.reset();
+		weave_run = false;
+		hit_tick = 0;
 		target.reset();
 		seen.clear();
 		shot_clear = false;
@@ -1659,12 +1695,73 @@ void notice_heavy_holders(bot_state &bs, const object &obj, const uint32_t tick)
 [[nodiscard]]
 double wall_distance(const object &obj, const vec3 &dir, double limit);
 
+/* Section 9.18: the nearest enemy the ship has a line of sight to, at any
+ * angle, and the nearest enemy (the movement recorder's fight context),
+ * for the habits.  The lines perceive cast this tick are reused; at most
+ * HABIT_SIGHT_CASTS more.  A cloaked enemy is seen near only, as in
+ * perceive.
+ */
+constexpr std::size_t HABIT_SIGHT_CASTS{3};
+
+void sense_nearest_enemies(bot_state &bs, const object &obj)
+{
+	auto &Objects = LevelUniqueObjectState.Objects;
+	const auto pos{to_vec(obj.pos)};
+	struct enemy
+	{
+		double distance;
+		const object *ship;
+		playernum_t pid;
+	};
+	std::array<enemy, MAX_PLAYERS> enemies{};
+	std::size_t n{};
+	for (playernum_t i = 0; i < N_players && i < MAX_PLAYERS; ++i)
+	{
+		if (i == bs.pid || same_team(bs.pid, i))
+			continue;
+		auto &plr{*vcplayerptr(i)};
+		if (plr.connected != player_connection_status::playing)
+			continue;
+		const auto &t{*Objects.vcptr(plr.objnum)};
+		const bool dying{i == Player_num ? Player_dead_state != player_dead_state::no : bot_ship_dying(i)};
+		if (t.type != object_type::OBJ_PLAYER || dying)
+			continue;
+		const double d{b::distance(to_vec(t.pos), pos)};
+		if (+(t.ctype.player_info.powerup_flags & player_flag::cloaked) && d > BOT_CLOAK_SEE_DISTANCE)
+			continue;
+		enemies[n++] = {d, &t, i};
+	}
+	std::sort(enemies.begin(), enemies.begin() + n, [](const enemy &a, const enemy &c) { return a.distance < c.distance; });
+	bs.sight_enemy.reset();
+	bs.near_enemy.reset();
+	if (n)
+		bs.near_enemy = to_vec(enemies[0].ship->pos);
+	std::size_t casts{};
+	for (std::size_t k{}; k != n; ++k)
+	{
+		const auto &e{enemies[k]};
+		bool clear;
+		if (bs.los_cast[e.pid])
+			clear = bs.los_cast[e.pid] > 0;
+		else if (casts++ < HABIT_SIGHT_CASTS)
+			clear = line_clear(obj, obj.pos, obj.segnum, e.ship->pos, 0, true);
+		else
+			break;
+		if (clear)
+		{
+			bs.sight_enemy = to_vec(e.ship->pos);
+			return;
+		}
+	}
+}
+
 void perceive(bot_state &bs, const object &obj, const uint32_t tick)
 {
 	auto &Objects = LevelUniqueObjectState.Objects;
 	const auto &sk{bs.skill};
 	const auto pos{to_vec(obj.pos)};
 	const auto frame{to_frame(obj.orient)};
+	bs.los_cast = {};
 	/* Section 9.5: where the bot has been (exploring). */
 	if (const uint32_t seg{obj.segnum}; seg < bs.visited.size())
 		bs.visited[seg] = tick + 1;
@@ -1700,7 +1797,9 @@ void perceive(bot_state &bs, const object &obj, const uint32_t tick)
 			continue;
 		if (+(t.ctype.player_info.powerup_flags & player_flag::cloaked) && dist > BOT_CLOAK_SEE_DISTANCE)
 			continue;
-		if (!line_clear(obj, obj.pos, obj.segnum, t.pos, 0, true))
+		const bool clear{line_clear(obj, obj.pos, obj.segnum, t.pos, 0, true)};
+		bs.los_cast[i] = clear ? 1 : -1;
+		if (!clear)
 			continue;
 		bs.visible_now[i] = true;
 		bs.memory[i] = {
@@ -1711,6 +1810,9 @@ void perceive(bot_state &bs, const object &obj, const uint32_t tick)
 			.tick = tick,
 		};
 	}
+	/* Section 9.18: the analysis' nearest enemies, for the habits. */
+	if (bs.habits.active())
+		sense_nearest_enemies(bs, obj);
 	/* Section 9.16: the target out of sight a moment, the fight's keys
 	 * fly on toward where it went only while no wall is between (it went
 	 * round a corner: the path).
@@ -3101,7 +3203,12 @@ vec3 follow_path(bot_state &bs, object &obj, const bool engaged)
 	const bool last{bs.steer_index + 1 == bs.points.size()};
 	double speed{max_speed};
 	if (last)
-		speed = std::min(speed, collecting ? dist * 3 + 8 : dist * 1.5);
+		/* Section 9.18: through the powerup at full speed (it is taken
+		 * by touching it; slowing for every one cost a unit and a half
+		 * of the mean speed), and toward any other end of a path the
+		 * braking starts nearer (3 units/s per unit, was 1.5).
+		 */
+		speed = std::min(speed, collecting ? max_speed : dist * b::PATH_END_SLOW_GAIN);
 	else
 	{
 		/* Slow down before a sharp turn (section 9.15: the more the
@@ -3209,18 +3316,62 @@ void decide_afterburner(bot_state &bs, object &obj, const vec3 &wanted, const ui
 	 * it comes back along it.
 	 */
 	const bool aligned{b::length(wanted) > max_speed * 0.5 && b::angle_between(frame.f, wanted) < (bs.run.side() ? b::RUN_ANGLE + b::radians(15) : b::radians(25))};
-	const bool burn{!bs.stuck.recovering() && b::want_afterburner({
-		.have = has_flag(pi, player_flag::afterburner),
-		.charge = bs.pl.afterburner_charge / 65536.0,
+	const double charge{bs.pl.afterburner_charge / 65536.0};
+	const bool have{has_flag(pi, player_flag::afterburner)};
+	/* Section 9.18: a situation the bot's habits aim at is burnt by the
+	 * aim (b::habit_governor), the others by the skill's rule.
+	 */
+	const auto situation{b::situation_of({
+		.enemy_in_sight = bs.sight_enemy.has_value(),
+		.attacked = bs.hit_tick && tick - bs.hit_tick < b::ticks_from_ms(2000),
+		.to_enemy = bs.sight_enemy ? *bs.sight_enemy - pos : bs.near_enemy ? *bs.near_enemy - pos : b::vec3{},
+		.nose = frame.f,
+		.vel = to_vec(obj.mtype.phys_info.velocity),
+		.max_speed = max_speed,
+		.turn_rate = std::hypot(obj.mtype.phys_info.rotvel.x, obj.mtype.phys_info.rotvel.y) * 2 * std::numbers::pi / 65536.0,
+		.max_turn_rate = B.limits.turn.max_rate,
+	})};
+	const bool governed{bs.habits.burn_governed(situation)};
+	const bool turn_boost{bs.turning.phase == b::turn_phase::boost && bs.turning.burn};
+	/* The review of PR #84: the push after a turn round (section 9.12,
+	 * the profile's tune.turn_boost_burn) keeps its burn.
+	 */
+	const bool burn{!bs.stuck.recovering() && (governed
+		? b::habit_burn({
+			.have = have,
+			.charge = charge,
+			.wanted = bs.habits.burn_wanted(situation),
+			.roam = situation == b::burn_situation::roam,
+			/* The keys of this tick: forward held, with or without the
+			 * strafe keys.
+			 */
+			.along = b::dot(frame.f, bs.move_cmd) > 0.3 ? b::dot(frame.f, b::normalized(bs.move_cmd)) : 0,
+			.burning = bs.burning,
+		}) || (turn_boost && b::want_afterburner({
+			.have = have,
+			.charge = charge,
+			.use = b::afterburner_of(bs.skill_level),
+			.turn_boost = true,
+			.aligned = aligned,
+			.burning = bs.burning,
+		}))
+		: b::want_afterburner({
+		.have = have,
+		.charge = charge,
 		.use = b::afterburner_of(bs.skill_level),
 		.chasing_far = chasing_far,
 		.retreating = bs.goal == bot_goal::retreat && bs.flee_burn,
 		.dodging = dodging,
 		.long_straight = long_straight,
-		.turn_boost = bs.turning.phase == b::turn_phase::boost && bs.turning.burn,
+		.turn_boost = turn_boost,
 		.aligned = aligned,
 		.burning = bs.burning,
-	})};
+	}))};
+	/* What the analysis sees: the afterburner as lit since the last
+	 * tick, with charge and this tick's forward key.
+	 */
+	if (bs.habits.active())
+		bs.habits.burn_tick(tick_seconds(1), situation, bs.burning && charge > 0 && have && b::dot(bs.move_cmd, frame.f) > 0);
 	if (burn == bs.burning)
 		return;
 	bs.burning = burn;
@@ -4457,11 +4608,15 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 	 * BOT_RANGE_LO/HI (b::tune_params).
 	 */
 	double range_lo{bs.tune.range_lo * range_scale}, range_hi{bs.tune.range_hi * range_scale};
+	/* Section 9.18: the habits' offset and shots belong to this band. */
+	bs.band_width = range_hi - range_lo;
+	bs.band_special = false;
 	/* Section 9.5: with a heavy missile ready, far enough for its blast. */
 	if (bs.standoff > range_lo)
 	{
 		range_lo = bs.standoff;
 		range_hi = std::max(range_hi, range_lo + 25);
+		bs.band_special = true;
 	}
 	/* Section 9.6: hugging an enemy that holds a heavy missile, within
 	 * its own blast.
@@ -4470,8 +4625,17 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 	{
 		range_lo = b::HUG_NEAREST;
 		range_hi = bs.hug_keep;
+		bs.band_special = true;
 	}
-	bs.juke.update(bs.rng, b::ticks_from_ms(sk.strafe_min_ms), b::ticks_from_ms(sk.strafe_max_ms), range_lo, range_hi, sk.strafe_vertical);
+	{
+		/* The review of PR #84: a standoff or a hug is kept as it is
+		 * (an offset took a bot into its own blast, or out of a hug).
+		 */
+		auto rhythm{bs.habits.rhythm()};
+		if (bs.band_special)
+			rhythm.offset = 0;
+		bs.juke.update(bs.rng, b::ticks_from_ms(sk.strafe_min_ms), b::ticks_from_ms(sk.strafe_max_ms), range_lo, range_hi, sk.strafe_vertical, rhythm);
+	}
 	/* Section 9.12: a retreat is flown turned away or facing the enemy,
 	 * drawn when it starts and every b::FLEE_ROLL_TICKS.
 	 */
@@ -4513,6 +4677,7 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 	 */
 	bool engaged{false};
 	double engaged_dist{1e9};
+	bs.engaged_distance = -1;
 	const bool engaged_now{p && p->visible && bs.target && *bs.target == p->target && bs.visible_now[p->target]};
 	/* Section 9.15: in a fight the bot flies with keys: engaged, or a
 	 * moment (b::FIGHT_KEYS_MS) after it last saw its target or was hit.
@@ -4571,6 +4736,7 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 		const auto to{est - pos};
 		const double dist{b::length(to)};
 		engaged_dist = dist;
+		bs.engaged_distance = dist;
 		/* Collecting, retreating or refuelling (section 4.7), the bot
 		 * shoots at what it sees but flies its path: backward when it
 		 * retreats facing its pursuer.
@@ -4615,9 +4781,15 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 				 */
 				const double band{range_hi - range_lo};
 				const double close{b::effective_close_speed(bs.style)};
-				const double forward{band < b::FIGHT_KEY_MIN_BAND
+				double forward{band < b::FIGHT_KEY_MIN_BAND
 					? b::approach_thrust(dist, bs.juke.range(), b::dot(vel, b::normalized(to)), close, max_speed)
 					: bs.approach.update(dist, bs.juke.range(), band) * close};
+				/* Section 9.18: closing in is the forward key, full (a
+				 * human's key; the style's closing speed was a part of
+				 * the thrust, 0.78 to 0.9 of the top speed).
+				 */
+				if (band >= b::FIGHT_KEY_MIN_BAND && forward > 0)
+					forward = 1;
 				/* Section 9.15: nor (its line of fire blocked a moment,
 				 * b::fire_blocked) into what blocks it: the strafe clears the
 				 * line.
@@ -4726,7 +4898,9 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 			bs.face_rate = {};
 			if (bs.turning.phase == b::turn_phase::boost)
 				bs.turning.reset();
-			const double forward{bs.approach.update(dist, bs.juke.range(), range_hi - range_lo) * b::effective_close_speed(bs.style)};
+			double forward{bs.approach.update(dist, bs.juke.range(), range_hi - range_lo) * b::effective_close_speed(bs.style)};
+			if (forward > 0)
+				forward = 1;
 			b::juke_turn_from_walls(bs.juke, bs.room);
 			keys = b::keys_off_walls(b::fight_keys(bs.juke, forward, b::effective_strafe_speed(sk, bs.style), tick < bs.blast_hold_until, false), bs.room);
 			use_keys = true;
@@ -4879,6 +5053,19 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 				keys = bs.path_keys.keys();
 			}
 		}
+		/* Section 9.18: a profile's strafe on the path of a fight
+		 * (b::path_weave).
+		 */
+		if (aim_set && in_fight)
+		{
+			/* No draw without a weave: the bots without a profile
+			 * keep their random numbers (the review of PR #84).
+			 */
+			if (bs.juke.started())
+				bs.weave_run = bs.habits.rhythm().weave > 0 && bs.rng.uniform() < bs.habits.rhythm().weave;
+			if (bs.weave_run)
+				keys = b::path_weave(keys, bs.juke, b::effective_strafe_speed(sk, bs.style));
+		}
 		if (mode != b::move_mode::turn_keys)
 			mode = b::move_mode::path_keys;
 	}
@@ -4921,6 +5108,15 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 	/* Section 9.12: the strafe keys do not flip at the tick rate. */
 	bs.move_cmd = frame.to_world(bs.lateral.apply(frame.to_local(bs.move_cmd), tick, immediate));
 	bs.mode = mode;
+	/* Section 9.18: the strafe as the analysis counts it (a key is a
+	 * thrust beyond 0.3 of full), in a fight as it counts one: an enemy
+	 * in sight within 400 units.
+	 */
+	if (bs.habits.strafe_governed() && tick % b::HABIT_SAMPLE_TICKS == 0)
+	{
+		const auto l{frame.to_local(bs.move_cmd)};
+		bs.habits.strafe_tick(tick_seconds(b::HABIT_SAMPLE_TICKS), bs.sight_enemy && b::distance(*bs.sight_enemy, pos) < b::HABIT_FIGHT_RANGE, l.x, l.y);
+	}
 	if (!aim_set)
 		bs.aim_dir = bs.face_dir;
 	/* Section 9.15: the afterburner's check of the way the bot wants to
@@ -5689,6 +5885,9 @@ void bots_fire()
 			continue;
 #endif
 		do_laser_firing_player(bs.pl, objp);
+		/* Section 9.18: the distance of the shot. */
+		if (bs.engaged_distance > 0 && !bs.band_special)
+			bs.habits.fired(bs.engaged_distance, bs.band_width);
 	}
 }
 
@@ -5752,6 +5951,7 @@ bool bot_take_damage(object &ship, const icobjptridx_t killer, const fix damage,
 			const auto tick{B.tick.tick()};
 			bs->last_attacker = who;
 			bs->attacked_tick = tick;
+			bs->hit_tick = tick;
 			/* Section 9.10: the attacker, if a bot, landed a hit (its
 			 * hits on a human show only as the human's shields: the
 			 * damage seen, b::pursuit_view).
