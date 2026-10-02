@@ -231,6 +231,8 @@ connection_config sanitized(connection_config config)
 	 * reliable message that does not fit beside the state chunk.
 	 */
 	config.max_packets_per_tick = std::max(config.max_packets_per_tick, 2u);
+	config.timeout = std::max<net_clock>(config.timeout, 1);
+	config.unacked_timeout = std::max<net_clock>(config.unacked_timeout, 1);
 	/* peer_tick is sanitized by set_peer_tick, from the constructor. */
 	return config;
 }
@@ -270,9 +272,17 @@ void connection::set_peer_tick(tick_period peer_tick)
 	 * margin, and never beyond what seq_diff can tell from "behind".
 	 */
 	const auto units{std::max<net_clock>(peer_tick.units(), 1)};
-	const auto ticks{(NET_V2_TIMEOUT + units - 1) / units};
+	const auto ticks{(m_config.timeout + units - 1) / units};
 	const auto per_tick{std::max<net_clock>(m_config.max_packets_per_tick, NET_V2_STATE_MAX_PARTS + 1)};
 	m_seq_jump_bound = static_cast<std::int16_t>(std::min<net_clock>(ticks * per_tick * NET_V2_SEQ_JUMP_MARGIN, 0x7fff));
+}
+
+void connection::set_timeouts(const net_clock timeout, const net_clock unacked_timeout)
+{
+	m_config.timeout = std::max<net_clock>(timeout, 1);
+	m_config.unacked_timeout = std::max<net_clock>(unacked_timeout, 1);
+	/* The jump bound is a function of the timeout. */
+	set_peer_tick(m_config.peer_tick);
 }
 
 void connection::close_with(const close_reason reason)
@@ -486,7 +496,7 @@ void connection::check_timeouts(const net_clock now)
 {
 	if (m_state == connection_state::closed)
 		return;
-	if (now - m_last_heard >= NET_V2_TIMEOUT)
+	if (now - m_last_heard >= m_config.timeout)
 	{
 		close_with(close_reason::timeout);
 		return;
@@ -500,13 +510,13 @@ void connection::check_timeouts(const net_clock now)
 	{
 		const auto &m{m_messages.front()};
 		assert(!m.acked);
-		if (m.sent && now - m.first_sent >= NET_V2_UNACKED_TIMEOUT)
+		if (m.sent && now - m.first_sent >= m_config.unacked_timeout)
 			close_with(close_reason::unacked_timeout);
 	}
 	/* The receive side of the same limit: messages held out of order
 	 * whose gap the peer never fills although it keeps sending.
 	 */
-	if (m_recv_window_pending != 0 && now - m_recv_gap_since >= NET_V2_UNACKED_TIMEOUT)
+	if (m_recv_window_pending != 0 && now - m_recv_gap_since >= m_config.unacked_timeout)
 		close_with(close_reason::stream_stalled);
 }
 

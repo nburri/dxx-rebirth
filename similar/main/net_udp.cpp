@@ -764,6 +764,31 @@ window_event_result manual_join_menu::event_handler(const d_event &event)
 	return newmenu::event_handler(event);
 }
 
+/* The game list: the sockets (the game port, and the default port for
+ * LAN broadcasts) and the browsing state.  Also when the list comes back
+ * after a failed join or a game left before its start, which closed the
+ * sockets.
+ */
+static bool net_udp_open_browsing()
+{
+	net_udp_init();
+	const auto gamemyport{CGameArg.MplUdpMyPort};
+	if (!net_v2::open_socket(0, gamemyport >= 1024 ? gamemyport : UDP_PORT_DEFAULT))
+		return false;
+
+	if (gamemyport >= 1024 && gamemyport != UDP_PORT_DEFAULT)
+		if (!net_v2::open_socket(1, UDP_PORT_DEFAULT))
+			nm_messagebox_str(menu_title{TXT_WARNING}, nm_messagebox_tie(TXT_OK), menu_subtitle{"Cannot open default port!\nYou can only scan for games\nmanually."});
+
+	change_playernum_to(1);
+	N_players = 0;
+	Network_sending_extras=0;
+	Network_rejoined=0;
+
+	Network_status = network_state::browsing; // We are looking at a game menu
+	return true;
+}
+
 void net_udp_manual_join_game()
 {
 	net_udp_init();
@@ -815,6 +840,13 @@ window_event_result netgame_list_game_menu::event_handler(const d_event &event)
 	{
 		case event_type::window_activated:
 		{
+			/* Back from a game that ended before it started (the host
+			 * lost, the wait cancelled): its teardown closed the sockets.
+			 */
+			if (!net_v2::socket_ready())
+				/* On failure open_socket said so; the list stays empty. */
+				net_udp_open_browsing();
+			Network_status = network_state::browsing;
 			Netgame.protocol.udp.valid = 0;
 			Active_udp_games = {};
 			num_active_udp_changed = 1;
@@ -1031,21 +1063,8 @@ window_event_result netgame_list_game_menu::event_handler(const d_event &event)
 
 void net_udp_list_join_game(grs_canvas &canvas)
 {
-	net_udp_init();
-	const auto gamemyport{CGameArg.MplUdpMyPort};
-	if (!net_v2::open_socket(0, gamemyport >= 1024 ? gamemyport : UDP_PORT_DEFAULT))
+	if (!net_udp_open_browsing())
 		return;
-
-	if (gamemyport >= 1024 && gamemyport != UDP_PORT_DEFAULT)
-		if (!net_v2::open_socket(1, UDP_PORT_DEFAULT))
-			nm_messagebox_str(menu_title{TXT_WARNING}, nm_messagebox_tie(TXT_OK), menu_subtitle{"Cannot open default port!\nYou can only scan for games\nmanually."});
-
-	change_playernum_to(1);
-	N_players = 0;
-	Network_sending_extras=0;
-	Network_rejoined=0;
-
-	Network_status = network_state::browsing; // We are looking at a game menu
 
 	net_v2::flush_sockets();
 	net_udp_listen();  // Throw out old info
@@ -2567,7 +2586,12 @@ static int net_udp_select_players()
 #endif
 
 GetPlayersAgain:
+	net_v2::host_set_lobby_open(true);
 	j = newmenu_do2(menu_title{nullptr}, menu_subtitle{spd.subtitle.data()}, spd.m, net_udp_start_poll, &spd, 1);
+	/* The player list is settled from here; the network keeps running
+	 * behind the team selection and the messages (net_v2::menu_pump).
+	 */
+	net_v2::host_set_lobby_open(false);
 
 	save_nplayers = N_players;
 
@@ -2780,7 +2804,17 @@ static int net_udp_wait_for_sync(void)
 
 	if (Network_status != network_state::playing)
 	{
-		if (net_v2::client_sync_timed_out())
+		if (const auto lost{net_v2::client_take_host_lost()})
+		{
+			/* Say why, instead of a silent return to the menu. */
+			if (lost->why == kick_player_reason::host_shutdown)
+				nm_messagebox_str(menu_title{nullptr}, nm_messagebox_tie(TXT_OK), menu_subtitle{"The host left the game."});
+			else if (lost->why == kick_player_reason::timeout)
+				nm_messagebox(menu_title{TXT_ERROR}, {TXT_OK}, "Lost the connection to the host:\nnothing was heard from it\nfor %u seconds.\n\nYou can join again.", (lost->silent_ms + 500) / 1000);
+			else
+				nm_messagebox_str(menu_title{TXT_ERROR}, nm_messagebox_tie(TXT_OK), menu_subtitle{"Lost the connection to the host:\nthe link is too slow or broken.\n\nYou can join again."});
+		}
+		else if (net_v2::client_sync_timed_out())
 		{
 			net_v2::client_send_leave(kick_player_reason::snapshot_failed);
 			nm_messagebox_str(menu_title{TXT_ERROR}, nm_messagebox_tie(TXT_OK), menu_subtitle{"Failed to join the netgame.\nThe host did not send the\ngame state in time.\nTry joining again."});
@@ -2886,8 +2920,12 @@ window_event_result dispatch_table::level_sync() const
 	{
 		get_local_player().connected = player_connection_status::disconnected;
 		dispatch->send_endlevel_packet();
-		show_menus();
+		/* Close first: the menu shown next (the game list) reopens the
+		 * sockets when it is activated, and must not find the old ones
+		 * that are about to close.
+		 */
 		net_udp_close();
+		show_menus();
 		return window_event_result::close;
 	}
 	return window_event_result::handled;

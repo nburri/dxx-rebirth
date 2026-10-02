@@ -66,7 +66,8 @@ constexpr std::size_t NET_V2_EVENT_QUEUE_MAX{64};
 constexpr std::size_t NET_V2_MAX_EVENT{255};
 
 /* A well-formed packet whose `seq` is further ahead of the newest seen
- * than a conforming peer could have sent within NET_V2_TIMEOUT is
+ * than a conforming peer could have sent within the timeout (NET_V2_TIMEOUT,
+ * or the connection's own, connection_config::timeout) is
  * rejected (`bad_seq`) and counted as a protocol error: accepting it
  * would move the reorder window past every real packet, time the
  * connection out and turn our acks into protocol errors at the peer.
@@ -128,6 +129,15 @@ struct connection_config
 	 * handshake (stage 1).
 	 */
 	tick_period peer_tick{0, 0};
+	/* Section 3.6: how long without a valid packet from the peer
+	 * (close_reason::timeout), and how long the oldest reliable message
+	 * may stay unacknowledged or a gap in the peer's stream unfilled
+	 * (unacked_timeout, stream_stalled).  The session layer lengthens
+	 * both while no level runs (set_timeouts, NET_V2_LOBBY_TIMEOUT).
+	 * Clamped to at least one unit.
+	 */
+	net_clock timeout{NET_V2_TIMEOUT};
+	net_clock unacked_timeout{NET_V2_UNACKED_TIMEOUT};
 };
 
 enum class connection_state : std::uint8_t
@@ -817,6 +827,14 @@ public:
 	 * mean the same as `tick`.
 	 */
 	void set_peer_tick(tick_period peer_tick);
+
+	/* Change the timeouts of section 3.6 (connection_config::timeout and
+	 * unacked_timeout); they apply from the next check, measured from the
+	 * same instants as before (the last packet heard, the oldest unacked
+	 * message's first send), so shortening them may close the connection
+	 * at once.  The sequence jump bound follows the new timeout.
+	 */
+	void set_timeouts(net_clock timeout, net_clock unacked_timeout);
 
 	/* Advance the clock slew and, once per tick period, the timeouts
 	 * and the RTO loss detection, without building a packet and without

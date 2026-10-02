@@ -759,6 +759,115 @@ void test_timeouts(const std::uint64_t seed)
 	}
 }
 
+/* (e2) The session layer's lobby timeouts (connection::set_timeouts):
+ * while no level runs the game may stop driving the network for tens of
+ * seconds, and nobody should be dropped for it.
+ */
+void test_lobby_timeouts(const std::uint64_t seed)
+{
+	begin("e2: lobby timeouts");
+	constexpr net_clock lobby{net_seconds(60)};
+	{
+		/* 30 s of silence both ways with 60 s limits: still connected, and a
+		 * message queued in the silence arrives after it.
+		 */
+		rng r{seed};
+		sim_world w{r, link_params{.latency = net_milliseconds(50)}};
+		for (auto &p : w.peers)
+			p.conn.set_timeouts(lobby, lobby);
+		CHECK(w.peers[0].conn.config().timeout == lobby && w.peers[0].conn.config().unacked_timeout == lobby);
+		w.run(60);
+		w.link.blocked = {{true, true}};
+		w.enqueue_random_message(0, 16);
+		w.run(30 * 60);
+		CHECK(w.peers[0].conn.state() == connection_state::connected);
+		CHECK(w.peers[1].conn.state() == connection_state::connected);
+		w.link.blocked = {{false, false}};
+		w.run(120);
+		check_delivery(w, 0);
+		for (unsigned i{}; i != 2; ++i)
+		{
+			CHECK(w.peers[i].conn.state() == connection_state::connected);
+			CHECK(w.peers[i].conn.stats().protocol_errors == 0);
+		}
+		/* Back to the in-level limits after 6 s of silence (the level
+		 * starts with a peer that went quiet): closed at the next check.
+		 */
+		w.link.blocked = {{true, true}};
+		w.run(6 * 60);
+		CHECK(w.peers[0].conn.state() == connection_state::connected);
+		for (auto &p : w.peers)
+			p.conn.set_timeouts(NET_V2_TIMEOUT, NET_V2_UNACKED_TIMEOUT);
+		w.run(1);
+		for (unsigned i{}; i != 2; ++i)
+		{
+			CHECK(w.peers[i].conn.state() == connection_state::closed);
+			CHECK(w.peers[i].conn.closed_because() == close_reason::timeout);
+		}
+		/* And 60 s of silence still ends a lobby connection. */
+		rng r2{seed};
+		sim_world v{r2, link_params{.latency = net_milliseconds(50)}};
+		for (auto &p : v.peers)
+			p.conn.set_timeouts(lobby, lobby);
+		v.run(60);
+		v.link.blocked = {{true, true}};
+		v.run(59 * 60);
+		CHECK(v.peers[0].conn.state() == connection_state::connected);
+		v.run(2 * 60);
+		CHECK(v.peers[0].conn.state() == connection_state::closed && v.peers[0].conn.closed_because() == close_reason::timeout);
+		std::printf("    30 s silence survived with 60 s limits; back to 5 s after 6 s silence: closed at once; 61 s silence: closed\n");
+	}
+	{
+		/* The sequence jump bound follows the timeout: a host sending its
+		 * state every tick through a 55 s one-way blackout (3300 packets,
+		 * more than the bound of a 5 s timeout) is taken back afterwards,
+		 * without a bad_seq.
+		 */
+		rng r{seed};
+		sim_world w{r, link_params{.latency = net_milliseconds(50)}};
+		for (auto &p : w.peers)
+			p.conn.set_timeouts(lobby, lobby);
+		w.run(60, [&](const unsigned i) { w.set_state(i); });
+		w.link.blocked[1] = true;	/* host -> client */
+		const auto before{w.peers[0].conn.stats().packets_sent};
+		w.run(55 * 60, [&](const unsigned i) { w.set_state(i); });
+		const auto lost{w.peers[0].conn.stats().packets_sent - before};
+		CHECK_MSG(lost > 3000, "packets in the blackout: " + std::to_string(lost));
+		const auto seen_before{w.peers[1].states_seen.size()};
+		w.link.blocked[1] = false;
+		w.run(60, [&](const unsigned i) { w.set_state(i); });
+		CHECK(w.peers[1].conn.stats().protocol_errors == 0);
+		CHECK(w.peers[1].states_seen.size() > seen_before + 30);
+		CHECK(w.peers[0].conn.state() == connection_state::connected && w.peers[1].conn.state() == connection_state::connected);
+		std::printf("    %llu packets lost in a 55 s one-way blackout: the stream resumes, no bad_seq\n", static_cast<unsigned long long>(lost));
+	}
+	{
+		/* Two hours in a lobby: keepalives only (a player list now and
+		 * then), 1 % loss; the packet sequence wraps and nothing closes.
+		 */
+		rng r{seed};
+		sim_world w{r, link_params{.latency = net_milliseconds(70), .jitter = net_milliseconds(10), .loss = 0.01}};
+		for (auto &p : w.peers)
+			p.conn.set_timeouts(lobby, lobby);
+		constexpr unsigned ticks{2 * 3600 * 60};
+		w.run(ticks, [&](const unsigned i) {
+			if (i == 0 && w.tick_count % (30 * 60) == 0)
+				w.enqueue_random_message(0, 96);
+		});
+		w.link.params.loss = 0;
+		w.run(120);
+		for (unsigned i{}; i != 2; ++i)
+		{
+			const auto s{w.peers[i].conn.stats()};
+			CHECK(s.state == connection_state::connected);
+			CHECK(s.protocol_errors == 0);
+			CHECK_MSG(s.packets_sent > 65536, "packets " + std::to_string(s.packets_sent));
+		}
+		check_delivery(w, 0);
+		std::printf("    2 h idle lobby at 1 %% loss: %llu packets each way, sequence wrapped, still connected\n", static_cast<unsigned long long>(w.peers[0].conn.stats().packets_sent));
+	}
+}
+
 /* Review findings: one case each. */
 
 /* 1. One packet never selects more than the 256-message window, even
@@ -3317,6 +3426,7 @@ int main(const int argc, char **const argv)
 	test_rtt(seed);
 	test_bounds(seed);
 	test_timeouts(seed);
+	test_lobby_timeouts(seed);
 	test_replay(seed);
 	test_held_buffers_retained();
 	test_seq_jump_bound_follows_peer_tick();
