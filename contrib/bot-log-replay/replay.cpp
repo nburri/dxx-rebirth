@@ -28,7 +28,7 @@ int main(int argc, char **argv)
 	std::map<std::string, goal_kind> current;
 	std::map<std::string, unsigned> oldc, newc;
 	unsigned n{0};
-	const char *names[]{"roam", "hunt", "engage", "collect", "retreat", "refuel"};
+	const char *names[]{"roam", "hunt", "engage", "collect", "retreat", "refuel", "objective"};
 	while (std::getline(f, line))
 	{
 		std::vector<std::string> c;

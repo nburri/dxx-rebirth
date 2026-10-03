@@ -23,6 +23,7 @@
 #include "bot_arena.h"
 #include "bot.h"
 #include "bot_command.h"
+#include "bot_modes.h"
 #include "collide.h"
 #include "console.h"
 #include "game.h"
@@ -36,6 +37,7 @@
 #include "d_levelstate.h"
 #include "player.h"
 #include "playsave.h"
+#include "segment.h"
 #include "timer.h"
 
 namespace dcx {
@@ -52,6 +54,32 @@ struct arena_player_stats
 	unsigned stuck{};
 	unsigned paths{};
 	double path_length{};
+	/* Section 9.19: capture the flag and hoard.  The time in each role
+	 * (bot::mode_role), the carries of the enemy flag (taken, captured,
+	 * dropped, their time and distance), the returns by touch, the
+	 * orbs taken and scored, the time in a goal without a flag or orbs
+	 * (the longest stay).
+	 */
+	std::array<double, ::dcx::bot::MODE_ROLE_COUNT> role_seconds{};
+	unsigned carries{};
+	unsigned captures{};
+	unsigned drops{};
+	unsigned returns{};
+	double carry_seconds{};
+	double carry_distance{};
+	bool carrying{};
+	bool captured{};
+	unsigned orbs_taken{};
+	unsigned orbs_scored{};
+	unsigned orb_scores{};
+	unsigned orbs_now{};
+	double goal_stay{};
+	double goal_stay_max{};
+	double goal_seconds{};
+	vms_vector last_pos{};
+	/* Kills of teammates: by a weapon, by the blast of its dying ship. */
+	unsigned team_kills_weapon{};
+	unsigned team_kills_blast{};
 };
 
 struct arena_state
@@ -198,6 +226,40 @@ void bot_arena_note_path(const unsigned pnum, const double length)
 	auto &p{A.players[pnum]};
 	++p.paths;
 	p.path_length += length;
+}
+
+void bot_arena_note_capture(const unsigned pnum)
+{
+	if (!counting(pnum))
+		return;
+	auto &p{A.players[pnum]};
+	++p.captures;
+	p.captured = true;
+}
+
+void bot_arena_note_flag_return(const unsigned pnum)
+{
+	if (counting(pnum))
+		++A.players[pnum].returns;
+}
+
+void bot_arena_note_orb_score(const unsigned pnum, const unsigned orbs)
+{
+	if (!counting(pnum))
+		return;
+	auto &p{A.players[pnum]};
+	++p.orb_scores;
+	p.orbs_scored += orbs;
+}
+
+void bot_arena_note_kill(const unsigned victim, const unsigned killer, const unsigned weapon)
+{
+	if (!counting(killer) || victim >= MAX_PLAYERS || victim == killer)
+		return;
+	if (!(Game_mode & GM_TEAM) || multi_get_team_from_player(Netgame, victim) != multi_get_team_from_player(Netgame, killer))
+		return;
+	auto &p{A.players[killer]};
+	++(weapon == 0xff ? p.team_kills_blast : p.team_kills_weapon);
 }
 
 bot_arena_cpu_scope::~bot_arena_cpu_scope()
@@ -399,6 +461,171 @@ std::optional<network_game_type> arena_mode(const std::string_view name)
 	return std::nullopt;
 }
 
+/* Section 9.19: the mode's numbers of this frame (roles, carries, orbs,
+ * stays in a goal).
+ */
+void mode_frame()
+{
+#if DXX_BUILD_DESCENT == 2
+	const bool ctf{game_mode_capture_flag(Game_mode) != 0};
+	if (!ctf && !game_mode_hoard(Game_mode))
+		return;
+	const double dt{f2fl(FrameTime)};
+	auto &Objects = LevelUniqueObjectState.Objects;
+	auto &vcsegptr{LevelSharedSegmentState.get_segments().vcptr};
+	for (playernum_t i = 0; i < N_players && i < MAX_PLAYERS; ++i)
+	{
+		if (i == Player_num)
+			continue;
+		auto &p{A.players[i]};
+		const auto &plr{*vcplayerptr(i)};
+		if (plr.connected != player_connection_status::playing)
+		{
+			p.carrying = false;
+			p.goal_stay = 0;
+			continue;
+		}
+		const auto &o{*Objects.vcptr(plr.objnum)};
+		if (uint8_t role; bot_mode_role(i, role) && role < p.role_seconds.size())
+			p.role_seconds[role] += dt;
+		const bool alive{o.type == object_type::OBJ_PLAYER};
+		const auto &pi{o.ctype.player_info};
+		const bool loaded{alive && +(pi.powerup_flags & player_flag::has_team_flag)};
+		if (ctf)
+		{
+			if (loaded && !p.carrying)
+			{
+				++p.carries;
+				p.carrying = true;
+				p.captured = false;
+				p.last_pos = o.pos;
+			}
+			else if (loaded)
+			{
+				p.carry_seconds += dt;
+				p.carry_distance += f2fl(vm_vec_dist(o.pos, p.last_pos));
+				p.last_pos = o.pos;
+			}
+			else if (p.carrying)
+			{
+				p.carrying = false;
+				if (!p.captured)
+					++p.drops;
+			}
+		}
+		else
+		{
+			const unsigned orbs{alive ? pi.hoard.orbs : 0u};
+			if (orbs > p.orbs_now)
+				p.orbs_taken += orbs - p.orbs_now;
+			p.orbs_now = orbs;
+		}
+		bool in_goal{false};
+		if (alive)
+			if (const auto seg{vcsegptr.check_untrusted(o.segnum)})
+				in_goal = (*seg)->special == segment_special::goal_blue || (*seg)->special == segment_special::goal_red;
+		if (in_goal && !loaded)
+		{
+			p.goal_stay += dt;
+			p.goal_seconds += dt;
+			p.goal_stay_max = std::max(p.goal_stay_max, p.goal_stay);
+		}
+		else
+			p.goal_stay = 0;
+	}
+#endif
+}
+
+void print_mode_summary(const double game_seconds)
+{
+#if DXX_BUILD_DESCENT == 2
+	const bool ctf{game_mode_capture_flag(Game_mode) != 0};
+	if (!ctf && !game_mode_hoard(Game_mode))
+		return;
+	std::array<bot_in_game, MAX_BOTS> list;
+	const unsigned n{bots_in_game(list)};
+	const bool team{(Game_mode & GM_TEAM) != game_mode_flags{}};
+	if (ctf)
+		con_printf(CON_URGENT, "botarena: mode: %-8s %-4s %-10s %4s %4s %4s %4s %6s %6s %5s  roles %% (attack defend escort hunt carry wait retrieve)",
+			"bot", "team", "style", "carr", "caps", "drop", "ret", "carry s", "u/s", "goal");
+	else
+		con_printf(CON_URGENT, "botarena: mode: %-8s %-4s %-10s %4s %6s %6s %5s  roles %% (collect score escort)",
+			"bot", "team", "style", "orbs", "scores", "scored", "goal");
+	struct team_sum
+	{
+		unsigned bots{}, captures{}, carries{}, drops{}, returns{}, orbs{}, scores{};
+		double carry_seconds{}, carry_distance{};
+		std::array<double, b::MODE_ROLE_COUNT> roles{};
+	};
+	std::array<team_sum, 2> teams{};
+	double worst_stay{0};
+	for (unsigned k = 0; k < n; ++k)
+	{
+		const auto pid{list[k].pid};
+		const auto &p{A.players[pid]};
+		const unsigned t{team && multi_get_team_from_player(Netgame, pid) == team_number::red ? 1u : 0u};
+		double total{0};
+		for (const auto r : p.role_seconds)
+			total += r;
+		const auto share{[&](const b::mode_role r) {
+			return total > 0 ? 100 * p.role_seconds[static_cast<unsigned>(r)] / total : 0.0;
+		}};
+		std::array<char, 32> style;
+		if (ctf)
+			con_printf(CON_URGENT, "botarena: mode: %-8s %-4s %-10s %4u %4u %4u %4u %6.1f %6.1f %5.1f  %3.0f %3.0f %3.0f %3.0f %3.0f %3.0f %3.0f",
+				static_cast<const char *>(list[k].cfg.name), t ? "red" : "blue", style_label(list[k].cfg, style), p.carries, p.captures, p.drops, p.returns,
+				p.carries ? p.carry_seconds / p.carries : 0.0, p.carry_seconds > 0 ? p.carry_distance / p.carry_seconds : 0.0, p.goal_stay_max,
+				share(b::mode_role::attack), share(b::mode_role::defend), share(b::mode_role::escort), share(b::mode_role::hunt), share(b::mode_role::carry), share(b::mode_role::wait), share(b::mode_role::retrieve));
+		else
+			con_printf(CON_URGENT, "botarena: mode: %-8s %-4s %-10s %4u %6u %6u %5.1f  %3.0f %3.0f %3.0f",
+				static_cast<const char *>(list[k].cfg.name), team ? (t ? "red" : "blue") : "-", style_label(list[k].cfg, style), p.orbs_taken, p.orb_scores, p.orbs_scored, p.goal_stay_max,
+				share(b::mode_role::collect), share(b::mode_role::score), share(b::mode_role::escort));
+		auto &ts{teams[t]};
+		++ts.bots;
+		ts.captures += p.captures;
+		ts.carries += p.carries;
+		ts.drops += p.drops;
+		ts.returns += p.returns;
+		ts.orbs += p.orbs_scored;
+		ts.scores += p.orb_scores;
+		ts.carry_seconds += p.carry_seconds;
+		ts.carry_distance += p.carry_distance;
+		for (std::size_t r = 0; r < ts.roles.size(); ++r)
+			ts.roles[r] += p.role_seconds[r];
+		worst_stay = std::max(worst_stay, p.goal_stay_max);
+	}
+	/* Kills of teammates (the kill matrix, the host's ghost left out),
+	 * and of them those by weapons (not a dying ship's blast).
+	 */
+	unsigned team_kills_seen{0}, team_kills_weapon{0};
+	if (team)
+		for (unsigned a = 0; a < N_players && a < MAX_PLAYERS; ++a)
+		{
+			if (a != Player_num)
+				team_kills_weapon += A.players[a].team_kills_weapon;
+			for (unsigned v = 0; v < N_players && v < MAX_PLAYERS; ++v)
+				if (a != v && a != Player_num && v != Player_num && multi_get_team_from_player(Netgame, a) == multi_get_team_from_player(Netgame, v))
+					team_kills_seen += kill_matrix[a][v];
+		}
+	const double per10{game_seconds > 0 ? 600 / game_seconds : 0.0};
+	for (unsigned t = 0; t < (team ? 2u : 1u); ++t)
+	{
+		const auto &ts{teams[t]};
+		if (!ts.bots)
+			continue;
+		if (ctf)
+			con_printf(CON_URGENT, "botarena: mode: team %-4s %u bots: %u captures (%.1f per 10 min), %u carries (%u dropped), %u returns, carry %.1f s mean at %.1f u/s",
+				t ? "red" : "blue", ts.bots, ts.captures, ts.captures * per10, ts.carries, ts.drops, ts.returns, ts.carries ? ts.carry_seconds / ts.carries : 0.0, ts.carry_seconds > 0 ? ts.carry_distance / ts.carry_seconds : 0.0);
+		else
+			con_printf(CON_URGENT, "botarena: mode: %s%s %u bots: %u orbs scored (%.1f per 10 min) in %u scores",
+				team ? "team " : "all", team ? (t ? "red" : "blue") : "", ts.bots, ts.orbs, ts.orbs * per10, ts.scores);
+	}
+	con_printf(CON_URGENT, "botarena: mode: team kills %u (%u by weapons, the rest by a dying ship's blast), longest stay in a goal without a flag or orbs %.1f s", team_kills_seen, team_kills_weapon, worst_stay);
+#else
+	(void)game_seconds;
+#endif
+}
+
 /* The summary.  As movrec-analyse counts them: "hits" are the direct
  * hits (each bolt of a shot of several, and the missiles' direct hits)
  * on other players, "shots" the primary shots (a volley of bolts is one
@@ -449,6 +676,7 @@ void print_summary(const double game_seconds)
 				b::bot_skill_names[k], t.bots, t.bots == 1 ? "" : "s", t.kills, t.deaths, t.deaths ? static_cast<double>(t.kills) / t.deaths : static_cast<double>(t.kills), t.shots ? static_cast<double>(t.hits) / t.shots : 0.0, t.hits, t.shots);
 	/* The game mode's own numbers (captures, flag counts). */
 	net_modes_arena_summary();
+	print_mode_summary(game_seconds);
 }
 
 }
@@ -530,6 +758,7 @@ window_event_result bot_arena_frame()
 	}
 	W.game_time = GameTime64;
 	const double game_seconds{static_cast<double>(GameTime64 - A.game_start) / F1_0};
+	mode_frame();
 	/* The wall-clock limit: the arena ends with the summary of the time
 	 * played and status 3 (the watchdog thread is the backstop).
 	 */

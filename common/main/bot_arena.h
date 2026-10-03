@@ -39,6 +39,17 @@ void bot_arena_note_fire(unsigned pnum, bool secondary);
 void bot_arena_note_damage(unsigned victim, unsigned attacker, fix damage, bool splash);
 void bot_arena_note_stuck(unsigned pnum);
 void bot_arena_note_path(unsigned pnum, double length);
+/* Section 9.19: capture the flag and hoard (net_modes.cpp, on the host):
+ * a capture, a flag returned by touch, orbs scored.
+ */
+void bot_arena_note_capture(unsigned pnum);
+void bot_arena_note_flag_return(unsigned pnum);
+void bot_arena_note_orb_score(unsigned pnum, unsigned orbs);
+/* The host decided a kill by a player (net_combat.cpp): the arena tells
+ * the kills of teammates by shots from those by a dying ship's blast
+ * (`weapon` 255: no weapon).
+ */
+void bot_arena_note_kill(unsigned victim, unsigned killer, unsigned weapon);
 
 /* The time the bots' code takes: bots_frame and bots_fire (game.cpp). */
 class bot_arena_cpu_scope

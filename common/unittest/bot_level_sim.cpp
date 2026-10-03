@@ -1242,6 +1242,8 @@ void sim::think(sim_bot &b)
 		}
 		case goal_kind::refuel:
 		case goal_kind::roam:
+		/* The level simulation plays no capture the flag nor hoard. */
+		case goal_kind::objective:
 			break;
 	}
 	if (b.goal != sim_goal::roam)

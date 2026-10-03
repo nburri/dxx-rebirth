@@ -24,7 +24,7 @@ to play against one.
 
 Goals:
 
-- Anarchy, team anarchy and bounty first. CTF and hoard come in a later stage (§9, stage B7).
+- Anarchy, team anarchy and bounty first. CTF and hoard come in a later stage (§9, stage B7; as implemented: §9.19).
 - The host configures bots in the game setup menu (count, name, skill, style)
   and can add, remove and re-skill them during a running game.
 - Bots are fun to fight. They navigate any custom level, fight, collect
@@ -601,7 +601,8 @@ shows the current setup. `param_opt::m` grows from 22 to 23 and the
 
 Robot anarchy and coop are greyed out on this branch. The Bots item is
 disabled with the text "Bots: not in this mode" in CTF and hoard until stage
-B7.
+B7 (since B7, §9.19, bots play capture the flag, its Classic variant, hoard
+and team hoard; the text remains for the modes without bots).
 
 ### 6.2 Bots screen (setup and in game, one implementation)
 
@@ -879,10 +880,11 @@ tools/botarena-run.sh [-n bots] [-b list] [-s seconds] [-f fps] [-t limit] [-o d
   of `-botarena-mode`: `team`, `ctf`, `ctfclassic` with the flag rules of
   `-botarena-ctf-rules`, `hoard`, `teamhoard`; in a team mode the bots by turns
   blue and red) on the given level with `<bots> + 1` players, no kill goal,
-  no time limit, no autosave. In capture the flag the bots take flags only
-  by flying through them so far (no flag goals), and orbs alike; the
-  summary adds the captures or orb scores and the host's flag or orb count
-  (network-protocol-v2.md, "Stage 6a").
+  no time limit, no autosave. In capture the flag and hoard the bots play
+  their roles (§9.19); the summary adds the captures or orb scores and the
+  host's flag or orb count (network-protocol-v2.md, "Stage 6a"), and the
+  `mode:` lines of §9.19 (roles, carries, orbs, team kills, stays in a
+  goal).
   The bots are those of `-botarena-bots` (skill and style by the names of
   `/bot`, an optional name; a bot the list leaves out plays the default),
   else the pilot's bot setup cut or filled to `<bots>`. Without `-pilot` a
@@ -1029,7 +1031,7 @@ and one PR per change.
 | **B4** | Secondaries and mines, dodge, strafe patterns, cloak/invul behaviour, converter. `-botarena` test mode. | B3 | M |
 | **B5** | In-game bot menu, chat commands, add/remove during play, join in progress with bots (extras inventory until stage 5). Implemented: §9.11. | B2 | S |
 | **B6** | Move to stage 4 authority: bots in the history ring, robot-style hit detection for bot shots, generic `PLAYER_KILLED`/`PLAYER_SPAWN`; delete the bot-specific kill path. Done with stage 4 (network-protocol-v2.md, "Stage 4 as implemented"): the host records its bots' positions every frame, a bot's hits are applied where the host shows the target, damage to a bot goes through `bot_take_damage` from the host's decision, and a bot's death and respawn are announced with `PLAYER_KILLED`/`PLAYER_SPAWN`. | v2 stage 4 | S |
-| **B7** | CTF and hoard: goal segments (`fuelcen_check_for_goal` / `_hoard_goal` for bots on the host), flag and orb roles (attack/defend/escort), team coordination through a shared host-side blackboard. | v2 stage 6 | M |
+| **B7** | CTF and hoard: goal segments (`fuelcen_check_for_goal` / `_hoard_goal` for bots on the host), flag and orb roles (attack/defend/escort), team coordination through a shared host-side blackboard. Implemented: §9.19. | v2 stage 6 | M |
 
 B1 is shippable on its own for playtesting against "target practice" bots.
 B1–B3 make a fun anarchy bot.
@@ -4199,6 +4201,190 @@ low confidence no aim, a profile of before, Trainee; every aim in its
 range for any file); `test-movement-analysis` (the aims and measured
 keys written, the afterburner owned, the fidelity of a flight against
 its own profile and another's).
+
+### 9.19 B7 as implemented: capture the flag, Classic, hoard and team hoard
+
+Bots play capture the flag (standard and Classic with every combination
+of its three rules), hoard and team hoard, in real games
+(`bots_allowed_in_mode`) and in the arena. The game-independent part is
+`common/main/bot_modes.h` (`test-bot-modes`); the game side is the
+"Section 9.19" block of `similar/main/bot.cpp`.
+
+**What a bot knows.** The host has the truth (every flag object, every
+ship's flag bit); a team knows only what a human of the team would know:
+
+- who carries a flag: the HUD tells everyone ("... picked up a flag!");
+- a flag at home in Classic: the rules put it there at the start and after
+  a capture, the HUD tells a return ("Red flag returned");
+- in standard CTF the flags' places at the level's start (the group knows
+  its maps); a flag put back after a capture somewhere at random is
+  unknown until a bot of the team sees it;
+- a dropped flag: known if its carrier was a teammate or was seen by a bot
+  of the team within 5 s before (it falls where the carrier's ship blows
+  up, 2 s after the kill; the carrier counts as one through its death
+  tumble); else the carrier's last sighting is a guess, searched until a
+  bot comes there. A carrier alive when its flag leaves it captured: the
+  flag went back somewhere (Classic: home);
+- where an enemy carrier is: the freshest sighting by any bot of the team
+  (normal perception, no wallhack). A hunter flies to a sighting up to 8 s
+  old, else to the enemy goal, where the carrier must go, and patrols
+  round it;
+- hoard: the orbs a bot saw (a few line of sight checks per strategy
+  tick) or heard appear (a death's drop close by), remembered 40 s; the
+  orbs every player carries (each pickup is announced on the HUD by name,
+  so a human can count them; the carriers are marked when in sight).
+
+What the bots of a team see is shared on the team's blackboard (as a team
+of humans calls out what it sees); what the team's humans see is not.
+
+**Roles** (the team blackboard, `assign_ctf_roles`, every second and at
+once when a flag changes hands or state). A carrier carries the flag home
+(`carry`), or, in Classic with "score only with the own flag home" while
+its own flag is away, waits near home (`wait`). The other bots get, in
+this order, each from the bot it costs least (path cost to the role's
+place, weighed by the style, 0.6 for the bot's present role):
+
+- `retrieve`: the own flag lying where the team knows it, with the touch
+  rule (the nearest bot touches it home); without the rule a `defend`er
+  guards it instead;
+- `hunt`: the own flag carried: half the bots (at least one); all of them
+  when the team cannot score before its flag is back;
+- `escort`: the team carries: one from three players, two from five; the
+  rest defend (nothing is left to attack);
+- `defend`: one from three players, two from six; one more for a team
+  of four or five ahead by a capture's points (5: the score counts kills
+  too, a kill traded does not flip it), one less for a team behind by as
+  much; the bots keep an attacker unless a lone bot plays with two or more
+  humans (it defends). In standard CTF (no flag is ever "home") the
+  defenders guard the own flag where it lies, by the same count;
+- `attack`: the rest.
+
+Humans are teammates of unknown role: they count in the team's size and
+are given nothing. A human who replaces a bot, a bot added or removed,
+deaths and respawns are seen at the next assignment.
+
+Styles: Cautious prefers to defend, Aggressive to attack and hunt,
+Collector to attack (it carries most), Balanced to escort.
+
+**Objectives** (`objective_for`, weighed in the goal choice of §4.7 as a
+seventh goal, `goal_kind::objective`, `bot_goal::objective`):
+
+| Role | Place | Utility | Fight | Hunt | Collect | Else |
+|---|---|---|---|---|---|---|
+| carry | nearest own goal segment | 6 | 0.5 | 0.2 | 0.25 | path while fighting, afterburner, cover 1.2 |
+| wait | a wait spot (80–280 u from home, out of the goals, least exposed) | 4, there 0.3 | 0.6, there 1 | 0.2 | 0.3–0.6 | returns its own flag itself if it lies within 700 |
+| retrieve | the own flag (or the guess) | 5 | 0.7 | 0.3 | 0.3 | path while fighting, afterburner far |
+| hunt | the sighting, else round the enemy goal | 3 (0 in sight: the fight) | 1 | 1 | 0.5 | afterburner far |
+| defend | round home (or the own flag lying) | 2.6, there 0.3 | 1 | 0.35 | 0.5 | patrols within 140 u |
+| escort | the carrier | 3, there 0.25 | 1 | 0.5 | 0.5 | |
+| attack | the enemy flag | 2.4, within 300 u 3.4 | 1 | 1 | 0.7 (Collector 0.9) | |
+| score (hoard) | nearest goal | 4.5 + 0.25 per orb | 0.6 | 0.3 | 0.3 | path while fighting, afterburner and cover from 3 orbs |
+| collect (hoard) | best known orb | 2.6–4.4 by load and path | 1 | 1 | 0.8 | |
+
+"There" is a path under 160 units to the role's place (home, the own
+flag, the enemy goal), not to the patrol point. A place the bot found no
+path to is no objective for 10 s (a wall a trigger opens), nor meanwhile
+any place out of its path costs' reach: the bot plays on instead of
+hovering. The utilities sit on the scale of §4.7
+(roam 0.2, a fight 1–3, retreat 3–5, collections up to some 6): a carrier
+goes home rather than fight one enemy in its way (it shoots at what it
+sees while it flies its path, the way a collecting bot does), and keeps
+going when weak (by design: a carrier that turns away loses the
+flag as surely); an attacker fights what it meets and goes for the flag
+otherwise; a defender at home lets the fight decide but hunts nobody far
+from home. The target choice weighs the enemy carrying the team's flag 2.5
+(4 for hunters and defenders) and in hoard an enemy with n orbs 1 + 0.2 n
+(`target_candidate::priority`).
+
+**Hoard** (`hoard_should_score`): n orbs scored at once are n(n+1)/2
+points and a death gives them all and one more to the killer, so a bot
+gathers before it scores: 4 orbs (Collector 6, Aggressive 5, Cautious 2),
+one less when threatened or already on its way; at once with 12 orbs, when
+hurt (below 45 shields with a goal within 700) or with half its load when
+a goal is on its way (220). With every goal beyond the path costs' reach
+(2500) the nearest by straight line counts, its distance times 1.5. In
+team hoard a teammate carrying 5 orbs or
+more gets an escort from three players.
+
+**Fixes found on the way.**
+
+- Bots had no keys: `init_player_stats_level` gives every human of a
+  network game (not cooperative) all the keys at the level's start, the
+  bots had none and took a key door for a wall (on BAHAGAD 6 the flags'
+  rooms were out of reach). `new_ship` gives them now.
+- Blastable walls: the navigation takes them as passable at 150 units more
+  path cost, and a bot shoots one on its path open (from 30–45 units:
+  pressed against it, the guns are on the other side). This holds in
+  every mode (anarchy too); a cell closed only by a blastable wall counts
+  as open for the spawn sites. On GGC-TOP 5 one team's way out of its side opens so;
+  before, that team never reached the other flag.
+- Team kills: with friendly fire, one kill in ten was a teammate's (CTF
+  arena before B7, super laser bolts, concussion missiles). A shot is now
+  held when a teammate is within the shot's width of the nose's line, now
+  or where it will be when the shot gets there; a missile also when a
+  teammate is within its blast (the damage radius; 2.5 times for the
+  earthshaker, 1.8 for smart missiles and mines, 1.3 for homing ones) of
+  where it bursts or of the target; no mine within 300 units of home or a
+  teammate in capture the flag and hoard. A dying ship's blast still kills
+  teammates nearby (the game's, not the bots' choice).
+
+**Recording.** A role change is a role event of the movement recording
+(format minor 6, PR #91), the objective goal is `bot_goals::objective`;
+`movrec-analyse` shows the bots' role times from them.
+
+**The arena** prints per bot its carries, captures, drops, returns, mean
+carry time and speed while carrying, the longest stay in a goal segment
+without a flag or orbs and its role shares (CTF), or its orbs taken,
+scores and orbs scored (hoard); per team the captures or orbs scored per
+10 minutes; the team kills (by weapons, by dying ships' blasts).
+
+**Validation** (`-botarena`, 10-minute games, 6 levels — SNYTEK-P 1, 2,
+6, Tynos 1, BAHAGAD 6, GGC-TOP 5 — × 6 seeds per row, Insane bots of the
+four styles, 3 against 3 unless said; the flag and orb counts were never
+broken; per team and 10 minutes):
+
+| Row | Captures (orbs) per team, 10 min | Carries captured | Carry s, u/s | Team kills by weapons, per game |
+|---|---|---|---|---|
+| CTF (standard) | 6.2 (blue 226, red 217) | 76 % | 11.5, 54 | 0.8 |
+| Classic, no rules (0) | 15.3 | 80 % | 5.1, 47 | 0.6 |
+| Classic, dropped returns (2) | 15.0 | 79 % | 5.8, 47 | 0.9 |
+| Classic, touch return (4) | 15.3 | 79 % | 5.7, 46 | 0.7 |
+| Classic, home to score (8; idle return) | 8.9 | 63 % | 10.1, 44 | 1.1 |
+| Classic, default (12) | 12.7 (469 : 447) | 73 % | 7.0, 46 | 0.7 |
+| Classic, all (14) | 13.4 | 73 % | 7.1, 45 | 1.1 |
+| Classic 12, 2 against 2 | 16.4 (686 : 496) | 75 % | 8.6, 44 | 0.25 |
+| Classic 12, 4 against 3 | 16.7 : 7.8 | 71 % | 7.3, 46 | 0.8 |
+| Classic 12, Insane against Hotshot | 18.4 : 9.5 | 73 % | 8.1, 47 | 0.6 |
+| Hoard (6 players) | 73 orbs, 2.2 per score | | | 0 |
+| Team hoard | 28 : 30 orbs | | | 0.9 |
+| Team hoard, 2 against 2 | 17.7 : 17.2 orbs | | | 0.5 |
+
+Role time (Classic 12, 3 against 3): attack 47 %, defend 26 %, hunt 14 %,
+escort 6 %, carry 5 %, wait 1.5 %, retrieve 1 %; Cautious bots defend 51 %
+of their time, Balanced 14 %. No bot stayed longer than 18 s in a goal
+segment without a flag or orbs. Tynos 1 (both goals side by side) gives
+some 30 captures a team; GGC-TOP 5 favours blue (its side of the level is
+shorter). Anarchy on Corona and Earth Shaker (6 seeds each): the same
+games as before B7, kill for kill. The bots' code takes 1.5 ms a game
+second for six bots (1.2 before).
+
+Levels whose flags are out of reach for everyone who does not open a
+trigger-operated wall (SNYTEK-P 3 in Classic: the home is a two-segment
+cell closed by switches) see no captures: the bots do not shoot switches.
+
+**Tests.** `test-bot-modes`: the quotas by the flags' state, team size
+and score; the nearest bot and the style; the hysteresis; humans; dead
+bots; carriers carrying and waiting; retrieve and defend with and without
+the touch rule; a sweep over sizes, humans, flag states and rule sets
+(every bot one role, at most one carrier and one retriever, hunters only
+when the own flag is carried, escorts only when the team carries); the
+objectives in the goal choice; when to score orbs; the hoard escort; the
+targets' weights.
+
+**Not done.** Bots do not drop a flag on purpose nor pass it; no profile
+keys for the roles (the styles choose them); bots do not shoot switches to
+open trigger walls; a missile in flight does not care for a teammate who
+flies into it.
 
 ## 10. Risks
 

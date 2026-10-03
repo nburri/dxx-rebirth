@@ -147,7 +147,9 @@ void bots_setup_load(const ::dcx::bot::bot_profile &p);
 /* Section 6.5: the setup as the pilot's netgame profile stores it. */
 [[nodiscard]]
 ::dcx::bot::bot_profile bots_setup_profile();
-/* Bots play anarchy, team anarchy and bounty until stage B7. */
+/* Bots play every mode but the cooperative and robot ones (stage B7:
+ * capture the flag, its Classic variant, hoard and team hoard too).
+ */
 [[nodiscard]]
 bool bots_allowed_in_mode(network_game_type mode);
 
@@ -223,6 +225,10 @@ bool bot_is_local(playernum_t pnum);
  * is no bot this machine flies.
  */
 bool bot_movement_state(playernum_t pnum, uint8_t &mode, uint8_t &goal);
+/* Section 9.19: the role (bot::mode_role) of bot `pnum` in capture the
+ * flag or hoard; false if it is no bot this machine flies.
+ */
+bool bot_mode_role(playernum_t pnum, uint8_t &role);
 /* Slot `pnum` was disconnected or given to a human: forget its bot. */
 void bot_slot_released(playernum_t pnum);
 /* `/kick` of player `pnum`: if it is a bot, remove it from the game (the

@@ -46,6 +46,7 @@
 #include "multi.h"
 #include "multibot.h"
 #include "bot.h"
+#include "bot_arena.h"
 #include "object.h"
 #include "player.h"
 #include "weapon.h"
@@ -593,6 +594,8 @@ void host_kill(const playernum_t victim, const nv::kill_attribution killer, cons
 	fill_counts(m);
 	send_msg(session_msg::player_killed, m);
 	con_printf(CON_VERBOSE, "net: P#%u killed (by kind %u, P#%u, weapon %u)", victim, static_cast<unsigned>(killer.kind), killer.pid, weapon_id);
+	if (killer.kind == nv::attacker_kind::player)
+		bot_arena_note_kill(victim, killer.pid, weapon_id);
 	if (victim == Player_num)
 		kill_local_ship(killer);
 	/* A bot: bot_take_damage marked its death; it starts with its next

@@ -712,6 +712,11 @@ struct target_candidate
 	 * fading confidence).
 	 */
 	bool pursued{};
+	/* Section 9.19: the weight of the target in capture the flag or
+	 * hoard (bot_modes.h: the enemy carrying the bot's team's flag, an
+	 * enemy carrying orbs), 1 otherwise.
+	 */
+	double priority{1};
 };
 
 /* Section 9.10: an unseen target under pursuit scores this (a visible
@@ -741,7 +746,7 @@ inline double target_score(const target_candidate &c, const double awareness_rad
 		s *= 1.3;
 	if (c.bounty)
 		s *= 2;
-	return s;
+	return s * c.priority;
 }
 
 /* The best candidate; the current target's score counts `hysteresis`
