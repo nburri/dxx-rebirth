@@ -26,6 +26,9 @@
 #   -s SECONDS  game time (default 600)
 #   -f FPS      frames per game second (default 200)
 #   -r SEED     random seed (default 1)
+#   -t SECONDS  wall-clock limit of the game (-botarena-timeout; default
+#               max(120, game time / 5 + 60)); the script also kills the
+#               game 30 s past it (timeout(1), if installed)
 #   -p PILOT    the pilot whose .plr/.ngp (game options) to use
 #   -o DIR      output directory (default: a new one under ${TMPDIR:-/tmp})
 #   -B DIR      the build directory with d2x-rebirth/ and common/ (default:
@@ -47,6 +50,7 @@ list_given=
 seconds=600
 fps=200
 seed=1
+limit=
 pilot=
 out=
 build="$here/build"
@@ -57,17 +61,18 @@ nl='
 '
 
 usage() {
-	sed -n '2,39p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'
 	exit "${1:-2}"
 }
 
-while getopts n:b:s:f:r:p:o:B:x:S:F:h opt; do
+while getopts n:b:s:f:r:t:p:o:B:x:S:F:h opt; do
 	case $opt in
 		n) bots=$OPTARG ;;
 		b) list=$OPTARG; list_given=1 ;;
 		s) seconds=$OPTARG ;;
 		f) fps=$OPTARG ;;
 		r) seed=$OPTARG ;;
+		t) limit=$OPTARG ;;
 		p) pilot=$OPTARG ;;
 		o) out=$OPTARG ;;
 		B) build=$OPTARG ;;
@@ -125,18 +130,60 @@ else
 fi
 [ -z "$pilot" ] || set -- "$@" -pilot "$pilot"
 
-echo "botarena-run: $mission level $level, $bots bots, $seconds s at $fps fps, seed $seed; output in $out"
+# The game's own watchdog (-botarena-timeout) ends a run that hangs; as
+# a backstop, timeout(1) kills it 30 s past that limit (SIGTERM, then
+# SIGKILL 10 s later), and the trap kills it when the script ends
+# (Ctrl-C, SIGTERM, an error) while the game still runs.
+if [ -z "$limit" ]; then
+	limit=$((seconds / 5 + 60))
+	[ "$limit" -ge 120 ] || limit=120
+fi
+set -- "$@" -botarena-timeout "$limit"
+timeout_cmd=
+for t in timeout gtimeout; do
+	if command -v "$t" > /dev/null 2>&1; then
+		timeout_cmd="$t --kill-after=10 $((limit + 30))"
+		break
+	fi
+done
+[ -n "$timeout_cmd" ] || echo "botarena-run: no timeout(1) found; only the game's own watchdog limits the run" >&2
+
+# A hung game does not answer SIGTERM (SDL turns it into a quit event
+# the game never reads): SIGKILL for the game (the child of timeout(1))
+# and the process the script started.
+children=
+cleanup() {
+	for pid in $children; do
+		pkill -KILL -P "$pid" 2> /dev/null || :
+		kill -KILL "$pid" 2> /dev/null || :
+	done
+}
+trap cleanup EXIT
+trap 'cleanup; trap - EXIT; exit 130' INT
+trap 'cleanup; trap - EXIT; exit 143' TERM HUP
+
+echo "botarena-run: $mission level $level, $bots bots, $seconds s at $fps fps, seed $seed, wall-clock limit $limit s; output in $out"
 # shellcheck disable=SC2086
 HOME="$home" SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-offscreen}" SDL_AUDIODRIVER="${SDL_AUDIODRIVER:-dummy}" \
-	"$game" -hogdir "$data" -nosound -nomusic -notitles -nomovies -nojoystick -nomouse \
+	$timeout_cmd "$game" -hogdir "$data" -nosound -nomusic -notitles -nomovies -nojoystick -nomouse \
 	-recordmoves -recordmoves-bots \
 	-botarena "$mission" "$level" "$bots" "$seconds" -fixedfps "$fps" -botarena-seed "$seed" \
-	"$@" $extra > "$out/game.log" 2>&1 || {
-	status=$?
+	"$@" $extra > "$out/game.log" 2>&1 &
+children=$!
+status=0
+wait "$children" || status=$?
+children=
+if [ "$status" -ne 0 ]; then
 	grep -a 'botarena' "$out/game.log" >&2 || tail -20 "$out/game.log" >&2
-	echo "botarena-run: the game failed (status $status); the log is $out/game.log" >&2
+	case $status in
+		3) why='the wall-clock limit (watchdog)' ;;
+		4) why='no game time progress (watchdog)' ;;
+		124|137) why="timeout(1) after $((limit + 30)) s" ;;
+		*) why="status $status" ;;
+	esac
+	echo "botarena-run: the game failed ($why); the log is $out/game.log" >&2
 	exit 1
-}
+fi
 grep -a 'botarena: ' "$out/game.log" | sed 's/^.*botarena: /  /'
 
 recording=$(ls -t "$userdir"/recordings/*.dmr 2>/dev/null | head -n 1)

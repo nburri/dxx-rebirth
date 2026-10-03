@@ -275,6 +275,7 @@ static void print_commandline_help()
 	VERB("  -botarena-bots <list>         -botarena: the bots, skill:style[:name] by commas\n\t\t\t\t(default: the pilot's bot setup)\n")	\
 	VERB("  -botarena-seed <n>            -botarena: the game's random seed (default 1)\n")	\
 	VERB("  -botarena-reactor <s>         -botarena: the host destroys the reactor after <s>\n\t\t\t\tgame seconds; the arena ends with the countdown\n")	\
+	VERB("  -botarena-timeout <s>         -botarena: abort after <s> wall seconds (default\n\t\t\t\tmax(120, <seconds> / 5 + 60))\n")	\
 	VERB("  -botarena-mode <mode>         -botarena: anarchy (default), team, ctf,\n\t\t\t\thoard, teamhoard\n")	\
 	VERB("  -norun                        Bail out after initialization\n")	\
 	VERB("  -no-grab                      Never grab keyboard/mouse\n")	\

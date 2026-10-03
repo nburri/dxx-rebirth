@@ -864,10 +864,10 @@ it is the main tuning tool:
 ```
 d2x-rebirth -hogdir DATA -botarena <mission> <level> <bots> <seconds>
             [-fixedfps N] [-botarena-bots "skill:style[:name],..."]
-            [-botarena-seed N] [-botarena-reactor S]
+            [-botarena-seed N] [-botarena-reactor S] [-botarena-timeout S]
             [-botarena-mode anarchy|team|ctf|hoard|teamhoard] [-pilot NAME]
             [-recordmoves -recordmoves-bots]
-tools/botarena-run.sh [-n bots] [-b list] [-s seconds] [-f fps] [-o dir]
+tools/botarena-run.sh [-n bots] [-b list] [-s seconds] [-f fps] [-t limit] [-o dir]
                       [-S profile.botstyle]... [-F profile.botstyle[@BOT]]... DATA <mission> [<level>]
 ```
 
@@ -915,11 +915,36 @@ tools/botarena-run.sh [-n bots] [-b list] [-s seconds] [-f fps] [-o dir]
 - **End.** After `<seconds>` of game time the summary goes to the log (and
   stdout on Linux/macOS), the game window closes (the recording is closed
   as usual) and the program exits with status 0 (1 if the game did not
-  start or ended early). A line every 60 game seconds shows the progress.
+  start or ended early, 3 or 4 from the watchdog, below). A line every 60 game seconds shows the progress.
   If the level ends first (the reactor destroyed, a time or kill limit;
   section 9.16: the end-of-level screens waited for players and the
   arena hung), the arena ends there the same way, with a line saying so
   and the summary of the time played.
+- **Watchdog** (2026-10-03, after six hung arena runs of older builds
+  ran for 1.5 days at 100 % CPU each): an arena run never runs forever.
+  `-botarena-timeout S` is its wall-clock limit, by default
+  max(120 s, `<seconds>` / 5 + 60 s), counted from the arena's start
+  (logged as `botarena: wall-clock limit S s`). The arena's frame
+  checks it: past the limit the arena ends with
+  `botarena: FAIL: wall-clock limit of S s reached ...`, the summary of
+  the time played and status 3. As a backstop, a thread of its own
+  (`watchdog_thread`, started by `bot_arena_start`) ends the program
+  with `std::_Exit`, without any cleanup, when that check is never
+  reached (a menu, the score screen, an endless loop): 5 s past the
+  limit with `botarena: watchdog timeout after S s, aborting` (status
+  3), and when the game time stood still for 30 s of wall time after
+  the first frame with `botarena: watchdog: no game time progress for
+  30 s of wall time (game time stands at T s), aborting` (status 4).
+  The message goes to stderr at once and to the game log (flushed) by
+  a helper thread; the program ends at the latest 2 s later even if
+  the log is blocked. For testing, `DXX_BOTARENA_DEBUG_HANG=N` makes
+  the arena's frame spin forever once N game seconds have passed.
+  `tools/botarena-run.sh` passes the limit (`-t`, same default), runs
+  the game under `timeout --kill-after=10 <limit + 30>` (or `gtimeout`;
+  without either only the game's watchdog applies) and kills the game
+  with SIGKILL when the script ends early (a trap on exit, Ctrl-C,
+  SIGTERM, SIGHUP; a hung game does not answer SIGTERM, which SDL turns
+  into a quit event).
 - **Summary.** Per bot: kills (of others), deaths, suicides, primary shots,
   direct hits on others and hits per primary shot (as movrec-analyse counts
   them: each bolt of a volley and a missile's direct hit is a hit), splash
