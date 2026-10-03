@@ -11,7 +11,10 @@
  * inventory with host-owned flags (net_v2_objects.h); and a model of a
  * host and its clients that plays pickups, deaths, drops and captures
  * with reports late and out of step, and checks after every step that
- * each flag is in the level or carried exactly once.
+ * each flag is in the level or carried exactly once.  Hoard: the orb
+ * scores, the extra orb of a death, the orb count, ORB_BONUS, host-owned
+ * orbs, and a model of pickups, deaths, drops and scores that checks the
+ * orb count after every step.
  *
  * Build and run with SCons:
  *
@@ -419,6 +422,245 @@ void test_model()
 	}
 }
 
+void test_hoard_rules()
+{
+	CHECK(orb_points(1) == 1);
+	CHECK(orb_points(2) == 3);
+	CHECK(orb_points(5) == 15);
+	CHECK(orb_points(12) == 78);
+	CHECK(orb_bonus_due({true, 3, true}));
+	CHECK(!orb_bonus_due({false, 3, true}));
+	CHECK(!orb_bonus_due({true, 0, true}));
+	CHECK(!orb_bonus_due({true, 3, false}));
+	const auto s{orb_score({10, 20, 30}, 4)};
+	CHECK(s.team_score == 20 && s.kills == 30 && s.kill_goal_count == 40);
+	/* Kept below 1000, as the v1 rule. */
+	const auto w{orb_score({990, 999, 950}, 12)};
+	CHECK(w.team_score == 68 && w.kills == 77 && w.kill_goal_count == 28);
+	/* The extra orb of a death: an opponent's kill only. */
+	death_view d{true, 2, 3, false, 0, 0};
+	CHECK(death_orb_due(d));
+	d.killer = 3;
+	CHECK(!death_orb_due(d));	/* suicide */
+	d.killer = 2;
+	d.by_player = false;
+	CHECK(!death_orb_due(d));	/* robot, reactor, lava */
+	d.by_player = true;
+	d.team_game = true;
+	CHECK(!death_orb_due(d));	/* a teammate */
+	d.killer_team = 1;
+	CHECK(death_orb_due(d));	/* the other team */
+	/* Census: deaths make orbs, scores take them. */
+	orb_census c{3, 4};
+	CHECK(c.holds(0, 10, 3));
+	CHECK(!c.holds(0, 10, 2));
+	CHECK(!c.holds(0, 11, 3));
+	CHECK(orb_census{}.holds(0, 0, 0));
+	CHECK((orb_census{2, 0}.holds(2, 0, 0)));
+}
+
+void test_orb_bonus_wire()
+{
+	orb_bonus_msg m;
+	m.pid = 7;
+	m.orbs = 12;
+	m.scores = {-5, 999, 300};
+	std::array<std::uint8_t, orb_bonus_msg::SIZE> buf;
+	m.write(buf);
+	const auto r{orb_bonus_msg::read(buf)};
+	CHECK(r && r->pid == 7 && r->orbs == 12);
+	CHECK(r->scores.team_score == -5 && r->scores.kills == 999 && r->scores.kill_goal_count == 300);
+	CHECK(!orb_bonus_msg::read(std::span<const std::uint8_t>(buf).first(orb_bonus_msg::SIZE - 1)));
+	auto bad{buf};
+	bad[0] = NET_V2_MAX_PLAYERS;
+	CHECK(!orb_bonus_msg::read(bad));
+	bad = buf;
+	bad[1] = 0;
+	CHECK(!orb_bonus_msg::read(bad));
+	bad[1] = HOARD_MAX_ORBS + 1;
+	CHECK(!orb_bonus_msg::read(bad));
+}
+
+[[nodiscard]]
+inventory_rules hoard_rules(const std::uint8_t team)
+{
+	inventory_rules r;
+	r.has_team_flag_bit = FLAG_TEAM;
+	r.host_owned_flags = FLAG_TEAM;
+	r.host_owned_orbs = true;
+	r.hoard_mode = true;
+	r.max_orbs = HOARD_MAX_ORBS;
+	r.team = team;
+	return r;
+}
+
+constexpr pickup_desc ORB{pickup_kind::orb, 0, 0, 0};
+
+void test_host_owned_orbs()
+{
+	const auto r{hoard_rules(0)};
+	inventory_mirror m;
+	m.reset({});
+	const auto seq{m.on_grant(r, ORB, evaluate_pickup(m.current(), r, ORB, 1))};
+	CHECK(m.current().orbs == 1 && (m.current().powerup_flags & FLAG_TEAM));
+	/* A report sent before the grant arrived. */
+	m.on_report(r, {}, static_cast<std::uint16_t>(seq - 1));
+	CHECK(m.current().orbs == 1 && (m.current().powerup_flags & FLAG_TEAM));
+	/* A report with an orb more than the host gave (the client's own
+	 * death rule of v1): the host's count stays, nothing is suspicious.
+	 */
+	inventory more;
+	more.orbs = 2;
+	more.powerup_flags = FLAG_TEAM;
+	const auto expected{m.current()};
+	m.on_report(r, more, seq);
+	CHECK(m.current().orbs == 1);
+	CHECK(!unexplained_gain(expected, m.current()));
+	/* A second grant, then the score: none left, and a late report
+	 * brings none back.
+	 */
+	const auto seq2{m.on_grant(r, ORB, evaluate_pickup(m.current(), r, ORB, 1))};
+	CHECK(m.current().orbs == 2);
+	m.take_orbs(FLAG_TEAM);
+	CHECK(m.current().orbs == 0 && !(m.current().powerup_flags & FLAG_TEAM));
+	m.on_report(r, more, seq2);
+	CHECK(m.current().orbs == 0 && !(m.current().powerup_flags & FLAG_TEAM));
+	/* A drop of one orb of two. */
+	const auto seq3{m.on_grant(r, ORB, evaluate_pickup(m.current(), r, ORB, 1))};
+	m.on_grant(r, ORB, evaluate_pickup(m.current(), r, ORB, 1));
+	CHECK(m.current().orbs == 2 && (m.current().powerup_flags & FLAG_TEAM));
+	/* A report that knows only the first of the two grants. */
+	m.on_report(r, {}, seq3);
+	CHECK(m.current().orbs == 2 && (m.current().powerup_flags & FLAG_TEAM));
+	m.on_drop(r, ORB, 0);
+	CHECK(m.current().orbs == 1 && (m.current().powerup_flags & FLAG_TEAM));
+	m.on_drop(r, ORB, 0);
+	CHECK(m.current().orbs == 0 && !(m.current().powerup_flags & FLAG_TEAM));
+	/* Without host ownership, the report decides (CTF copies keep
+	 * their orbs at zero anyway).
+	 */
+	auto plain{r};
+	plain.host_owned_orbs = false;
+	plain.host_owned_flags = 0;
+	m.on_report(plain, more, m.issued());
+	CHECK(m.current().orbs == 2);
+}
+
+/* Hoard: a host and four clients (two teams, team hoard or not) pick up
+ * orbs, die (an opponent's kill adds an orb), drop orbs and score, with
+ * late reports.  After every step: the orbs in the level and carried
+ * are those the deaths made less those scored, and no copy has more
+ * than the most a player carries.
+ */
+void test_hoard_model()
+{
+	constexpr unsigned CLIENTS{4};
+	for (unsigned seed = 1; seed <= 200; ++seed)
+	{
+		std::mt19937 rng{seed};
+		const bool team_game{(seed & 1) != 0};
+		std::array<inventory_mirror, CLIENTS> host;
+		std::array<std::deque<inventory>, CLIENTS> reports;
+		std::array<inventory, CLIENTS> own{};
+		for (auto &h : host)
+			h.reset({});
+		unsigned in_level{0}, created{0}, scored{0}, scores{0};
+		for (unsigned step = 0; step < 4000; ++step)
+		{
+			const unsigned i{static_cast<unsigned>(rng() % CLIENTS)};
+			const std::uint8_t team{static_cast<std::uint8_t>(i & 1)};
+			const auto r{hoard_rules(team)};
+			auto &mirror{host[i]};
+			switch (rng() % 6)
+			{
+				case 0:
+					/* Picks up an orb lying in the level. */
+					if (in_level)
+					{
+						const auto o{evaluate_pickup(mirror.current(), r, ORB, 1)};
+						if (o.usable)
+						{
+							mirror.on_grant(r, ORB, o);
+							--in_level;
+							own[i].orbs = static_cast<std::uint8_t>(own[i].orbs + 1);
+						}
+					}
+					break;
+				case 1:
+					/* A report, now or later, with a count of its own
+					 * that may be wrong (v1 clients added the death
+					 * orb themselves).
+					 */
+					{
+						auto inv{own[i]};
+						if (rng() % 4 == 0)
+							inv.orbs = static_cast<std::uint8_t>(inv.orbs + 1);
+						reports[i].push_back(inv);
+					}
+					break;
+				case 2:
+					if (!reports[i].empty())
+					{
+						/* Some grants may still be on their way. */
+						const auto in_flight{static_cast<std::uint16_t>(std::min<std::size_t>(mirror.pending(), rng() % 3))};
+						mirror.on_report(r, reports[i].front(), static_cast<std::uint16_t>(mirror.issued() - in_flight));
+						reports[i].pop_front();
+					}
+					break;
+				case 3:
+					/* Dies: killed by someone (maybe itself, maybe a
+					 * teammate, maybe no player); the host adds the
+					 * extra orb and drops them all.
+					 */
+					{
+						const std::uint8_t killer{static_cast<std::uint8_t>(rng() % (CLIENTS + 1))};
+						const death_view d{killer < CLIENTS, killer, static_cast<std::uint8_t>(i), team_game, static_cast<std::uint8_t>(killer & 1), team};
+						unsigned orbs{mirror.current().orbs};
+						if (death_orb_due(d) && orbs < HOARD_MAX_ORBS)
+						{
+							++orbs;
+							++created;
+						}
+						in_level += orbs;
+						mirror.clear();
+						own[i] = {};
+					}
+					break;
+				case 4:
+					/* In a goal: the host scores what its copy holds. */
+					if (const auto n{mirror.current().orbs}; orb_bonus_due({true, n, true}))
+					{
+						mirror.take_orbs(FLAG_TEAM);
+						scored += n;
+						++scores;
+						own[i] = {};
+					}
+					break;
+				case 5:
+					/* Drops one orb. */
+					if (evaluate_drop(mirror.current(), r, ORB, 0))
+					{
+						mirror.on_drop(r, ORB, 0);
+						++in_level;
+						if (own[i].orbs)
+							own[i].orbs = static_cast<std::uint8_t>(own[i].orbs - 1);
+					}
+					break;
+			}
+			orb_census c;
+			c.in_level = in_level;
+			for (const auto &h : host)
+			{
+				CHECK(h.current().orbs <= HOARD_MAX_ORBS);
+				CHECK(((h.current().powerup_flags & FLAG_TEAM) != 0) == (h.current().orbs != 0));
+				c.carried += h.current().orbs;
+			}
+			CHECK(c.holds(0, created, scored));
+		}
+		CHECK(created > 0 && scores > 0);
+	}
+}
+
 }
 
 int main()
@@ -429,6 +671,10 @@ int main()
 	test_capture_wire();
 	test_host_owned_flags();
 	test_model();
+	test_hoard_rules();
+	test_orb_bonus_wire();
+	test_host_owned_orbs();
+	test_hoard_model();
 	std::puts("net_v2_modes: all checks passed");
 	return 0;
 }

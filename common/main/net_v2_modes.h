@@ -17,6 +17,14 @@
  * flag is always either in the level or carried by exactly one player
  * (`flag_census`).
  *
+ * Hoard and team hoard: orbs are powerups the host grants (section 6.2).
+ * The host tests every ship against the goals as well; a carrier of orbs
+ * in a goal scores (`orb_bonus_due`, `orb_score`: n orbs are worth
+ * n(n+1)/2) and the host sends ORB_BONUS.  A player killed by an
+ * opponent drops one orb more than it carried (`death_orb_due`), decided
+ * on the host for every player, bots included.  The orbs in the level and
+ * carried are those the deaths created less those scored (`orb_census`).
+ *
  * Teams as the game numbers them: blue 0, red 1.  A flag is named by the
  * team it belongs to (the blue flag is POW_FLAG_BLUE, its home is the
  * blue goal); the other team takes it.
@@ -137,6 +145,87 @@ struct flag_census
 	}
 };
 
+/* Hoard: the most orbs a player carries (player_info::max_hoard_orbs). */
+constexpr std::uint8_t HOARD_MAX_ORBS{12};
+
+/* What the host knows of one ship when it tests the goals in hoard. */
+struct orb_check
+{
+	bool alive{};
+	std::uint8_t orbs{};
+	/* The ship's segment is a goal (either team's: every goal takes
+	 * orbs, fuelcen_check_for_hoard_goal).
+	 */
+	bool in_goal{};
+};
+
+[[nodiscard]]
+constexpr bool orb_bonus_due(const orb_check &c)
+{
+	return c.alive && c.orbs && c.in_goal;
+}
+
+/* n orbs are worth n(n+1)/2 points (GetOrbBonus). */
+[[nodiscard]]
+constexpr int orb_points(const unsigned orbs)
+{
+	return static_cast<int>(orbs * (orbs + 1) / 2);
+}
+
+/* The scores after `orbs` orbs scored, as multi_do_orb_bonus counted
+ * them: the points on the team's score, the player's kills and its kill
+ * goal count, each kept below 1000.
+ */
+[[nodiscard]]
+constexpr capture_scores orb_score(const capture_scores &before, const unsigned orbs)
+{
+	const int points{orb_points(orbs)};
+	const auto add{[points](const std::int16_t v) {
+		return static_cast<std::int16_t>((v + points) % 1000);
+	}};
+	return {add(before.team_score), add(before.kills), add(before.kill_goal_count)};
+}
+
+/* A death in hoard: the dead player drops one orb more than it carried
+ * (up to the most a player carries) when another player killed it, and
+ * in team hoard one of the other team (start_player_death_sequence's
+ * rule, which every machine applied to its own player; a bot never got
+ * it).  The host decides it from its own verdict on the kill.
+ */
+struct death_view
+{
+	/* A player killed it (not a robot, the reactor, a fall, nothing). */
+	bool by_player{};
+	std::uint8_t killer{};
+	std::uint8_t victim{};
+	bool team_game{};
+	std::uint8_t killer_team{};
+	std::uint8_t victim_team{};
+};
+
+[[nodiscard]]
+constexpr bool death_orb_due(const death_view &d)
+{
+	if (!d.by_player || d.killer == d.victim)
+		return false;
+	return !d.team_game || d.killer_team != d.victim_team;
+}
+
+/* Every orb is in the level or carried; there are as many as the level
+ * started with (none, as a rule) plus those the deaths created less those
+ * scored.
+ */
+struct orb_census
+{
+	unsigned in_level{};
+	unsigned carried{};
+	[[nodiscard]]
+	constexpr bool holds(const unsigned at_start, const unsigned created, const unsigned scored) const
+	{
+		return in_level + carried + scored == at_start + created;
+	}
+};
+
 /* CAPTURE (0x39): host to all.  Player `pid` of team `team` brought the
  * flag of team `flag` home; the scores are the host's after the capture,
  * which every machine takes.
@@ -170,6 +259,40 @@ struct capture_msg
 		m.scores.kills = static_cast<std::int16_t>(net_get_le16(&buf[5]));
 		m.scores.kill_goal_count = static_cast<std::int16_t>(net_get_le16(&buf[7]));
 		if (m.pid >= NET_V2_MAX_PLAYERS || m.team >= CTF_TEAMS || m.flag != other_team(m.team))
+			return std::nullopt;
+		return m;
+	}
+};
+
+/* ORB_BONUS (0x3a): host to all.  Player `pid` scored `orbs` orbs; the
+ * scores are the host's after it, which every machine takes.
+ */
+struct orb_bonus_msg
+{
+	static constexpr std::size_t SIZE{8};
+	std::uint8_t pid{};
+	std::uint8_t orbs{};
+	capture_scores scores{};
+	void write(std::span<std::uint8_t, SIZE> buf) const
+	{
+		buf[0] = pid;
+		buf[1] = orbs;
+		net_put_le16(&buf[2], static_cast<std::uint16_t>(scores.team_score));
+		net_put_le16(&buf[4], static_cast<std::uint16_t>(scores.kills));
+		net_put_le16(&buf[6], static_cast<std::uint16_t>(scores.kill_goal_count));
+	}
+	[[nodiscard]]
+	static std::optional<orb_bonus_msg> read(const std::span<const std::uint8_t> buf)
+	{
+		if (buf.size() != SIZE)
+			return std::nullopt;
+		orb_bonus_msg m;
+		m.pid = buf[0];
+		m.orbs = buf[1];
+		m.scores.team_score = static_cast<std::int16_t>(net_get_le16(&buf[2]));
+		m.scores.kills = static_cast<std::int16_t>(net_get_le16(&buf[4]));
+		m.scores.kill_goal_count = static_cast<std::int16_t>(net_get_le16(&buf[6]));
+		if (m.pid >= NET_V2_MAX_PLAYERS || !m.orbs || m.orbs > HOARD_MAX_ORBS)
 			return std::nullopt;
 		return m;
 	}

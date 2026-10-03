@@ -85,6 +85,8 @@ enum class session_msg : std::uint8_t
 	 * capture the flag, host to all (protocol 109).
 	 */
 	capture = 0x39,
+	/* Orbs scored in hoard, host to all (protocol 110). */
+	orb_bonus = 0x3a,
 	drop_request = 0x3b,
 	obj_settle = 0x47,
 	/* Host-assigned spawns (section 8, "Host-assigned spawns",

@@ -49,11 +49,11 @@ constexpr net_clock net_milliseconds(const net_clock ms)
  * stage 2, 102: stage 3, 103: stage 3 review fixes, 104: the PLAYER_LIST
  * bot flag, 105: host-assigned spawns, SPAWN_REQUEST and SPAWN_SITE,
  * 106: stage 4, 107: the shared controls in INPUT, -sharemoves, 108:
- * ADDRESS_SEEN, 109: CAPTURE);
+ * ADDRESS_SEEN, 109: CAPTURE, 110: ORB_BONUS);
  * named differently so that the two never shadow each other in a
  * translation unit that sees both.
  */
-constexpr std::uint16_t NET_V2_PROTO_VERSION{109};
+constexpr std::uint16_t NET_V2_PROTO_VERSION{110};
 constexpr std::size_t NET_V2_HEADER_SIZE{34};
 constexpr std::size_t NET_V2_MAX_PACKET{1200};
 constexpr std::size_t NET_V2_ACK_BITS{64};

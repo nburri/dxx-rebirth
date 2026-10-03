@@ -25,6 +25,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 
 #include "dxxsconf.h"
 #include <bitset>
+#include <climits>
 #include <memory>
 #include <new>
 #include <stdexcept>
@@ -4073,18 +4074,41 @@ static int GetOrbBonus (char num)
 
 void multi_do_orb_bonus(const playernum_t pnum, const multiplayer_rspan<multiplayer_command_t::MULTI_ORB_BONUS> buf)
 {
+	/* Protocol v2: the host decides scored orbs (ORB_BONUS,
+	 * net_modes.cpp); the v1 message is only played in a demo.
+	 */
+	if (net_objects_active())
+	{
+		con_printf(CON_VERBOSE, "net: MULTI_ORB_BONUS from P#%u ignored (the host decides scores)", pnum);
+		return;
+	}
+	auto &Objects = LevelUniqueObjectState.Objects;
+	auto &player_info = Objects.vmptr(vcplayerptr(pnum)->objnum)->ctype.player_info;
+	const int bonus{GetOrbBonus(buf[2])};
+	const auto team{multi_get_team_from_player(Netgame, pnum)};
+	multi_apply_orb_bonus(pnum, buf[2], (team_kills[team] + bonus) % 1000, (player_info.net_kills_total + bonus) % 1000, (player_info.KillGoalCount + bonus) % 1000, false);
+}
+
+}
+
+/* Orbs scored (the host's ORB_BONUS, or a v1 MULTI_ORB_BONUS in a demo):
+ * the messages, the sounds, the record and the scores.  `team_goal`: the
+ * kill goal counts the team's score.
+ */
+void multi_apply_orb_bonus(const playernum_t pnum, const unsigned orbs, const int team_score, const int kills, const int kill_goal_count, const bool team_goal)
+{
 	auto &Objects = LevelUniqueObjectState.Objects;
 	auto &vmobjptr = Objects.vmptr;
 	// Figure out the results of a network kills and add it to the
 	// appropriate player's tally.
 
 	int TheGoal;
-	int bonus=GetOrbBonus (buf[2]);
+	const int bonus{GetOrbBonus(static_cast<char>(orbs))};
 
 	if (pnum==Player_num)
 		HUD_init_message(HM_MULTI, "You have scored %d points!",bonus);
 	else
-		HUD_init_message(HM_MULTI, "%s has scored with %d orbs!",static_cast<const char *>(vcplayerptr(pnum)->callsign), buf[2]);
+		HUD_init_message(HM_MULTI, "%s has scored with %u orbs!",static_cast<const char *>(vcplayerptr(pnum)->callsign), orbs);
 
 	if (pnum==Player_num)
 		digi_start_sound_queued (sound_effect::SOUND_HUD_YOU_GOT_GOAL,F1_0*2);
@@ -4107,22 +4131,19 @@ void multi_do_orb_bonus(const playernum_t pnum, const multiplayer_rspan<multipla
 	}
 
 
-	team_kills[multi_get_team_from_player(Netgame, pnum)] += bonus;
+	team_kills[multi_get_team_from_player(Netgame, pnum)] = static_cast<int16_t>(team_score);
 	auto &plr = *vcplayerptr(pnum);
 	auto &player_info = vmobjptr(plr.objnum)->ctype.player_info;
 	player_info.powerup_flags &= ~player_flag::has_team_flag;  // Clear orb flag
-	player_info.net_kills_total += bonus;
-	player_info.KillGoalCount += bonus;
-
-	team_kills[multi_get_team_from_player(Netgame, pnum)]%=1000;
-	player_info.net_kills_total%=1000;
-	player_info.KillGoalCount %= 1000;
+	player_info.hoard.orbs = 0;
+	player_info.net_kills_total = static_cast<int16_t>(kills);
+	player_info.KillGoalCount = static_cast<int16_t>(kill_goal_count);
 
 	if (Netgame.KillGoal>0)
 	{
 		TheGoal=Netgame.KillGoal*5;
 
-		if (player_info.KillGoalCount >= TheGoal)
+		if ((team_goal ? team_score : player_info.KillGoalCount) >= TheGoal)
 		{
 			if (pnum==Player_num)
 			{
@@ -4136,8 +4157,6 @@ void multi_do_orb_bonus(const playernum_t pnum, const multiplayer_rspan<multipla
 	}
 	multi_sort_kill_list();
 	multi_show_player_list();
-}
-
 }
 
 namespace {
@@ -5089,12 +5108,30 @@ class hoard_resources_type
 public:
 	bitmap_index bm_idx = invalid_bm_idx;
 	unsigned snd_idx = invalid_snd_idx;
+	/* The orb vclip, the goal effect and the goal texture are appended to
+	 * Vclip, Effects and TmapInfo.  A later hoard game reuses these slots
+	 * instead of appending new ones each time (which overflowed the
+	 * tables after some 20 hoard levels in one session).
+	 */
+	unsigned vclip_slot = UINT_MAX, effect_slot = UINT_MAX, texture_slot = UINT_MAX;
 	void reset();
-	~hoard_resources_type()
-	{
-		reset();
-	}
+	/* No destructor: freeing at program exit touched Orb_icons and
+	 * GameSounds after their own destructors had run (static destruction
+	 * order), a double free that aborted every hoard game's exit in
+	 * optimised (LTO) builds.  close_hoard_data() frees the data while the
+	 * game data is still alive.
+	 */
 };
+
+/* The slot `slot` of a table with `count` entries if it is still the last
+ * one, otherwise a newly appended one.
+ */
+static unsigned hoard_reuse_or_append(unsigned &slot, unsigned &count)
+{
+	if (slot == UINT_MAX || slot + 1 != count)
+		slot = count++;
+	return slot;
+}
 
 static hoard_resources_type hoard_resources;
 
@@ -5129,6 +5166,11 @@ void hoard_resources_type::reset()
 		i.reset();
 }
 
+void close_hoard_data()
+{
+	hoard_resources.reset();
+}
+
 void init_hoard_data(d_vclip_array &Vclip)
 {
 	auto &Effects = LevelUniqueEffectsClipState.Effects;
@@ -5158,10 +5200,9 @@ void init_hoard_data(d_vclip_array &Vclip)
 	MALLOC( bitmap_data1, ubyte, n_orb_frames*orb_w*orb_h + n_goal_frames*64*64 );
 
 	//Create orb vclip
-	const auto nvc = Vclip.valid_index(Num_vclips);
+	const auto nvc = Vclip.valid_index(hoard_reuse_or_append(hoard_resources.vclip_slot, Num_vclips));
 	if (!nvc)
 		throw std::runtime_error("too many vclips");
-	++ Num_vclips;
 	const auto orb_vclip{*nvc};
 	auto &vcorb = Vclip[orb_vclip];
 	vcorb.play_time = F1_0/2;
@@ -5188,17 +5229,19 @@ void init_hoard_data(d_vclip_array &Vclip)
 	Powerup_info[powerup_type_t::POW_HOARD_ORB].light = Powerup_info[powerup_type_t::POW_SHIELD_BOOST].light;
 
 	//Create orb goal wall effect
-	const auto opt_goal_eclip{Effects.valid_index(Num_effects++)};
-	assert(opt_goal_eclip);
+	const auto opt_goal_eclip{Effects.valid_index(hoard_reuse_or_append(hoard_resources.effect_slot, Num_effects))};
+	if (!opt_goal_eclip)
+		throw std::runtime_error("too many effects");
 	Effects[*opt_goal_eclip] = Effects[(effect_index{94})];        //copy from blue goal
-	Effects[*opt_goal_eclip].changing_wall_texture = static_cast<texture_index>(NumTextures);
+	const auto goal_texture{hoard_reuse_or_append(hoard_resources.texture_slot, NumTextures)};
+	if (goal_texture >= MAX_TEXTURES)
+		throw std::runtime_error("too many textures");
+	Effects[*opt_goal_eclip].changing_wall_texture = static_cast<texture_index>(goal_texture);
 	Effects[*opt_goal_eclip].vc.num_frames=n_goal_frames;
 
-	TmapInfo[NumTextures] = find_required_goal_texture(LevelUniqueTmapInfoState, tmapinfo_flag::goal_blue);
-	TmapInfo[NumTextures].eclip_num = *opt_goal_eclip;
-	TmapInfo[NumTextures].flags = static_cast<tmapinfo_flags>(tmapinfo_flag::goal_hoard);
-	NumTextures++;
-	Assert(NumTextures < MAX_TEXTURES);
+	TmapInfo[goal_texture] = find_required_goal_texture(LevelUniqueTmapInfoState, tmapinfo_flag::goal_blue);
+	TmapInfo[goal_texture].eclip_num = *opt_goal_eclip;
+	TmapInfo[goal_texture].flags = static_cast<tmapinfo_flags>(tmapinfo_flag::goal_hoard);
 	range_for (auto &i, partial_range(Effects[*opt_goal_eclip].vc.frames, n_goal_frames))
 	{
 		const bitmap_index bi{bitmap_num};
