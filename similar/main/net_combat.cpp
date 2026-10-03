@@ -588,6 +588,8 @@ void host_kill(const playernum_t victim, const nv::kill_attribution killer, cons
 	m.team_vector = static_cast<uint8_t>(Netgame.team_vector);
 	m.bounty_target = static_cast<uint8_t>(Bounty_target);
 	multi_player_killed(victim, static_cast<uint8_t>(killer.kind), killer.pid);
+	/* Hoard: the extra orb the death drops (net_modes.cpp). */
+	net_modes_host_player_killed(victim, killer.kind == nv::attacker_kind::player, killer.pid);
 	fill_counts(m);
 	send_msg(session_msg::player_killed, m);
 	con_printf(CON_VERBOSE, "net: P#%u killed (by kind %u, P#%u, weapon %u)", victim, static_cast<unsigned>(killer.kind), killer.pid, weapon_id);

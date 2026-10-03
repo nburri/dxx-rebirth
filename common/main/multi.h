@@ -187,8 +187,9 @@ static inline player_ship_color get_team_color(const team_number tnum)
  * 108: ADDRESS_SEEN, the client tells the host the address it reaches the
  * host at (the host's public address behind a NAT router).
  * 109: CAPTURE, the host decides captures in capture the flag.
- * 111: capture the flag (Classic): its rules in GAME_SETTINGS, CTF_NOTICE
- * (110 is ORB_BONUS, hoard).
+ * 110: ORB_BONUS, the host decides scored orbs and a death's extra orb in
+ * hoard.
+ * 111: capture the flag (Classic): its rules in GAME_SETTINGS, CTF_NOTICE.
  */
 constexpr std::uint16_t MULTI_PROTO_VERSION{111};
 // PROTOCOL VARIABLES AND DEFINES - END
@@ -805,6 +806,10 @@ void multi_send_capture_bonus (playernum_t pnum);
  * counts the team's score.
  */
 void multi_apply_capture(playernum_t pnum, int team_score, int kills, int kill_goal_count, bool team_goal);
+/* Orbs scored (the host's ORB_BONUS or a v1 MULTI_ORB_BONUS): the scores
+ * after it, and whether the kill goal counts the team's score.
+ */
+void multi_apply_orb_bonus(playernum_t pnum, unsigned orbs, int team_score, int kills, int kill_goal_count, bool team_goal);
 int multi_all_players_alive(const fvcobjptr &, std::ranges::subrange<const player *>);
 void multi_send_seismic(fix);
 void multi_send_drop_blobs(playernum_t);
@@ -812,6 +817,8 @@ void multi_send_sound_function (char,char, playernum_t pnum = Player_num);
 void DropFlag();
 void multi_send_finish_game ();
 void init_hoard_data(d_vclip_array &Vclip);
+/* Frees what init_hoard_data loaded; call before the game data is freed. */
+void close_hoard_data();
 void multi_apply_goal_textures();
 void multi_send_escort_goal(const d_unique_buddy_state &);
 
@@ -1221,18 +1228,37 @@ bool net_objects_host_owns_weapon(playernum_t pnum, uint8_t weapon, uint8_t leve
  * player brings back.
  */
 void net_objects_host_take_team_flag(playernum_t pnum);
+/* Host: player `pnum`'s orbs scored (hoard): it carries none any more. */
+void net_objects_host_take_orbs(playernum_t pnum);
 
 /* Game modes the host decides (similar/main/net_modes.cpp,
  * Documentation/network-protocol-v2.md section 6.8 and "Stage 6a: game
- * modes"): captures in capture the flag.  Nothing here acts outside a
+ * modes"): captures in capture the flag, orbs scored and the extra orb
+ * of a death in hoard.  Nothing here acts outside a
  * network game.
  */
 /* Level start, every machine (after net_objects_level_start). */
 void net_modes_level_start();
 /* Every frame: the host tests the goals and counts the flags. */
 void net_modes_frame();
-/* CAPTURE from the host. */
+/* CAPTURE and ORB_BONUS from the host. */
 void net_modes_receive(playernum_t from, uint8_t type, std::span<const uint8_t> payload);
+/* Host: it decided player `victim`'s death; `killer` is the player who
+ * killed it, if a player did (the extra orb of a death in hoard).
+ */
+void net_modes_host_player_killed(playernum_t victim, bool by_player, uint8_t killer);
+/* Host: the orbs player `pnum` drops with its death, `orbs` carried (one
+ * more if an opponent killed it, once per death).
+ */
+uint8_t net_modes_host_death_orbs(playernum_t pnum, uint8_t orbs);
+/* Host: `orbs` orbs of a death could not be dropped (no room in the
+ * level).
+ */
+void net_modes_host_orbs_lost(unsigned orbs);
+/* Player `pnum` reappeared or a new player took its slot: no death of it
+ * waits for its drop any more.
+ */
+void net_modes_forget_death(playernum_t pnum);
 /* The bot arena's summary: the captures and the flag counts. */
 void net_modes_arena_summary();
 /* Capture the flag (Classic), every machine, while the level's objects

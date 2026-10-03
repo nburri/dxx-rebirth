@@ -303,6 +303,10 @@ std::optional<network_game_type> arena_mode(const std::string_view name)
 		return network_game_type::team_anarchy;
 	if (name == "ctf" || name == "ctfclassic")
 		return network_game_type::capture_flag;
+	if (name == "hoard")
+		return network_game_type::hoard;
+	if (name == "teamhoard")
+		return network_game_type::team_hoard;
 	return std::nullopt;
 }
 
@@ -387,7 +391,7 @@ bool bot_arena_start()
 	const auto mode{arena_mode(CGameArg.DbgBotArenaMode)};
 	if (!mode)
 	{
-		con_printf(CON_URGENT, "botarena: unknown mode \"%s\" (anarchy, team, ctf, ctfclassic)", CGameArg.DbgBotArenaMode.c_str());
+		con_printf(CON_URGENT, "botarena: unknown mode \"%s\" (anarchy, team, ctf, ctfclassic, hoard, teamhoard)", CGameArg.DbgBotArenaMode.c_str());
 		return false;
 	}
 	const unsigned bots{CGameArg.DbgBotArenaBots};

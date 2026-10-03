@@ -124,6 +124,7 @@ void gamedata_close()
 {
 #if DXX_BUILD_DESCENT == 2
 	bm_free_extra_objbitmaps();
+	close_hoard_data();
 #endif
 	free_endlevel_data();
 	piggy_close();

@@ -865,7 +865,7 @@ it is the main tuning tool:
 d2x-rebirth -hogdir DATA -botarena <mission> <level> <bots> <seconds>
             [-fixedfps N] [-botarena-bots "skill:style[:name],..."]
             [-botarena-seed N] [-botarena-reactor S]
-            [-botarena-mode anarchy|team|ctf|ctfclassic]
+            [-botarena-mode anarchy|team|ctf|ctfclassic|hoard|teamhoard]
             [-botarena-ctf-rules N] [-pilot NAME]
             [-recordmoves -recordmoves-bots]
 tools/botarena-run.sh [-n bots] [-b list] [-s seconds] [-f fps] [-o dir]
@@ -877,11 +877,12 @@ tools/botarena-run.sh [-n bots] [-b list] [-s seconds] [-f fps] [-o dir]
   set up like the host setup menu (`net_udp_setup_defaults`: the defaults,
   then the pilot's `.ngp` with its game options), then anarchy (or the mode
   of `-botarena-mode`: `team`, `ctf`, `ctfclassic` with the flag rules of
-  `-botarena-ctf-rules`; in a team mode the bots by turns
+  `-botarena-ctf-rules`, `hoard`, `teamhoard`; in a team mode the bots by turns
   blue and red) on the given level with `<bots> + 1` players, no kill goal,
   no time limit, no autosave. In capture the flag the bots take flags only
-  by flying through them so far (no flag goals); the summary adds the
-  captures and the host's flag count (network-protocol-v2.md, "Stage 6a").
+  by flying through them so far (no flag goals), and orbs alike; the
+  summary adds the captures or orb scores and the host's flag or orb count
+  (network-protocol-v2.md, "Stage 6a").
   The bots are those of `-botarena-bots` (skill and style by the names of
   `/bot`, an optional name; a bot the list leaves out plays the default),
   else the pilot's bot setup cut or filled to `<bots>`. Without `-pilot` a

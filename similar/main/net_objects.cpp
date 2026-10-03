@@ -250,13 +250,18 @@ nv::inventory_rules rules_for(const playernum_t pnum)
 	r.has_team_flag_bit = underlying_value(player_flag::has_team_flag);
 	r.max_orbs = player_info::max_hoard_orbs;
 	r.capture_mode = game_mode_capture_flag(Game_mode);
-	if (r.capture_mode)
-	{
-		r.host_owned_flags = r.has_team_flag_bit;
-		/* Classic: a touch returns the own team's flag (net_modes.cpp). */
-		r.own_flag_returns = nv::ctf_rules::from_bits(Netgame.CtfClassicFlags).touch_returns;
-	}
 	r.hoard_mode = game_mode_hoard(Game_mode);
+	/* The flag carried (CTF), the orbs and the flag that shows them
+	 * (hoard): the host's alone (game modes, net_modes.cpp).
+	 */
+	if (r.capture_mode || r.hoard_mode)
+		r.host_owned_flags = r.has_team_flag_bit;
+	r.host_owned_orbs = r.hoard_mode;
+	/* Capture the flag (Classic): a touch returns the own team's flag
+	 * (net_modes.cpp).
+	 */
+	if (r.capture_mode)
+		r.own_flag_returns = nv::ctf_rules::from_bits(Netgame.CtfClassicFlags).touch_returns;
 	r.max_omega_charge = MAX_OMEGA_CHARGE;
 #else
 	r.max_super_laser_level = r.max_laser_level;
@@ -1198,7 +1203,14 @@ void host_receive_drop(const playernum_t from, const std::span<const uint8_t> pa
 	Net_create_loc = 0;
 	const auto &&objp{spit_powerup(LevelUniqueObjectState, LevelSharedSegmentState, LevelUniqueSegmentState, Vclip, ship, id, static_cast<unsigned>(d_rand()))};
 	if (objp == object_none)
+	{
+		/* Taken from the player, and no room in the level: an orb is
+		 * gone, and the orb count knows it.
+		 */
+		if (desc.kind == nv::pickup_kind::orb)
+			net_modes_host_orbs_lost(1);
 		return;
+	}
 	if (desc.kind == nv::pickup_kind::vulcan_cannon || desc.kind == nv::pickup_kind::omega)
 		objp->ctype.powerup_info.count = static_cast<int>(m->count);
 	net_objects_announce(objp, static_cast<uint8_t>(from), false);
@@ -1287,13 +1299,16 @@ void net_objects_level_start()
 		}
 		auto &ship{*Objects.vmptr(objnum)};
 		auto inv{inventory_of(ship)};
-		/* Nobody carries what only the host gives (a flag): the ship
-		 * of another player may still hold the old level's, and no
+		/* Nobody carries what only the host gives (a flag, orbs): the
+		 * ship of another player may still hold the old level's, and no
 		 * report of the player would clear it.
 		 */
-		if (const auto owned{rules_for(static_cast<playernum_t>(i)).host_owned_flags}; owned && (inv.powerup_flags & owned))
+		const auto rules{rules_for(static_cast<playernum_t>(i))};
+		if ((rules.host_owned_flags && (inv.powerup_flags & rules.host_owned_flags)) || (rules.host_owned_orbs && inv.orbs))
 		{
-			inv.powerup_flags &= ~owned;
+			inv.powerup_flags &= ~rules.host_owned_flags;
+			if (rules.host_owned_orbs)
+				inv.orbs = 0;
 			if (i != Player_num)
 				write_inventory(ship, inv, false);
 		}
@@ -1345,6 +1360,7 @@ void net_objects_host_join(const playernum_t pnum)
 	 */
 	A.mirrors[pnum].reset({});
 	A.dropped[pnum] = false;
+	net_modes_forget_death(pnum);
 	/* A bot added to the slot during the game (bots section 6.4): its
 	 * first inventory is reported whatever a bot before it sent last.
 	 */
@@ -1534,6 +1550,20 @@ void net_objects_host_drop_player_eggs(const playernum_t pnum)
 		net_interp_snap_to_newest(pnum);
 		write_inventory(*objp, A.mirrors[pnum].current(), true);
 	}
+	unsigned orbs_to_drop{0};
+#if DXX_BUILD_DESCENT == 2
+	/* Hoard: one orb more for a player killed by an opponent (the host's
+	 * verdict on the kill, net_modes.cpp), dropped with the rest.
+	 */
+	if (game_mode_hoard(Game_mode))
+	{
+		auto &pi{objp->ctype.player_info};
+		pi.hoard.orbs = net_modes_host_death_orbs(pnum, pi.hoard.orbs);
+		if (pi.hoard.orbs)
+			pi.powerup_flags |= player_flag::has_team_flag;
+		orbs_to_drop = std::min(pi.hoard.orbs, player_info::max_hoard_orbs);
+	}
+#endif
 	/* Capture the flag (Classic): the carrier's flag goes home instead of
 	 * dropping, if the rules say so.
 	 */
@@ -1544,13 +1574,20 @@ void net_objects_host_drop_player_eggs(const playernum_t pnum)
 	/* The log: what was dropped, with the net ids. */
 	char list[MAX_NET_CREATE_OBJECTS * 20]{};
 	std::size_t used{};
+	unsigned orbs_dropped{0};
 	for (unsigned i = 0; i < created; ++i)
 	{
 		const auto &&dropped{Objects.vmptridx(Net_create_objnums[i])};
 		net_objects_announce(dropped, NO_OWNER, false);
-		if (dropped->type != object_type::OBJ_POWERUP || used >= sizeof(list))
+		if (dropped->type != object_type::OBJ_POWERUP)
 			continue;
 		const auto powerup{get_powerup_id(dropped)};
+#if DXX_BUILD_DESCENT == 2
+		if (powerup == powerup_type_t::POW_HOARD_ORB)
+			++orbs_dropped;
+#endif
+		if (used >= sizeof(list))
+			continue;
 		const int n{std::snprintf(list + used, sizeof(list) - used, " %s@%04x", powerup_short_name(powerup), netid_of(*dropped, dropped.get_unchecked_index()))};
 		if (n > 0)
 			used = std::min(sizeof(list), used + static_cast<std::size_t>(n));
@@ -1568,6 +1605,11 @@ void net_objects_host_drop_player_eggs(const playernum_t pnum)
 	con_printf(CON_NORMAL, "net: P#%u (%s) dropped %u powerups:%s", pnum, player_role(pnum), created, list);
 	if (flag_home)
 		net_modes_host_flag_home(*flag_home, MAX_PLAYERS, true);
+	/* Orbs that found no room in the level (the object table full) are
+	 * gone: the orb count knows it.
+	 */
+	if (orbs_dropped < orbs_to_drop)
+		net_modes_host_orbs_lost(orbs_to_drop - orbs_dropped);
 }
 
 void net_objects_player_reappeared(const playernum_t pnum)
@@ -1575,6 +1617,8 @@ void net_objects_player_reappeared(const playernum_t pnum)
 	if (pnum >= MAX_PLAYERS)
 		return;
 	A.dropped[pnum] = false;
+	/* A death's extra orb belongs to the death that was dropped. */
+	net_modes_forget_death(pnum);
 	if (pnum == Player_num)
 	{
 		/* Report the new ship's inventory even if it equals the old. */
@@ -1669,6 +1713,26 @@ void net_objects_host_take_team_flag(const playernum_t pnum)
 		mirror.take_flags(underlying_value(player_flag::has_team_flag));
 #else
 	(void)ship;
+#endif
+}
+
+void net_objects_host_take_orbs(const playernum_t pnum)
+{
+	if (!net_objects_active() || !multi_i_am_master() || pnum >= MAX_PLAYERS || pnum >= N_players)
+		return;
+#if DXX_BUILD_DESCENT == 2
+	auto &Objects{LevelUniqueObjectState.Objects};
+	auto &ship{*Objects.vmptr(vcplayerptr(pnum)->objnum)};
+	auto &pi{ship.ctype.player_info};
+	pi.hoard.orbs = 0;
+	pi.powerup_flags &= ~player_flag::has_team_flag;
+	if (pnum == Player_num)
+		return;
+	auto &mirror{A.mirrors[pnum]};
+	if (bot_is_local(pnum))
+		mirror.assign(inventory_of(ship));
+	else
+		mirror.take_orbs(underlying_value(player_flag::has_team_flag));
 #endif
 }
 

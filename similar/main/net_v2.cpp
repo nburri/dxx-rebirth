@@ -4729,7 +4729,7 @@ void handle_reliable(peer &p, const session_msg type, const std::span<const uint
 	/* Game modes (net_modes.cpp): host to all, gated like the combat
 	 * messages.
 	 */
-	if (type == session_msg::capture || type == session_msg::ctf_notice)
+	if (type == session_msg::capture || type == session_msg::orb_bonus || type == session_msg::ctf_notice)
 	{
 		if (!multi_i_am_master() && peer_sends_game_data(p) && legacy_processing_allowed())
 			net_modes_receive(slot, static_cast<uint8_t>(type), payload);

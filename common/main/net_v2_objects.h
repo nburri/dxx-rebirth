@@ -280,6 +280,10 @@ struct inventory_rules
 	 * would lose it).
 	 */
 	std::uint32_t host_owned_flags{};
+	/* The orbs carried are the host's as well (hoard): grants, drops,
+	 * deaths and scores change them, reports do not.
+	 */
+	bool host_owned_orbs{};
 	/* Capture the flag (Classic): a player's touch returns its own team's
 	 * flag (the host decides whether the flag is away from home, and
 	 * puts it there; the player gains nothing).
@@ -689,13 +693,28 @@ public:
 		base_.powerup_flags &= ~flags;
 		current_.powerup_flags &= ~flags;
 	}
+	/* The host took the player's orbs (they scored) and the flag that
+	 * shows them.
+	 */
+	void take_orbs(const std::uint32_t flags)
+	{
+		take_flags(flags);
+		base_.orbs = current_.orbs = 0;
+	}
+
 	/* A report of the player's inventory with `applied` grants. */
 	void on_report(const inventory_rules &r, const inventory &inv, const std::uint16_t applied)
 	{
 		const std::uint32_t owned{current_.powerup_flags & r.host_owned_flags};
+		const std::uint8_t owned_orbs{current_.orbs};
 		has_report_ = true;
 		base_ = inv;
 		base_.powerup_flags = (base_.powerup_flags & ~r.host_owned_flags) | owned;
+		if (r.host_owned_orbs)
+			/* With the grants in flight: none of them is counted
+			 * "in flight" by the accounting log.
+			 */
+			base_.orbs = owned_orbs;
 		std::size_t kept{0};
 		for (std::size_t i = 0; i < pending_count_; ++i)
 			if (seq_diff(pending_[i].seq, applied) > 0)
@@ -710,6 +729,8 @@ public:
 				apply_pickup(current_, r, pending_[i].desc, pending_[i].outcome);
 		}
 		current_.powerup_flags = (current_.powerup_flags & ~r.host_owned_flags) | owned;
+		if (r.host_owned_orbs)
+			current_.orbs = owned_orbs;
 	}
 private:
 	inventory base_{};

@@ -1408,7 +1408,7 @@ from projectiles that were fired at stale positions).
 | Anarchy, team anarchy | Kills and team vector in `PLAYER_KILLED`; `GAME_MODE_STATE{team_vector, Bounty_target, KillGoalCount[8]}` (replaces `MULTI_GMODE_UPDATE`, `MULTI_KILLGOALS`, `MULTI_DO_BOUNTY`) sent on change and every 5 s; kill goal / time limit end decided by the host → `LEVEL_END`. |
 | Bounty | `Bounty_target` chosen by the host on every kill/disconnect, in `PLAYER_KILLED` and `GAME_MODE_STATE`. |
 | CTF (D2) | Flags are powerups: pickup via §6.2 (host checks team). Capture: the host tests the carrier's rewound/current position against the goal segment (`fuelcen_check_for_goal` on the host, using the carrier's latest accepted state) → `CAPTURE{pid}` (score +5) and flag reset `OBJ_CREATE`. Drop on death: host `OBJ_CREATE` with spit velocity. `DROP_FLAG` request from a carrier → host creates. As implemented: §8, "Stage 6a: game modes". |
-| Hoard / team hoard (D2) | Orbs are powerups (`INVENTORY.hoard_orbs`). Scoring: host detects the carrier in the goal (`fuelcen_check_for_hoard_goal`) → `ORB_BONUS{pid, orbs}`. Drop on death handled as flags. |
+| Hoard / team hoard (D2) | Orbs are powerups (`INVENTORY.hoard_orbs`). Scoring: host detects the carrier in the goal (`fuelcen_check_for_hoard_goal`) → `ORB_BONUS{pid, orbs}`. Drop on death handled as flags. As implemented: §8, "Stage 6a: game modes". |
 | Cooperative | Robots host-simulated (§5.2); keys granted to all (host applies the coop rule); `SCORE_UPDATE{pid, score}` from the host; `SAVE_GAME`/`RESTORE_GAME` as host messages (unchanged payloads). |
 | Robot anarchy | Same robot handling; robot kills credited by the host. |
 
@@ -1524,8 +1524,8 @@ Message type numbering: session 0x01–0x1F (§4), `INVENTORY` 0x20,
 Stage 3 adds `OBJ_SETTLE` 0x47 and does not use `OBJ_AMMO` 0x23 or
 `DROP_FLAG_REQUEST` 0x3C (§8, "Stage 3 as implemented"). Protocol 105 adds
 `SPAWN_REQUEST` 0x48 and `SPAWN_SITE` 0x49 (§8, "Host-assigned spawns").
-Protocol 109 uses `CAPTURE` 0x39, protocol 111 `CTF_NOTICE` 0x4A (§8,
-"Stage 6a: game modes"; 110 is `ORB_BONUS` 0x3A, hoard).
+Protocol 109 uses `CAPTURE` 0x39, protocol 110 `ORB_BONUS` 0x3A, protocol
+111 `CTF_NOTICE` 0x4A (§8, "Stage 6a: game modes").
 The table lives in `net_v2.h` as a `for_each_net_v2_message(VALUE)` macro
 with `(NAME, id, min_len, max_len, allowed_sender)` so the length and
 direction checks of §3.7 are table-driven like v1's `command_length`.
@@ -2811,6 +2811,67 @@ triggers, robots). Rules and wire layouts in `common/main/net_v2_modes.h`
   never broken in 10.8 million frames.
 - **Version.** `MULTI_PROTO_VERSION` and `NET_V2_PROTO_VERSION` are 109.
 
+**Hoard and team hoard (protocol 110).**
+
+- **Why.** As in CTF, a client announced its own scored orbs
+  (`MULTI_ORB_BONUS`) and bots never scored. The extra orb a death drops
+  (an opponent's kill: the dead player's orb count +1, up to 12) was
+  decided by the dying player's machine from its own idea of the kill, for
+  humans only; the host then found one orb more in the dead player's next
+  report than its copy expected and logged it as a "suspicious
+  inventory".
+- **Scores.** The host tests every ship every frame as for CTF: a living
+  ship that carries orbs in a goal segment (either team's: every goal takes
+  orbs, `fuelcen_check_for_hoard_goal`) scores them (`orb_bonus_due`). The
+  host takes the orbs from the ship and its copy
+  (`net_objects_host_take_orbs`), counts the scores (`orb_score`: n orbs
+  are n(n+1)/2 points on the team's score, the player's kills and kill goal
+  count, each kept below 1000 as before) and sends `ORB_BONUS`. The kill
+  goal counts the team's score in team hoard, the player's in hoard. A
+  client no longer tests itself; a `MULTI_ORB_BONUS` in a network game is
+  logged and ignored.
+- **`ORB_BONUS` (0x3A, reliable, host → all, 8 bytes):** `pid` u8, `orbs` u8
+  (1–12), team score i16, the player's kills i16, its kill goal count i16
+  (after the score). Every machine shows the messages, plays the sounds,
+  keeps the record ("… has the record with … points") and takes the scores
+  (`multi_apply_orb_bonus`).
+- **The extra orb of a death** is decided on the host, for every player
+  (the host, clients, bots), from the host's own verdict on the kill
+  (`host_kill` → `net_modes_host_player_killed`): killed by another player,
+  in team hoard by one of the other team (`death_orb_due`). It is added
+  when the host drops the dead player's items (`net_objects_host_drop_player_eggs`,
+  once per death) and dropped with them. A client no longer adds it to
+  its own count.
+- **Host-owned orbs.** The orbs carried and the flag bit that shows them
+  are the host's (`inventory_rules::host_owned_orbs`): grants, drops,
+  deaths and scores change them, a report never does (a late report would
+  bring scored orbs back; a report with the client's own count is not
+  "suspicious" any more). At level start no player carries any.
+- **Orb count.** The host counts every frame: the orbs in the level and
+  carried equal those of the level at start (none, as a rule) plus the
+  deaths' extra orbs less those scored (`orb_census`), less those a death
+  could not drop for want of room in the object table (logged: `hoard: N
+  orbs of a death found no room in the level`). A broken count is logged
+  (`hoard: orb count BROKEN …`); the arena prints it.
+- **Exit crash.** Every hoard and team hoard game aborted at exit in LTO
+  (release) builds: `hoard_resources`' destructor ran during static
+  destruction and reset the hoard sounds in `GameSounds`, which LTO had
+  already destroyed (double free). The hoard data is now freed from
+  `gamedata_close()` and the object has no destructor. `init_hoard_data`
+  also reuses its vclip, effect and texture slots instead of appending new
+  ones on every hoard level (the tables overflowed after some 20 hoard
+  levels in one session).
+- **Tests.** `test-net-v2-modes`: the orb points, scores and their bound,
+  the death rule (suicide, robots, teammates), the orb count, `ORB_BONUS`,
+  host-owned orbs under late and wrong reports, scores and drops, and a
+  hoard model (200 seeds × 4000 steps: pickups, deaths with the extra orb,
+  drops, scores, wrong reports) that checks the orb count after every step.
+  `-botarena-mode hoard` / `teamhoard`, 6 bots, 30 min, 6 levels × 3 seeds
+  each: 480 scores of 1864 orbs by bots, 6467 extra orbs of deaths, the
+  orb count never broken in 13 million frames (one orb lost for want of
+  room, accounted), no suspicious inventory, no exit crash (LTO build).
+- **Version.** `MULTI_PROTO_VERSION` and `NET_V2_PROTO_VERSION` are 110.
+
 **Capture the flag (Classic) (protocol 111).**
 
 - **What.** A variant of CTF the host chooses in the game setup ("Capture
@@ -2877,8 +2938,7 @@ triggers, robots). Rules and wire layouts in `common/main/net_v2_modes.h`
   6, 9, 2 seeds × 30 min each (96 games): the flags start at home in every
   game, 231 captures, 74 flags returned by touch, 43 idle returns, 91
   captures refused for an own flag away, the flag count never broken.
-- **Version.** `MULTI_PROTO_VERSION` and `NET_V2_PROTO_VERSION` are 111
-  (110 is hoard's `ORB_BONUS`).
+- **Version.** `MULTI_PROTO_VERSION` and `NET_V2_PROTO_VERSION` are 111.
 
 ### Stage 5 — Join in progress, level flow, level end
 
