@@ -194,7 +194,7 @@ constexpr char world_vertex_source[] =
 "void main()\n"
 "{\n"
 "	v_uv = gl_MultiTexCoord0.xy;\n"
-"	v_col = gl_Color;\n"
+"	v_col = clamp(gl_Color, 0.0, 1.0);\n"
 "	gl_Position = ftransform();\n"
 "}\n";
 
@@ -297,6 +297,7 @@ constexpr char post_composite_fragment_source[] =
 "uniform vec2 u_off;\n"
 "uniform float u_taps4;\n"
 "uniform vec2 u_bloom_scale;\n"
+"uniform vec2 u_bloom_max;\n"
 "uniform float u_bloom_strength;\n"
 "uniform float u_gamma_inv;\n"
 "uniform float u_contrast;\n"
@@ -309,7 +310,7 @@ constexpr char post_composite_fragment_source[] =
 "	else\n"
 "		c = texture2D(u_scene, v_uv).rgb;\n"
 "	if (u_bloom_strength > 0.0)\n"
-"		c += texture2D(u_bloom, v_uv * u_bloom_scale).rgb * u_bloom_strength;\n"
+"		c += texture2D(u_bloom, min(v_uv * u_bloom_scale, u_bloom_max)).rgb * u_bloom_strength;\n"
 "	c = clamp(c, 0.0, 1.0);\n"
 "	if (u_gamma_inv != 1.0)\n"
 "		c = pow(c, vec3(u_gamma_inv));\n"
@@ -488,7 +489,9 @@ struct post_targets
 	/* Bloom: [0] half size, [1] and [2] quarter size (ping-pong). */
 	std::array<GLuint, 3> bloom_fbo{}, bloom_tex{};
 	std::array<unsigned, 3> bloom_w{}, bloom_h{};
+	/* The size and settings that failed; others are tried again. */
 	bool broken{false};
+	std::array<unsigned, 4> broken_key{};
 };
 
 post_targets targets;
@@ -526,8 +529,10 @@ void delete_targets()
 		if (x)
 			glDeleteTextures(1, &x);
 	const bool broken{t.broken};
+	const auto broken_key{t.broken_key};
 	t = {};
 	t.broken = broken;
+	t.broken_key = broken_key;
 }
 
 GLuint make_color_texture(const unsigned w, const unsigned h)
@@ -570,11 +575,20 @@ unsigned wanted_scale_percent()
 bool ensure_targets()
 {
 	auto &t{targets};
-	if (t.broken)
-		return false;
 	const unsigned sw{grd_curscreen->get_screen_width()}, sh{grd_curscreen->get_screen_height()};
-	const unsigned scale{wanted_scale_percent()};
-	const unsigned samples{wanted_samples()};
+	unsigned scale{wanted_scale_percent()};
+	unsigned samples{wanted_samples()};
+	/* Within the driver's limits, and at most 1 GiB of multisampled
+	 * color and depth (4K at 200 % with 8x would need 2 GiB).
+	 */
+	const int max_size{ogl_effects_caps.max_texture_size};
+	while (scale > 100 && max_size > 0 && (sw * scale / 100 > static_cast<unsigned>(max_size) || sh * scale / 100 > static_cast<unsigned>(max_size)))
+		scale -= 50;
+	while (samples > 2 && static_cast<double>(sw) * sh * scale * scale / 10000 * samples * 8 > 1024.0 * 1024 * 1024)
+		samples /= 2;
+	const std::array<unsigned, 4> key{{sw, sh, scale, samples}};
+	if (t.broken && t.broken_key == key)
+		return false;
 	if (t.scene_fbo && t.screen_w == sw && t.screen_h == sh && t.scale_percent == scale && t.samples == samples)
 		return true;
 	delete_targets();
@@ -632,10 +646,12 @@ bool ensure_targets()
 	glBindTexture(GL_TEXTURE_2D, 0);
 	if (!ok)
 	{
-		t.broken = true;
 		delete_targets();
+		t.broken = true;
+		t.broken_key = key;
 		return false;
 	}
+	t.broken = false;
 	con_printf(CON_VERBOSE, "DXX-Rebirth: OpenGL: post-process targets %ux%u, %u samples", t.w, t.h, samples);
 	return true;
 }
@@ -772,6 +788,11 @@ void ogl_effects_init()
 			load_function(gl.Uniform4fv, "glUniform4fv") &&
 			load_function(gl.ActiveTexture, "glActiveTexture", "ARB");
 		c.texture_lod = c.shaders && has_extension(extensions, "GL_ARB_shader_texture_lod");
+	}
+	{
+		GLint max_texture_size{0};
+		glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_texture_size);
+		c.max_texture_size = max_texture_size;
 	}
 	/* Framebuffer objects: core in 3.0 and ARB_framebuffer_object (same
 	 * names), else the EXT extensions (names with "EXT").
@@ -964,6 +985,7 @@ void ogl_post_end()
 			/* scene uv -> quarter target uv */
 			const unsigned qw{std::max(1u, view.w / 4)}, qh{std::max(1u, view.h / 4)};
 			set_uniform2(p, "u_bloom_scale", (static_cast<float>(qw) / t.bloom_w[1]) / scene_u1, (static_cast<float>(qh) / t.bloom_h[1]) / scene_v1);
+			set_uniform2(p, "u_bloom_max", (qw - 0.5f) / t.bloom_w[1], (qh - 0.5f) / t.bloom_h[1]);
 			set_uniform1(p, "u_bloom_strength", 0.25f + 0.15f * std::min<unsigned>(CGameCfg.Bloom, 8));
 		}
 		else
@@ -987,6 +1009,8 @@ void ogl_post_end()
 		gl.BlitFramebuffer(0, 0, view.vw, view.vh, view.x, screen_h - view.y - view.h, view.x + view.w, screen_h - view.y, GL_COLOR_BUFFER_BIT, GL_LINEAR);
 		gl.BindFramebuffer(GL_FRAMEBUFFER, 0);
 	}
+	/* Whichever program the passes left bound. */
+	gl.UseProgram(0);
 	world_program_current = 0;
 	glPopAttrib();
 	/* The rest of the frame (HUD, cockpit) draws on the whole screen. */
@@ -994,6 +1018,7 @@ void ogl_post_end()
 	glViewport(0, 0, screen_w, screen_h);
 	last_width = screen_w;
 	last_height = screen_h;
+	glLineWidth(linedotscale);
 }
 
 }

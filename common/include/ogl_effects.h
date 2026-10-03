@@ -43,6 +43,7 @@ struct ogl_effects_support
 	bool fbo;		/* framebuffer objects with blit */
 	bool fbo_multisample;
 	int max_samples;
+	int max_texture_size;
 };
 
 #if DXX_USE_OGLES

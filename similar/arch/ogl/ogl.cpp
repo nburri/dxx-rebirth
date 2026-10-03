@@ -1707,6 +1707,11 @@ static void tex_set_size(ogl_texture &tex)
 //stores OpenGL textured id in *texid and u/v values required to get only the real data in *u/*v
 static int ogl_loadtexture(const palette_array_t &pal, const uint8_t *data, const int dxo, int dyo, ogl_texture &tex, const int bm_flags, const int data_format, opengl_texture_filter texfilt, const bool texanis, const bool edgepad)
 {
+	if (texfilt == opengl_texture_filter::sharp)
+		/* Filtered like "Smooth"; the world shader keeps the texels
+		 * sharp.  Without shader support, like "Blocky Filtered".
+		 */
+		texfilt = ogl_effects_caps.texture_lod ? opengl_texture_filter::trilinear : opengl_texture_filter::upscale;
 	++frame_probe::counters.texture_uploads;
 	frame_probe::event_scope probe{frame_probe::phase::tex, frame_probe::event_kind::texture_upload, tex.w, 0};
 	tex.tw = {std::bit_ceil(tex.w)};
@@ -1889,11 +1894,6 @@ static int ogl_loadtexture(const palette_array_t &pal, const uint8_t *data, cons
 	// should match structue in menu.cpp
 	// organized in switches for better readability
 	bool buildmipmap = false;
-	if (texfilt == opengl_texture_filter::sharp)
-		/* Filtered like "Smooth"; the world shader keeps the texels
-		 * sharp.  Without shader support, like "Blocky Filtered".
-		 */
-		texfilt = ogl_effects_caps.texture_lod ? opengl_texture_filter::trilinear : opengl_texture_filter::upscale;
 	GLint gl_mag_filter_int, gl_min_filter_int;
 	switch (texfilt)
 	{
