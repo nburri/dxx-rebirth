@@ -11,6 +11,11 @@
  * inventory with host-owned flags (net_v2_objects.h); and a model of a
  * host and its clients that plays pickups, deaths, drops and captures
  * with reports late and out of step, and checks after every step that
+ * each flag is in the level or carried exactly once.  Capture the flag
+ * (Classic): the options, flag touches, captures with the own flag home
+ * or away, the home choice, CTF_NOTICE, the own flag's return in the
+ * pickup rules, and a model of every option combination.
+ *
  * each flag is in the level or carried exactly once.  Hoard: the orb
  * scores, the extra orb of a death, the orb count, ORB_BONUS, host-owned
  * orbs, and a model of pickups, deaths, drops and scores that checks the
@@ -422,6 +427,230 @@ void test_model()
 	}
 }
 
+void test_classic_rules()
+{
+	/* The bits: without "classic" nothing applies. */
+	CHECK(!ctf_rules::from_bits(CTF_RULE_DROPPED_RETURNS | CTF_RULE_TOUCH_RETURNS | CTF_RULE_HOME_TO_SCORE).classic);
+	CHECK(!ctf_rules::from_bits(CTF_RULE_DROPPED_RETURNS | CTF_RULE_TOUCH_RETURNS | CTF_RULE_HOME_TO_SCORE).touch_returns);
+	for (unsigned bits = 0; bits < 16; ++bits)
+	{
+		const auto r{ctf_rules::from_bits(static_cast<std::uint8_t>(bits))};
+		const bool c{(bits & CTF_RULE_CLASSIC) != 0};
+		CHECK(r.classic == c);
+		CHECK(r.dropped_returns == (c && (bits & CTF_RULE_DROPPED_RETURNS)));
+		CHECK(r.touch_returns == (c && (bits & CTF_RULE_TOUCH_RETURNS)));
+		CHECK(r.home_to_score == (c && (bits & CTF_RULE_HOME_TO_SCORE)));
+		CHECK(dropped_flag_goes_home(r) == r.dropped_returns);
+		/* The idle return only where nothing else returns a flag and a
+		 * team needs its own flag home.
+		 */
+		CHECK(idle_flag_returns(r) == (r.home_to_score && !r.touch_returns));
+		CHECK(flag_respawns_home(r) == c);
+		/* Touching flags: the other team's is taken unless one is
+		 * carried; the own one goes home only with the rule and away
+		 * from home.
+		 */
+		for (const bool at_home : {false, true})
+			for (const bool carries : {false, true})
+			{
+				CHECK(evaluate_flag_touch(r, CTF_TEAM_BLUE, CTF_TEAM_RED, at_home, carries) == (carries ? flag_touch::none : flag_touch::take));
+				CHECK(evaluate_flag_touch(r, CTF_TEAM_RED, CTF_TEAM_BLUE, at_home, carries) == (carries ? flag_touch::none : flag_touch::take));
+				CHECK(evaluate_flag_touch(r, CTF_TEAM_BLUE, CTF_TEAM_BLUE, at_home, carries) == (r.touch_returns && !at_home ? flag_touch::return_home : flag_touch::none));
+			}
+		/* Captures: only a carrier in its own goal; with home_to_score
+		 * only while its own flag is at home.
+		 */
+		const capture_check in_goal{true, CTF_TEAM_RED, true, CTF_TEAM_RED};
+		CHECK(evaluate_capture(r, in_goal, true) == capture_verdict::score);
+		CHECK(evaluate_capture(r, in_goal, false) == (r.home_to_score ? capture_verdict::own_flag_away : capture_verdict::score));
+		CHECK(evaluate_capture(r, {true, CTF_TEAM_RED, true, CTF_TEAM_BLUE}, true) == capture_verdict::none);
+		CHECK(evaluate_capture(r, {true, CTF_TEAM_RED, false, CTF_TEAM_RED}, false) == capture_verdict::none);
+		CHECK(evaluate_capture(r, {false, CTF_TEAM_RED, true, CTF_TEAM_RED}, false) == capture_verdict::none);
+	}
+	CHECK(ctf_rules::from_bits(CTF_RULE_CLASSIC | CTF_RULES_DEFAULT).touch_returns);
+	CHECK(ctf_rules::from_bits(CTF_RULE_CLASSIC | CTF_RULES_DEFAULT).home_to_score);
+	CHECK(!ctf_rules::from_bits(CTF_RULE_CLASSIC | CTF_RULES_DEFAULT).dropped_returns);
+}
+
+void test_choose_home()
+{
+	CHECK(!choose_home({}));
+	const std::array<goal_segment, 1> one{{{17, 5}}};
+	CHECK(choose_home(one) == 17);
+	/* The largest; the lowest number of equal ones, in any order. */
+	const std::array<goal_segment, 4> some{{{40, 9}, {12, 30}, {8, 30}, {3, 29}}};
+	CHECK(choose_home(some) == 8);
+	const std::array<goal_segment, 4> reversed{{{3, 29}, {8, 30}, {12, 30}, {40, 9}}};
+	CHECK(choose_home(reversed) == 8);
+}
+
+void test_notice_wire()
+{
+	for (const auto kind : {ctf_notice_kind::returned, ctf_notice_kind::own_flag_away})
+		for (const std::uint8_t pid : {std::uint8_t{0}, std::uint8_t{7}, NET_V2_PLAYER_ID_NONE})
+		{
+			const ctf_notice_msg m{kind, CTF_TEAM_RED, pid};
+			std::array<std::uint8_t, ctf_notice_msg::SIZE> buf;
+			m.write(buf);
+			const auto r{ctf_notice_msg::read(buf)};
+			/* "Your flag must be home" is for a player. */
+			if (kind == ctf_notice_kind::own_flag_away && pid == NET_V2_PLAYER_ID_NONE)
+			{
+				CHECK(!r);
+				continue;
+			}
+			CHECK(r && r->kind == kind && r->team == CTF_TEAM_RED && r->pid == pid);
+		}
+	std::array<std::uint8_t, ctf_notice_msg::SIZE> bad{{2, 0, 0}};
+	CHECK(!ctf_notice_msg::read(bad));
+	bad = {{0, 2, 0}};
+	CHECK(!ctf_notice_msg::read(bad));
+	bad = {{0, 0, 8}};
+	CHECK(!ctf_notice_msg::read(bad));
+	CHECK(!ctf_notice_msg::read(std::span<const std::uint8_t>(bad).first(2)));
+}
+
+void test_own_flag_pickup()
+{
+	auto r{ctf_rules(CTF_TEAM_BLUE)};
+	/* Its own (blue) flag: not usable without the rule. */
+	CHECK(!evaluate_pickup({}, r, flag_desc(CTF_TEAM_BLUE), 0).usable);
+	r.own_flag_returns = true;
+	const auto o{evaluate_pickup({}, r, flag_desc(CTF_TEAM_BLUE), 0)};
+	CHECK(o.usable && o.consumed);
+	/* A return gives nothing. */
+	inventory inv;
+	apply_pickup(inv, r, flag_desc(CTF_TEAM_BLUE), o);
+	CHECK(!(inv.powerup_flags & FLAG_TEAM));
+	/* Even while carrying the other flag. */
+	inv.powerup_flags = FLAG_TEAM;
+	CHECK(evaluate_pickup(inv, r, flag_desc(CTF_TEAM_BLUE), 0).usable);
+	/* The other team's flag as before. */
+	CHECK(!evaluate_pickup(inv, r, flag_desc(CTF_TEAM_RED), 0).usable);
+	CHECK(evaluate_pickup({}, r, flag_desc(CTF_TEAM_RED), 0).usable);
+	CHECK(units_carried(inv, r, flag_desc(CTF_TEAM_BLUE)) == 0);
+}
+
+/* Capture the flag (Classic), every combination of the options: two
+ * teams, two players each; flags are at home, carried or dropped.  The
+ * model plays touches, deaths, captures and the time the flags lie, and
+ * checks after every step that each flag is in exactly one place, that
+ * a capture puts the flag home, that a capture happens only with the
+ * scoring team's flag at home when the rule says so, and that a dropped
+ * flag goes home at once when the rule says so.
+ */
+void test_classic_model()
+{
+	enum class place : std::uint8_t { home, carried, dropped };
+	for (unsigned bits = 0; bits < 8; ++bits)
+	{
+		const auto r{ctf_rules::from_bits(static_cast<std::uint8_t>(CTF_RULE_CLASSIC | (bits << 1)))};
+		for (unsigned seed = 1; seed <= 50; ++seed)
+		{
+			std::mt19937 rng{seed};
+			std::array<place, CTF_TEAMS> where{{place::home, place::home}};
+			/* Steps a flag lay dropped (the idle return). */
+			std::array<unsigned, CTF_TEAMS> idle{};
+			/* Who carries each flag (meaningful while carried). */
+			std::array<unsigned, CTF_TEAMS> carrier{};
+			unsigned captures{0}, refused{0}, returns{0};
+			for (unsigned step = 0; step < 3000; ++step)
+			{
+				const unsigned p{static_cast<unsigned>(rng() % 4)};
+				const std::uint8_t team{static_cast<std::uint8_t>(p & 1)};
+				const std::uint8_t enemy{other_team(team)};
+				const bool carries{where[enemy] == place::carried && carrier[enemy] == p};
+				switch (rng() % 4)
+				{
+					case 0:
+						/* Touches a flag where it lies. */
+						{
+							const std::uint8_t f{static_cast<std::uint8_t>(rng() & 1)};
+							if (where[f] == place::carried)
+								break;
+							switch (evaluate_flag_touch(r, team, f, where[f] == place::home, carries))
+							{
+								case flag_touch::none:
+									break;
+								case flag_touch::take:
+									CHECK(f == enemy);
+									where[f] = place::carried;
+									carrier[f] = p;
+									break;
+								case flag_touch::return_home:
+									CHECK(f == team && where[f] == place::dropped && r.touch_returns);
+									where[f] = place::home;
+									++returns;
+									break;
+							}
+						}
+						break;
+					case 1:
+						/* Dies: a carried flag drops, or goes home. */
+						if (carries)
+							where[enemy] = dropped_flag_goes_home(r) ? place::home : place::dropped;
+						break;
+					case 2:
+						/* In its own goal. */
+						switch (evaluate_capture(r, {true, team, carries, team}, where[team] == place::home))
+						{
+							case capture_verdict::none:
+								CHECK(!carries);
+								break;
+							case capture_verdict::score:
+								CHECK(carries);
+								CHECK(!r.home_to_score || where[team] == place::home);
+								/* Classic: the captured flag goes home. */
+								where[enemy] = flag_respawns_home(r) ? place::home : place::dropped;
+								++captures;
+								break;
+							case capture_verdict::own_flag_away:
+								CHECK(carries && r.home_to_score && where[team] != place::home);
+								++refused;
+								break;
+						}
+						break;
+					case 3:
+						/* Drops the flag by hand (it stays). */
+						if (carries)
+							where[enemy] = place::dropped;
+						break;
+				}
+				/* A flag that lies dropped returns after a while when no
+				 * rule would return it and both teams could otherwise be
+				 * stuck (idle_flag_returns).  Each flag is in one place,
+				 * and a carried flag has exactly one carrier, of the other
+				 * team.
+				 */
+				for (std::size_t f = 0; f < CTF_TEAMS; ++f)
+				{
+					if (where[f] == place::carried)
+						CHECK((carrier[f] & 1) != f);
+					if (where[f] != place::dropped)
+						idle[f] = 0;
+					else if (++idle[f] >= 200 && idle_flag_returns(r))
+					{
+						where[f] = place::home;
+						idle[f] = 0;
+						++returns;
+					}
+				}
+			}
+			/* With only the idle return, the random players of the model
+			 * pick a lying flag up again long before it returns: a team
+			 * there needs to guard its dropped flag, which the model
+			 * does not play.
+			 */
+			if (!idle_flag_returns(r))
+				CHECK(captures > 0);
+			if (r.home_to_score && !r.dropped_returns)
+				CHECK(refused > 0);
+			if (r.touch_returns && !r.dropped_returns)
+				CHECK(returns > 0);
+		}
+	}
+}
+
 void test_hoard_rules()
 {
 	CHECK(orb_points(1) == 1);
@@ -671,6 +900,11 @@ int main()
 	test_capture_wire();
 	test_host_owned_flags();
 	test_model();
+	test_classic_rules();
+	test_choose_home();
+	test_notice_wire();
+	test_own_flag_pickup();
+	test_classic_model();
 	test_hoard_rules();
 	test_orb_bonus_wire();
 	test_host_owned_orbs();

@@ -154,6 +154,11 @@ struct CArg : prohibit_void_ptr<>
 	 * bots play every mode the arena offers (game modes, stage 6a).
 	 */
 	std::string DbgBotArenaMode;
+	/* -botarena-ctf-rules N: the options of capture the flag (Classic),
+	 * CTF_RULE_* bits of net_v2_modes.h (2 dropped flag returns, 4 own
+	 * team returns, 8 score only with own flag home); -1: the defaults.
+	 */
+	int DbgBotArenaCtfRules{-1};
 #if DXX_USE_SHAREPATH
 	bool SysNoHogDir;
 #endif

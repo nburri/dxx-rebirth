@@ -17,6 +17,16 @@
  * flag is always either in the level or carried by exactly one player
  * (`flag_census`).
  *
+ * Capture the flag (Classic): a variant of capture the flag the host
+ * chooses in the game setup.  Every flag starts in its own team's goal
+ * (`home`, placed the same way on every machine, `choose_home`) and comes
+ * back there after a capture; the host's options (`ctf_rules`) decide
+ * whether a flag dropped by a dying carrier stays where it fell or
+ * returns home at once, whether the own team returns its dropped flag by
+ * touching it (`evaluate_flag_touch`), and whether a team scores only
+ * while its own flag is at home (`evaluate_capture`).  A flag is at home
+ * when it lies in a goal segment of its own team.
+ *
  * Hoard and team hoard: orbs are powerups the host grants (section 6.2).
  * The host tests every ship against the goals as well; a carrier of orbs
  * in a goal scores (`orb_bonus_due`, `orb_score`: n orbs are worth
@@ -142,6 +152,181 @@ struct flag_census
 			if (total(static_cast<std::uint8_t>(i)) != expected[i])
 				return false;
 		return true;
+	}
+};
+
+/* Capture the flag (Classic): the host's options, as Netgame carries them
+ * (CtfClassicFlags, GAME_SETTINGS, the .ngp file).
+ */
+constexpr std::uint8_t CTF_RULE_CLASSIC{1 << 0};
+constexpr std::uint8_t CTF_RULE_DROPPED_RETURNS{1 << 1};
+constexpr std::uint8_t CTF_RULE_TOUCH_RETURNS{1 << 2};
+constexpr std::uint8_t CTF_RULE_HOME_TO_SCORE{1 << 3};
+constexpr std::uint8_t CTF_RULES_KNOWN{CTF_RULE_CLASSIC | CTF_RULE_DROPPED_RETURNS | CTF_RULE_TOUCH_RETURNS | CTF_RULE_HOME_TO_SCORE};
+/* The options a new game starts with: a dropped flag stays, the own team
+ * returns it, a team scores only with its own flag at home.
+ */
+constexpr std::uint8_t CTF_RULES_DEFAULT{CTF_RULE_TOUCH_RETURNS | CTF_RULE_HOME_TO_SCORE};
+
+struct ctf_rules
+{
+	/* The Classic variant at all; without it the other options do
+	 * nothing (standard capture the flag).
+	 */
+	bool classic{};
+	/* A flag a dying (or departing) carrier drops returns home at once,
+	 * instead of staying where it fell.
+	 */
+	bool dropped_returns{};
+	/* A player who touches its own team's flag away from home returns it
+	 * home.
+	 */
+	bool touch_returns{};
+	/* A team scores only while its own flag is at home. */
+	bool home_to_score{};
+	[[nodiscard]]
+	static constexpr ctf_rules from_bits(const std::uint8_t bits)
+	{
+		const bool c{(bits & CTF_RULE_CLASSIC) != 0};
+		return {c, c && (bits & CTF_RULE_DROPPED_RETURNS), c && (bits & CTF_RULE_TOUCH_RETURNS), c && (bits & CTF_RULE_HOME_TO_SCORE)};
+	}
+};
+
+/* A player touches a flag lying in the level. */
+enum class flag_touch : std::uint8_t
+{
+	/* Nothing happens (its own flag at home, its own flag without the
+	 * touch rule, or the other team's flag while it carries one).
+	 */
+	none,
+	/* It takes the other team's flag. */
+	take,
+	/* Its own team's flag, away from home, goes home. */
+	return_home,
+};
+
+[[nodiscard]]
+constexpr flag_touch evaluate_flag_touch(const ctf_rules &r, const std::uint8_t player_team, const std::uint8_t flag_team, const bool flag_at_home, const bool carries_flag)
+{
+	if (player_team != flag_team)
+		return carries_flag ? flag_touch::none : flag_touch::take;
+	if (r.touch_returns && !flag_at_home)
+		return flag_touch::return_home;
+	return flag_touch::none;
+}
+
+/* A carrier in its own goal (capture_due). */
+enum class capture_verdict : std::uint8_t
+{
+	none,
+	score,
+	/* Classic with home_to_score: its own team's flag is not at home. */
+	own_flag_away,
+};
+
+[[nodiscard]]
+constexpr capture_verdict evaluate_capture(const ctf_rules &r, const capture_check &c, const bool own_flag_at_home)
+{
+	if (!capture_due(c))
+		return capture_verdict::none;
+	if (r.home_to_score && !own_flag_at_home)
+		return capture_verdict::own_flag_away;
+	return capture_verdict::score;
+}
+
+/* Where the flag of a dying or departing carrier goes. */
+[[nodiscard]]
+constexpr bool dropped_flag_goes_home(const ctf_rules &r)
+{
+	return r.dropped_returns;
+}
+
+/* A flag lying away from home that nobody returns: with "score only with
+ * the own flag home" and no touch return, a dropped flag (by hand, or by
+ * a death without "dropped flag returns") would stop its team from
+ * scoring for the rest of the level.  The host then returns a flag that
+ * lay away from home this long (seconds).
+ */
+constexpr unsigned CTF_IDLE_RETURN_SECONDS{30};
+
+[[nodiscard]]
+constexpr bool idle_flag_returns(const ctf_rules &r)
+{
+	return r.home_to_score && !r.touch_returns;
+}
+
+/* Where a captured (or lost, or missing) flag reappears: at home in the
+ * Classic variant, else at a random place.
+ */
+[[nodiscard]]
+constexpr bool flag_respawns_home(const ctf_rules &r)
+{
+	return r.classic;
+}
+
+/* The home of a team's flag: one of the team's goal segments, the same
+ * on every machine.  A team may have several (the goal of a level is
+ * often a room of several segments): the largest (the sum of the
+ * squared distances of its corners from its center, in game units
+ * squared, as a measure of its size), the lowest segment number of equal
+ * ones.
+ */
+struct goal_segment
+{
+	std::uint16_t segnum{};
+	std::uint64_t size{};
+};
+
+[[nodiscard]]
+constexpr std::optional<std::uint16_t> choose_home(const std::span<const goal_segment> goals)
+{
+	std::optional<goal_segment> best;
+	for (const auto &g : goals)
+		if (!best || g.size > best->size || (g.size == best->size && g.segnum < best->segnum))
+			best = g;
+	if (!best)
+		return std::nullopt;
+	return best->segnum;
+}
+
+/* CTF_NOTICE (0x4a): host to all, or to one player. */
+enum class ctf_notice_kind : std::uint8_t
+{
+	/* The flag of team `team` went home: touched by player `pid`
+	 * (NET_V2_PLAYER_ID_NONE: on its own, a carrier's death or
+	 * departure).
+	 */
+	returned,
+	/* Player `pid` of team `team` is in its goal with the other flag,
+	 * but its own flag is not at home (to that player only).
+	 */
+	own_flag_away,
+};
+
+struct ctf_notice_msg
+{
+	static constexpr std::size_t SIZE{3};
+	ctf_notice_kind kind{};
+	std::uint8_t team{};
+	std::uint8_t pid{NET_V2_PLAYER_ID_NONE};
+	void write(std::span<std::uint8_t, SIZE> buf) const
+	{
+		buf[0] = static_cast<std::uint8_t>(kind);
+		buf[1] = team;
+		buf[2] = pid;
+	}
+	[[nodiscard]]
+	static std::optional<ctf_notice_msg> read(const std::span<const std::uint8_t> buf)
+	{
+		if (buf.size() != SIZE || buf[0] > static_cast<std::uint8_t>(ctf_notice_kind::own_flag_away) || buf[1] >= CTF_TEAMS)
+			return std::nullopt;
+		ctf_notice_msg m;
+		m.kind = static_cast<ctf_notice_kind>(buf[0]);
+		m.team = buf[1];
+		m.pid = buf[2];
+		if (m.pid >= NET_V2_MAX_PLAYERS && (m.pid != NET_V2_PLAYER_ID_NONE || m.kind == ctf_notice_kind::own_flag_away))
+			return std::nullopt;
+		return m;
 	}
 };
 

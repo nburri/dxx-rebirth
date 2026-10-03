@@ -45,6 +45,7 @@
 #include "net_v2.h"
 #include "net_v2_transport.h"
 #include "net_v2_session.h"
+#include "net_v2_modes.h"
 #include "net_v2_game.h"
 #include "net_v2_state.h"
 #include "net_interp.h"
@@ -1446,7 +1447,10 @@ void write_game_settings(writer &w)
 	w.u8(Netgame.NoFriendlyFire);
 	w.u8(Netgame.MouselookFlags);
 	w.u8(Netgame.PitchLockFlags);
-	w.u8(0);	/* reserved (was PacketLossPrevention) */
+	/* Protocol 111: the rules of capture the flag (Classic), where the
+	 * reserved byte (once PacketLossPrevention) was.
+	 */
+	w.u8(Netgame.CtfClassicFlags);
 	w.u32(static_cast<uint32_t>(Netgame.KillGoal));
 	w.u32(Netgame.PlayTimeAllowed.count());
 	for (auto &i : Netgame.team_name)
@@ -1487,7 +1491,7 @@ void read_game_settings(reader &r)
 	const auto no_ff{r.u8()};
 	const auto mouselook{r.u8()};
 	const auto pitchlock{r.u8()};
-	r.u8();	/* reserved */
+	const auto ctf_classic{r.u8()};
 	const auto killgoal{r.i32()};
 	const auto playtime{r.i32()};
 	per_team_array<callsign_t> team_name;
@@ -1541,6 +1545,7 @@ void read_game_settings(reader &r)
 	Netgame.NoFriendlyFire = no_ff;
 	Netgame.MouselookFlags = mouselook;
 	Netgame.PitchLockFlags = pitchlock;
+	Netgame.CtfClassicFlags = ctf_classic & ::dcx::net_v2::CTF_RULES_KNOWN;
 	Netgame.KillGoal = killgoal;
 	Netgame.PlayTimeAllowed = d_time_fix(playtime);
 	Netgame.team_name = team_name;
@@ -4724,7 +4729,7 @@ void handle_reliable(peer &p, const session_msg type, const std::span<const uint
 	/* Game modes (net_modes.cpp): host to all, gated like the combat
 	 * messages.
 	 */
-	if (type == session_msg::capture || type == session_msg::orb_bonus)
+	if (type == session_msg::capture || type == session_msg::orb_bonus || type == session_msg::ctf_notice)
 	{
 		if (!multi_i_am_master() && peer_sends_game_data(p) && legacy_processing_allowed())
 			net_modes_receive(slot, static_cast<uint8_t>(type), payload);

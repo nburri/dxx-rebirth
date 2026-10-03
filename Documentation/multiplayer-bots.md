@@ -865,7 +865,8 @@ it is the main tuning tool:
 d2x-rebirth -hogdir DATA -botarena <mission> <level> <bots> <seconds>
             [-fixedfps N] [-botarena-bots "skill:style[:name],..."]
             [-botarena-seed N] [-botarena-reactor S] [-botarena-timeout S]
-            [-botarena-mode anarchy|team|ctf|hoard|teamhoard] [-pilot NAME]
+            [-botarena-mode anarchy|team|ctf|ctfclassic|hoard|teamhoard]
+            [-botarena-ctf-rules N] [-pilot NAME]
             [-recordmoves -recordmoves-bots]
 tools/botarena-run.sh [-n bots] [-b list] [-s seconds] [-f fps] [-t limit] [-o dir]
                       [-S profile.botstyle]... [-F profile.botstyle[@BOT]]... DATA <mission> [<level>]
@@ -875,7 +876,8 @@ tools/botarena-run.sh [-n bots] [-b list] [-s seconds] [-f fps] [-t limit] [-o d
   name (`Corona`, `ESHAKER.MN2`) or its title (`Earth Shaker`); the game is
   set up like the host setup menu (`net_udp_setup_defaults`: the defaults,
   then the pilot's `.ngp` with its game options), then anarchy (or the mode
-  of `-botarena-mode`: `team`, `ctf`, `hoard`, `teamhoard`; in a team mode the bots by turns
+  of `-botarena-mode`: `team`, `ctf`, `ctfclassic` with the flag rules of
+  `-botarena-ctf-rules`, `hoard`, `teamhoard`; in a team mode the bots by turns
   blue and red) on the given level with `<bots> + 1` players, no kill goal,
   no time limit, no autosave. In capture the flag the bots take flags only
   by flying through them so far (no flag goals), and orbs alike; the

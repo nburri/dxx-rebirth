@@ -1562,6 +1562,7 @@ static int net_udp_start_poll(newmenu *, const d_event &event, start_poll_menu_i
 #endif
 
 #if DXX_BUILD_DESCENT == 1
+#define D2X_CTF_CLASSIC_MENU_OPTIONS(VERB)
 #define D2X_UDP_MENU_OPTIONS(VERB)	\
 
 #elif DXX_BUILD_DESCENT == 2
@@ -1571,6 +1572,14 @@ static int net_udp_start_poll(newmenu *, const d_event &event, start_poll_menu_i
 	DXX_MENUITEM(VERB, CHECK, "Remove Thief at level start", opt_thief_presence, thief_absent)	\
 	DXX_MENUITEM(VERB, CHECK, "Prevent Thief Stealing Energy Weapons", opt_thief_steal_energy, thief_cannot_steal_energy_weapons)	\
 	DXX_MENUITEM(VERB, CHECK, "Allow Guidebot (coop only; experimental)", opt_guidebot_enabled, Netgame.AllowGuidebot)	\
+
+/* Capture the flag (Classic): the host's flag rules (net_v2_modes.h). */
+#define D2X_CTF_CLASSIC_MENU_OPTIONS(VERB)	\
+	DXX_MENUITEM(VERB, TEXT, "", blank_ctf)	\
+	DXX_MENUITEM(VERB, TEXT, "CTF Classic: flag rules", ctf_label)	\
+	DXX_MENUITEM(VERB, FCHECK, "Dropped flag returns home at once", opt_ctf_dropped_returns, Netgame.CtfClassicFlags, ctf_rule::dropped_returns)	\
+	DXX_MENUITEM(VERB, FCHECK, "Own team returns its flag by touch", opt_ctf_touch_returns, Netgame.CtfClassicFlags, ctf_rule::touch_returns)	\
+	DXX_MENUITEM(VERB, FCHECK, "Score only with own flag home", opt_ctf_home_to_score, Netgame.CtfClassicFlags, ctf_rule::home_to_score)	\
 
 #endif
 
@@ -1609,6 +1618,7 @@ constexpr std::integral_constant<unsigned, 5 * reactor_invul_time_mini_scale> re
 	DXX_MENUITEM(VERB, CHECK, "Shuffle powerups in anarchy games", opt_shuffle_powerups, Netgame.ShufflePowerupSeed)	\
 	DXX_MENUITEM(VERB, MENU, "Set Objects allowed...", opt_setpower)	         \
 	DXX_MENUITEM(VERB, MENU, "Set Objects granted at spawn...", opt_setgrant)	\
+	D2X_CTF_CLASSIC_MENU_OPTIONS(VERB)	\
 	DXX_MENUITEM(VERB, TEXT, "", blank_3)                                     \
 	DXX_MENUITEM(VERB, TEXT, "Misc. Options", misc_label)	                    \
 	DXX_MENUITEM(VERB, CHECK, TXT_SHOW_ON_MAP, opt_show_on_map, game_flag_show_all_players_on_automap)	\
@@ -2084,7 +2094,7 @@ struct param_opt
 	int start_game, mode, mode_end, moreopts, bots;
 	int closed, refuse, maxnet, anarchy, team_anarchy, robot_anarchy, coop, bounty;
 #if DXX_BUILD_DESCENT == 2
-	int capture, hoard, team_hoard;
+	int capture, capture_classic, hoard, team_hoard;
 #endif
 	std::array<char, sizeof("S100")> slevel{{"1"}};
 	char srmaxnet[sizeof("Maximum players: 99")];
@@ -2124,7 +2134,7 @@ static int net_udp_game_param_handler( newmenu *menu,const d_event &event, param
 				menus[opt->closed+1].value = 0;
 			}
 #elif DXX_BUILD_DESCENT == 2
-			if (((HoardEquipped() != hoard_availability_state::Missing && (citem == opt->team_hoard)) || ((citem == opt->team_anarchy) || (citem == opt->capture))) && !menus[opt->closed].value && !menus[opt->refuse].value)
+			if (((HoardEquipped() != hoard_availability_state::Missing && (citem == opt->team_hoard)) || ((citem == opt->team_anarchy) || (citem == opt->capture) || (citem == opt->capture_classic))) && !menus[opt->closed].value && !menus[opt->refuse].value)
 			{
 				menus[opt->refuse].value = 1;
 				menus[opt->refuse-1].value = 0;
@@ -2168,7 +2178,18 @@ static int net_udp_game_param_handler( newmenu *menu,const d_event &event, param
 				}
 #if DXX_BUILD_DESCENT == 2
 				else if (menus[opt->capture].value)
+				{
 					Netgame.gamemode = network_game_type::capture_flag;
+					Netgame.CtfClassicFlags &= ~ctf_rule::classic;
+				}
+				else if (menus[opt->capture_classic].value)
+				{
+					/* Capture the flag (Classic): capture the flag with
+					 * its own flag rules (Advanced Options).
+					 */
+					Netgame.gamemode = network_game_type::capture_flag;
+					Netgame.CtfClassicFlags |= ctf_rule::classic;
+				}
 				else if (const auto hoard{HoardEquipped()}; hoard != hoard_availability_state::Missing && menus[opt->hoard].value)
 					Netgame.gamemode = network_game_type::hoard;
 				else if (hoard != hoard_availability_state::Missing && menus[opt->team_hoard].value)
@@ -2280,6 +2301,9 @@ static void net_udp_setup_defaults()
 	Netgame.NoFriendlyFire = 0;
 	Netgame.MouselookFlags = 0;
 	Netgame.PitchLockFlags = 0;
+#if DXX_BUILD_DESCENT == 2
+	Netgame.CtfClassicFlags = ctf_rule::defaults;
+#endif
 
 #if DXX_USE_TRACKER
 	Netgame.Tracker = 1;
@@ -2344,7 +2368,12 @@ window_event_result net_udp_setup_game(const d_select_event &)
 	nm_set_item_radio(m[optnum], TXT_ANARCHY_W_ROBOTS, Netgame.gamemode == network_game_type::robot_anarchy, 0); opt.robot_anarchy=optnum; optnum++;
 	nm_set_item_radio(m[optnum], TXT_COOPERATIVE, Netgame.gamemode == network_game_type::cooperative, 0); opt.coop=optnum; optnum++;
 #if DXX_BUILD_DESCENT == 2
-	nm_set_item_radio(m[optnum], "Capture the flag", Netgame.gamemode == network_game_type::capture_flag, 0); opt.capture=optnum; optnum++;
+	{
+		const bool ctf{Netgame.gamemode == network_game_type::capture_flag};
+		const bool classic{(Netgame.CtfClassicFlags & ctf_rule::classic) != 0};
+		nm_set_item_radio(m[optnum], "Capture the flag", ctf && !classic, 0); opt.capture=optnum; optnum++;
+		nm_set_item_radio(m[optnum], "Capture the flag (Classic)", ctf && classic, 0); opt.capture_classic=optnum; optnum++;
+	}
 
 	if (HoardEquipped() != hoard_availability_state::Missing)
 	{
@@ -2380,7 +2409,7 @@ window_event_result net_udp_setup_game(const d_select_event &)
 	opt.moreopts=optnum;
 	nm_set_item_menu(  m[optnum], "Advanced Options"); optnum++;
 
-	Assert(optnum <= 21);
+	Assert(optnum <= 22);
 
 #if DXX_USE_TRACKER
 	if (Netgame.TrackerNATWarned == TrackerNATHolePunchWarn::Unset)

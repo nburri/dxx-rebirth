@@ -880,6 +880,9 @@ void maybe_drop_net_powerup(powerup_type_t powerup_type, bool adjust_cap, bool r
                         } while (vcplayerptr(pnum)->connected != player_connection_status::playing);
                 }
 
+		/* Capture the flag (Classic): a missing flag goes home. */
+		if (net_modes_host_respawn_flag(powerup_type))
+			return;
 		net_drop_powerup_away_from(powerup_type, pnum);
 	}
 }
