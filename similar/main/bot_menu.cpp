@@ -627,12 +627,24 @@ b::bot_profile bots_setup_profile()
 
 bool bots_allowed_in_mode(const network_game_type mode)
 {
-	/* The bot arena plays the team modes too (-botarena-mode); the bots
-	 * take flags only by flying through them so far.
-	 */
+	/* The bot arena plays every mode it can start (-botarena-mode). */
 	if (!CGameArg.DbgBotArenaMission.empty())
 		return true;
-	return mode == network_game_type::anarchy || mode == network_game_type::team_anarchy || mode == network_game_type::bounty;
+	switch (mode)
+	{
+		case network_game_type::anarchy:
+		case network_game_type::team_anarchy:
+		case network_game_type::bounty:
+#if DXX_BUILD_DESCENT == 2
+		/* Stage B7 (Documentation/multiplayer-bots.md section 9.19). */
+		case network_game_type::capture_flag:
+		case network_game_type::hoard:
+		case network_game_type::team_hoard:
+#endif
+			return true;
+		default:
+			return false;
+	}
 }
 
 void bots_setup_label(char *const buf, const std::size_t size, const network_game_type mode)

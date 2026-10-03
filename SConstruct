@@ -5092,6 +5092,13 @@ class DXXArchive(DXXCommon):
 		RuntimeTest('test-bot-goals', (
 			'common/unittest/bot_goals.cpp',
 			)),
+		# Test of the bots in capture the flag and hoard: the team's
+		# roles, the objectives against the other goals, when to score
+		# orbs (bot_modes.h, Documentation/multiplayer-bots.md section
+		# 9.19).
+		RuntimeTest('test-bot-modes', (
+			'common/unittest/bot_modes.cpp',
+			)),
 		# Test of the bots' missiles, mines and items: the secondary
 		# choice by skill, the blast safety, the release, the converter,
 		# cloak and invulnerability tactics (bot_weapons.h).

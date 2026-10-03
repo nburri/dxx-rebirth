@@ -60,6 +60,7 @@
 #include "net_v2_game.h"
 #include "multi.h"
 #include "bot.h"
+#include "bot_arena.h"
 #include "fireball.h"
 #include "gameseg.h"
 #include "object.h"
@@ -346,6 +347,7 @@ void host_capture(const playernum_t pnum, const uint8_t team)
 	m.write(buf);
 	::dsx::net_v2::game_broadcast(static_cast<uint8_t>(session_msg::capture), buf);
 	++M.captures;
+	bot_arena_note_capture(pnum);
 	con_printf(CON_NORMAL, "ctf: P#%u (%s) captured the %s flag; %s team %i", pnum, team_name(team), team_name(flag), team_name(team), m.scores.team_score);
 	/* The flag goes back into the level now (after CAPTURE, so that
 	 * every machine has taken it from the carrier first), unless the
@@ -445,6 +447,7 @@ void host_orb_bonus(const playernum_t pnum, const uint8_t orbs)
 	::dsx::net_v2::game_broadcast(static_cast<uint8_t>(session_msg::orb_bonus), buf);
 	++M.orb_scores;
 	M.orbs_scored += orbs;
+	bot_arena_note_orb_score(pnum, orbs);
 	con_printf(CON_NORMAL, "hoard: P#%u scored %u orbs (%i points); kills %i", pnum, orbs, nv::orb_points(orbs), m.scores.kills);
 	apply_orb_bonus(m);
 }
@@ -913,7 +916,10 @@ void net_modes_host_return_flag(const vmobjptridx_t flag, const playernum_t pnum
 	/* The flag lying away from home goes; the one at home comes. */
 	flag->flags |= OF_SHOULD_BE_DEAD;
 	if (pnum < N_players)
+	{
 		con_printf(CON_NORMAL, "ctf: P#%u returns the %s flag", pnum, team_name(*team));
+		bot_arena_note_flag_return(pnum);
+	}
 	net_modes_host_flag_home(*team, pnum, true);
 #else
 	(void)flag;

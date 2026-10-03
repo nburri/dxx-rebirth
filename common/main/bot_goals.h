@@ -682,8 +682,12 @@ enum class goal_kind : uint8_t
 	retreat,
 	/* To a fuel (or repair) centre, and hover in it. */
 	refuel,
+	/* Section 9.19 (stage B7): the place of the bot's role in capture
+	 * the flag or hoard (bot_modes.h, objective_for).
+	 */
+	objective,
 };
-constexpr unsigned BOT_GOAL_COUNT{6};
+constexpr unsigned BOT_GOAL_COUNT{7};
 
 struct goal_inputs
 {
@@ -769,6 +773,15 @@ struct goal_inputs
 	 * powerups of about the same utility).
 	 */
 	bool power_current{};
+	/* Section 9.19: the objective of the bot's role in capture the flag
+	 * or hoard (bot_modes.h objective_for: its utility, 0 none), and its
+	 * factors on the engagement and on the hunt of a target out of
+	 * sight (a carrier flies home rather than fight; a defender hunts
+	 * nobody far from home).
+	 */
+	double objective{};
+	double mode_engage{1};
+	double mode_hunt{1};
 	/* The goal of the last strategy tick (hysteresis). */
 	std::optional<goal_kind> current;
 };
@@ -1551,13 +1564,15 @@ inline goal_utilities goal_utility(const goal_inputs &in)
 	{
 		const double engage{2 * in.target_score * in.engage_weight * in.phase_engage * in.third_party * armed_engage_factor(in.armed)};
 		if (in.target_visible)
-			at(goal_kind::engage) = engage;
+			at(goal_kind::engage) = engage * in.mode_engage;
 		else
-			at(goal_kind::hunt) = engage;
+			at(goal_kind::hunt) = engage * in.mode_hunt;
 	}
 	/* Section 9.9: no target known, armed: seek the last one seen. */
 	else if (in.seek > 0)
-		at(goal_kind::hunt) = in.seek * in.phase_engage;
+		at(goal_kind::hunt) = in.seek * in.phase_engage * in.mode_hunt;
+	/* Section 9.19: the role's objective. */
+	at(goal_kind::objective) = in.objective;
 	double collect{in.collect * in.collect_weight};
 	if (in.target_visible && in.collect_path > GRAB_DISTANCE)
 		collect *= in.collector ? COLLECTOR_UNDER_FIRE : in.collect_upgrade ? COLLECT_UPGRADE_UNDER_FIRE : COLLECT_UNDER_FIRE;

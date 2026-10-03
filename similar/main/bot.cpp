@@ -40,8 +40,11 @@
 #include "bot.h"
 #include "bot_arena.h"
 #include "bot_goals.h"
+#include "bot_modes.h"
+#include "net_v2_modes.h"
 #include "bot_movement.h"
 #include "movement_record_format.h"
+#include "movement_record.h"
 #include "level_geometry.h"
 #include "bot_nav.h"
 #include "bot_weapons.h"
@@ -178,7 +181,7 @@ bool bot_log_on()
 
 inline constexpr std::array<const char *, 10> primary_names{{"laser", "vulcan", "spread", "plasma", "fusion", "super", "gauss", "helix", "phoenix", "omega"}};
 inline constexpr std::array<const char *, 10> secondary_names{{"conc", "homing", "prox", "smart", "mega", "flash", "guided", "smine", "merc", "shaker"}};
-inline constexpr std::array<const char *, b::BOT_GOAL_COUNT> goal_names{{"roam", "hunt", "engage", "collect", "retreat", "refuel"}};
+inline constexpr std::array<const char *, b::BOT_GOAL_COUNT> goal_names{{"roam", "hunt", "engage", "collect", "retreat", "refuel", "objective"}};
 
 [[nodiscard]]
 const char *primary_name(const unsigned i)
@@ -283,6 +286,10 @@ enum class bot_goal : uint8_t
 	retreat,
 	/* To a fuel or repair centre, and hover there until full. */
 	refuel,
+	/* Section 9.19 (stage B7): the place of its role in capture the
+	 * flag or hoard (the enemy flag, home, an orb, a goal...).
+	 */
+	objective,
 };
 
 /* Section 9.15: the movement recorder writes the goal and the movement
@@ -303,6 +310,27 @@ static_assert(static_cast<uint8_t>(b::move_mode::slide) == mrb::bot_modes::slide
 static_assert(static_cast<uint8_t>(b::move_mode::duck) == mrb::bot_modes::duck);
 static_assert(static_cast<uint8_t>(b::move_mode::recover) == mrb::bot_modes::recover);
 static_assert(b::MOVE_MODE_COUNT == mrb::bot_modes::count);
+static_assert(static_cast<uint8_t>(bot_goal::objective) == mrb::bot_goals::objective);
+/* Section 9.19: the roles as the recording's role events have them. */
+static_assert(static_cast<uint8_t>(b::mode_role::attack) == mrb::mode_role::attack);
+static_assert(static_cast<uint8_t>(b::mode_role::defend) == mrb::mode_role::defend);
+static_assert(static_cast<uint8_t>(b::mode_role::escort) == mrb::mode_role::escort);
+static_assert(static_cast<uint8_t>(b::mode_role::hunt) == mrb::mode_role::hunt);
+static_assert(static_cast<uint8_t>(b::mode_role::carry) == mrb::mode_role::carry);
+static_assert(static_cast<uint8_t>(b::mode_role::wait) == mrb::mode_role::wait);
+static_assert(static_cast<uint8_t>(b::mode_role::retrieve) == mrb::mode_role::retrieve);
+static_assert(static_cast<uint8_t>(b::mode_role::collect) == mrb::mode_role::collect);
+static_assert(static_cast<uint8_t>(b::mode_role::score) == mrb::mode_role::score);
+static_assert(b::MODE_ROLE_COUNT == mrb::mode_role::count);
+
+/* Section 9.19: an orb a bot knows of (hoard). */
+struct known_orb
+{
+	uint16_t key{0xffff}, sig{};
+	vec3 pos;
+	uint32_t seg{};
+	uint32_t tick{};
+};
 
 struct bot_controls
 {
@@ -629,6 +657,25 @@ struct bot_state
 	uint8_t deny_reason{};
 	uint32_t deny_tick{};
 	uint32_t next_log_tick{};
+	/* Section 9.19 (stage B7): the role the team blackboard gave it in
+	 * capture the flag or hoard, the objective of the last strategy tick
+	 * (bot_modes.h) and its place, the orbs it knows of, whether it is
+	 * on its way to score its orbs, the patrol point near its place.
+	 */
+	b::mode_role role{b::mode_role::none};
+	b::objective objective;
+	bool objective_known{};
+	uint32_t objective_seg{};
+	vec3 objective_pos;
+	std::vector<known_orb> orbs;
+	bool hoard_scoring{};
+	uint32_t patrol_seg{0xffffffffu};
+	uint32_t patrol_until{};
+	/* An objective's segment the bot found no path to, and until when it
+	 * is no objective (the bot would hover where it is).
+	 */
+	uint32_t objective_blocked_seg{0xffffffffu};
+	uint32_t objective_blocked_until{};
 	/* Navigation. */
 	bot_goal goal{bot_goal::none};
 	uint32_t goal_seg{};
@@ -790,6 +837,11 @@ struct bot_state
 		tactics = {};
 		clear_path();
 		goal = bot_goal::none;
+		objective = {};
+		objective_known = false;
+		hoard_scoring = false;
+		patrol_seg = 0xffffffffu;
+		patrol_until = 0;
 		stuck.reset();
 		penalties.clear();
 		avoid = {};
@@ -964,7 +1016,7 @@ void build_nav_graph()
 		const uint32_t n{segp.get_unchecked_index()};
 		if (n >= count)
 			continue;
-		const shared_segment &ss{segp};
+		const shared_segment &ss = *segp;
 		if (ss.special == segment_special::fuelcen)
 			B.fuel_centres.push_back(n);
 		else if (ss.special == segment_special::repaircen)
@@ -989,9 +1041,64 @@ bool edge_passable(const uint32_t from, const b::nav_edge &e, const player_flags
 	if (wall_num == wall_none)
 		return false;
 	const auto &w{*vcwallptr(wall_num)};
+	/* Section 9.19: a blastable wall is shot open on the way
+	 * (blastable_ahead).
+	 */
+	if (w.type == WALL_BLASTABLE)
+		return true;
 	if (w.type != WALL_DOOR || +(w.flags & wall_flag::door_locked))
 		return false;
 	return w.keys == wall_key::none || +(powerup_flags & static_cast<player_flag>(w.keys));
+}
+
+/* Section 9.19: a blastable wall still standing costs this much more
+ * on a path (the time to shoot it open).
+ */
+constexpr double BOT_BLASTABLE_EXTRA_COST{150};
+
+[[nodiscard]]
+double blastable_cost(const uint32_t from, const uint8_t side)
+{
+	if (side >= 6)
+		return 0;
+	const auto wall_num{vcsegptr(static_cast<segnum_t>(from))->shared_segment::sides[static_cast<sidenum_t>(side)].wall_num};
+	if (wall_num == wall_none)
+		return 0;
+	auto &Walls = LevelUniqueWallSubsystemState.Walls;
+	const auto &w{*Walls.vcptr(wall_num)};
+	return w.type == WALL_BLASTABLE && !(w.flags & wall_flag::blasted) ? BOT_BLASTABLE_EXTRA_COST : 0;
+}
+
+/* Section 9.19: a bot shoots a blastable wall from this far (closer, it
+ * backs off: from the wall, the guns are on the other side).
+ */
+constexpr double BOT_BLAST_WALL_NEAR{30};
+constexpr double BOT_BLAST_WALL_STAND{45};
+
+/* Section 9.19: the centre of a blastable wall (not yet blasted) on the
+ * next stretch of the bot's path, within reach of a shot.
+ */
+[[nodiscard]]
+std::optional<vec3> blastable_ahead(const bot_state &bs, const vec3 &pos)
+{
+	auto &Walls = LevelUniqueWallSubsystemState.Walls;
+	for (std::size_t i = bs.point_index; i < bs.point_edges.size() && i < bs.point_index + 4; ++i)
+	{
+		const auto [from, side] = bs.point_edges[i];
+		if (side >= 6 || from >= B.graph.size())
+			continue;
+		const auto wall_num{vcsegptr(static_cast<segnum_t>(from))->shared_segment::sides[static_cast<sidenum_t>(side)].wall_num};
+		if (wall_num == wall_none)
+			continue;
+		const auto &w{*Walls.vcptr(wall_num)};
+		if (w.type != WALL_BLASTABLE || +(w.flags & wall_flag::blasted))
+			continue;
+		const auto &centre{B.side_centres[from * 6 + side]};
+		if (b::distance(centre, pos) < 150)
+			return centre;
+		return std::nullopt;
+	}
+	return std::nullopt;
 }
 
 /* The segments a ship without keys flies to from `seg`, by the doors and
@@ -1489,7 +1596,7 @@ void plan_path(bot_state &bs, const object &obj, const uint32_t goal_seg, const 
 	const double appetite{bs.cover_appetite};
 	const auto extra{[&bs, appetite](const uint32_t from, const b::nav_edge &e) {
 		const double excess{appetite > 0 && e.to < B.exposure_excess.size() ? B.exposure_excess[e.to] : 0.0};
-		return bs.penalties.cost(from, e.side) + b::cover_extra_cost(e.cost, appetite, excess);
+		return bs.penalties.cost(from, e.side) + b::cover_extra_cost(e.cost, appetite, excess) + blastable_cost(from, e.side);
 	}};
 	if (!B.search.find(B.graph, start, goal_seg, passable, extra, BOT_NAV_NODE_LIMIT, B.path))
 		return;
@@ -1546,6 +1653,9 @@ double cover_appetite_for(const bot_state &bs, const bot_goal g)
 {
 	if (g == bot_goal::hunt)
 		return 0;
+	/* Section 9.19: a carrier's way home by cover. */
+	if (g == bot_goal::objective && bs.objective.cover > 0)
+		return std::max(bs.objective.cover, b::cover_appetite(bs.cover));
 	auto cv{bs.cover};
 	cv.away = g == bot_goal::collect || g == bot_goal::refuel || g == bot_goal::retreat;
 	cv.power = g == bot_goal::collect && bs.power_going;
@@ -2010,7 +2120,7 @@ void compute_distances(bot_state &bs, const object &obj)
 	bs.dist.compute(B.graph, obj.segnum, [flags](const uint32_t from, const b::nav_edge &e) {
 		return edge_passable(from, e, flags);
 	}, [&bs](const uint32_t from, const b::nav_edge &e) {
-		return bs.penalties.cost(from, e.side);
+		return bs.penalties.cost(from, e.side) + blastable_cost(from, e.side);
 	}, BOT_DISTANCE_MAX_COST, BOT_DISTANCE_NODE_LIMIT);
 }
 
@@ -2162,6 +2272,941 @@ void learn_powerups(bot_state &bs, const object &obj, const uint32_t tick)
 		if (seen || b::knows_from_map(initial, bs.dist.hops(o->segnum), sk.map_knowledge, bs.dist.cost(o->segnum)))
 			learn_one(o, initial, seen);
 	}
+}
+
+/* Section 9.19 (stage B7): capture the flag (standard and Classic),
+ * hoard and team hoard.  The host keeps a blackboard per team: what the
+ * team knows of the flags (only what a human of the team would know:
+ * bot_modes.h, flag_state) and the role of each of its bots
+ * (b::assign_ctf_roles, b::assign_hoard_roles), updated with the
+ * strategy layer's rate (modes_update, before the bots think).  Each
+ * bot turns its role into an objective (plan_objective), weighed in its
+ * goal choice against the fight and the collections (think).
+ */
+namespace nv = ::dcx::net_v2;
+
+/* A dropped flag's place is known to the team if one of its bots saw the
+ * carrier this recently before the drop (it fell where the carrier
+ * died).
+ */
+constexpr unsigned BOT_DROP_SEEN_TICKS{5 * b::BOT_TICK_RATE};
+/* A hunter flies to where the enemy carrier was seen while the sighting
+ * is this fresh, else to the enemy goal (where the carrier goes).
+ */
+constexpr unsigned BOT_HUNT_SIGHTING_TICKS{8 * b::BOT_TICK_RATE};
+/* The roles are assigned again this often, and at once when a flag
+ * changes hands or state.
+ */
+constexpr unsigned BOT_ROLE_TICKS{b::BOT_TICK_RATE};
+/* A place guessed (a flag dropped out of sight) is searched within
+ * this distance.
+ */
+constexpr double BOT_GUESS_SEARCHED{50};
+/* Defenders and waiting carriers patrol within this distance of their
+ * place, to a new point every few seconds.
+ */
+constexpr double BOT_PATROL_RADIUS{140};
+constexpr unsigned BOT_PATROL_TICKS{6 * b::BOT_TICK_RATE};
+/* No mine this close to home or to a teammate (teammate_behind). */
+constexpr double BOT_MODE_MINE_DISTANCE{300};
+/* An objective without a path is none for this long. */
+constexpr unsigned BOT_OBJECTIVE_BLOCKED_TICKS{10 * b::BOT_TICK_RATE};
+/* Orbs a bot remembers, and how long. */
+constexpr std::size_t BOT_ORB_MEMORY{24};
+constexpr unsigned BOT_ORB_MEMORY_TICKS{40 * b::BOT_TICK_RATE};
+constexpr unsigned BOT_ORB_LOS_BUDGET{3};
+
+enum class mode_kind : uint8_t
+{
+	none,
+	ctf,
+	hoard,
+};
+
+/* What a team knows of a flag. */
+struct flag_knowledge
+{
+	b::flag_state state{b::flag_state::unknown};
+	uint8_t carrier{0xff};
+	bool place_known{};
+	vec3 pos;
+	uint32_t seg{};
+	/* When the place was learnt (a carrier: last seen). */
+	uint32_t tick{};
+	/* The flag object the place is of. */
+	uint16_t key{0xffff}, sig{};
+	/* Dropped out of the team's sight: where its carrier was last seen
+	 * (searched until a bot comes there).
+	 */
+	bool guess{};
+	vec3 guess_pos;
+	uint32_t guess_seg{};
+};
+
+struct team_board
+{
+	/* By the flag's team (nv::CTF_TEAM_BLUE, nv::CTF_TEAM_RED). */
+	std::array<flag_knowledge, nv::CTF_TEAMS> flags{};
+	uint32_t next_assign{};
+	/* The flags' states and carriers at the last assignment. */
+	uint32_t situation{};
+};
+
+struct modes_state
+{
+	mode_kind kind{mode_kind::none};
+	bool team{};
+	nv::ctf_rules rules{};
+	/* The goal segments of each team, and all of them (hoard). */
+	std::array<std::vector<uint32_t>, nv::CTF_TEAMS> goals{};
+	std::vector<uint32_t> all_goals;
+	std::vector<bool> is_goal;
+	/* The home of each team's flag (net_modes_home_segment). */
+	std::array<std::optional<uint32_t>, nv::CTF_TEAMS> home{};
+	/* Places near home, under cover and out of the goal, where a
+	 * carrier waits for its flag to come home.
+	 */
+	std::array<std::vector<uint32_t>, nv::CTF_TEAMS> wait_spots{};
+	std::array<team_board, nv::CTF_TEAMS> boards{};
+	uint32_t next_update{};
+	bool first_update{true};
+};
+
+modes_state MS;
+
+[[nodiscard]]
+uint8_t team_of(const playernum_t p)
+{
+	return multi_get_team_from_player(Netgame, p) == team_number::red ? nv::CTF_TEAM_RED : nv::CTF_TEAM_BLUE;
+}
+
+/* Player `p` is in the game (the bot arena's host is a ghost nobody
+ * sees: no player).
+ */
+[[nodiscard]]
+bool in_game(const playernum_t p)
+{
+	if (p >= N_players || p >= MAX_PLAYERS)
+		return false;
+	if (vcplayerptr(p)->connected != player_connection_status::playing)
+		return false;
+	return !(bot_arena_active() && p == Player_num);
+}
+
+/* Its ship, if it is alive (not a ghost, not in its death tumble). */
+[[nodiscard]]
+const object *live_ship_of(const playernum_t p)
+{
+	if (!in_game(p))
+		return nullptr;
+	auto &Objects = LevelUniqueObjectState.Objects;
+	const auto &o{*Objects.vcptr(vcplayerptr(p)->objnum)};
+	if (o.type != object_type::OBJ_PLAYER)
+		return nullptr;
+	if (p == Player_num ? Player_dead_state != player_dead_state::no : bot_ship_dying(p))
+		return nullptr;
+	if (const auto bs{find_bot(p)}; bs && bs->life != bot_life::alive)
+		return nullptr;
+	return &o;
+}
+
+#if DXX_BUILD_DESCENT == 2
+[[nodiscard]]
+std::optional<uint8_t> flag_of(const object_base &o)
+{
+	if (o.type != object_type::OBJ_POWERUP)
+		return std::nullopt;
+	switch (get_powerup_id(o))
+	{
+		case powerup_type_t::POW_FLAG_BLUE:
+			return nv::CTF_TEAM_BLUE;
+		case powerup_type_t::POW_FLAG_RED:
+			return nv::CTF_TEAM_RED;
+		default:
+			return std::nullopt;
+	}
+}
+#endif
+
+/* The level's goals and homes (prepare_level). */
+void modes_level_start()
+{
+	MS = {};
+#if DXX_BUILD_DESCENT == 2
+	if (game_mode_capture_flag(Game_mode))
+		MS.kind = mode_kind::ctf;
+	else if (game_mode_hoard(Game_mode))
+		MS.kind = mode_kind::hoard;
+#endif
+	if (MS.kind == mode_kind::none)
+		return;
+	MS.team = +(Game_mode & GM_TEAM);
+	if (MS.kind == mode_kind::ctf)
+		MS.rules = nv::ctf_rules::from_bits(Netgame.CtfClassicFlags);
+	const auto count{B.graph.size()};
+	MS.is_goal.assign(count, false);
+	for (const auto &&segp : vcsegptridx)
+	{
+		const uint32_t n{segp.get_unchecked_index()};
+		if (n >= count)
+			continue;
+		const shared_segment &ss = *segp;
+		std::optional<uint8_t> t;
+		if (ss.special == segment_special::goal_blue)
+			t = nv::CTF_TEAM_BLUE;
+		else if (ss.special == segment_special::goal_red)
+			t = nv::CTF_TEAM_RED;
+		if (!t)
+			continue;
+		MS.goals[*t].push_back(n);
+		MS.all_goals.push_back(n);
+		MS.is_goal[n] = true;
+	}
+	for (const uint8_t t : {nv::CTF_TEAM_BLUE, nv::CTF_TEAM_RED})
+	{
+		if (const auto h{net_modes_home_segment(t)}; h && *h < count)
+			MS.home[t] = static_cast<uint32_t>(*h);
+		else if (!MS.goals[t].empty())
+			MS.home[t] = MS.goals[t].front();
+		if (!MS.home[t] || MS.kind != mode_kind::ctf)
+			continue;
+		/* Wait spots: out of the goals, 80-280 units from home, the
+		 * least exposed first (section 9.17), the nearest of equal ones.
+		 */
+		const auto home_pos{B.graph.position(*MS.home[t])};
+		struct spot
+		{
+			float excess;
+			double dist;
+			uint32_t seg;
+		};
+		std::vector<spot> spots;
+		for (uint32_t i = 0; i < count; ++i)
+		{
+			if (MS.is_goal[i])
+				continue;
+			const double d{b::distance(B.graph.position(i), home_pos)};
+			if (d < 80 || d > 280)
+				continue;
+			spots.push_back({i < B.exposure_excess.size() ? B.exposure_excess[i] : 0.0f, d, i});
+		}
+		std::ranges::sort(spots, [](const spot &a, const spot &c) {
+			return a.excess != c.excess ? a.excess < c.excess : a.dist < c.dist;
+		});
+		for (std::size_t i = 0; i < spots.size() && i < 6; ++i)
+			MS.wait_spots[t].push_back(spots[i].seg);
+	}
+	con_printf(CON_VERBOSE, "bots: %s: goals blue %zu, red %zu; homes %d, %d; wait spots %zu, %zu", MS.kind == mode_kind::ctf ? (MS.rules.classic ? "ctf classic" : "ctf") : MS.team ? "team hoard" : "hoard",
+		MS.goals[0].size(), MS.goals[1].size(), MS.home[0] ? static_cast<int>(*MS.home[0]) : -1, MS.home[1] ? static_cast<int>(*MS.home[1]) : -1, MS.wait_spots[0].size(), MS.wait_spots[1].size());
+}
+
+/* The path cost from bot `bs` (its last strategy tick) to segment `seg`. */
+[[nodiscard]]
+double cost_to(const bot_state &bs, const uint32_t seg)
+{
+	if (seg >= B.graph.size())
+		return b::ROLE_FAR;
+	const auto c{bs.dist.cost(seg)};
+	return c ? *c : b::ROLE_FAR;
+}
+
+#if DXX_BUILD_DESCENT == 2
+void set_role(bot_state &bs, const b::mode_role r)
+{
+	if (bs.role == r)
+		return;
+	if (bot_log_on())
+		con_printf(CON_VERBOSE, "bots: '%s' role %s -> %s", static_cast<const char *>(bs.cfg.name), b::name_of(bs.role), b::name_of(r));
+	bs.role = r;
+	bs.patrol_seg = 0xffffffffu;
+	/* The movement recording's role event (format minor 6). */
+	movement_record_mode_event(mrb::mode_event_kind::role, bs.pid, mrb::PLAYER_NONE, static_cast<uint8_t>(r), 0);
+}
+
+/* The freshest sighting of player `p` by a bot of team `t`. */
+[[nodiscard]]
+const b::target_memory *team_sighting(const uint8_t t, const playernum_t p)
+{
+	const b::target_memory *best{nullptr};
+	for (const auto &o : B.bots)
+	{
+		if (!o || !in_game(o->pid) || team_of(o->pid) != t)
+			continue;
+		const auto &m{o->memory[p]};
+		if (m.valid && (!best || m.tick > best->tick))
+			best = &m;
+	}
+	return best;
+}
+
+/* A bot of team `t` that is alive sees the place `where` (its awareness,
+ * its field of view or close by, the line of sight).
+ */
+[[nodiscard]]
+bool team_sees(const uint8_t t, const vms_vector &where)
+{
+	const auto wpos{to_vec(where)};
+	for (const auto &o : B.bots)
+	{
+		if (!o || team_of(o->pid) != t || o->life != bot_life::alive)
+			continue;
+		const auto ship{live_ship_of(o->pid)};
+		if (!ship)
+			continue;
+		const auto to{wpos - to_vec(ship->pos)};
+		const double d{b::length(to)};
+		if (!b::notices_powerup(d, b::in_field_of_view(to_frame(ship->orient).f, to, o->skill.fov_half_deg), o->skill.awareness))
+			continue;
+		if (line_clear(*ship, ship->pos, ship->segnum, where, 0, true))
+			return true;
+	}
+	return false;
+}
+
+struct flag_truth
+{
+	bool lying{};
+	uint16_t key{0xffff}, sig{};
+	vms_vector pos{};
+	uint32_t seg{};
+	bool at_home{};
+	uint8_t carrier{0xff};
+};
+
+/* What team `t` learns of flag `f` at this update. */
+void learn_flag(const uint8_t t, const uint8_t f, const flag_truth &truth, const uint32_t tick)
+{
+	auto &k{MS.boards[t].flags[f]};
+	const auto before{k};
+	if (truth.carrier < MAX_PLAYERS)
+	{
+		/* "... picked up a flag!": everyone knows who carries it. */
+		if (k.state != b::flag_state::carried || k.carrier != truth.carrier)
+			k.place_known = false;
+		k.state = b::flag_state::carried;
+		k.carrier = truth.carrier;
+		k.key = 0xffff;
+		k.guess = false;
+		if (team_of(truth.carrier) == t)
+		{
+			/* A teammate: the team knows where it is. */
+			if (const auto ship{live_ship_of(truth.carrier)})
+			{
+				k.place_known = true;
+				k.pos = to_vec(ship->pos);
+				k.seg = ship->segnum;
+				k.tick = tick;
+			}
+		}
+		else if (const auto m{team_sighting(t, truth.carrier)}; m && (!k.place_known || m->tick >= k.tick))
+		{
+			k.place_known = true;
+			k.pos = m->pos;
+			k.seg = m->segment;
+			k.tick = m->tick;
+		}
+		return;
+	}
+	if (!truth.lying)
+	{
+		/* Neither carried nor in the level: captured a moment ago, or
+		 * not in this level; or its carrier's ship blew up this moment
+		 * and the flag is not in the level yet (kept: the drop's place
+		 * is known by the carrier's last sighting).
+		 */
+		if (k.state != b::flag_state::carried)
+			k = {};
+		return;
+	}
+	k.carrier = 0xff;
+	if (MS.rules.classic && truth.at_home)
+	{
+		/* At home: the rules and the HUD ("... flag returned", a
+		 * capture) tell everyone.
+		 */
+		k.state = b::flag_state::home;
+		k.place_known = true;
+		k.guess = false;
+	}
+	else
+	{
+		k.state = b::flag_state::lying;
+		bool known{MS.first_update || (before.place_known && before.key == truth.key && before.sig == truth.sig && before.state != b::flag_state::carried)};
+		/* Its carrier died or left (alive, it captured: the flag went
+		 * back somewhere, unknown; or dropped it by hand).
+		 */
+		if (!known && before.state == b::flag_state::carried && before.carrier < MAX_PLAYERS && !live_ship_of(before.carrier))
+		{
+			/* Its carrier died or left: the team knows where if it was
+			 * a teammate or seen just before.
+			 */
+			if (team_of(before.carrier) == t || (before.place_known && tick - before.tick <= BOT_DROP_SEEN_TICKS))
+				known = true;
+			else if (before.place_known)
+			{
+				k.guess = true;
+				k.guess_pos = before.pos;
+				k.guess_seg = before.seg;
+			}
+		}
+		if (!known && (before.key != truth.key || before.sig != truth.sig || !before.place_known))
+			known = team_sees(t, truth.pos);
+		k.place_known = known;
+		if (known)
+			k.guess = false;
+	}
+	k.key = truth.key;
+	k.sig = truth.sig;
+	if (k.place_known)
+	{
+		k.pos = to_vec(truth.pos);
+		k.seg = truth.seg;
+		k.tick = tick;
+	}
+	/* A guess searched: a bot of the team came there and did not see it. */
+	if (k.guess)
+		for (const auto &o : B.bots)
+			if (o && team_of(o->pid) == t)
+				if (const auto ship{live_ship_of(o->pid)}; ship && b::distance(to_vec(ship->pos), k.guess_pos) < BOT_GUESS_SEARCHED)
+					k.guess = false;
+}
+
+void ctf_update(const uint32_t tick)
+{
+	auto &Objects = LevelUniqueObjectState.Objects;
+	std::array<flag_truth, nv::CTF_TEAMS> truth{};
+	for (const auto &&o : Objects.vcptridx)
+	{
+		const auto f{flag_of(o)};
+		if (!f || (o->flags & OF_SHOULD_BE_DEAD) || truth[*f].lying)
+			continue;
+		auto &t{truth[*f]};
+		t.lying = true;
+		t.key = o.get_unchecked_index();
+		t.sig = underlying_value(o->signature);
+		t.pos = o->pos;
+		t.seg = o->segnum;
+		t.at_home = net_modes_flag_at_home(o);
+	}
+	/* A carrier in its death tumble still carries (the flag drops when
+	 * the ship explodes; the review of B7: the knowledge of where it
+	 * fell was lost in between).
+	 */
+	for (playernum_t p = 0; p < N_players && p < MAX_PLAYERS; ++p)
+	{
+		if (!in_game(p))
+			continue;
+		const auto &ship{*Objects.vcptr(vcplayerptr(p)->objnum)};
+		if (ship.type == object_type::OBJ_PLAYER && +(ship.ctype.player_info.powerup_flags & player_flag::has_team_flag))
+			truth[nv::other_team(team_of(p))].carrier = p;
+	}
+	for (const uint8_t t : {nv::CTF_TEAM_BLUE, nv::CTF_TEAM_RED})
+	{
+		auto &board{MS.boards[t]};
+		for (const uint8_t f : {nv::CTF_TEAM_BLUE, nv::CTF_TEAM_RED})
+			learn_flag(t, f, truth[f], tick);
+		const auto &own{board.flags[t]};
+		const auto &enemy{board.flags[nv::other_team(t)]};
+		const uint32_t situation{static_cast<uint32_t>(own.state) | static_cast<uint32_t>(enemy.state) << 4 | static_cast<uint32_t>(own.carrier) << 8 | static_cast<uint32_t>(enemy.carrier) << 16 | (own.place_known || own.guess ? 1u << 24 : 0) | (enemy.place_known ? 1u << 25 : 0)};
+		if (tick < board.next_assign && situation == board.situation)
+			continue;
+		board.next_assign = tick + BOT_ROLE_TICKS;
+		board.situation = situation;
+		std::array<b::member_view, MAX_PLAYERS> members{};
+		std::array<b::mode_role, MAX_PLAYERS> roles{};
+		unsigned n{0}, enemies{0};
+		/* The places the roles go to. */
+		const std::optional<uint32_t> own_flag_seg{own.place_known && own.state == b::flag_state::lying ? std::optional<uint32_t>{own.seg} : own.guess ? std::optional<uint32_t>{own.guess_seg} : std::nullopt};
+		const std::optional<uint32_t> enemy_flag_seg{enemy.place_known && (enemy.state == b::flag_state::home || enemy.state == b::flag_state::lying) ? std::optional<uint32_t>{enemy.seg} : std::nullopt};
+		std::optional<uint32_t> enemy_carrier_seg;
+		if (own.state == b::flag_state::carried)
+			enemy_carrier_seg = own.place_known ? std::optional<uint32_t>{own.seg} : MS.home[nv::other_team(t)];
+		std::optional<uint32_t> own_carrier_seg;
+		if (enemy.state == b::flag_state::carried && enemy.place_known)
+			own_carrier_seg = enemy.seg;
+		const std::optional<uint32_t> defend_seg{own.state == b::flag_state::lying && own.place_known ? std::optional<uint32_t>{own.seg} : MS.home[t]};
+		for (playernum_t p = 0; p < N_players && p < MAX_PLAYERS; ++p)
+		{
+			if (!in_game(p))
+				continue;
+			if (team_of(p) != t)
+			{
+				++enemies;
+				continue;
+			}
+			auto &m{members[n]};
+			m.pid = p;
+			const auto bs{find_bot(p)};
+			m.bot = bs != nullptr;
+			m.alive = live_ship_of(p) != nullptr;
+			m.carrier = enemy.state == b::flag_state::carried && enemy.carrier == p;
+			if (bs)
+			{
+				m.style = bs->cfg.style;
+				m.previous = bs->role;
+				if (m.alive)
+				{
+					const auto at{[&bs](const std::optional<uint32_t> seg) {
+						return seg ? cost_to(*bs, *seg) : b::ROLE_FAR;
+					}};
+					m.to_own_home = at(defend_seg);
+					m.to_enemy_flag = at(enemy_flag_seg);
+					m.to_own_flag = at(own_flag_seg);
+					m.to_enemy_carrier = at(enemy_carrier_seg);
+					m.to_own_carrier = at(own_carrier_seg);
+				}
+			}
+			++n;
+		}
+		if (!n)
+			continue;
+		const b::team_view tv{
+			.classic = MS.rules.classic,
+			.touch_returns = MS.rules.touch_returns,
+			.home_to_score = MS.rules.home_to_score,
+			.own_flag = own.state,
+			.enemy_flag = enemy.state,
+			.own_flag_place_known = own.place_known || own.guess,
+			.enemy_flag_place_known = enemy.place_known,
+			.team_carries = enemy.state == b::flag_state::carried,
+			.team_size = n,
+			.enemies = enemies,
+			.score_lead = team_kills[static_cast<team_number>(t)] - team_kills[static_cast<team_number>(nv::other_team(t))],
+		};
+		b::assign_ctf_roles(tv, std::span(members.data(), n), std::span(roles.data(), n));
+		for (unsigned i = 0; i < n; ++i)
+			if (const auto bs{find_bot(members[i].pid)})
+				set_role(*bs, roles[i]);
+	}
+}
+
+void hoard_update()
+{
+	for (const uint8_t t : {nv::CTF_TEAM_BLUE, nv::CTF_TEAM_RED})
+	{
+		std::array<b::hoard_member, MAX_PLAYERS> members{};
+		std::array<b::mode_role, MAX_PLAYERS> roles{};
+		unsigned n{0};
+		/* The teammate with the most orbs (team hoard). */
+		std::optional<uint32_t> loaded_seg;
+		unsigned loaded_orbs{0};
+		if (MS.team)
+			for (playernum_t p = 0; p < N_players && p < MAX_PLAYERS; ++p)
+				if (const auto ship{live_ship_of(p)}; ship && team_of(p) == t && ship->ctype.player_info.hoard.orbs > loaded_orbs)
+				{
+					loaded_orbs = ship->ctype.player_info.hoard.orbs;
+					loaded_seg = ship->segnum;
+				}
+		for (playernum_t p = 0; p < N_players && p < MAX_PLAYERS; ++p)
+		{
+			if (!in_game(p) || (MS.team && team_of(p) != t) || (!MS.team && t != nv::CTF_TEAM_BLUE))
+				continue;
+			auto &m{members[n++]};
+			m.pid = p;
+			const auto bs{find_bot(p)};
+			m.bot = bs != nullptr;
+			const auto ship{live_ship_of(p)};
+			m.alive = ship != nullptr;
+			m.orbs = ship ? ship->ctype.player_info.hoard.orbs : 0;
+			if (bs)
+			{
+				m.scoring = bs->hoard_scoring;
+				m.style = bs->cfg.style;
+				m.previous = bs->role;
+				if (m.alive && loaded_seg)
+					m.to_loaded = cost_to(*bs, *loaded_seg);
+			}
+		}
+		b::assign_hoard_roles(MS.team, n, std::span(members.data(), n), std::span(roles.data(), n));
+		for (unsigned i = 0; i < n; ++i)
+			if (const auto bs{find_bot(members[i].pid)})
+				set_role(*bs, roles[i]);
+	}
+}
+#endif
+
+/* Once per strategy period, before the bots think. */
+void modes_update(const uint32_t tick)
+{
+	if (MS.kind == mode_kind::none || tick < MS.next_update)
+		return;
+	MS.next_update = tick + b::STRATEGY_DIVISOR;
+#if DXX_BUILD_DESCENT == 2
+	if (MS.kind == mode_kind::ctf)
+		ctf_update(tick);
+	else
+		hoard_update();
+#endif
+	MS.first_update = false;
+}
+
+/* Section 9.19: the orbs the bot learns of (hoard): seen (as a powerup,
+ * a few line of sight checks per tick) or heard appearing (a death's
+ * drop close by).  An orb gone is forgotten when the bot sees its place
+ * empty or comes to it, or after BOT_ORB_MEMORY_TICKS.
+ */
+void learn_orbs(bot_state &bs, const object &obj, const uint32_t tick)
+{
+#if DXX_BUILD_DESCENT == 2
+	auto &Objects = LevelUniqueObjectState.Objects;
+	const auto &sk{bs.skill};
+	const auto pos{to_vec(obj.pos)};
+	const auto frame{to_frame(obj.orient)};
+	unsigned budget{BOT_ORB_LOS_BUDGET};
+	const auto sees{[&](const vms_vector &where) {
+		const auto to{to_vec(where) - pos};
+		if (!budget || !b::notices_powerup(b::length(to), b::in_field_of_view(frame.f, to, sk.fov_half_deg), sk.awareness))
+			return false;
+		--budget;
+		return line_clear(obj, obj.pos, obj.segnum, where, 0, true);
+	}};
+	const auto live{[&Objects](const known_orb &k) -> const object * {
+		if (k.key > Highest_object_index)
+			return nullptr;
+		const auto &o{*Objects.vcptr(objnum_t{k.key})};
+		if (o.type == object_type::OBJ_POWERUP && get_powerup_id(o) == powerup_type_t::POW_HOARD_ORB && underlying_value(o.signature) == k.sig && !(o.flags & OF_SHOULD_BE_DEAD))
+			return &o;
+		return nullptr;
+	}};
+	/* An orb rolling on is followed. */
+	for (auto &k : bs.orbs)
+		if (const auto o{live(k)})
+		{
+			k.pos = to_vec(o->pos);
+			k.seg = o->segnum;
+		}
+	std::erase_if(bs.orbs, [&](const known_orb &k) {
+		if (tick - k.tick > BOT_ORB_MEMORY_TICKS)
+			return true;
+		if (live(k))
+			return false;
+		return b::distance(pos, k.pos) < 20 || sees(to_fixvec(k.pos));
+	});
+	for (const auto &&o : Objects.vcptridx)
+	{
+		if (o->type != object_type::OBJ_POWERUP || get_powerup_id(o) != powerup_type_t::POW_HOARD_ORB || (o->flags & OF_SHOULD_BE_DEAD))
+			continue;
+		const uint16_t key = o.get_unchecked_index();
+		const uint16_t sig = underlying_value(o->signature);
+		if (std::ranges::any_of(bs.orbs, [key, sig](const known_orb &k) { return k.key == key && k.sig == sig; }))
+			continue;
+		const double d{b::distance(pos, to_vec(o->pos))};
+		const double age{(GameTime64 - o->ctype.powerup_info.creation_time) / 65536.0};
+		if (!b::hears_appearance(age, d, sk.hearing) && !sees(o->pos))
+			continue;
+		if (bs.orbs.size() >= BOT_ORB_MEMORY)
+		{
+			/* The farthest goes. */
+			const auto far_one{std::ranges::max_element(bs.orbs, {}, [&pos](const known_orb &k) { return b::distance(pos, k.pos); })};
+			if (b::distance(pos, far_one->pos) <= d)
+				continue;
+			bs.orbs.erase(far_one);
+		}
+		bs.orbs.push_back({key, sig, to_vec(o->pos), static_cast<uint32_t>(o->segnum), tick});
+	}
+#else
+	(void)bs;
+	(void)obj;
+	(void)tick;
+#endif
+}
+
+/* The objective of the bot's role and its place (think). */
+struct mode_plan
+{
+	b::objective obj;
+	bool known{};
+	uint32_t seg{};
+	vec3 pos;
+};
+
+/* The nearest of `segs` by the bot's path costs. */
+[[nodiscard]]
+std::optional<uint32_t> nearest_of(const bot_state &bs, const std::span<const uint32_t> segs)
+{
+	std::optional<uint32_t> best;
+	double best_cost{0};
+	for (const auto s : segs)
+	{
+		const double c{cost_to(bs, s)};
+		if (!(c < b::ROLE_FAR))
+			continue;
+		if (!best || c < best_cost)
+		{
+			best = s;
+			best_cost = c;
+		}
+	}
+	return best;
+}
+
+/* A patrol point within BOT_PATROL_RADIUS of `centre` the bot can reach,
+ * kept until it is reached or BOT_PATROL_TICKS passed.
+ */
+[[nodiscard]]
+uint32_t patrol_point(bot_state &bs, const object &obj, const uint32_t centre, const uint32_t tick)
+{
+	const auto cpos{B.graph.position(centre)};
+	const bool keep{bs.patrol_seg < B.graph.size() && tick < bs.patrol_until && obj.segnum != bs.patrol_seg && b::distance(B.graph.position(bs.patrol_seg), cpos) <= BOT_PATROL_RADIUS};
+	if (keep)
+		return bs.patrol_seg;
+	std::array<uint32_t, 32> pick{};
+	unsigned n{0};
+	for (uint32_t i = 0; i < B.graph.size(); ++i)
+	{
+		if (i == obj.segnum || b::distance(B.graph.position(i), cpos) > BOT_PATROL_RADIUS)
+			continue;
+		if (!(cost_to(bs, i) < 2 * BOT_PATROL_RADIUS + 200))
+			continue;
+		if (n < pick.size())
+			pick[n++] = i;
+		else if (const auto r{bs.rng.below(n + 1)}; r < pick.size())
+			pick[r] = i;
+	}
+	bs.patrol_seg = n ? pick[bs.rng.below(std::min<unsigned>(n, pick.size()))] : centre;
+	bs.patrol_until = tick + BOT_PATROL_TICKS;
+	return bs.patrol_seg;
+}
+
+[[nodiscard]]
+mode_plan plan_objective(bot_state &bs, const object &obj, const uint32_t tick, const bool attacked, const bool target_visible)
+{
+	mode_plan r;
+	if (MS.kind == mode_kind::none)
+		return r;
+	const auto pos{to_vec(obj.pos)};
+	b::objective_view v{.role = bs.role, .style = bs.cfg.style};
+	const auto place{[&r](const uint32_t seg, const vec3 &p) {
+		if (seg >= B.graph.size())
+			return;
+		r.known = true;
+		r.seg = seg;
+		r.pos = p;
+	}};
+	const auto centre{[&place](const std::optional<uint32_t> seg) {
+		if (seg)
+			place(*seg, B.graph.position(*seg));
+	}};
+	/* "There" (bot_modes.h OBJ_THERE_PATH): a patrol round the place;
+	 * whether it is there is judged by the path to the place, not to
+	 * the patrol point (the review of B7).
+	 */
+	std::optional<double> centre_path;
+	const auto patrol_round{[&](const uint32_t seg) {
+		centre_path = cost_to(bs, seg);
+		if (*centre_path < b::OBJ_THERE_PATH)
+			centre(patrol_point(bs, obj, seg, tick));
+		else
+			centre(seg);
+	}};
+#if DXX_BUILD_DESCENT == 2
+	if (MS.kind == mode_kind::ctf)
+	{
+		const auto t{team_of(bs.pid)};
+		const auto &board{MS.boards[t]};
+		const auto &own{board.flags[t]};
+		const auto &enemy{board.flags[nv::other_team(t)]};
+		switch (bs.role)
+		{
+			case b::mode_role::carry:
+				/* Into the nearest of its team's goals. */
+				centre(MS.goals[t].empty() ? MS.home[t] : nearest_of(bs, MS.goals[t]));
+				if (!r.known)
+					centre(MS.home[t]);
+				break;
+			case b::mode_role::wait:
+				/* The own flag lying close by where the team knows it,
+				 * with the touch rule: the carrier returns it itself.
+				 */
+				if (MS.rules.touch_returns && own.state == b::flag_state::lying && own.place_known && cost_to(bs, own.seg) < 700)
+				{
+					place(own.seg, own.pos);
+					v.role = b::mode_role::retrieve;
+				}
+				else if (!MS.wait_spots[t].empty())
+					/* Its corner near home (the bots of a team spread
+					 * over the spots).
+					 */
+					centre(MS.wait_spots[t][bs.pid % MS.wait_spots[t].size()]);
+				else
+					centre(MS.home[t]);
+				break;
+			case b::mode_role::retrieve:
+				if (own.state == b::flag_state::lying && own.place_known)
+					place(own.seg, own.pos);
+				else if (own.guess)
+					place(own.guess_seg, own.guess_pos);
+				break;
+			case b::mode_role::hunt:
+				if (own.state != b::flag_state::carried)
+					break;
+				v.target_in_sight = own.carrier < MAX_PLAYERS && bs.visible_now[own.carrier];
+				if (own.place_known && tick - own.tick <= BOT_HUNT_SIGHTING_TICKS)
+					place(own.seg, own.pos);
+				else
+				{
+					/* Where the carrier goes: the enemy goal, watched
+					 * from round about (not sat in).
+					 */
+					const auto other{nv::other_team(t)};
+					auto goal{MS.goals[other].empty() ? MS.home[other] : nearest_of(bs, MS.goals[other])};
+					if (!goal)
+						goal = MS.home[other];
+					if (goal)
+					{
+						patrol_round(*goal);
+						v.watching = true;
+					}
+				}
+				break;
+			case b::mode_role::defend:
+				if (own.state == b::flag_state::lying && own.place_known)
+					patrol_round(own.seg);
+				else if (MS.home[t])
+					patrol_round(*MS.home[t]);
+				break;
+			case b::mode_role::escort:
+				if (enemy.state == b::flag_state::carried && enemy.carrier < MAX_PLAYERS && enemy.carrier != bs.pid)
+					if (const auto ship{live_ship_of(enemy.carrier)})
+						place(ship->segnum, to_vec(ship->pos));
+				break;
+			case b::mode_role::attack:
+				if ((enemy.state == b::flag_state::home || enemy.state == b::flag_state::lying) && enemy.place_known)
+					place(enemy.seg, enemy.pos);
+				break;
+			default:
+				break;
+		}
+	}
+	else if (MS.kind == mode_kind::hoard)
+	{
+		const auto &pi{obj.ctype.player_info};
+		const unsigned orbs{pi.hoard.orbs};
+		v.orbs = orbs;
+		learn_orbs(bs, obj, tick);
+		auto goal{nearest_of(bs, MS.all_goals)};
+		double to_goal{goal ? cost_to(bs, *goal) : b::ROLE_FAR};
+		/* Every goal beyond the path costs' reach: the nearest as the
+		 * crow flies, its distance a little longer (the review of B7: a
+		 * bot far from the goals never scored).
+		 */
+		if (!goal)
+			for (const auto g : MS.all_goals)
+				if (const double d{1.5 * b::distance(pos, B.graph.position(g))}; d < to_goal)
+				{
+					goal = g;
+					to_goal = std::min(d, b::ROLE_FAR - 1);
+				}
+		/* Score now or gather more (b::hoard_should_score). */
+		bs.hoard_scoring = b::hoard_should_score({
+			.orbs = orbs,
+			.max_orbs = pi.max_hoard_orbs,
+			.to_goal = to_goal,
+			.shields = obj.shields / 65536.0,
+			.threatened = attacked || target_visible,
+			.style = bs.cfg.style,
+			.scoring = bs.hoard_scoring,
+		});
+		if (bs.hoard_scoring && bs.role != b::mode_role::score)
+			set_role(bs, b::mode_role::score);
+		else if (!bs.hoard_scoring && bs.role == b::mode_role::score)
+			set_role(bs, b::mode_role::collect);
+		v.role = bs.role;
+		switch (bs.role)
+		{
+			case b::mode_role::score:
+				centre(goal);
+				break;
+			case b::mode_role::escort:
+			{
+				const auto t{team_of(bs.pid)};
+				unsigned most{0};
+				for (playernum_t p = 0; p < N_players && p < MAX_PLAYERS; ++p)
+					if (const auto ship{live_ship_of(p)}; ship && p != bs.pid && team_of(p) == t && ship->ctype.player_info.hoard.orbs > most)
+					{
+						most = ship->ctype.player_info.hoard.orbs;
+						place(ship->segnum, to_vec(ship->pos));
+					}
+				break;
+			}
+			case b::mode_role::collect:
+			default:
+			{
+				/* The best orb it knows. */
+				double best{0};
+				for (const auto &k : bs.orbs)
+				{
+					const double c{cost_to(bs, k.seg)};
+					if (!(c < b::ROLE_FAR))
+						continue;
+					const double u{b::orb_utility(orbs, c + b::distance(B.graph.position(k.seg), k.pos))};
+					if (u > best)
+					{
+						best = u;
+						place(k.seg, k.pos);
+					}
+				}
+				if (r.known)
+				{
+					v.place_known = true;
+					v.path = cost_to(bs, r.seg);
+					r.obj = b::objective_for(v);
+					r.obj.utility = best;
+					r.obj.collect = 0.8;
+					return r;
+				}
+				break;
+			}
+		}
+	}
+#else
+	(void)tick;
+	(void)attacked;
+	(void)target_visible;
+	(void)patrol_round;
+#endif
+	/* A place without a way there (plan_path found none lately) is no
+	 * objective: the exact segment for a while, and any place out of
+	 * the path costs' reach meanwhile (an escorted carrier, a sighting
+	 * that moves on).
+	 */
+	if (r.known && tick < bs.objective_blocked_until && (r.seg == bs.objective_blocked_seg || !(cost_to(bs, r.seg) < b::ROLE_FAR)))
+		r.known = false;
+	v.place_known = r.known;
+	v.path = r.known ? cost_to(bs, r.seg) + b::distance(B.graph.position(r.seg), r.pos) : b::ROLE_FAR;
+	/* The place is the segment the bot is in: path cost 0. */
+	if (r.known && r.seg == obj.segnum)
+		v.path = b::distance(pos, r.pos);
+	if (r.known && centre_path)
+		v.path = *centre_path;
+	r.obj = b::objective_for(v);
+	return r;
+}
+
+/* Section 9.19: the weight of enemy `i` as a target: the carrier of the
+ * bot's team's flag; an enemy carrying orbs (b::carrier_priority,
+ * b::orb_carrier_priority).
+ */
+[[nodiscard]]
+double mode_target_priority(const bot_state &bs, const playernum_t i)
+{
+#if DXX_BUILD_DESCENT == 2
+	if (MS.kind == mode_kind::ctf)
+	{
+		const auto &own{MS.boards[team_of(bs.pid)].flags[team_of(bs.pid)]};
+		if (own.state == b::flag_state::carried && own.carrier == i)
+			return b::carrier_priority(bs.role);
+	}
+	else if (MS.kind == mode_kind::hoard)
+	{
+		if (const auto ship{live_ship_of(i)})
+			return b::orb_carrier_priority(ship->ctype.player_info.hoard.orbs);
+	}
+#else
+	(void)bs;
+	(void)i;
+#endif
+	return 1;
 }
 
 /* A goal place: a powerup or a centre. */
@@ -2759,6 +3804,8 @@ std::optional<b::goal_kind> current_goal(const bot_state &bs, const bool target_
 			return b::goal_kind::retreat;
 		case bot_goal::refuel:
 			return b::goal_kind::refuel;
+		case bot_goal::objective:
+			return b::goal_kind::objective;
 	}
 	return std::nullopt;
 }
@@ -2792,6 +3839,8 @@ void think(bot_state &bs, object &obj, const uint32_t tick)
 		c.damaged_me_recently = bs.last_attacker == i && tick - bs.attacked_tick < BOT_REVENGE_TICKS;
 		c.low_shields = Objects.vcptr(vcplayerptr(i)->objnum)->shields < i2f(30);
 		c.bounty = +(Game_mode & GM_BOUNTY) && Bounty_target == i;
+		/* Section 9.19: the enemy carrying the team's flag, orbs. */
+		c.priority = c.excluded ? 1 : mode_target_priority(bs, i);
 	}
 	bs.target = b::choose_target(std::span(cand.data(), n), bs.target, sk.awareness);
 	if (bs.pursuit.active && bs.target != bs.pursuit.who)
@@ -2987,6 +4036,18 @@ void think(bot_state &bs, object &obj, const uint32_t tick)
 		kill_soon = t.type == object_type::OBJ_PLAYER && b::kill_imminent(target_visible, t.shields / 65536.0, *target_distance);
 	}
 	const bool power_current{bs.power_going && bs.goal == bot_goal::collect && power.place.key == bs.collect_key && power.place.sig == bs.collect_sig};
+	/* Section 9.19: the objective of the bot's role in capture the flag
+	 * or hoard, and its weight on the fight and the collections.
+	 */
+	const auto plan{plan_objective(bs, obj, tick, attacked, target_visible)};
+	bs.objective = plan.obj;
+	bs.objective_known = plan.known;
+	if (plan.known)
+	{
+		bs.objective_seg = plan.seg;
+		bs.objective_pos = plan.pos;
+	}
+	const double mode_collect{plan.obj.collect};
 	const b::goal_inputs gin{
 		.has_target = bs.target.has_value() && !given_up,
 		.target_visible = target_visible,
@@ -3006,20 +4067,23 @@ void think(bot_state &bs, object &obj, const uint32_t tick)
 		.weak = weak,
 		.seek = seek,
 		.phase_engage = phase_engage,
-		.phase_collect = phase_collect,
+		.phase_collect = phase_collect * mode_collect,
 		.third_party = b::third_party_factor(bs.cfg.style, bs.third_parties),
 		.refuel = centre.utility,
 		.retreat_shields = bs.retreat_shields,
 		.engage_weight = st.engage_weight * b::style_engage_factor(st, advantage) * bs.tactics.engage_weight,
-		.collect_weight = st.collect_weight * bs.tactics.collect_weight,
+		.collect_weight = st.collect_weight * bs.tactics.collect_weight * mode_collect,
 		.collector = bs.cfg.style == b::bot_style::collector,
 		.detour_scale = bs.tune.grab_detour_scale,
 		.pursuing = pursuing,
-		.power = power.value.utility,
+		.power = power.value.utility * mode_collect,
 		.power_fight = power.value.fight,
 		.power_invulnerability = power.place.invulnerability,
 		.kill_imminent = kill_soon,
 		.power_current = power_current,
+		.objective = plan.known ? plan.obj.utility : 0,
+		.mode_engage = plan.obj.engage,
+		.mode_hunt = plan.obj.hunt,
 		.current = current_goal(bs, target_visible),
 	};
 	const auto goal{b::choose_goal(gin)};
@@ -3152,6 +4216,33 @@ void think(bot_state &bs, object &obj, const uint32_t tick)
 				return;
 			}
 			break;
+		}
+		case b::goal_kind::objective:
+		{
+			/* Section 9.19: to the role's place; a place that moves (a
+			 * carrier escorted, an enemy carrier's sighting) is planned
+			 * again at most every half second.
+			 */
+			const bool other{bs.goal != bot_goal::objective};
+			const bool moved{bs.goal_seg != plan.seg};
+			bs.objective_seg = plan.seg;
+			bs.objective_pos = plan.pos;
+			if (other || replan_due || (moved && tick - bs.last_plan_tick >= BOT_HUNT_REPLAN_TICKS))
+			{
+				set_goal(bs, obj, bot_goal::objective, plan.seg, plan.pos, tick);
+				/* No way there (a wall a trigger opens, a door locked
+				 * for good): no objective there for a while; the bot
+				 * plays on (section 9.19).
+				 */
+				if (bs.points.empty() && plan.seg != obj.segnum)
+				{
+					bs.objective_blocked_seg = plan.seg;
+					bs.objective_blocked_until = tick + BOT_OBJECTIVE_BLOCKED_TICKS;
+					if (bot_log_on())
+						con_printf(CON_VERBOSE, "bots: '%s' finds no way to its objective in segment %u", static_cast<const char *>(bs.cfg.name), plan.seg);
+				}
+			}
+			return;
 		}
 		case b::goal_kind::roam:
 			break;
@@ -3295,8 +4386,13 @@ void decide_afterburner(bot_state &bs, object &obj, const vec3 &wanted, const ui
 	bool chasing_far{false};
 	if (bs.target && (bs.goal == bot_goal::hunt) && bs.memory[*bs.target].valid)
 		chasing_far = b::distance(pos, bs.memory[*bs.target].pos) > bs.style.burn_chase_distance;
+	/* Section 9.19: a carrier's run home (or a hunter's far chase) is
+	 * burnt along its path.
+	 */
+	if (bs.goal == bot_goal::objective && bs.objective.burn && bs.steer_index < bs.points.size())
+		chasing_far = true;
 	bool long_straight{false};
-	if ((bs.goal == bot_goal::roam || bs.goal == bot_goal::collect) && bs.steer_index < bs.points.size())
+	if ((bs.goal == bot_goal::roam || bs.goal == bot_goal::collect || bs.goal == bot_goal::objective) && bs.steer_index < bs.points.size())
 		/* Section 9.15: straight on along the path, past the point it
 		 * steers at.
 		 */
@@ -3333,10 +4429,19 @@ void decide_afterburner(bot_state &bs, object &obj, const vec3 &wanted, const ui
 	})};
 	const bool governed{bs.habits.burn_governed(situation)};
 	const bool turn_boost{bs.turning.phase == b::turn_phase::boost && bs.turning.burn};
+	/* Section 9.19: the carrier's run is burnt whatever the habits. */
+	const bool run_burn{chasing_far && bs.goal == bot_goal::objective && b::want_afterburner({
+		.have = have,
+		.charge = charge,
+		.use = b::afterburner_of(bs.skill_level),
+		.chasing_far = true,
+		.aligned = aligned,
+		.burning = bs.burning,
+	})};
 	/* The review of PR #84: the push after a turn round (section 9.12,
 	 * the profile's tune.turn_boost_burn) keeps its burn.
 	 */
-	const bool burn{!bs.stuck.recovering() && (governed
+	const bool burn{!bs.stuck.recovering() && (run_burn || (governed
 		? b::habit_burn({
 			.have = have,
 			.charge = charge,
@@ -3366,7 +4471,7 @@ void decide_afterburner(bot_state &bs, object &obj, const vec3 &wanted, const ui
 		.turn_boost = turn_boost,
 		.aligned = aligned,
 		.burning = bs.burning,
-	}))};
+	})))};
 	/* What the analysis sees: the afterburner as lit since the last
 	 * tick, with charge and this tick's forward key.
 	 */
@@ -3730,6 +4835,19 @@ bool teammate_behind(const bot_state &bs, const object &obj)
 	auto &Objects = LevelUniqueObjectState.Objects;
 	const auto pos{to_vec(obj.pos)};
 	const auto dir{b::normalized(to_vec(obj.mtype.phys_info.velocity))};
+	/* Section 9.19: in capture the flag and team hoard the team comes to
+	 * the same places (home, the flags, the goals): no mine near home,
+	 * nor with a teammate anywhere near.
+	 */
+	if (MS.kind != mode_kind::none)
+	{
+		if (const auto home{MS.home[team_of(bs.pid)]}; MS.kind == mode_kind::ctf && home && b::distance(pos, B.graph.position(*home)) < BOT_MODE_MINE_DISTANCE)
+			return true;
+		for (playernum_t i = 0; i < N_players && i < MAX_PLAYERS; ++i)
+			if (i != bs.pid && same_team(bs.pid, i))
+				if (const auto ship{live_ship_of(i)}; ship && b::distance(to_vec(ship->pos), pos) < BOT_MODE_MINE_DISTANCE)
+					return true;
+	}
 	for (playernum_t i = 0; i < N_players && i < MAX_PLAYERS; ++i)
 	{
 		if (i == bs.pid || !same_team(bs.pid, i))
@@ -4559,6 +5677,11 @@ void log_summary(const bot_state &bs, const object &obj, const uint32_t tick)
 		bs.risk_now.self_budget, bs.risk_now.trade, bs.hugging ? " hug" : "", bs.duck_point && tick < bs.duck_until ? " duck" : "",
 		bs.dumping ? " dump" : "", bs.turning.phase == b::turn_phase::reversing ? " reverse-turn" : bs.turning.phase == b::turn_phase::sliding ? " slide-turn" : bs.turning.phase == b::turn_phase::boost ? (bs.turning.burn ? " boost-burn" : " boost") : "",
 		b::name_of(bs.light_why), b::name_of(bs.armed));
+	/* Section 9.19: the role and its objective. */
+	if (bs.role != b::mode_role::none)
+		con_printf(CON_VERBOSE, "bots: '%s' role=%s objective %.2f %s seg %u (in seg %u, %.0f u away)%s%s",
+			static_cast<const char *>(bs.cfg.name), b::name_of(bs.role), bs.objective.utility, bs.objective_known ? "at" : "unknown,", bs.objective_known ? bs.objective_seg : 0u, static_cast<unsigned>(obj.segnum),
+			bs.objective_known ? b::distance(to_vec(obj.pos), bs.objective_pos) : 0.0, bs.objective.burn ? " burn" : "", bs.objective.path_while_fighting ? " path-fight" : "");
 }
 
 /* Section 9.16: out of a fight, the hover of a refuel (no path) is flown
@@ -4741,7 +5864,11 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 		 * shoots at what it sees but flies its path: backward when it
 		 * retreats facing its pursuer.
 		 */
-		bool path_goal{bs.goal == bot_goal::collect || bs.goal == bot_goal::retreat || bs.goal == bot_goal::refuel};
+		bool path_goal{bs.goal == bot_goal::collect || bs.goal == bot_goal::retreat || bs.goal == bot_goal::refuel ||
+			/* Section 9.19: a carrier (a retriever, a scorer) flies its
+			 * way and shoots at what it sees.
+			 */
+			(bs.goal == bot_goal::objective && bs.objective.path_while_fighting)};
 		/* Section 9.16: a pickup aside while the target is far off its
 		 * way: the fight first.
 		 */
@@ -5117,6 +6244,25 @@ void bot_tick(bot_state &bs, const uint32_t tick)
 		const auto l{frame.to_local(bs.move_cmd)};
 		bs.habits.strafe_tick(tick_seconds(b::HABIT_SAMPLE_TICKS), bs.sight_enemy && b::distance(*bs.sight_enemy, pos) < b::HABIT_FIGHT_RANGE, l.x, l.y);
 	}
+	/* Section 9.19: a blastable wall on the way is shot open, as a human
+	 * does (on GGC-TOP 5 one team's way out of its side opens so).
+	 */
+	if (!aim_set && !bs.fire)
+		if (const auto wall{blastable_ahead(bs, pos)})
+		{
+			bs.face_dir = b::normalized(*wall - pos);
+			bs.face_rate = {};
+			bs.fire = b::angle_between(frame.f, bs.face_dir) < b::radians(12);
+			/* Not pressed against it: the shots must leave the guns
+			 * on this side of the wall.
+			 */
+			if (const double d{b::distance(*wall, pos)}; d < BOT_BLAST_WALL_NEAR)
+				bs.move_cmd = -bs.face_dir;
+			else if (d < BOT_BLAST_WALL_STAND)
+				bs.move_cmd = b::velocity_command({}, vel, max_speed);
+			if (bot_log_on() && tick % b::BOT_TICK_RATE == 0)
+				con_printf(CON_VERBOSE, "bots: '%s' shoots a blastable wall %.0f units ahead%s", static_cast<const char *>(bs.cfg.name), b::distance(*wall, pos), bs.fire ? "" : " (turning to it)");
+		}
 	if (!aim_set)
 		bs.aim_dir = bs.face_dir;
 	/* Section 9.15: the afterburner's check of the way the bot wants to
@@ -5199,6 +6345,13 @@ void give_spawn_invulnerability(object &obj)
  */
 void new_ship(bot_state &bs, object &obj)
 {
+	/* Section 9.19: every player of a network game but a cooperative one
+	 * holds all the keys (init_player_stats_level gives them to the
+	 * human at the level's start; the bots had none and took a locked
+	 * door for a wall: on BAHAGAD 6 the flags' rooms were out of reach).
+	 */
+	if (+(Game_mode & GM_MULTI) && !(Game_mode & GM_MULTI_COOP))
+		obj.ctype.player_info.powerup_flags |= player_flag::blue_key | player_flag::gold_key | player_flag::red_key;
 	give_spawn_invulnerability(obj);
 	obj.ctype.player_info.Fusion_charge = 0;
 	bs.fusion_charging = false;
@@ -5442,6 +6595,15 @@ bool bot_is_local(const playernum_t pnum)
 	return find_bot(pnum) != nullptr;
 }
 
+bool bot_mode_role(const playernum_t pnum, uint8_t &role)
+{
+	const auto bs{find_bot(pnum)};
+	if (!bs || !bots_running())
+		return false;
+	role = static_cast<uint8_t>(bs->role);
+	return true;
+}
+
 bool bot_movement_state(const playernum_t pnum, uint8_t &mode, uint8_t &goal)
 {
 	const auto bs{find_bot(pnum)};
@@ -5634,6 +6796,8 @@ void prepare_level()
 	build_nav_graph();
 	compute_limits();
 	judge_spawn_sites();
+	/* Section 9.19: the goals and homes of capture the flag and hoard. */
+	modes_level_start();
 	/* Section 9.8: the level's supply of weapons against its players
 	 * (a weapon-poor level: the bots fight with what they have).
 	 */
@@ -5664,6 +6828,11 @@ void enter_level(bot_state &bs)
 	bs.last_attacker = 0xff;
 	bs.memory = {};
 	bs.powerups.clear();
+	/* Section 9.19: the level's roles and orbs start afresh. */
+	bs.orbs.clear();
+	bs.role = b::mode_role::none;
+	bs.hoard_scoring = false;
+	bs.objective_blocked_until = 0;
 	bs.visited.assign(B.graph.size(), 0);
 }
 
@@ -5742,6 +6911,9 @@ void bots_frame(const d_robot_info_array &Robot_info)
 	B.last_time = GameTime64;
 	const unsigned ticks{B.tick.advance(GameTime64)};
 	const uint32_t first{B.tick.tick() - ticks};
+	/* Section 9.19: the teams' blackboards, before the bots think. */
+	if (ticks)
+		modes_update(B.tick.tick());
 	for (auto &o : B.bots)
 	{
 		if (!o)
@@ -5770,6 +6942,110 @@ void bots_frame(const d_robot_info_array &Robot_info)
 			bot_tick(bs, first + k);
 		steer(bs, obj);
 	}
+}
+
+namespace {
+
+/* Section 9.19 (stage B7): with friendly fire, no shot that a teammate
+ * flies into.  The trigger discipline (shot_line_clear) holds fire when
+ * a teammate is first on the line to the target at the strategy tick;
+ * the team modes put teammates next to each other (an escort, the
+ * defenders), and in the CTF arena one kill in ten was a teammate's
+ * (super laser bolts, concussion missiles), before and after the roles.
+ * Now each shot is also held when a teammate is within the shot's width
+ * of the nose's line now or where it will be when the shot gets there,
+ * or, for a missile, near where it bursts.
+ */
+constexpr double BOT_TEAM_FIRE_MARGIN{9};
+constexpr double BOT_TEAM_FIRE_WIDE_MARGIN{16};
+constexpr double BOT_TEAM_MISSILE_MARGIN{22};
+/* A missile's blast: its damage radius, wider for those that split
+ * (the earthshaker's children, the smart missile's homing blobs) and
+ * for the homing ones (they curve onto whoever is near the target).
+ */
+constexpr double BOT_TEAM_BLAST_MIN{40};
+constexpr double BOT_TEAM_BLAST_MARGIN{20};
+
+[[nodiscard]]
+double missile_blast_radius(const secondary_weapon_index w)
+{
+	const double r{std::max(BOT_TEAM_BLAST_MIN, Weapon_info[Secondary_weapon_to_weapon_info[w]].damage_radius / 65536.0)};
+#if DXX_BUILD_DESCENT == 2
+	if (w == secondary_weapon_index::earthshaker)
+		return 2.5 * r + BOT_TEAM_BLAST_MARGIN;
+	if (w == secondary_weapon_index::smart_mine)
+		return 1.8 * r + BOT_TEAM_BLAST_MARGIN;
+	if (w == secondary_weapon_index::guided)
+		return 1.3 * r + BOT_TEAM_BLAST_MARGIN;
+#endif
+	if (w == secondary_weapon_index::homing)
+		return 1.3 * r + BOT_TEAM_BLAST_MARGIN;
+	if (w == secondary_weapon_index::smart)
+		return 1.8 * r + BOT_TEAM_BLAST_MARGIN;
+	return r + BOT_TEAM_BLAST_MARGIN;
+}
+
+[[nodiscard]]
+bool teammate_in_fire(const bot_state &bs, const object &ship, const bool missile, const secondary_weapon_index which = secondary_weapon_index::concussion)
+{
+	if (!(Game_mode & GM_TEAM) || Netgame.NoFriendlyFire)
+		return false;
+	auto &Objects = LevelUniqueObjectState.Objects;
+	const auto &pi{ship.ctype.player_info};
+	const auto pos{to_vec(ship.pos)};
+	const auto nose{b::normalized(to_vec(ship.orient.fvec))};
+	double speed{missile ? 150.0 : weapon_speed(pi)};
+	double range{missile ? 600.0 : weapon_range(pi)};
+	if (!(speed > 1))
+		speed = 1;
+	if (!(range > 0))
+		range = 400;
+	double margin{missile ? BOT_TEAM_MISSILE_MARGIN : BOT_TEAM_FIRE_MARGIN};
+#if DXX_BUILD_DESCENT == 2
+	if (!missile && (pi.Primary_weapon == primary_weapon_index::spreadfire || pi.Primary_weapon == primary_weapon_index::helix || pi.Primary_weapon == primary_weapon_index::omega))
+		margin = BOT_TEAM_FIRE_WIDE_MARGIN;
+#endif
+	/* Where a missile bursts: the target engaged, else the range; and
+	 * where the target is (a homing missile goes there).
+	 */
+	const double burst{bs.engaged_distance > 0 ? bs.engaged_distance : range};
+	/* A mine is dropped behind (teammate_behind judges it). */
+#if DXX_BUILD_DESCENT == 2
+	if (missile && (which == secondary_weapon_index::proximity || which == secondary_weapon_index::smart_mine))
+		return false;
+#else
+	if (missile && which == secondary_weapon_index::proximity)
+		return false;
+#endif
+	const double blast{missile ? missile_blast_radius(which) : 0.0};
+	const std::optional<vec3> target_at{missile && bs.target && bs.memory[*bs.target].valid ? std::optional<vec3>{bs.memory[*bs.target].pos} : std::nullopt};
+	for (playernum_t i = 0; i < N_players && i < MAX_PLAYERS; ++i)
+	{
+		if (i == bs.pid || !same_team(bs.pid, i) || vcplayerptr(i)->connected != player_connection_status::playing)
+			continue;
+		const auto &t{*Objects.vcptr(vcplayerptr(i)->objnum)};
+		if (t.type != object_type::OBJ_PLAYER)
+			continue;
+		const auto rel{to_vec(t.pos) - pos};
+		const double width{margin + t.size / 65536.0};
+		if (missile && (b::length(rel - nose * burst) < blast || (target_at && b::distance(to_vec(t.pos), *target_at) < blast)))
+			return true;
+		const auto off_line{[&](const vec3 &r) {
+			const double along{b::dot(r, nose)};
+			if (along < -width || along > range + width)
+				return false;
+			return b::length(r - nose * std::max(along, 0.0)) < width;
+		}};
+		if (off_line(rel))
+			return true;
+		const double along{b::dot(rel, nose)};
+		if (along > 0)
+			if (off_line(rel + to_vec(t.mtype.phys_info.velocity) * (along / speed)))
+				return true;
+	}
+	return false;
+}
+
 }
 
 void bots_fire()
@@ -5808,6 +7084,10 @@ void bots_fire()
 			const bool volley_on{bs.missile_volley < std::max<unsigned>(1, Weapon_info[Secondary_weapon_to_weapon_info[w]].fire_count)};
 			if (!pi.secondary_ammo[w])
 				bs.missile_fire.reset();
+			/* Section 9.19: held while a teammate is in the way. */
+			else if (teammate_in_fire(bs, objp, true, w))
+			{
+			}
 			else if (volley_on || allowed_to_fire_missile(pi))
 			{
 				do_missile_firing(bs.pl, w, objp);
@@ -5858,7 +7138,7 @@ void bots_fire()
 			}
 			if (fusion && bs.fusion_charging && bs.fusion_want == b::fusion_action::release)
 			{
-				if (!allowed_to_fire_laser(bs.pl, pi))
+				if (!allowed_to_fire_laser(bs.pl, pi) || teammate_in_fire(bs, objp, false))
 					continue;
 				const double charged{pi.Fusion_charge / 65536.0};
 				do_laser_firing_player(bs.pl, objp);
@@ -5876,6 +7156,9 @@ void bots_fire()
 		if (!bs.fire)
 			continue;
 		if (!allowed_to_fire_laser(bs.pl, objp->ctype.player_info))
+			continue;
+		/* Section 9.19: no shot a teammate flies into. */
+		if (teammate_in_fire(bs, objp, false))
 			continue;
 #if DXX_BUILD_DESCENT == 2
 		/* Section 9.5: no omega shot without the charge for it (the host
