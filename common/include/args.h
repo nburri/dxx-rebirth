@@ -144,6 +144,10 @@ struct CArg : prohibit_void_ptr<>
 	uint32_t DbgBotArenaSeconds;
 	uint32_t DbgBotArenaSeed;
 	uint32_t DbgBotArenaReactor;
+	/* -botarena-timeout S: the arena's wall-clock limit (bot_arena.cpp,
+	 * the watchdog); 0 = the default, max(120 s, <seconds> / 5 + 60 s).
+	 */
+	uint32_t DbgBotArenaTimeout;
 	std::string DbgBotArenaMission;
 	std::string DbgBotArenaSpec;
 	/* -botarena-mode anarchy|team|ctf|hoard|teamhoard: the game mode (default anarchy);
