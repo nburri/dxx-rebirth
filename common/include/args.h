@@ -150,6 +150,14 @@ struct CArg : prohibit_void_ptr<>
 	 */
 	uint32_t DbgBotArenaTimeout;
 	std::string DbgBotArenaMission;
+	/* -visshot (vis_shot.h) */
+	std::string DbgVisShotMission;
+	std::string DbgVisShotDir;
+	std::string DbgVisShotPresets;
+	uint8_t DbgVisShotLevel;
+	uint16_t DbgVisShotFrames;
+	uint16_t DbgVisShotWidth;
+	uint16_t DbgVisShotHeight;
 	std::string DbgBotArenaSpec;
 	/* -botarena-mode anarchy|team|ctf|hoard|teamhoard: the game mode (default anarchy);
 	 * bots play every mode the arena offers (game modes, stage 6a).

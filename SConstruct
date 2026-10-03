@@ -5577,6 +5577,7 @@ class DXXProgram(DXXCommon):
 'similar/main/text.cpp',
 'similar/main/titles.cpp',
 'similar/main/vclip.cpp',
+'similar/main/vis_shot.cpp',
 'similar/main/wall.cpp',
 'similar/main/weapon.cpp',
 'similar/misc/args.cpp',

@@ -23,6 +23,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
  *
  */
 
+#include "vis_shot.h"
 #include "dxxsconf.h"
 #include <cctype>
 #include <utility>
@@ -2290,7 +2291,9 @@ window_event_result StartNewLevel(int level_num)
 		maybe_set_first_secret_visit(level_num);
 	}
 
-	ShowLevelIntro(level_num);
+	/* -visshot: nobody presses a key. */
+	if (!vis_shot_active())
+		ShowLevelIntro(level_num);
 #endif
 
 	return StartNewLevelSub(LevelSharedRobotInfoState.Robot_info, level_num, 1, secret_restore::none);
