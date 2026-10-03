@@ -10,12 +10,15 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cinttypes>
 #include <cstdio>
+#include <cstdlib>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 
 #include "bot_arena.h"
 #include "bot.h"
@@ -70,6 +73,92 @@ struct arena_state
 };
 
 arena_state A;
+
+#if DXX_USE_UDP
+/* The watchdog (Documentation/multiplayer-bots.md section 8.2): an arena
+ * run must never run forever.  The arena's frame ends the game when the
+ * wall-clock limit (-botarena-timeout) has passed; a thread of its own
+ * ends the program, without any cleanup, when even that check is not
+ * reached: WATCHDOG_GRACE after the limit, or when the game time stood
+ * still for WATCHDOG_STALL of wall time (a loop that never returns to
+ * the arena's frame: a menu, the score screen, an endless loop).
+ */
+constexpr int WATCHDOG_STATUS_TIMEOUT{3};
+constexpr int WATCHDOG_STATUS_STALLED{4};
+constexpr unsigned WATCHDOG_GRACE{5};
+constexpr unsigned WATCHDOG_STALL{30};
+
+struct watchdog_state
+{
+	std::chrono::steady_clock::time_point start{};
+	uint32_t limit{};
+	/* GameTime64 of the arena's last frame; -1 before its first. */
+	std::atomic<int64_t> game_time{-1};
+	/* A message for the game log is written; the thread waits for it. */
+	std::atomic<bool> logged{};
+};
+
+watchdog_state W;
+
+/* In wall seconds. */
+[[nodiscard]]
+uint32_t watchdog_limit()
+{
+	if (const uint32_t t{CGameArg.DbgBotArenaTimeout})
+		return t;
+	return std::max<uint32_t>(120, CGameArg.DbgBotArenaSeconds / 5 + 60);
+}
+
+/* The thread ends the program: the message goes to stderr at once, then
+ * (by yet another thread, as the main thread may hold the log in the
+ * middle of a write) to the game log, which is flushed; whether that
+ * worked or not, the program ends 2 s later.
+ */
+[[noreturn]]
+void watchdog_abort(const int status, const char *const message)
+{
+	std::fputs(message, stderr);
+	std::fputc('\n', stderr);
+	std::fflush(stderr);
+	std::thread([message]() {
+		con_puts(CON_URGENT, std::span<const char>(message, std::char_traits<char>::length(message) + 1));
+		con_flush_gamelog();
+		W.logged = true;
+	}).detach();
+	for (unsigned i = 0; i < 20 && !W.logged; ++i)
+		std::this_thread::sleep_for(std::chrono::milliseconds{100});
+	std::fflush(stdout);
+	std::_Exit(status);
+}
+
+void watchdog_thread()
+{
+	static std::array<char, 160> message;
+	int64_t seen{-1};
+	auto seen_at{std::chrono::steady_clock::now()};
+	for (;;)
+	{
+		std::this_thread::sleep_for(std::chrono::milliseconds{250});
+		const auto now{std::chrono::steady_clock::now()};
+		if (now - W.start >= std::chrono::seconds{W.limit + WATCHDOG_GRACE})
+		{
+			std::snprintf(message.data(), message.size(), "botarena: watchdog timeout after %" PRIu32 " s, aborting", W.limit);
+			watchdog_abort(WATCHDOG_STATUS_TIMEOUT, message.data());
+		}
+		const int64_t t{W.game_time.load()};
+		if (t != seen)
+		{
+			seen = t;
+			seen_at = now;
+		}
+		else if (t >= 0 && now - seen_at >= std::chrono::seconds{WATCHDOG_STALL})
+		{
+			std::snprintf(message.data(), message.size(), "botarena: watchdog: no game time progress for %u s of wall time (game time stands at %.1f s), aborting", WATCHDOG_STALL, static_cast<double>(t) / F1_0);
+			watchdog_abort(WATCHDOG_STATUS_STALLED, message.data());
+		}
+	}
+}
+#endif
 
 [[nodiscard]]
 bool counting(const unsigned pnum)
@@ -366,6 +455,11 @@ void print_summary(const double game_seconds)
 
 bool bot_arena_start()
 {
+	/* From here on, the arena runs under the watchdog. */
+	W.start = std::chrono::steady_clock::now();
+	W.limit = watchdog_limit();
+	std::thread(watchdog_thread).detach();
+	con_printf(CON_URGENT, "botarena: wall-clock limit %" PRIu32 " s", W.limit);
 	if (!InterfaceUniqueState.PilotName[0u])
 	{
 		/* No -pilot: a pilot of defaults, written nowhere. */
@@ -429,7 +523,31 @@ window_event_result bot_arena_frame()
 		}
 		return window_event_result::ignored;
 	}
+	W.game_time = GameTime64;
 	const double game_seconds{static_cast<double>(GameTime64 - A.game_start) / F1_0};
+	/* The wall-clock limit: the arena ends with the summary of the time
+	 * played and status 3 (the watchdog thread is the backstop).
+	 */
+	if (std::chrono::steady_clock::now() - W.start >= std::chrono::seconds{W.limit})
+	{
+		con_printf(CON_URGENT, "botarena: FAIL: wall-clock limit of %" PRIu32 " s reached after %.0f of %" PRIu32 " s of game time, aborting", W.limit, game_seconds, CGameArg.DbgBotArenaSeconds);
+		print_summary(game_seconds);
+		A.done = true;
+		exit_status = WATCHDOG_STATUS_TIMEOUT;
+		return window_event_result::close;
+	}
+	/* Testing the watchdog: DXX_BOTARENA_DEBUG_HANG=N makes the arena
+	 * spin here forever once N game seconds have passed.
+	 */
+	static const char *const hang{std::getenv("DXX_BOTARENA_DEBUG_HANG")};
+	if (hang && game_seconds >= std::atof(hang))
+	{
+		con_printf(CON_URGENT, "botarena: DXX_BOTARENA_DEBUG_HANG: spinning forever after %.0f s of game time", game_seconds);
+		con_flush_gamelog();
+		for (volatile bool spin{true}; spin;)
+		{
+		}
+	}
 	if (GameTime64 >= A.next_progress)
 	{
 		A.next_progress += i2f(60);
