@@ -39,7 +39,9 @@
 #include <algorithm>
 #include <array>
 #include <cstdio>
+#include <optional>
 #include <span>
+#include <utility>
 
 #include "net_v2_objects.h"
 #include "net_v2_lagtest.h"
@@ -50,6 +52,7 @@
 #include "multi.h"
 #include "bot.h"
 #include "movement_record.h"
+#include "movement_record_format.h"
 #include "object.h"
 #include "player.h"
 #include "powerup.h"
@@ -75,6 +78,7 @@ namespace dsx {
 namespace {
 
 namespace nv = ::dcx::net_v2;
+namespace mr = ::dcx::movrec;
 using nv::netid_t;
 using nv::NETID_NONE;
 using nv::session_msg;
@@ -107,6 +111,10 @@ struct authority_state
 	std::array<nv::inventory_mirror, MAX_PLAYERS> mirrors{};
 	/* The host dropped this player's items; it has not reappeared. */
 	std::array<bool, MAX_PLAYERS> dropped{};
+	/* Client: the movement recording has this player's drop of its
+	 * death; it has not reappeared.
+	 */
+	std::array<bool, MAX_PLAYERS> drop_recorded{};
 	nv::pending_pickups<16> pending;
 	/* Client: the grants for this player received (INVENTORY `seq`). */
 	uint16_t applied_grants{};
@@ -572,6 +580,36 @@ void report_others_pickup(const playernum_t pnum, const powerup_type_t id)
 #endif
 }
 
+/* The movement recording (format minor 6): a flag or an orb taken, on the
+ * host when it grants it, on a client when the grant arrives.  The orbs
+ * carried are the ship's where it is the truth (the host's view, this
+ * client's own ship); 0 lets the recording count them.
+ */
+void record_mode_pickup(const playernum_t pnum, const powerup_type_t id)
+{
+#if DXX_BUILD_DESCENT == 2
+	if (pnum >= N_players || pnum >= MAX_PLAYERS)
+		return;
+	if ((id == powerup_type_t::POW_FLAG_BLUE || id == powerup_type_t::POW_FLAG_RED) && game_mode_capture_flag(Game_mode))
+		movement_record_mode_event(mr::mode_event_kind::flag_pickup, pnum, id == powerup_type_t::POW_FLAG_BLUE ? nv::CTF_TEAM_BLUE : nv::CTF_TEAM_RED, 0, 0);
+	else if (id == powerup_type_t::POW_HOARD_ORB && game_mode_hoard(Game_mode))
+	{
+		unsigned orbs{};
+		if (multi_i_am_master() || pnum == Player_num)
+		{
+			auto &Objects{LevelUniqueObjectState.Objects};
+			const auto &ship{*Objects.vcptr(vcplayerptr(pnum)->objnum)};
+			if (ship.type == object_type::OBJ_PLAYER)
+				orbs = ship.ctype.player_info.hoard.orbs;
+		}
+		movement_record_mode_event(mr::mode_event_kind::orb_pickup, pnum, mr::PLAYER_NONE, 0, orbs);
+	}
+#else
+	(void)pnum;
+	(void)id;
+#endif
+}
+
 void send_grant(const playernum_t pnum, const netid_t id, const powerup_type_t powerup, const uint32_t count, const uint32_t remaining, const bool removed)
 {
 	const uint8_t life{pnum < MAX_PLAYERS ? A.mirrors[pnum].life() : uint8_t{}};
@@ -617,6 +655,7 @@ void log_grant(const playernum_t pnum, const netid_t id, const powerup_type_t po
 	/* The host's own pickups are recorded by do_powerup. */
 	if (pnum != Player_num)
 		movement_record_pickup(pnum, underlying_value(powerup));
+	record_mode_pickup(pnum, powerup);
 }
 
 /* The host's accounting of the item `powerup` gives: the bookkeeping's
@@ -880,6 +919,7 @@ void receive_grant(const std::span<const uint8_t> payload)
 	}
 	else
 		report_others_pickup(g->pid, static_cast<powerup_type_t>(g->powerup_id));
+	record_mode_pickup(g->pid, static_cast<powerup_type_t>(g->powerup_id));
 	if (objp == object_none)
 	{
 		if (g->removed())
@@ -1196,6 +1236,10 @@ void host_receive_drop(const playernum_t from, const std::span<const uint8_t> pa
 	auto &Objects{LevelUniqueObjectState.Objects};
 	auto &ship{*Objects.vmptr(vcplayerptr(from)->objnum)};
 	write_inventory(ship, mirror.current(), true);
+	if (desc.kind == nv::pickup_kind::orb)
+		movement_record_mode_event(mr::mode_event_kind::orb_drop, from, mr::PLAYER_NONE, 0, 1, mr::mode_drop_flag::by_hand);
+	else if (desc.kind == nv::pickup_kind::team_flag)
+		movement_record_mode_event(mr::mode_event_kind::flag_drop, from, static_cast<uint8_t>(m->powerup_id == underlying_value(powerup_type_t::POW_FLAG_RED) ? 1 : 0), 0, 0, mr::mode_drop_flag::by_hand);
 	/* Spat from the ship where its owner had it, not from its delayed
 	 * interpolated pose.
 	 */
@@ -1284,6 +1328,7 @@ void net_objects_level_start()
 	A.pending.reset();
 	lagtest_reset();
 	A.dropped.fill(false);
+	A.drop_recorded.fill(false);
 	A.applied_grants = 0;
 	A.life.reset();
 	A.have_last_sent = false;
@@ -1536,8 +1581,29 @@ void net_objects_announce(const vmobjptridx_t obj, const uint8_t owner, const bo
 
 void net_objects_host_drop_player_eggs(const playernum_t pnum)
 {
-	if (!net_objects_active() || !multi_i_am_master() || pnum >= MAX_PLAYERS || pnum >= N_players)
+	if (!net_objects_active() || pnum >= MAX_PLAYERS || pnum >= N_players)
 		return;
+	if (!multi_i_am_master())
+	{
+		/* A client drops nothing; its movement recording notes what the
+		 * ship carried as far as it knows (once per death).
+		 */
+		if (std::exchange(A.drop_recorded[pnum], true))
+			return;
+		auto &Objects{LevelUniqueObjectState.Objects};
+		const auto &ship{*Objects.vcptr(vcplayerptr(pnum)->objnum)};
+		if (ship.type != object_type::OBJ_PLAYER && ship.type != object_type::OBJ_GHOST)
+			return;
+		const auto &pi{ship.ctype.player_info};
+		const bool carries{+(pi.powerup_flags & player_flag::has_team_flag) != 0};
+#if DXX_BUILD_DESCENT == 2
+		const unsigned orbs{pnum == Player_num ? pi.hoard.orbs : 0u};
+#else
+		const unsigned orbs{};
+#endif
+		net_modes_record_drop(pnum, carries, std::nullopt, carries || orbs, orbs);
+		return;
+	}
 	if (A.dropped[pnum])
 		return;
 	A.dropped[pnum] = true;
@@ -1567,7 +1633,9 @@ void net_objects_host_drop_player_eggs(const playernum_t pnum)
 	/* Capture the flag (Classic): the carrier's flag goes home instead of
 	 * dropping, if the rules say so.
 	 */
+	const bool had_flag{+(objp->ctype.player_info.powerup_flags & player_flag::has_team_flag) != 0};
 	const auto flag_home{net_modes_host_take_dropped_flag(*objp, pnum)};
+	net_modes_record_drop(pnum, had_flag, flag_home.has_value(), orbs_to_drop != 0, orbs_to_drop);
 	Net_create_loc = 0;
 	drop_player_powerup_eggs(objp);
 	const auto created{std::min<unsigned>(Net_create_loc, MAX_NET_CREATE_OBJECTS)};
@@ -1617,6 +1685,7 @@ void net_objects_player_reappeared(const playernum_t pnum)
 	if (pnum >= MAX_PLAYERS)
 		return;
 	A.dropped[pnum] = false;
+	A.drop_recorded[pnum] = false;
 	/* A death's extra orb belongs to the death that was dropped. */
 	net_modes_forget_death(pnum);
 	if (pnum == Player_num)

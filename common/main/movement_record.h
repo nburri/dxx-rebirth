@@ -59,6 +59,15 @@ void movement_record_pickup(unsigned pnum, unsigned powerup);
  * countdown's seconds.
  */
 void movement_record_level_event(std::uint8_t kind, unsigned pid, int value, std::uint8_t flags = 0);
+/* Format minor 6: an event of capture the flag or hoard
+ * (movement_record_format.h, mode_event_kind; the bots' roles:
+ * mode_event_kind::role with `id` a mode_role).  `pid` the player (255:
+ * none), `other` a flag's team (255: none).  For orb_pickup a `value` of 0
+ * means not known here: the orbs carried are counted from the events; for
+ * orb_drop likewise (nothing is written if none are known).  Nothing
+ * happens when not recording.
+ */
+void movement_record_mode_event(std::uint8_t kind, unsigned pid, std::uint8_t other, std::uint8_t id, unsigned value, std::uint8_t flags = 0);
 /* -sharemoves on a client: the local player's controls this frame as the
  * recording stores them (forward, sideways, vertical, pitch, heading,
  * bank; 60 = full deflection), for its INPUT chunk.  False while there

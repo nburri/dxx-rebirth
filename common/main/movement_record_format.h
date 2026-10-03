@@ -51,10 +51,13 @@ constexpr std::uint16_t FORMAT_VERSION{1};
  * level's geometry; 4 for a bot's movement mode and goal appended to
  * its samples (sample::bot_known); 5 for the level events (the reactor,
  * its countdown, escapes, deaths in the mine, the level end:
- * record_type::level_event).  Appended to the header; a header without it
- * is minor 0.
+ * record_type::level_event); 6 for the game modes' events (flags and orbs
+ * taken, dropped, scored, returned; a bot's role: record_type::mode_event)
+ * and the goals of the level (record_type::mode_goal), and the bots'
+ * objective goal (bot_goals::objective).  Appended to the header; a header
+ * without it is minor 0.
  */
-constexpr std::uint16_t FORMAT_MINOR{5};
+constexpr std::uint16_t FORMAT_MINOR{6};
 /* The file names are cut to this length (the level record has room for
  * the names and two of these).
  */
@@ -97,6 +100,14 @@ enum class record_type : std::uint8_t
 	 * level_event_kind).
 	 */
 	level_event = 14,
+	/* Minor 6: an event of capture the flag or hoard (event layout,
+	 * `kind` a mode_event_kind).
+	 */
+	mode_event = 15,
+	/* Minor 6: a goal of the level in capture the flag or hoard
+	 * (mode_goal_record), at every level start.
+	 */
+	mode_goal = 16,
 };
 
 /* file_header::flags */
@@ -201,11 +212,13 @@ constexpr std::uint8_t hunt{2};
 constexpr std::uint8_t collect{3};
 constexpr std::uint8_t retreat{4};
 constexpr std::uint8_t refuel{5};
-constexpr std::uint8_t count{6};
+/* Minor 6: the game mode's objective (a flag, an orb, a goal). */
+constexpr std::uint8_t objective{6};
+constexpr std::uint8_t count{7};
 }
 
 inline constexpr std::array<const char *, bot_goals::count> bot_goal_names{{
-	"none", "roam", "hunt", "collect", "retreat", "refuel",
+	"none", "roam", "hunt", "collect", "retreat", "refuel", "objective",
 }};
 
 [[nodiscard]]
@@ -289,6 +302,123 @@ constexpr const char *level_event_name(const std::uint8_t kind)
 		default: return "level event";
 	}
 }
+
+/* Minor 6: event_record::kind for mode_event.  Teams as the game numbers
+ * them: 0 blue, 1 red; a flag is named by the team it belongs to.  Every
+ * machine records the events it learns of, each once.
+ */
+namespace mode_event_kind {
+/* `pid` takes a flag; `other` the flag's team. */
+constexpr std::uint8_t flag_pickup{0};
+/* The flag `pid` carried left its ship (death, drop, departure); `other`
+ * the flag's team; `flags` mode_drop_flag (went_home: it went straight
+ * home by the "dropped flag returns" rule; by_hand: dropped by its
+ * carrier, who lives on).
+ */
+constexpr std::uint8_t flag_drop{1};
+/* `pid` captured the flag of team `other`; `value` the scoring team's
+ * score after it.
+ */
+constexpr std::uint8_t flag_capture{2};
+/* The flag of team `other` went home; `pid` who returned it (PLAYER_NONE:
+ * nobody); `flags` a flag_return_reason.
+ */
+constexpr std::uint8_t flag_return{3};
+/* `pid` takes an orb; `value` the orbs it carries now. */
+constexpr std::uint8_t orb_pickup{4};
+/* `pid` scored `value` orbs. */
+constexpr std::uint8_t orb_score{5};
+/* `pid` died or left with orbs, or dropped one (`flags`
+ * mode_drop_flag::by_hand): `value` orbs.
+ */
+constexpr std::uint8_t orb_drop{6};
+/* A bot's role (written by the bot code): `pid` the bot, `id` a mode_role. */
+constexpr std::uint8_t role{7};
+/* `pid` is in its goal with the flag, but its own flag is not at home
+ * (Classic); `other` the flag it carries.
+ */
+constexpr std::uint8_t capture_refused{8};
+constexpr std::uint8_t count{9};
+}
+
+/* event_record::flags of mode_event_kind::flag_return. */
+namespace flag_return_reason {
+constexpr std::uint8_t touch{0};		/* its own team touched it */
+constexpr std::uint8_t idle{1};		/* lay away from home for 30 s */
+constexpr std::uint8_t dropped{2};		/* a carrier's death ("dropped flag returns") */
+constexpr std::uint8_t other{3};
+}
+
+/* event_record::flags of mode_event_kind::flag_drop and orb_drop. */
+namespace mode_drop_flag {
+constexpr std::uint8_t went_home{1 << 0};	/* flag_drop only */
+constexpr std::uint8_t by_hand{1 << 1};
+}
+
+/* The role of a bot in capture the flag or hoard (mode_event_kind::role,
+ * `id`).
+ */
+namespace mode_role {
+constexpr std::uint8_t none{0};
+constexpr std::uint8_t attack{1};
+constexpr std::uint8_t defend{2};
+constexpr std::uint8_t escort{3};
+/* Hunts the enemy carrier. */
+constexpr std::uint8_t hunt{4};
+/* Carries the enemy flag home. */
+constexpr std::uint8_t carry{5};
+/* A carrier waiting for its own flag to be home. */
+constexpr std::uint8_t wait{6};
+/* Goes for its own dropped flag. */
+constexpr std::uint8_t retrieve{7};
+/* Hoard: collects orbs, fights. */
+constexpr std::uint8_t collect{8};
+/* Hoard: goes to a goal to score. */
+constexpr std::uint8_t score{9};
+constexpr std::uint8_t count{10};
+}
+
+inline constexpr std::array<const char *, mode_role::count> mode_role_names{{
+	"none", "attack", "defend", "escort", "hunt", "carry", "wait", "retrieve", "collect", "score",
+}};
+
+[[nodiscard]]
+constexpr const char *mode_role_name(const std::uint8_t r)
+{
+	return r < mode_role::count ? mode_role_names[r] : "?";
+}
+
+[[nodiscard]]
+constexpr const char *mode_event_name(const std::uint8_t kind)
+{
+	switch (kind)
+	{
+		case mode_event_kind::flag_pickup: return "flag pickup";
+		case mode_event_kind::flag_drop: return "flag drop";
+		case mode_event_kind::flag_capture: return "flag capture";
+		case mode_event_kind::flag_return: return "flag return";
+		case mode_event_kind::orb_pickup: return "orb pickup";
+		case mode_event_kind::orb_score: return "orb score";
+		case mode_event_kind::orb_drop: return "orb drop";
+		case mode_event_kind::role: return "role";
+		case mode_event_kind::capture_refused: return "capture refused";
+		default: return "mode event";
+	}
+}
+
+/* Minor 6: mode_goal_record::mode, the game mode of the level. */
+namespace goal_mode {
+constexpr std::uint8_t none{0};
+constexpr std::uint8_t ctf{1};
+constexpr std::uint8_t ctf_classic{2};
+constexpr std::uint8_t hoard{3};
+constexpr std::uint8_t team_hoard{4};
+}
+
+/* mode_goal_record::team of a hoard goal (every goal takes anyone's orbs). */
+constexpr std::uint8_t GOAL_TEAM_ANY{2};
+/* The most hoard goals written per level. */
+constexpr unsigned MAX_HOARD_GOALS{16};
 
 /* event_record::kind for end */
 namespace end_reason {
@@ -772,6 +902,23 @@ struct sync_record
 
 constexpr std::size_t SYNC_SIZE{17};
 
+/* Minor 6: a goal of the level, at every level start in capture the flag
+ * (each team's home, the goal segment its flag belongs in: the same on
+ * every machine) and hoard (every goal segment, at most MAX_HOARD_GOALS).
+ * `team` 0 blue, 1 red, GOAL_TEAM_ANY a hoard goal; `mode` a goal_mode;
+ * `pos` the segment's centre, 1/256 unit (as sample::pos).
+ */
+struct mode_goal_record
+{
+	std::uint8_t team{};
+	std::uint8_t mode{};
+	std::uint16_t segment{};
+	std::array<std::int32_t, 3> pos{};
+	constexpr bool operator==(const mode_goal_record &) const = default;
+};
+
+constexpr std::size_t MODE_GOAL_SIZE{13};
+
 struct tick_record
 {
 	std::uint32_t tick{};
@@ -818,6 +965,7 @@ constexpr bool is_event(const record_type t)
 		case record_type::weapon:
 		case record_type::end:
 		case record_type::level_event:
+		case record_type::mode_event:
 			return true;
 		default:
 			return false;
@@ -910,6 +1058,19 @@ inline std::span<const std::uint8_t> encode(record_buffer &buf, const sync_recor
 	w.u32(y.session_id);
 	w.i64(y.host_ms);
 	w.u8(y.flags);
+	return detail::finish_record(w);
+}
+
+[[nodiscard]]
+inline std::span<const std::uint8_t> encode(record_buffer &buf, const mode_goal_record &g)
+{
+	byte_writer w{buf};
+	detail::begin_record(w, record_type::mode_goal);
+	w.u8(g.team);
+	w.u8(g.mode);
+	w.u16(g.segment);
+	for (const auto v : g.pos)
+		w.i24(v);
 	return detail::finish_record(w);
 }
 
@@ -1044,6 +1205,21 @@ inline std::optional<sync_record> decode_sync(const std::span<const std::uint8_t
 	if (!r.ok())
 		return std::nullopt;
 	return y;
+}
+
+[[nodiscard]]
+inline std::optional<mode_goal_record> decode_mode_goal(const std::span<const std::uint8_t> payload)
+{
+	byte_reader r{payload};
+	mode_goal_record g;
+	g.team = r.u8();
+	g.mode = r.u8();
+	g.segment = r.u16();
+	for (auto &v : g.pos)
+		v = r.i24();
+	if (!r.ok())
+		return std::nullopt;
+	return g;
 }
 
 [[nodiscard]]

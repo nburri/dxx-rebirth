@@ -99,7 +99,9 @@ keys), 5 slide (the slide while the nose comes round), 6 duck (ducking out
 of sight, the peek round a corner, a hold: the velocity controller to a
 point), 7 recover (the stuck recovery). Modes 2 to 5 are keys, as a human
 flies; 1 and 6 are not. The goals: 0 none, 1 roam, 2 hunt (a target known
-or in sight), 3 collect, 4 retreat, 5 refuel. So a real game shows directly
+or in sight), 3 collect, 4 retreat, 5 refuel, 6 objective (minor 6: the
+game mode's objective, a flag, an orb or a goal in capture the flag and
+hoard). So a real game shows directly
 how much of its fights a bot flew with keys and what it was after;
 `movrec-dump` and `movrec-analyse` report it (sections 5 and 8).
 
@@ -215,6 +217,50 @@ left the level for the score screen (`value` the countdown then, 65535
 none). `value` is the countdown's seconds left unless said otherwise
 (Documentation/network-protocol-v2.md, "Reactor countdown").
 
+**Capture the flag and hoard (minor 6).** A `mode_event` record (the
+event layout) marks what happened to the flags and orbs, as this machine
+learns it; every machine records each event once, so a client's own
+recording has them too. Teams are 0 blue and 1 red; a flag is named by the
+team it belongs to.
+
+| kind | Event | pid | other | id | value | flags |
+|---|---|---|---|---|---|---|
+| 0 | flag pickup | taker | the flag's team | | | |
+| 1 | flag drop: the carried flag left its ship (death, departure, dropped by hand) | carrier | the flag's team | | | bit 0 it went straight home (the "dropped flag returns" rule); bit 1 dropped by hand |
+| 2 | flag capture | carrier | the captured flag's team | | the scoring team's score after it | |
+| 3 | flag return: the flag went home | who returned it, 255 nobody | the flag's team | | | 0 touched by its own team, 1 lay away from home for 30 s, 2 the dropped flag rule, 3 other (not known here) |
+| 4 | orb pickup | taker | | | orbs carried now | |
+| 5 | orb score | scorer | | | orbs scored | |
+| 6 | orb drop: died or left with orbs, or dropped one | carrier | | | orbs dropped | bit 1 dropped by hand |
+| 7 | role (bots) | the bot | | role | | |
+| 8 | capture refused (Classic: in its goal with the flag, its own flag away) | carrier | the carried flag's team | | | |
+
+The roles of a bot (`id` of kind 7, written by the bot code when the
+role changes): 0 none, 1 attack, 2 defend, 3 escort, 4 hunt (the enemy
+carrier), 5 carry (the enemy flag home), 6 wait (a carrier waiting for its
+own flag to be home), 7 retrieve (its own dropped flag), 8 collect (hoard:
+collecting orbs, fighting), 9 score (hoard: going to a goal).
+
+Sources: the host records the pickups when it grants them (its own, its
+bots' and the clients'), the drops when it drops a dead or departed
+player's items and when a client drops one by hand, the returns when it
+puts a flag home and the refused captures when it tells the carrier; a
+client records the pickups when the grant arrives, the drops of a ship that
+dies or leaves (the flag as it saw it carried; the orbs of its own ship, of
+another as many as it saw it take: the extra orb of a death is the host's),
+the returns from `CTF_NOTICE` (its reason from the rules, 3 where they do not
+tell) and its own refused captures. Every machine records captures and
+orb scores when it applies the host's `CAPTURE` and `ORB_BONUS`. A drop by
+hand is recorded by the dropping machine (and the host); a client does not
+learn another player's.
+
+A `mode_goal` record at every level start of capture the flag and hoard
+gives a goal of the level: in capture the flag each team's home (the goal
+segment its flag belongs in, the same on every machine, Documentation/
+network-protocol-v2.md "Stage 6a"), in hoard every goal segment (at most
+16; any goal takes anyone's orbs: team 2), with the segment's centre and
+the game mode (1 capture the flag, 2 Classic, 3 hoard, 4 team hoard).
+
 `level` and `player` records describe the context: a `level` record at the
 start of every level (number, name, mission, segment count, game mode, and
 since minor 3 the mission's file name without extension, the stem of its
@@ -226,7 +272,7 @@ controls) change.
 
 ## 4. File format
 
-All integers little-endian. Version 1, minor 5. The minor counts additions
+All integers little-endian. Version 1, minor 6. The minor counts additions
 that an older reader skips without harm (new record types, new flag bits,
 fields appended to the header); the version changes only when old fields
 change. Minor 0 is the first release (v0.61-exp-25); minor 1 adds the
@@ -246,8 +292,11 @@ bytes, after the controls) to the samples of bots flown here (flags2 bit 2
 `bot`); a minor 3 reader ignores them, a minor 4 reader reads a sample
 without them as not known, and trailing bytes of any sample that is not a
 bot's are a later version's. Minor 5 adds the `level_event` record (type
-14, the event layout); older readers count it as unknown and skip it. A
-minor 0 file reads as
+14, the event layout); older readers count it as unknown and skip it.
+Minor 6 adds the `mode_event` (type 15, the event layout) and `mode_goal`
+(type 16) records and the bot goal 6 objective; older readers skip both
+records as unknown, and a minor 6 reader reads the files of minor 0 to 5,
+which have none. A minor 0 file reads as
 before (its header has no `minor` field: 0).
 
 ```
@@ -278,6 +327,8 @@ Record payloads (sizes without the 2 byte record header):
 | 5–12 events (11) | time_ms u32, pid u8, other u8, kind u8, id u8, value u16, flags u8 |
 | 13 `sync` (17, minor 1) | time_ms u32, session_id u32 (0: no network session), host_ms i64 (the host's clock at `time_ms`, milliseconds), flags u8 (1 the clock is known, 2 this machine is the host) |
 | 14 `level_event` (11, minor 5) | the event layout; `kind` as in section 3.2, "Level events" |
+| 15 `mode_event` (11, minor 6) | the event layout; `kind` as in section 3.2, "Capture the flag and hoard" |
+| 16 `mode_goal` (13, minor 6) | team u8 (0 blue, 1 red, 2 any: hoard), mode u8 (1 capture the flag, 2 Classic, 3 hoard, 4 team hoard), segment u16, centre 3 × i24 (1/256 unit, as a sample's position) |
 
 The bit assignments are in `common/main/movement_record_format.h`
 (`sample_flag`, `sample_flag2`, `context_flag`, ...), which is the normative
@@ -347,7 +398,8 @@ mode, its mode changes per minute and its goals, enemy in sight and mean distanc
 attack, aimed at, shots, hits dealt and taken with damage (and how many of
 them splash), kills, deaths, suicides, respawns, pickups, weapon switches;
 for a network game the session id and the number of `sync` records; the
-level events (minor 5) in a list after the header lines. `--csv DIR` writes
+level events (minor 5) in a list after the header lines; the goals (minor
+6) under their level and the number of mode events of each kind. `--csv DIR` writes
 `DIR/<file>-p<N>-<callsign>.csv` (one row per sample, in game units and in
 the ship's frame; the column `controls_shared` tells shared controls, the
 last two `bot_mode` and `bot_goal` a bot's movement, by name, minor 4)
@@ -397,6 +449,10 @@ build/common/movrec-analyse [--out DIR] [--player CALLSIGN]... [--bots]
 | `--min-seconds N` | Skip players alive for less than N seconds (default 20). |
 | `--missions DIR` | The folder of the missions (`.hog` and `.mn2`, as in the game's `missions/`): find every recorded level's geometry and report the traits per level and room (section 8.8). |
 | `--fidelity PROFILE[@BOT]` | Compare the recorded bot BOT (else the bots named like the profile's callsign, else all) with this `.botstyle` file's measured values, trait by trait (section 8.12; repeatable). |
+
+A game of capture the flag or hoard (minor 6) gets a section of its own
+after the list of games, with every player of the game, bots included
+(section 8.13).
 
 Give it every recording you have of a player: all files of all evenings, the
 host's and the clients'. It first lists the files (format, length, host or
@@ -936,6 +992,53 @@ game owned it 90–95 % of the time.
 `tools/botarena-run.sh -S FILE -F FILE` (Documentation/multiplayer-bots.md
 §8.2) flies a profile in a headless arena game and prints this check.
 
+### 8.13 Capture the flag and hoard
+
+What humans do with the flags and orbs, so that the bots can learn it.
+From the `mode_event` and `mode_goal` records (minor 6) of a game
+(`analyse_modes`, `write_mode_report`; the events of one game recorded on
+several machines count once, as all events, section 8.2):
+
+- per team the captures, and how often its flag went home by itself (the
+  idle and dropped flag returns); in hoard the scores and orbs (per team in
+  team hoard, else of all players), all per 10 minutes of the game (from
+  its first to its last sample);
+- per player the flags taken, captured, returned by touching them, lost
+  with deaths (or a departure) and dropped by hand, and the refused
+  captures; the carries, from a pickup to its capture, its drop or the
+  carrier's death (or the level's end): how many, the time in all and per
+  carry, how many were captured and dropped, and the mean speed while
+  carrying (units/s over the samples alive); in hoard the orbs taken,
+  scored (in how many scores, the mean orbs per score), lost with deaths
+  (with the death's extra orb) and dropped;
+- per player where it spent its time alive: carrying (a flag, or in hoard
+  orbs), near its own home (within 200 units of the goal's centre; in hoard
+  near any goal), near the enemy home, elsewhere. Carrying comes first, then
+  the nearer home. This is how a human's role shows (near its own home:
+  defending; near the enemy's: attacking);
+- for a player with `role` events (the bots) the time alive in each role,
+  from a role event to the next; a death ends it (no role until the next
+  event).
+
+```
+== capture the flag (Classic): 5.0 min ==
+  blue team: 0 captures (0.0 per 10 min), its flag went home 0 times by itself
+  red team: 0 captures (0.0 per 10 min), its flag went home 0 times by itself
+  talon (bot), blue, alive 293 s:
+    flags: 0 taken, 0 captured, 1 returned, 0 lost with deaths, 0 dropped
+    time alive: near own home 15 %, near enemy home 20 %, elsewhere 64 %
+  ravager (bot), red, alive 285 s:
+    flags: 1 taken, 0 captured, 0 returned, 1 lost with deaths, 0 dropped
+    carries: 1, 11 s in all, 11.1 s each; 0 captured, 1 dropped; 53.5 u/s while carrying
+    time alive: carrying 4 %, near own home 10 %, near enemy home 7 %, elsewhere 80 %
+```
+
+(A headless arena game on SnyTek Pro level 1; the bots of that time took a
+flag only by flying through it.) The test (`test_modes` in
+`common/unittest/movement_analysis.cpp`) plays a scripted minute of
+capture the flag and of hoard, recorded by one machine and by two, and
+checks every number.
+
 ## 9. Code
 
 | File | Content |
@@ -944,7 +1047,7 @@ game owned it 90–95 % of the time.
 | `common/main/movement_record_reader.h` | Reader library (header-only) |
 | `common/main/movement_record.h`, `similar/main/movement_record.cpp` | The game's side: session file, sampling, context, event hooks |
 | `common/tools/movrec_dump.cpp` | The dump tool |
-| `common/unittest/movement_record.cpp` | Tests: round trips, header, chunks, truncation at every byte, damaged chunks, unknown records, the tick schedule at 20 to 1000 fps, quantisation and frames, the minor 1 additions |
+| `common/unittest/movement_record.cpp` | Tests: round trips, header, chunks, truncation at every byte, damaged chunks, unknown records, the tick schedule at 20 to 1000 fps, quantisation and frames, the additions of minor 1 to 6 (old files read, new records skipped by old readers) |
 | `common/main/movement_analysis.h` | Step 2: loading, sessions and clocks, merging, tracks and the control estimate, the movement profile, the proposal, the report (header-only) |
 | `common/main/level_geometry.h` | Section 8.8: the mission files (HOG, MN2), the level's segments and vertices, rays through them, the room of a segment, the level's character, finding a recorded level among the missions (header-only, standard C++) |
 | `common/main/bot_style_profile.h` | The `.botstyle` format: keys and ranges, write, parse, apply to `skill_params`/`style_params`/`tune_params` (header-only, for the game too) |
@@ -957,7 +1060,12 @@ bots fired), the game window's close (end of the session),
 `do_laser_firing_player` and `do_missile_firing` (fire), `multi_do_fire`
 (remote fire), `collide_player_and_weapon` (hit),
 `object_create_explosion_with_damage` (splash hit), `multi_compute_kill`
-(kill), `do_powerup` and the host's pickup grant log (pickup). `net_v2.cpp`:
+(kill), `do_powerup` and the host's pickup grant log (pickup);
+capture the flag and hoard (minor 6): `net_objects.cpp` (pickups at the
+grant, drops with a death or departure and by hand), `net_modes.cpp`
+(captures, orb scores, returns, refused captures, the homes for the
+`mode_goal` records), `DropFlag` (the own ship's drop by hand); the bots'
+roles from the bot code (`movement_record_mode_event`). `net_v2.cpp`:
 clients set the afterburner bit of `INPUT`; `host_input_afterburner` reads
 it on the host; a client with `-sharemoves` appends its controls
 (`movement_record_shared_controls`) and `host_input_controls` gives the

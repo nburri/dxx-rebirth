@@ -105,6 +105,8 @@ struct file_player
 	bool bot{};
 	/* Flown on the recording machine (exact controls). */
 	bool local{};
+	/* The team of its last player record (0 blue, 1 red; 255 none). */
+	std::uint8_t team{0xff};
 };
 
 struct file_sample
@@ -131,6 +133,13 @@ struct file_level
 	std::uint32_t start_ms{};
 };
 
+/* Minor 6: a goal of a level of the file (capture the flag, hoard). */
+struct file_goal
+{
+	std::uint16_t level{};
+	mode_goal_record g;
+};
+
 struct recording
 {
 	std::string name;
@@ -141,6 +150,7 @@ struct recording
 	std::vector<file_sample> samples;
 	std::vector<file_event> events;
 	std::vector<sync_record> syncs;
+	std::vector<file_goal> goals;
 	std::uint32_t end_ms{};
 	[[nodiscard]]
 	bool host() const
@@ -184,14 +194,16 @@ inline std::optional<recording> load_recording(const std::span<const std::uint8_
 	/* Who holds each slot now. */
 	std::array<int, 256> slot;
 	slot.fill(-1);
-	const auto player_index{[&rec](const std::string &callsign, const bool bot, const bool local) {
+	const auto player_index{[&rec](const std::string &callsign, const bool bot, const bool local, const std::uint8_t team = 0xff) {
 		for (std::size_t i{}; i != rec.players.size(); ++i)
 			if (rec.players[i].bot == bot && lower(rec.players[i].callsign) == lower(callsign))
 			{
 				rec.players[i].local |= local;
+				if (team != 0xff)
+					rec.players[i].team = team;
 				return static_cast<int>(i);
 			}
-		rec.players.push_back({callsign, bot, local});
+		rec.players.push_back({callsign, bot, local, team});
 		return static_cast<int>(rec.players.size() - 1);
 	}};
 	const auto holder{[&](const std::uint8_t pid) {
@@ -207,7 +219,7 @@ inline std::optional<recording> load_recording(const std::span<const std::uint8_
 		return std::nullopt;
 	for (std::size_t i{}; i != head->first.num_players; ++i)
 		if (const auto &p{head->first.players[i]}; p.flags & player_flag::connected)
-			slot[p.pid] = player_index(p.callsign, (p.flags & player_flag::bot) != 0, (p.flags & player_flag::local) != 0);
+			slot[p.pid] = player_index(p.callsign, (p.flags & player_flag::bot) != 0, (p.flags & player_flag::local) != 0, p.team);
 	std::uint32_t now_ms{};
 	const auto result{read_recording(bytes, [&](const record &r) {
 		if (const auto t{std::get_if<tick_record>(&r)})
@@ -220,10 +232,12 @@ inline std::optional<recording> load_recording(const std::span<const std::uint8_
 		else if (const auto p{std::get_if<player_record>(&r)})
 		{
 			if (p->flags & player_flag::connected)
-				slot[p->pid] = player_index(p->callsign, (p->flags & player_flag::bot) != 0, (p->flags & player_flag::local) != 0);
+				slot[p->pid] = player_index(p->callsign, (p->flags & player_flag::bot) != 0, (p->flags & player_flag::local) != 0, p->team);
 			else
 				slot[p->pid] = -1;
 		}
+		else if (const auto g{std::get_if<mode_goal_record>(&r)})
+			rec.goals.push_back({static_cast<std::uint16_t>(rec.levels.empty() ? 0 : rec.levels.size() - 1), *g});
 		else if (const auto y{std::get_if<sync_record>(&r)})
 			rec.syncs.push_back(*y);
 		else if (const auto s{std::get_if<sample>(&r)})
@@ -587,6 +601,8 @@ struct session_player
 	std::string callsign;
 	bool bot{};
 	std::vector<merged_sample> samples;
+	/* 0 blue, 1 red (255: none known). */
+	std::uint8_t team{0xff};
 };
 
 struct merged_session
@@ -633,7 +649,9 @@ inline merged_session merge_session(const std::span<const recording> files, cons
 			const auto at{std::find_if(out.players.begin(), out.players.end(), [&p](const session_player &q) { return q.bot == p.bot && lower(q.callsign) == lower(p.callsign); })};
 			index[fi].push_back(static_cast<int>(at - out.players.begin()));
 			if (at == out.players.end())
-				out.players.push_back({p.callsign, p.bot, {}});
+				out.players.push_back({p.callsign, p.bot, {}, p.team});
+			else if (at->team == 0xff)
+				at->team = p.team;
 		}
 	}
 	const std::size_t np{out.players.size()};
@@ -715,7 +733,14 @@ inline merged_session merge_session(const std::span<const recording> files, cons
 		for (const auto &e : f.events)
 		{
 			if (e.who < 0)
+			{
+				/* Minor 6: a mode event of no player (a flag that went
+				 * home by itself), from the reference file only.
+				 */
+				if (!fi && e.e.type == record_type::mode_event)
+					out.events.push_back({sf.clock.to_session(e.e.time_ms), -1, -1, e.e});
 				continue;
+			}
 			const auto p{static_cast<std::size_t>(index[fi][static_cast<std::size_t>(e.who)])};
 			const auto t{sf.clock.to_session(e.e.time_ms)};
 			if (source(p, t) != fi)
@@ -4111,6 +4136,381 @@ inline std::string write_report(const player_stats &s, const bot::style_profile 
 }
 
 /*
+ * Capture the flag and hoard (format minor 6): per player what it did
+ * with the flags and orbs, and where it flew, from the mode events and
+ * the goals of the level (Documentation/movement-recording.md, section
+ * 8.13).
+ */
+
+namespace limits {
+/* Near a goal (a team's home, a hoard goal): within this distance of its
+ * centre.
+ */
+constexpr double MODE_NEAR_GOAL{200};
+}
+
+/* Where a player flew, per sample alive: carrying (a flag, or in hoard
+ * orbs), near its own home (in hoard: near a goal), near the other
+ * team's home, elsewhere.
+ */
+enum class mode_zone : std::uint8_t
+{
+	carry,
+	own_home,
+	enemy_home,
+	elsewhere,
+	count,
+};
+
+inline constexpr std::array<const char *, static_cast<std::size_t>(mode_zone::count)> mode_zone_names{{"carrying", "near own home", "near enemy home", "elsewhere"}};
+inline constexpr std::array<const char *, static_cast<std::size_t>(mode_zone::count)> hoard_zone_names{{"carrying orbs", "near a goal", "-", "elsewhere"}};
+
+struct mode_player_stats
+{
+	std::string callsign;
+	bool bot{};
+	std::uint8_t team{0xff};
+	double alive_s{};
+	/* Capture the flag. */
+	unsigned flag_pickups{};
+	unsigned captures{};
+	/* Its own flag returned by touching it. */
+	unsigned returns{};
+	/* Flags lost with a death or departure, and dropped by hand. */
+	unsigned flag_drops{};
+	unsigned flag_drops_by_hand{};
+	unsigned captures_refused{};
+	/* The carries (from a pickup to a capture, a drop or the level's
+	 * end): how many, how long, how they ended, how fast the carrier
+	 * flew.
+	 */
+	unsigned carries{};
+	unsigned carries_captured{};
+	unsigned carries_dropped{};
+	double carry_s{};
+	double carry_speed_sum{};
+	double carry_speed_s{};
+	/* Hoard. */
+	unsigned orbs_picked{};
+	unsigned orb_scores{};
+	unsigned orbs_scored{};
+	unsigned orbs_dropped{};
+	unsigned orbs_dropped_by_hand{};
+	/* Seconds alive per zone (mode_zone); per role where the recording
+	 * has role events of the player (bots).
+	 */
+	std::array<double, static_cast<std::size_t>(mode_zone::count)> zone_s{};
+	bool has_roles{};
+	std::array<double, mode_role::count> role_s{};
+	[[nodiscard]]
+	double mean_carry_s() const
+	{
+		return carries ? carry_s / carries : 0;
+	}
+	[[nodiscard]]
+	double carry_speed() const
+	{
+		return carry_speed_s > 0 ? carry_speed_sum / carry_speed_s : 0;
+	}
+};
+
+struct mode_team_stats
+{
+	unsigned captures{};
+	unsigned orb_scores{};
+	unsigned orbs_scored{};
+	/* Its flag went home with nobody touching it (idle, the dropped flag
+	 * rule).
+	 */
+	unsigned returns_alone{};
+};
+
+struct mode_summary
+{
+	/* goal_mode (none: not known, only events). */
+	std::uint8_t mode{goal_mode::none};
+	bool hoard{};
+	bool has_goals{};
+	/* From the first to the last sample of the game. */
+	double minutes{};
+	std::vector<mode_player_stats> players;
+	/* blue, red, and the players of no team (hoard). */
+	std::array<mode_team_stats, 3> teams{};
+};
+
+[[nodiscard]]
+inline const char *goal_mode_name(const std::uint8_t m)
+{
+	switch (m)
+	{
+		case goal_mode::ctf: return "capture the flag";
+		case goal_mode::ctf_classic: return "capture the flag (Classic)";
+		case goal_mode::hoard: return "hoard";
+		case goal_mode::team_hoard: return "team hoard";
+		default: return "game mode";
+	}
+}
+
+/* The game mode summary of a session, or nothing if its recordings have
+ * neither mode events nor goals.
+ */
+[[nodiscard]]
+inline std::optional<mode_summary> analyse_modes(const std::span<const recording> files, const session &ses, const merged_session &ms)
+{
+	mode_summary out;
+	bool any_events{};
+	bool flag_events{}, orb_events{};
+	for (const auto &e : ms.events)
+		if (e.e.type == record_type::mode_event)
+		{
+			any_events = true;
+			if (e.e.kind <= mode_event_kind::flag_return || e.e.kind == mode_event_kind::capture_refused)
+				flag_events = true;
+			else if (e.e.kind <= mode_event_kind::orb_drop)
+				orb_events = true;
+		}
+	/* The goals of each file's levels: [file of the session][level]. */
+	std::vector<std::vector<std::vector<mode_goal_record>>> goals(ses.files.size());
+	for (std::size_t fi{}; fi != ses.files.size(); ++fi)
+	{
+		const auto &f{files[ses.files[fi].file]};
+		goals[fi].resize(std::max<std::size_t>(f.levels.size(), 1));
+		for (const auto &g : f.goals)
+			if (g.level < goals[fi].size())
+			{
+				goals[fi][g.level].push_back(g.g);
+				out.has_goals = true;
+				if (out.mode == goal_mode::none)
+					out.mode = g.g.mode;
+			}
+	}
+	if (!any_events && !out.has_goals)
+		return std::nullopt;
+	out.hoard = out.mode == goal_mode::hoard || out.mode == goal_mode::team_hoard || (out.mode == goal_mode::none && orb_events && !flag_events);
+	std::int64_t first{INT64_MAX}, last{INT64_MIN};
+	for (std::size_t p{}; p != ms.players.size(); ++p)
+	{
+		const auto &sp{ms.players[p]};
+		mode_player_stats st;
+		st.callsign = sp.callsign;
+		st.bot = sp.bot;
+		st.team = sp.team;
+		/* The player's mode events and deaths, in time order. */
+		std::vector<const merged_event *> ev;
+		for (const auto &e : ms.events)
+			if (e.who == static_cast<int>(p) && (e.e.type == record_type::mode_event || e.e.type == record_type::death))
+				ev.push_back(&e);
+		for (const auto *const e : ev)
+			if (e->e.type == record_type::mode_event && e->e.kind == mode_event_kind::role)
+				st.has_roles = true;
+		/* Walk the samples and the events together. */
+		std::size_t k{};
+		bool carrying{};
+		std::int64_t carry_from{};
+		unsigned orbs{};
+		std::uint8_t role{mode_role::none};
+		const auto end_carry{[&](const std::int64_t t) {
+			if (!carrying)
+				return;
+			carrying = false;
+			st.carry_s += static_cast<double>(t - carry_from) / 1000.0;
+		}};
+		const auto apply{[&](const merged_event &e) {
+			if (e.e.type == record_type::death)
+			{
+				if (carrying)
+				{
+					++st.carries_dropped;
+					end_carry(e.t);
+				}
+				orbs = 0;
+				role = mode_role::none;
+				return;
+			}
+			const bool by_hand{(e.e.flags & mode_drop_flag::by_hand) != 0};
+			switch (e.e.kind)
+			{
+				case mode_event_kind::flag_pickup:
+					++st.flag_pickups;
+					if (!carrying)
+					{
+						carrying = true;
+						carry_from = e.t;
+						++st.carries;
+					}
+					break;
+				case mode_event_kind::flag_drop:
+					++(by_hand ? st.flag_drops_by_hand : st.flag_drops);
+					if (carrying)
+					{
+						++st.carries_dropped;
+						end_carry(e.t);
+					}
+					break;
+				case mode_event_kind::flag_capture:
+					++st.captures;
+					if (carrying)
+						++st.carries_captured;
+					end_carry(e.t);
+					if (st.team < 2)
+						++out.teams[st.team].captures;
+					break;
+				case mode_event_kind::flag_return:
+					++st.returns;
+					break;
+				case mode_event_kind::capture_refused:
+					++st.captures_refused;
+					break;
+				case mode_event_kind::orb_pickup:
+					++st.orbs_picked;
+					orbs = e.e.value;
+					break;
+				case mode_event_kind::orb_score:
+				{
+					++st.orb_scores;
+					st.orbs_scored += e.e.value;
+					auto &t{out.teams[st.team < 2 && out.mode == goal_mode::team_hoard ? st.team : 2]};
+					++t.orb_scores;
+					t.orbs_scored += e.e.value;
+					orbs = 0;
+					break;
+				}
+				case mode_event_kind::orb_drop:
+					(by_hand ? st.orbs_dropped_by_hand : st.orbs_dropped) += e.e.value;
+					orbs = by_hand && orbs > e.e.value ? orbs - e.e.value : 0;
+					break;
+				case mode_event_kind::role:
+					role = e.e.id < mode_role::count ? e.e.id : mode_role::none;
+					break;
+				default:
+					break;
+			}
+		}};
+		std::optional<std::pair<std::uint16_t, std::uint16_t>> level;
+		for (const auto &m : sp.samples)
+		{
+			while (k != ev.size() && ev[k]->t <= m.t)
+				apply(*ev[k++]);
+			first = std::min(first, m.t);
+			last = std::max(last, m.t);
+			/* A new level (or another file's): a carry ends with it. */
+			if (const std::pair cur{m.file, m.level}; level && *level != cur)
+			{
+				end_carry(m.t);
+				orbs = 0;
+			}
+			level = std::pair{m.file, m.level};
+			if (!(m.s.flags & sample_flag::alive))
+				continue;
+			const double w{ms.tick_s[m.file]};
+			st.alive_s += w;
+			const auto u{to_units(m.s)};
+			if (carrying)
+			{
+				st.carry_speed_sum += u.speed * w;
+				st.carry_speed_s += w;
+			}
+			mode_zone z{mode_zone::elsewhere};
+			if (carrying || (out.hoard && orbs))
+				z = mode_zone::carry;
+			else if (m.file < goals.size() && m.level < goals[m.file].size())
+			{
+				double own{INFINITY}, enemy{INFINITY};
+				for (const auto &g : goals[m.file][m.level])
+				{
+					vec3 d;
+					for (std::size_t i{}; i != 3; ++i)
+						d[i] = u.pos[i] - g.pos[i] / 256.0;
+					const double dist{length(d)};
+					if (g.team == GOAL_TEAM_ANY || g.team == st.team)
+						own = std::min(own, dist);
+					else
+						enemy = std::min(enemy, dist);
+				}
+				if (own < limits::MODE_NEAR_GOAL && own <= enemy)
+					z = mode_zone::own_home;
+				else if (enemy < limits::MODE_NEAR_GOAL)
+					z = mode_zone::enemy_home;
+			}
+			st.zone_s[static_cast<std::size_t>(z)] += w;
+			if (st.has_roles)
+				st.role_s[role] += w;
+		}
+		while (k != ev.size())
+			apply(*ev[k++]);
+		if (carrying)
+			end_carry(sp.samples.empty() ? carry_from : std::max(carry_from, sp.samples.back().t));
+		/* Not an observer (the arena's host): alive a second, or in the
+		 * events.
+		 */
+		if (st.alive_s >= 1 || std::any_of(ev.begin(), ev.end(), [](const merged_event *const e) { return e->e.type == record_type::mode_event; }))
+			out.players.push_back(std::move(st));
+	}
+	for (const auto &e : ms.events)
+		if (e.who < 0 && e.e.type == record_type::mode_event && e.e.kind == mode_event_kind::flag_return && e.e.other < 2)
+			++out.teams[e.e.other].returns_alone;
+	if (last > first)
+		out.minutes = static_cast<double>(last - first) / 60000.0;
+	std::stable_sort(out.players.begin(), out.players.end(), [](const mode_player_stats &a, const mode_player_stats &b) { return a.team != b.team ? a.team < b.team : a.alive_s > b.alive_s; });
+	return out;
+}
+
+/* The game mode section of the report. */
+[[nodiscard]]
+inline std::string write_mode_report(const mode_summary &m)
+{
+	using detail::appendf;
+	std::string o;
+	appendf(o, "\n== %s: %.1f min%s ==\n", goal_mode_name(m.mode), m.minutes, m.has_goals ? "" : " (no goals recorded)");
+	const double per10{m.minutes > 0 ? 10 / m.minutes : 0};
+	if (m.hoard)
+	{
+		/* Team hoard: per team; hoard: all players together. */
+		const bool teams{m.mode == goal_mode::team_hoard};
+		for (std::size_t t{teams ? 0u : 2u}; t != (teams ? 2u : 3u); ++t)
+		{
+			const auto &ts{m.teams[t]};
+			appendf(o, "  %s: %u scores, %u orbs (%.1f scores per 10 min, %.1f orbs per score)\n", t == 0 ? "blue" : t == 1 ? "red" : "all", ts.orb_scores, ts.orbs_scored, ts.orb_scores * per10, ts.orb_scores ? static_cast<double>(ts.orbs_scored) / ts.orb_scores : 0.0);
+		}
+	}
+	else
+		for (std::size_t t{}; t != 2; ++t)
+			appendf(o, "  %s team: %u captures (%.1f per 10 min), its flag went home %u times by itself\n", t == 0 ? "blue" : "red", m.teams[t].captures, m.teams[t].captures * per10, m.teams[t].returns_alone);
+	const auto &zone_names{m.hoard ? hoard_zone_names : mode_zone_names};
+	for (const auto &p : m.players)
+	{
+		appendf(o, "  %s%s%s, alive %.0f s:\n", p.callsign.c_str(), p.bot ? " (bot)" : "", p.team == 0 ? ", blue" : p.team == 1 ? ", red" : "", p.alive_s);
+		if (m.hoard)
+			appendf(o, "    orbs: %u picked, %u scored in %u scores (%.1f per score), %u lost with deaths, %u dropped\n",
+				p.orbs_picked, p.orbs_scored, p.orb_scores, p.orb_scores ? static_cast<double>(p.orbs_scored) / p.orb_scores : 0.0, p.orbs_dropped, p.orbs_dropped_by_hand);
+		else
+		{
+			appendf(o, "    flags: %u taken, %u captured, %u returned, %u lost with deaths, %u dropped%s\n", p.flag_pickups, p.captures, p.returns, p.flag_drops, p.flag_drops_by_hand,
+				p.captures_refused ? (", " + std::to_string(p.captures_refused) + " captures refused (own flag away)").c_str() : "");
+			if (p.carries)
+				appendf(o, "    carries: %u, %.0f s in all, %.1f s each; %u captured, %u dropped; %.1f u/s while carrying\n", p.carries, p.carry_s, p.mean_carry_s(), p.carries_captured, p.carries_dropped, p.carry_speed());
+		}
+		if (p.alive_s > 0)
+		{
+			std::string zones;
+			for (std::size_t z{}; z != p.zone_s.size(); ++z)
+				if (p.zone_s[z] > 0)
+					appendf(zones, "%s%s %.0f %%", zones.empty() ? "" : ", ", zone_names[z], detail::pct(p.zone_s[z] / p.alive_s));
+			appendf(o, "    time alive: %s\n", zones.c_str());
+			if (p.has_roles)
+			{
+				std::string roles;
+				for (std::size_t r{}; r != p.role_s.size(); ++r)
+					if (p.role_s[r] > 0)
+						appendf(roles, "%s%s %.0f %%", roles.empty() ? "" : ", ", mode_role_name(static_cast<std::uint8_t>(r)), detail::pct(p.role_s[r] / p.alive_s));
+				appendf(o, "    roles: %s\n", roles.c_str());
+			}
+		}
+	}
+	return o;
+}
+
+/*
  * All of it, from files to profiles.
  */
 
@@ -4128,6 +4528,8 @@ struct analysis_result
 	 * two), most time alive first.
 	 */
 	std::vector<player_result> players;
+	/* Section 8.13: per game with mode events or goals (minor 6). */
+	std::vector<mode_summary> modes;
 };
 
 [[nodiscard]]
@@ -4145,6 +4547,8 @@ inline analysis_result analyse_recordings(const std::span<const recording> files
 	for (const auto &ses : r.sessions)
 	{
 		const auto ms{merge_session(files, ses)};
+		if (auto m{analyse_modes(files, ses, ms)})
+			r.modes.push_back(std::move(*m));
 		for (std::size_t p{}; p != ms.players.size(); ++p)
 		{
 			const auto &sp{ms.players[p]};

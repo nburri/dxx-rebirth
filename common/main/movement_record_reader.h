@@ -27,7 +27,7 @@
 
 namespace dcx::movrec {
 
-using record = std::variant<level_record, player_record, tick_record, sample, event_record, sync_record>;
+using record = std::variant<level_record, player_record, tick_record, sample, event_record, sync_record, mode_goal_record>;
 
 struct read_stats
 {
@@ -104,6 +104,12 @@ void parse_payload(const std::span<const std::uint8_t> payload, read_stats &stat
 			case record_type::sync:
 				if (const auto y{decode_sync(body)})
 					on_record(record{*y});
+				else
+					++stats.malformed_records;
+				break;
+			case record_type::mode_goal:
+				if (const auto g{decode_mode_goal(body)})
+					on_record(record{*g});
 				else
 					++stats.malformed_records;
 				break;
@@ -345,6 +351,8 @@ inline const char *record_type_name(const record_type t)
 		case record_type::end: return "end";
 		case record_type::sync: return "sync";
 		case record_type::level_event: return "level_event";
+		case record_type::mode_event: return "mode_event";
+		case record_type::mode_goal: return "mode_goal";
 	}
 	return "unknown";
 }

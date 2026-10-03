@@ -24,7 +24,11 @@
  * reported is compared with the profile's measured values, trait by trait
  * (section 9.18 of Documentation/multiplayer-bots.md): PROFILE@BOT the
  * bot BOT, else a bot whose name starts with the profile's callsign's
- * first three letters, or every bot when none does.
+ * first three letters, or every bot when none does.  A game of capture
+ * the flag or hoard (format minor 6) gets a section of its own after the
+ * list of games: per team the scores, per player (bots included) the
+ * flags and orbs taken, carried, scored and lost and where it flew
+ * (section 8.13).
  *
  * Build: scons sdl2=1 d1x=0 d2x=1 register_runtime_test_plain_link_targets=1 movrec-analyse
  * Binary: build/common/movrec-analyse
@@ -315,6 +319,9 @@ int main(const int argc, char **const argv)
 	}
 	for (const auto &n : result.notes)
 		std::printf("  note: %s\n", n.c_str());
+	/* Section 8.13: capture the flag and hoard, every player of the game. */
+	for (const auto &m : result.modes)
+		std::fputs(write_mode_report(m).c_str(), stdout);
 	for (const auto &pr : result.players)
 	{
 		const auto &s{pr.stats};

@@ -39,6 +39,7 @@
 #include "d_underlying_value.h"
 #include "fvi.h"
 #include "game.h"
+#include "gameseg.h"
 #include "gameseq.h"
 #include "kconfig.h"
 #include "laser.h"
@@ -167,6 +168,10 @@ struct recorder
 	std::array<slot_occupant, MAX_PLAYERS> occupants{};
 	std::uint32_t last_sync_ms{};
 	bool sync_due{};
+	/* Format minor 6: the orbs each player carries, as the mode events
+	 * tell (for events whose count is not known here).
+	 */
+	std::array<std::uint8_t, MAX_PLAYERS> orbs{};
 	/* Line of sight between two players this tick: 0 unknown, 1 clear,
 	 * 2 blocked.
 	 */
@@ -378,6 +383,47 @@ const char *level_file_name()
 	return "";
 }
 
+/* Format minor 6: the goals of the level in capture the flag (each
+ * team's home, as net_modes.cpp chooses it) and hoard (every goal).
+ */
+void put_goals()
+{
+#if DXX_USE_MULTIPLAYER && DXX_BUILD_DESCENT == 2
+	if (!mode_multi())
+		return;
+	std::uint8_t mode;
+	const bool ctf{game_mode_capture_flag(Game_mode) != 0};
+	if (ctf)
+		mode = net_modes_ctf_classic() ? mr::goal_mode::ctf_classic : mr::goal_mode::ctf;
+	else if (game_mode_hoard(Game_mode))
+		mode = +(Game_mode & GM_TEAM) ? mr::goal_mode::team_hoard : mr::goal_mode::hoard;
+	else
+		return;
+	auto &segments{LevelSharedSegmentState.get_segments()};
+	auto &vcvertptr{LevelSharedSegmentState.get_vertex_state().get_vertices().vcptr};
+	const auto put{[&](const std::uint8_t team, const vcsegptridx_t seg) {
+		const auto c{compute_segment_center(vcvertptr, seg)};
+		mr::record_buffer buf;
+		put_record(mr::encode(buf, mr::mode_goal_record{team, mode, static_cast<std::uint16_t>(seg.get_unchecked_index()), {{mr::quantise_pos(c.x), mr::quantise_pos(c.y), mr::quantise_pos(c.z)}}}));
+	}};
+	if (ctf)
+	{
+		for (const std::uint8_t team : {std::uint8_t{0}, std::uint8_t{1}})
+			if (const auto home{net_modes_home_segment(team)})
+				put(team, segments.vcptridx(segnum_t{*home}));
+		return;
+	}
+	unsigned n{};
+	for (auto &&seg : segments.vcptridx)
+		if (seg->special == segment_special::goal_blue || seg->special == segment_special::goal_red)
+		{
+			put(mr::GOAL_TEAM_ANY, seg);
+			if (++n == mr::MAX_HOARD_GOALS)
+				break;
+		}
+#endif
+}
+
 void begin_level()
 {
 	R.level_known = true;
@@ -386,10 +432,12 @@ void begin_level()
 	R.mission = Current_mission.get();
 	for (auto &t : R.players)
 		t = {};
+	R.orbs = {};
 	R.sync_due = true;
 	mr::record_buffer buf;
 	put_record(mr::encode_level(buf, static_cast<std::int8_t>(std::clamp(Current_level_num, -128, 127)), static_cast<std::uint16_t>(R.segments), underlying_value(Game_mode), mission_name(), static_cast<const char *>(Current_level_name), mission_file_name(), level_file_name()));
 	announce_players(true);
+	put_goals();
 }
 
 /* A new level: another number, mission or mine, or the game time
@@ -801,6 +849,7 @@ void check_occupant(const unsigned pid)
 	t.hit_by_ms.fill(0);
 	for (auto &p : R.players)
 		p.hit_by_ms[pid] = 0;
+	R.orbs[pid] = 0;
 	o.in_game = in_game;
 	if (!in_game)
 	{
@@ -1061,6 +1110,38 @@ void movement_record_level_event(const std::uint8_t kind, const unsigned pid, co
 	if (!R.file)
 		return;
 	put_event(mr::record_type::level_event, pid < MAX_PLAYERS ? pid : mr::PLAYER_NONE, mr::PLAYER_NONE, kind, 0, value < 0 ? 0xffffu : static_cast<unsigned>(value), flags);
+}
+
+void movement_record_mode_event(const std::uint8_t kind, const unsigned pid, const std::uint8_t other, const std::uint8_t id, unsigned value, const std::uint8_t flags)
+{
+	if (!R.file)
+		return;
+	const unsigned p{pid < MAX_PLAYERS ? pid : mr::PLAYER_NONE};
+	if (p != mr::PLAYER_NONE)
+	{
+		auto &orbs{R.orbs[p]};
+		switch (kind)
+		{
+			case mr::mode_event_kind::orb_pickup:
+				if (!value)
+					value = orbs + 1u;
+				orbs = static_cast<std::uint8_t>(std::min(value, 255u));
+				break;
+			case mr::mode_event_kind::orb_drop:
+				if (!value)
+					value = (flags & mr::mode_drop_flag::by_hand) ? 1u : orbs;
+				if (!value)
+					return;
+				orbs = (flags & mr::mode_drop_flag::by_hand) && orbs > value ? static_cast<std::uint8_t>(orbs - value) : std::uint8_t{0};
+				break;
+			case mr::mode_event_kind::orb_score:
+				orbs = 0;
+				break;
+			default:
+				break;
+		}
+	}
+	put_event(mr::record_type::mode_event, p, other, kind, id, std::min(value, 0xffffu), flags);
 }
 
 }

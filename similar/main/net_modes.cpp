@@ -47,6 +47,7 @@
 
 #if DXX_USE_MULTIPLAYER
 
+#include <algorithm>
 #include <array>
 #include <cinttypes>
 #include <optional>
@@ -73,12 +74,15 @@
 #include "digi.h"
 #include "sounds.h"
 #include "vclip.h"
+#include "movement_record.h"
+#include "movement_record_format.h"
 
 namespace dsx {
 
 namespace {
 
 namespace nv = ::dcx::net_v2;
+namespace mr = ::dcx::movrec;
 
 static_assert(ctf_rule::classic == nv::CTF_RULE_CLASSIC && ctf_rule::dropped_returns == nv::CTF_RULE_DROPPED_RETURNS && ctf_rule::touch_returns == nv::CTF_RULE_TOUCH_RETURNS && ctf_rule::home_to_score == nv::CTF_RULE_HOME_TO_SCORE && ctf_rule::defaults == nv::CTF_RULES_DEFAULT);
 using nv::session_msg;
@@ -113,6 +117,10 @@ struct modes_state
 		fix64 since{};
 	};
 	std::array<idle_flag, nv::CTF_TEAMS> idle{};
+	/* The movement recording's reason of the return under way when no
+	 * player returns the flag (mr::flag_return_reason).
+	 */
+	uint8_t return_reason{mr::flag_return_reason::dropped};
 	/* Hoard: a death the host decided earns its extra orb (cleared when
 	 * the death's orbs are dropped).
 	 */
@@ -314,6 +322,7 @@ nv::orb_check orb_view(const playernum_t pnum)
 
 void apply_capture(const nv::capture_msg &m)
 {
+	movement_record_mode_event(mr::mode_event_kind::flag_capture, m.pid, m.flag, 0, static_cast<unsigned>(std::max<int>(m.scores.team_score, 0)));
 	multi_apply_capture(playernum_t{m.pid}, m.scores.team_score, m.scores.kills, m.scores.kill_goal_count, true);
 	if (ctf_rules().classic)
 		HUD_init_message(HM_MULTI, "%s team scores!", team_title(m.team));
@@ -409,12 +418,15 @@ void host_idle_flags()
 			continue;
 		idle = {};
 		con_printf(CON_NORMAL, "ctf: the %s flag lay away from home for %u s", team_name(team), nv::CTF_IDLE_RETURN_SECONDS);
+		M.return_reason = mr::flag_return_reason::idle;
 		net_modes_host_return_flag(*lying, MAX_PLAYERS);
+		M.return_reason = mr::flag_return_reason::dropped;
 	}
 }
 
 void apply_orb_bonus(const nv::orb_bonus_msg &m)
 {
+	movement_record_mode_event(mr::mode_event_kind::orb_score, m.pid, mr::PLAYER_NONE, 0, m.orbs);
 	multi_apply_orb_bonus(playernum_t{m.pid}, m.orbs, m.scores.team_score, m.scores.kills, m.scores.kill_goal_count, +(Game_mode & GM_TEAM));
 }
 
@@ -611,6 +623,23 @@ void client_receive_notice(const std::span<const uint8_t> payload)
 	const auto m{nv::ctf_notice_msg::read(payload)};
 	if (!m || !game_mode_capture_flag(Game_mode))
 		return;
+	/* The movement recording: a return, with its reason as far as the
+	 * rules tell (the notice does not carry it); a refused capture of
+	 * this machine's player.
+	 */
+	if (m->kind == nv::ctf_notice_kind::returned)
+	{
+		uint8_t reason{mr::flag_return_reason::touch};
+		if (m->pid >= N_players)
+		{
+			const auto rules{ctf_rules()};
+			const bool dropped{nv::dropped_flag_goes_home(rules)}, idle{nv::idle_flag_returns(rules)};
+			reason = dropped == idle ? mr::flag_return_reason::other : dropped ? mr::flag_return_reason::dropped : mr::flag_return_reason::idle;
+		}
+		movement_record_mode_event(mr::mode_event_kind::flag_return, m->pid, m->team, 0, 0, reason);
+	}
+	else if (m->kind == nv::ctf_notice_kind::own_flag_away && m->pid == Player_num)
+		movement_record_mode_event(mr::mode_event_kind::capture_refused, m->pid, nv::other_team(m->team), 0, 0);
 	show_notice(*m);
 }
 
@@ -741,6 +770,40 @@ bool net_modes_ctf_classic()
 #endif
 }
 
+std::optional<uint16_t> net_modes_home_segment(const uint8_t team)
+{
+#if DXX_BUILD_DESCENT == 2
+	if (team >= nv::CTF_TEAMS)
+		return std::nullopt;
+	if (const auto home{home_segment(team)})
+		return static_cast<uint16_t>(home->get_unchecked_index());
+#else
+	(void)team;
+#endif
+	return std::nullopt;
+}
+
+void net_modes_record_drop(const playernum_t pnum, const bool had_flag, const std::optional<bool> flag_went_home, const bool had_orbs, const unsigned orbs)
+{
+#if DXX_BUILD_DESCENT == 2
+	if (pnum >= MAX_PLAYERS || pnum >= N_players)
+		return;
+	if (had_flag && game_mode_capture_flag(Game_mode))
+	{
+		const bool home{flag_went_home ? *flag_went_home : nv::dropped_flag_goes_home(ctf_rules())};
+		movement_record_mode_event(mr::mode_event_kind::flag_drop, pnum, nv::other_team(team_of(pnum)), 0, 0, home ? mr::mode_drop_flag::went_home : 0);
+	}
+	if (had_orbs && game_mode_hoard(Game_mode))
+		movement_record_mode_event(mr::mode_event_kind::orb_drop, pnum, mr::PLAYER_NONE, 0, orbs);
+#else
+	(void)pnum;
+	(void)had_flag;
+	(void)flag_went_home;
+	(void)had_orbs;
+	(void)orbs;
+#endif
+}
+
 bool net_modes_flag_at_home(const object_base &flag)
 {
 #if DXX_BUILD_DESCENT == 2
@@ -828,6 +891,7 @@ void net_modes_host_flag_home(const uint8_t team, const playernum_t returned_by,
 	if (!returned)
 		return;
 	++M.returns;
+	movement_record_mode_event(mr::mode_event_kind::flag_return, returned_by, team, 0, 0, returned_by < N_players ? mr::flag_return_reason::touch : M.return_reason);
 	send_notice({nv::ctf_notice_kind::returned, team, returned_by < N_players ? static_cast<uint8_t>(returned_by) : nv::NET_V2_PLAYER_ID_NONE}, std::nullopt);
 #else
 	(void)team;
