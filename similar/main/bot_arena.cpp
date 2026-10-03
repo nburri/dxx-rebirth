@@ -13,6 +13,7 @@
 #include <chrono>
 #include <cinttypes>
 #include <cstdio>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -293,6 +294,18 @@ struct skill_totals
 	unsigned hits{};
 };
 
+/* -botarena-mode: the game mode by its name (empty: anarchy). */
+std::optional<network_game_type> arena_mode(const std::string_view name)
+{
+	if (name.empty() || name == "anarchy")
+		return network_game_type::anarchy;
+	if (name == "team")
+		return network_game_type::team_anarchy;
+	if (name == "ctf")
+		return network_game_type::capture_flag;
+	return std::nullopt;
+}
+
 /* The summary.  As movrec-analyse counts them: "hits" are the direct
  * hits (each bolt of a shot of several, and the missiles' direct hits)
  * on other players, "shots" the primary shots (a volley of bolts is one
@@ -341,6 +354,8 @@ void print_summary(const double game_seconds)
 		if (const auto &t{by_skill[k]}; t.bots)
 			con_printf(CON_URGENT, "botarena: skill %-7s %u bot%s: kills %u, deaths %u (%.2f kills per death), %.2f direct hits per primary shot (%u hits, %u shots)",
 				b::bot_skill_names[k], t.bots, t.bots == 1 ? "" : "s", t.kills, t.deaths, t.deaths ? static_cast<double>(t.kills) / t.deaths : static_cast<double>(t.kills), t.shots ? static_cast<double>(t.hits) / t.shots : 0.0, t.hits, t.shots);
+	/* The game mode's own numbers (captures, flag counts). */
+	net_modes_arena_summary();
 }
 
 }
@@ -369,8 +384,14 @@ bool bot_arena_start()
 	 * same game (as long as the bots' code does not change).
 	 */
 	timer_use_simulated_clock(F1_0, F1_0 / CGameArg.DbgBotArenaFps);
+	const auto mode{arena_mode(CGameArg.DbgBotArenaMode)};
+	if (!mode)
+	{
+		con_printf(CON_URGENT, "botarena: unknown mode \"%s\" (anarchy, team, ctf)", CGameArg.DbgBotArenaMode.c_str());
+		return false;
+	}
 	const unsigned bots{CGameArg.DbgBotArenaBots};
-	net_udp_arena_prepare(level, bots);
+	net_udp_arena_prepare(level, bots, *mode);
 	if (!setup_bots(bots))
 		return false;
 	con_printf(CON_URGENT, "botarena: level %u of \"%s\" (%s), %u bots, %" PRIu32 " s at %u fps, seed %" PRIu32,

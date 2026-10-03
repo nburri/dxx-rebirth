@@ -2720,7 +2720,7 @@ static int net_udp_start_game()
 
 namespace dsx {
 
-void net_udp_arena_prepare(const unsigned level, const unsigned bots)
+void net_udp_arena_prepare(const unsigned level, const unsigned bots, const network_game_type mode)
 {
 #if DXX_USE_TRACKER
 	/* No tracker: not even its address is looked up (net_udp_init). */
@@ -2729,10 +2729,11 @@ void net_udp_arena_prepare(const unsigned level, const unsigned bots)
 	net_udp_init();
 	net_udp_setup_defaults();
 	/* The pilot's profile gave the game options (powerups, invulnerability
-	 * after a respawn, tick rate...).  The arena plays anarchy on its
-	 * level, without end, unannounced.
+	 * after a respawn, tick rate...).  The arena plays its mode
+	 * (anarchy unless -botarena-mode says otherwise) on its level,
+	 * without end, unannounced.
 	 */
-	Netgame.gamemode = network_game_type::anarchy;
+	Netgame.gamemode = mode;
 	Netgame.levelnum = level;
 	Netgame.max_numplayers = std::min<unsigned>(bots + 1, MAX_PLAYERS);
 	Netgame.KillGoal = 0;
@@ -2766,6 +2767,11 @@ bool net_udp_arena_start(const uint32_t seed)
 	}
 	if (const auto placed{bots_allocate_slots()}; placed < bots)
 		con_printf(CON_URGENT, "botarena: only %u of %u bots fit", placed, bots);
+	/* A team mode: the bots by turns on the blue and the red team (the
+	 * host, a ghost, is blue).
+	 */
+	if (+(Game_mode & GM_TEAM))
+		Netgame.team_vector = static_cast<uint8_t>(0xaa & ((1u << N_players) - 1));
 	if (StartNewLevel(Netgame.levelnum) == window_event_result::close)
 	{
 		Game_mode = {};

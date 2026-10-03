@@ -1407,7 +1407,7 @@ from projectiles that were fired at stale positions).
 |---|---|
 | Anarchy, team anarchy | Kills and team vector in `PLAYER_KILLED`; `GAME_MODE_STATE{team_vector, Bounty_target, KillGoalCount[8]}` (replaces `MULTI_GMODE_UPDATE`, `MULTI_KILLGOALS`, `MULTI_DO_BOUNTY`) sent on change and every 5 s; kill goal / time limit end decided by the host → `LEVEL_END`. |
 | Bounty | `Bounty_target` chosen by the host on every kill/disconnect, in `PLAYER_KILLED` and `GAME_MODE_STATE`. |
-| CTF (D2) | Flags are powerups: pickup via §6.2 (host checks team). Capture: the host tests the carrier's rewound/current position against the goal segment (`fuelcen_check_for_goal` on the host, using the carrier's latest accepted state) → `CAPTURE{pid}` (score +5) and flag reset `OBJ_CREATE`. Drop on death: host `OBJ_CREATE` with spit velocity. `DROP_FLAG` request from a carrier → host creates. |
+| CTF (D2) | Flags are powerups: pickup via §6.2 (host checks team). Capture: the host tests the carrier's rewound/current position against the goal segment (`fuelcen_check_for_goal` on the host, using the carrier's latest accepted state) → `CAPTURE{pid}` (score +5) and flag reset `OBJ_CREATE`. Drop on death: host `OBJ_CREATE` with spit velocity. `DROP_FLAG` request from a carrier → host creates. As implemented: §8, "Stage 6a: game modes". |
 | Hoard / team hoard (D2) | Orbs are powerups (`INVENTORY.hoard_orbs`). Scoring: host detects the carrier in the goal (`fuelcen_check_for_hoard_goal`) → `ORB_BONUS{pid, orbs}`. Drop on death handled as flags. |
 | Cooperative | Robots host-simulated (§5.2); keys granted to all (host applies the coop rule); `SCORE_UPDATE{pid, score}` from the host; `SAVE_GAME`/`RESTORE_GAME` as host messages (unchanged payloads). |
 | Robot anarchy | Same robot handling; robot kills credited by the host. |
@@ -1524,6 +1524,7 @@ Message type numbering: session 0x01–0x1F (§4), `INVENTORY` 0x20,
 Stage 3 adds `OBJ_SETTLE` 0x47 and does not use `OBJ_AMMO` 0x23 or
 `DROP_FLAG_REQUEST` 0x3C (§8, "Stage 3 as implemented"). Protocol 105 adds
 `SPAWN_REQUEST` 0x48 and `SPAWN_SITE` 0x49 (§8, "Host-assigned spawns").
+Protocol 109 uses `CAPTURE` 0x39 (§8, "Stage 6a: game modes").
 The table lives in `net_v2.h` as a `for_each_net_v2_message(VALUE)` macro
 with `(NAME, id, min_len, max_len, allowed_sender)` so the length and
 direction checks of §3.7 are table-driven like v1's `command_length`.
@@ -2740,6 +2741,74 @@ not a demo played back (`net_combat_active`). Differences from §6.5,
 - **Version.** `MULTI_PROTO_VERSION` and `NET_V2_PROTO_VERSION` are 108 (a
   107 host would log the unknown message and ignore it, but the version
   check keeps them apart anyway).
+
+#### Stage 6a: game modes (protocol 109)
+
+The game modes the host decides, ahead of the rest of stage 6 (doors,
+triggers, robots). Rules and wire layouts in `common/main/net_v2_modes.h`
+(`test-net-v2-modes`), game side in `similar/main/net_modes.cpp`.
+
+**Capture the flag (protocol 109).**
+
+- **Why.** Every machine tested only its own ship against the goals and
+  announced its capture with the v1 `MULTI_CAPTURE_BONUS`, which every
+  machine applied (+5): a bot never scored (nothing tested its ship); the
+  captured flag came back only when the host's level inventory missed it
+  (`MultiLevelInv_Repopulate`, up to 2 s later, at a random place); a
+  capture that crossed the carrier's death on its way to the host could
+  leave a flag twice (dropped by the host from its copy, captured by the
+  client) or not at all.
+- **The host tests every ship, every frame** (`net_modes_frame`): its own
+  and its bots' where they are, a client's at its newest accepted
+  position (`net_interp_newest_live_position`, the segment of the newest
+  `INPUT`), alive as the host sees it (not after the host decided its
+  death, `net_combat_host_player_alive`). A carrier of the other team's
+  flag in its own team's goal captures (`capture_due`). A client no longer
+  tests itself in a network game; a `MULTI_CAPTURE_BONUS` that still
+  arrives is logged and ignored (it is only played in demos).
+- **A capture, on the host:** the flag is taken from the carrier's ship and
+  from the host's copy of its inventory (`net_objects_host_take_team_flag`),
+  the scores are counted (`capture_score`: team score, the carrier's kills
+  and kill goal count, +5 each), `CAPTURE` goes to every client, then the
+  flag goes back into the level at once (`net_drop_powerup_away_from`, the
+  drop place `maybe_drop_net_powerup` uses, some segments away from the
+  carrier; `OBJ_CREATE`). The kill goal counts the team's score, as for a
+  kill (`multi_player_killed`; v1 counted the carrier's own count).
+- **`CAPTURE` (0x39, reliable, host → all, 9 bytes):** `pid` u8, `team` u8
+  (0 blue, 1 red), `flag` u8 (the team whose flag it was: always the other
+  one), then the host's scores after the capture: team score i16, the
+  carrier's kills i16, its kill goal count i16. A client takes the scores
+  as they are (as `PLAYER_KILLED`'s), clears the carrier's flag, shows "You
+  have Scored!" / "… has Scored!" and plays the goal sound
+  (`multi_apply_capture`). Invalid: wrong size, `pid` ≥ 8, `team` > 1, a
+  team's own flag.
+- **One order: the host's.** The carried flag is a *host-owned* flag
+  (`inventory_rules::host_owned_flags`): grants, drops, deaths and
+  captures set and clear it on the host, a client's `INVENTORY` report
+  never does — a report sent before a capture arrived would bring the flag
+  back, one sent before a grant arrived would lose it. A capture and a
+  death are both decided on the host, one after the other: either the flag
+  is captured (and the death drops nothing) or it is dropped (and the
+  carrier has nothing left to capture). A carrier takes no second flag
+  (`evaluate_pickup`), which would be lost with the one bit that carries
+  both.
+- **Flag count.** The host counts every frame: each flag of each team is
+  in the level or carried, as often as the level had it (`flag_census`).
+  A broken count is logged once when it breaks and once when it is
+  restored (`ctf: flag count BROKEN …`); the bot arena prints the frames
+  counted and the broken ones in its summary.
+- **Accounting.** The host's powerup log counts a carried flag only for
+  the team that takes it (`units_carried`; it counted any flag before).
+- **Tests.** `test-net-v2-modes`: the capture rule, scores and kill goal,
+  the census, the wire layout, the host-owned flag under late reports,
+  drops and deaths, and a model of a host and four clients (200 seeds,
+  4000 steps) that plays pickups, deaths, drops and captures with late
+  reports and checks the flag count after every step.
+  `-botarena-mode ctf` (the bots by turns blue and red; they take flags
+  only by flying through them): 10 levels × 3 seeds × 30 min, 21
+  captures, 293 flag pickups, 263 flags dropped on deaths, the flag count
+  never broken in 10.8 million frames.
+- **Version.** `MULTI_PROTO_VERSION` and `NET_V2_PROTO_VERSION` are 109.
 
 ### Stage 5 — Join in progress, level flow, level end
 

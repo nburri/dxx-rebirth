@@ -273,6 +273,13 @@ struct inventory_rules
 	std::uint32_t ammo_rack_bit{};
 	std::uint32_t has_team_flag_bit{};
 	std::uint8_t max_orbs{};
+	/* Player flags only the host changes (a CTF flag carried, game modes
+	 * section 6.8): the host's grants, drops, deaths and captures set and
+	 * clear them, a client's report never does (a report sent before a
+	 * capture would bring the flag back, one sent before a grant arrived
+	 * would lose it).
+	 */
+	std::uint32_t host_owned_flags{};
 	bool capture_mode{};
 	bool hoard_mode{};
 	std::uint8_t team{};
@@ -371,7 +378,10 @@ constexpr pickup_outcome evaluate_pickup(const inventory &inv, const inventory_r
 				return {};
 			return {true, true, 0, 0};
 		case pickup_kind::team_flag:
-			if (!r.capture_mode || r.team != d.index)
+			/* One flag at a time: the carried flag is one bit, and a
+			 * second would be lost with it.
+			 */
+			if (!r.capture_mode || r.team != d.index || (inv.powerup_flags & r.has_team_flag_bit))
 				return {};
 			return {true, true, 0, 0};
 		case pickup_kind::orb:
@@ -653,11 +663,21 @@ public:
 		apply_drop(base_, r, d, count);
 		apply_drop(current_, r, d, count);
 	}
+	/* The host took flags from the player (a capture): nothing the
+	 * player reports brings them back (inventory_rules::host_owned_flags).
+	 */
+	void take_flags(const std::uint32_t flags)
+	{
+		base_.powerup_flags &= ~flags;
+		current_.powerup_flags &= ~flags;
+	}
 	/* A report of the player's inventory with `applied` grants. */
 	void on_report(const inventory_rules &r, const inventory &inv, const std::uint16_t applied)
 	{
+		const std::uint32_t owned{current_.powerup_flags & r.host_owned_flags};
 		has_report_ = true;
 		base_ = inv;
+		base_.powerup_flags = (base_.powerup_flags & ~r.host_owned_flags) | owned;
 		std::size_t kept{0};
 		for (std::size_t i = 0; i < pending_count_; ++i)
 			if (seq_diff(pending_[i].seq, applied) > 0)
@@ -671,6 +691,7 @@ public:
 			else
 				apply_pickup(current_, r, pending_[i].desc, pending_[i].outcome);
 		}
+		current_.powerup_flags = (current_.powerup_flags & ~r.host_owned_flags) | owned;
 	}
 private:
 	inventory base_{};
@@ -742,7 +763,8 @@ constexpr std::uint32_t units_carried(const inventory &inv, const inventory_rule
 		case pickup_kind::vulcan_ammo:
 			return inv.vulcan_ammo;
 		case pickup_kind::team_flag:
-			return (inv.powerup_flags & r.has_team_flag_bit) ? 1 : 0;
+			/* The flag a player carries is the one its team takes. */
+			return r.team == d.index && (inv.powerup_flags & r.has_team_flag_bit) ? 1 : 0;
 		case pickup_kind::orb:
 			return inv.orbs;
 		default:

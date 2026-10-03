@@ -73,6 +73,10 @@ void draw_fireball(const d_vclip_array &Vclip, grs_canvas &, vcobjptridx_t obj);
 void explode_wall(fvcvertptr &, vcsegptridx_t, sidenum_t sidenum, wall &);
 unsigned do_exploding_wall_frame(const d_robot_info_array &Robot_info, wall &);
 void maybe_drop_net_powerup(powerup_type_t powerup_type, bool adjust_cap, bool random_player);
+/* The host creates a powerup at a random place some segments away from
+ * player `pnum` (or the other players) and announces it (OBJ_CREATE).
+ */
+imobjptridx_t net_drop_powerup_away_from(powerup_type_t powerup_type, playernum_t pnum);
 void maybe_replace_powerup_with_energy(object_base &del_obj);
 }
 

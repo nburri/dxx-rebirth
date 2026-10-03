@@ -627,6 +627,11 @@ b::bot_profile bots_setup_profile()
 
 bool bots_allowed_in_mode(const network_game_type mode)
 {
+	/* The bot arena plays the team modes too (-botarena-mode); the bots
+	 * take flags only by flying through them so far.
+	 */
+	if (!CGameArg.DbgBotArenaMission.empty())
+		return true;
 	return mode == network_game_type::anarchy || mode == network_game_type::team_anarchy || mode == network_game_type::bounty;
 }
 
