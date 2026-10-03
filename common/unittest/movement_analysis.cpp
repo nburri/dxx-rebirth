@@ -2462,10 +2462,12 @@ void test_modes()
 		CHECK(b.bot && b.team == 1 && b.has_roles);
 		CHECK(b.flag_pickups == 1 && b.flag_drops == 1 && b.carries == 1 && b.carries_dropped == 1 && b.captures == 0);
 		CHECK_RANGE(b.carry_s, 4.9, 5.1);
-		/* Defends 30 s, hunts 20 s, dead 2 s, no role for 8 s. */
+		/* Defends 30 s, hunts 20 s, dead 2 s, hunts on 8 s (a bot
+		 * keeps its role over a death).
+		 */
 		CHECK_RANGE(b.role_s[mode_role::defend], 29.9, 30.1);
-		CHECK_RANGE(b.role_s[mode_role::hunt], 19.9, 20.1);
-		CHECK_RANGE(b.role_s[mode_role::none], 7.9, 8.1);
+		CHECK_RANGE(b.role_s[mode_role::hunt], 27.9, 28.2);
+		CHECK_RANGE(b.role_s[mode_role::none], 0, 0.1);
 		CHECK_RANGE(b.alive_s, 57.9, 58.1);
 		const auto text{write_mode_report(m)};
 		CHECK(text.find("capture the flag (Classic)") != std::string::npos);

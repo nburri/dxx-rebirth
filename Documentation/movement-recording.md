@@ -236,7 +236,9 @@ team it belongs to.
 | 8 | capture refused (Classic: in its goal with the flag, its own flag away) | carrier | the carried flag's team | | | |
 
 The roles of a bot (`id` of kind 7, written by the bot code when the
-role changes): 0 none, 1 attack, 2 defend, 3 escort, 4 hunt (the enemy
+role changes; the bots' capture the flag and hoard play, stage B7 of
+multiplayer-bots.md, PR #92; before it no bot has a role and no sample
+has the objective goal): 0 none, 1 attack, 2 defend, 3 escort, 4 hunt (the enemy
 carrier), 5 carry (the enemy flag home), 6 wait (a carrier waiting for its
 own flag to be home), 7 retrieve (its own dropped flag), 8 collect (hoard:
 collecting orbs, fighting), 9 score (hoard: going to a goal).
@@ -1017,8 +1019,9 @@ several machines count once, as all events, section 8.2):
   the nearer home. This is how a human's role shows (near its own home:
   defending; near the enemy's: attacking);
 - for a player with `role` events (the bots) the time alive in each role,
-  from a role event to the next; a death ends it (no role until the next
-  event).
+  from a role event to the next (the role holds over a death: a bot keeps
+  it; the time dead is no sample); a level's end ends it, as it ends a
+  carry (at the level's last sample, not across the score screens).
 
 ```
 == capture the flag (Classic): 5.0 min ==

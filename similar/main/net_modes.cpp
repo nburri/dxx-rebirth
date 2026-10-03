@@ -478,6 +478,10 @@ void host_check_goals()
 				{
 					t = GameTime64;
 					++M.refused;
+					/* The host records it (its own player's and its bots';
+					 * a client records its own when the notice arrives).
+					 */
+					movement_record_mode_event(mr::mode_event_kind::capture_refused, i, nv::other_team(c.team), 0, 0);
 					const nv::ctf_notice_msg m{nv::ctf_notice_kind::own_flag_away, c.team, static_cast<uint8_t>(i)};
 					send_notice(m, i);
 				}

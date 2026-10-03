@@ -4323,8 +4323,11 @@ inline std::optional<mode_summary> analyse_modes(const std::span<const recording
 					++st.carries_dropped;
 					end_carry(e.t);
 				}
+				/* A bot keeps its role over a death (its next role
+				 * event comes only with a change); the time dead is no
+				 * sample.
+				 */
 				orbs = 0;
-				role = mode_role::none;
 				return;
 			}
 			const bool by_hand{(e.e.flags & mode_drop_flag::by_hand) != 0};
@@ -4352,7 +4355,10 @@ inline std::optional<mode_summary> analyse_modes(const std::span<const recording
 					if (carrying)
 						++st.carries_captured;
 					end_carry(e.t);
-					if (st.team < 2)
+					/* The scoring team is the other of the flag's. */
+					if (e.e.other < 2)
+						++out.teams[1 - e.e.other].captures;
+					else if (st.team < 2)
 						++out.teams[st.team].captures;
 					break;
 				case mode_event_kind::flag_return:
@@ -4387,6 +4393,7 @@ inline std::optional<mode_summary> analyse_modes(const std::span<const recording
 			}
 		}};
 		std::optional<std::pair<std::uint16_t, std::uint16_t>> level;
+		std::int64_t prev_t{};
 		for (const auto &m : sp.samples)
 		{
 			while (k != ev.size() && ev[k]->t <= m.t)
@@ -4396,10 +4403,15 @@ inline std::optional<mode_summary> analyse_modes(const std::span<const recording
 			/* A new level (or another file's): a carry ends with it. */
 			if (const std::pair cur{m.file, m.level}; level && *level != cur)
 			{
-				end_carry(m.t);
+				/* At the last sample of the level, not across the
+				 * score screens.
+				 */
+				end_carry(prev_t);
 				orbs = 0;
+				role = mode_role::none;
 			}
 			level = std::pair{m.file, m.level};
+			prev_t = m.t;
 			if (!(m.s.flags & sample_flag::alive))
 				continue;
 			const double w{ms.tick_s[m.file]};
