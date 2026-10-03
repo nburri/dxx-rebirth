@@ -66,6 +66,9 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "gauges.h"
 #include "powerup.h"
 #include "switch.h"
+#if DXX_USE_OGL
+#include "ogl_effects.h"
+#endif
 #include "automap.h"
 #include "timer.h"
 #include "config.h"
@@ -944,6 +947,14 @@ static void draw_automap(fvcobjptr &vcobjptr, automap &am, fix eye = 0)
 	if (eye == 0)
 		gr_clear_canvas(canvas, BM_XRGB(0,0,0));
 
+#if DXX_USE_OGL
+	/* Anti-aliasing, render scale, bloom, gamma (ogl_effects.h). */
+	const bool post_effects{
+#if DXX_USE_STEREOSCOPIC_RENDER
+		VR_stereo == StereoFormat::None &&
+#endif
+		ogl_post_begin(canvas, false)};
+#endif
 	g3_start_frame(canvas);
 	render_start_frame();
 
@@ -1029,8 +1040,13 @@ static void draw_automap(fvcobjptr &vcobjptr, automap &am, fix eye = 0)
 	}
 
 	g3_end_frame();
+#if DXX_USE_OGL
+	if (post_effects)
+		ogl_post_end();
+#endif
 
 	SCREEN_SIZE_STEREO;
+
 	name_frame(canvas, am, dx, dy);
 	SCREEN_SIZE_NORMAL;
 

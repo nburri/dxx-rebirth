@@ -83,6 +83,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #if DXX_USE_OGL
 #include "ogl_init.h"
 #include "ogl_extensions.h"
+#include "ogl_effects.h"
 #endif
 #include "physfs_list.h"
 
@@ -2081,6 +2082,124 @@ void hud_config()
 	(void)menu;
 }
 
+#if DXX_USE_OGL
+/* Options -> Graphics -> Visual Quality: the settings of ogl_effects.h
+ * and the anisotropic filtering level.  Changes apply at once (the
+ * anisotropic level when the graphics menu reloads the textures).
+ */
+struct visual_quality_menu_items
+{
+	enum
+	{
+		opt_vq_aniso,
+		opt_vq_aa,
+		opt_vq_scale,
+		opt_vq_smooth,
+		opt_vq_bloom,
+		opt_vq_gamma,
+		opt_vq_contrast,
+		opt_vq_blank,
+		opt_vq_info,
+		opt_vq_count
+	};
+	static constexpr std::array<uint8_t, 5> aniso_levels{{0, 2, 4, 8, 16}};
+	static constexpr std::array<uint8_t, 4> aa_levels{{0, 2, 4, 8}};
+	static constexpr std::array<uint8_t, 3> scale_levels{{100, 150, 200}};
+	std::array<newmenu_item, opt_vq_count> m;
+	std::array<ntstring<NM_MAX_TEXT_LEN>, opt_vq_count> saved_text;
+	std::array<std::array<char, 48>, opt_vq_count> label;
+	std::array<char, 80> info;
+	template <std::size_t N>
+	static unsigned index_of(const std::array<uint8_t, N> &levels, const unsigned value)
+	{
+		unsigned best{0};
+		for (unsigned i = 0; i < N; ++i)
+			if (levels[i] <= value)
+				best = i;
+		return best;
+	}
+	static unsigned percent_index(const unsigned percent)
+	{
+		return (std::clamp(percent, 70u, 130u) - 70u) / 5u;
+	}
+	visual_quality_menu_items()
+	{
+		auto &c{ogl_effects_caps};
+		nm_set_item_slider(m[opt_vq_aniso], label[opt_vq_aniso].data(), index_of(aniso_levels, CGameCfg.TexAnisotropy), 0, aniso_levels.size() - 1, saved_text[opt_vq_aniso]);
+		nm_set_item_slider(m[opt_vq_aa], label[opt_vq_aa].data(), index_of(aa_levels, CGameCfg.Multisample), 0, aa_levels.size() - 1, saved_text[opt_vq_aa]);
+		nm_set_item_slider(m[opt_vq_scale], label[opt_vq_scale].data(), index_of(scale_levels, CGameCfg.RenderScale), 0, scale_levels.size() - 1, saved_text[opt_vq_scale]);
+		nm_set_item_checkbox(m[opt_vq_smooth], "Smooth Lighting", CGameCfg.SmoothLighting);
+		nm_set_item_slider(m[opt_vq_bloom], label[opt_vq_bloom].data(), std::min<unsigned>(CGameCfg.Bloom, 8), 0, 8, saved_text[opt_vq_bloom]);
+		nm_set_item_slider(m[opt_vq_gamma], label[opt_vq_gamma].data(), percent_index(CGameCfg.GammaCurve), 0, 12, saved_text[opt_vq_gamma]);
+		nm_set_item_slider(m[opt_vq_contrast], label[opt_vq_contrast].data(), percent_index(CGameCfg.Contrast), 0, 12, saved_text[opt_vq_contrast]);
+		nm_set_item_text(m[opt_vq_blank], "");
+		std::snprintf(info.data(), info.size(), "Shaders: %s  Framebuffers: %s  Max. MSAA: %ix",
+			c.shaders ? "yes" : "no", c.fbo ? "yes" : "no", c.fbo_multisample ? c.max_samples : 0);
+		nm_set_item_text(m[opt_vq_info], info.data());
+		update_labels();
+	}
+	void update_labels()
+	{
+		const unsigned aniso{aniso_levels[m[opt_vq_aniso].value]};
+		if (aniso)
+			std::snprintf(label[opt_vq_aniso].data(), label[opt_vq_aniso].size(), "Anisotropic Filtering: %ux%s", aniso, ogl_maxanisotropy < aniso ? " (n/a)" : "");
+		else
+			std::snprintf(label[opt_vq_aniso].data(), label[opt_vq_aniso].size(), "Anisotropic Filtering: off");
+		const unsigned aa{aa_levels[m[opt_vq_aa].value]};
+		if (aa)
+			std::snprintf(label[opt_vq_aa].data(), label[opt_vq_aa].size(), "Anti-Aliasing (MSAA): %ux%s", aa, static_cast<int>(aa) > ogl_effects_caps.max_samples ? " (n/a)" : "");
+		else
+			std::snprintf(label[opt_vq_aa].data(), label[opt_vq_aa].size(), "Anti-Aliasing (MSAA): off");
+		std::snprintf(label[opt_vq_scale].data(), label[opt_vq_scale].size(), "Render Scale: %u%%", static_cast<unsigned>(scale_levels[m[opt_vq_scale].value]));
+		if (const unsigned b{static_cast<unsigned>(m[opt_vq_bloom].value)})
+			std::snprintf(label[opt_vq_bloom].data(), label[opt_vq_bloom].size(), "Bloom (Glow): %u", b);
+		else
+			std::snprintf(label[opt_vq_bloom].data(), label[opt_vq_bloom].size(), "Bloom (Glow): off");
+		std::snprintf(label[opt_vq_gamma].data(), label[opt_vq_gamma].size(), "Gamma: %.2f", (70 + 5 * m[opt_vq_gamma].value) / 100.0);
+		std::snprintf(label[opt_vq_contrast].data(), label[opt_vq_contrast].size(), "Contrast: %.2f", (70 + 5 * m[opt_vq_contrast].value) / 100.0);
+	}
+	void apply() const
+	{
+		CGameCfg.TexAnisotropy = aniso_levels[m[opt_vq_aniso].value];
+		CGameCfg.Multisample = aa_levels[m[opt_vq_aa].value];
+		CGameCfg.RenderScale = scale_levels[m[opt_vq_scale].value];
+		CGameCfg.SmoothLighting = m[opt_vq_smooth].value;
+		CGameCfg.Bloom = m[opt_vq_bloom].value;
+		CGameCfg.GammaCurve = 70 + 5 * m[opt_vq_gamma].value;
+		CGameCfg.Contrast = 70 + 5 * m[opt_vq_contrast].value;
+	}
+};
+
+struct visual_quality_menu : visual_quality_menu_items, newmenu
+{
+	visual_quality_menu(grs_canvas &src) :
+		newmenu(menu_title{nullptr}, menu_subtitle{"Visual Quality"}, menu_filename{nullptr}, tiny_mode_flag::normal, tab_processing_flag::ignore, adjusted_citem::create(m, 0), src)
+	{
+	}
+	virtual window_event_result event_handler(const d_event &event) override
+	{
+		switch (event.type)
+		{
+			case event_type::newmenu_changed:
+				update_labels();
+				apply();
+				break;
+			case event_type::window_close:
+				apply();
+				break;
+			default:
+				break;
+		}
+		return newmenu::event_handler(event);
+	}
+};
+
+void visual_quality_config()
+{
+	window_create<visual_quality_menu>(grd_curscreen->sc_canvas);
+}
+#endif
+
 #define DXX_GRAPHICS_MENU(VERB)	\
 	DXX_MENUITEM(VERB, MENU, "Screen resolution...", opt_gr_screenres)	\
 	DXX_MENUITEM(VERB, MENU, "HUD Options...", opt_gr_hudmenu)	\
@@ -2101,15 +2220,15 @@ struct graphics_config_menu_items
 	DXX_MENUITEM(VERB, RADIO, "Classic", opt_filter_none, 0, optgrp_texfilt)	\
 	DXX_MENUITEM(VERB, RADIO, "Blocky Filtered", opt_filter_upscale, 0, optgrp_texfilt)	\
 	DXX_MENUITEM(VERB, RADIO, "Smooth", opt_filter_trilinear, 0, optgrp_texfilt)	\
-	DXX_MENUITEM(VERB, CHECK, "Anisotropic Filtering", opt_filter_anisotropy, CGameCfg.TexAnisotropy)	\
+	DXX_MENUITEM(VERB, RADIO, "Sharp Pixels", opt_filter_sharp, 0, optgrp_texfilt)	\
 	D2X_OGL_GRAPHICS_MENU(VERB)	\
 	DXX_MENUITEM(VERB, TEXT, "", blank2)	\
 
 #define DXX_OGL1_GRAPHICS_MENU(VERB)	\
+	DXX_MENUITEM(VERB, MENU, "Visual Quality...", opt_gr_visual)	\
 	DXX_MENUITEM(VERB, CHECK, "Transparency Effects", opt_gr_alphafx, PlayerCfg.AlphaEffects)	\
 	DXX_MENUITEM(VERB, CHECK, "Colored Dynamic Light", opt_gr_dynlightcolor, PlayerCfg.DynLightColor)	\
 	DXX_MENUITEM(VERB, CHECK, "VSync", opt_gr_vsync, CGameCfg.VSync)	\
-	DXX_MENUITEM(VERB, CHECK, "4x multisampling", opt_gr_multisample, CGameCfg.Multisample)	\
 
 #if DXX_BUILD_DESCENT == 1
 #define D2X_OGL_GRAPHICS_MENU(VERB)
@@ -2158,13 +2277,6 @@ window_event_result graphics_config_menu::event_handler(const d_event &event)
 				CGameCfg.GammaLevel = GammaLevel;
 				gr_palette_set_gamma(GammaLevel);
 			}
-#if DXX_USE_OGL
-			else if (citem == opt_filter_anisotropy && ogl_maxanisotropy <= 1.0 && m[opt_filter_anisotropy].value)
-			{
-				m[opt_filter_anisotropy].value = 0;
-				window_create<passive_messagebox>(menu_title{TXT_ERROR}, menu_subtitle{"Anisotropic Filtering not\nsupported by your hardware/driver."}, TXT_OK, grd_curscreen->sc_canvas);
-			}
-#endif
 			break;
 		}
 		case event_type::newmenu_selected:
@@ -2174,36 +2286,38 @@ window_event_result graphics_config_menu::event_handler(const d_event &event)
 				window_create<screen_resolution_menu>();
 			else if (citem == opt_gr_hudmenu)
 				hud_config();
+#if DXX_USE_OGL
+			else if (citem == opt_gr_visual)
+				visual_quality_config();
+#endif
 			return window_event_result::handled;		// stay in menu
 		}
 		case event_type::window_close:
 #if DXX_USE_OGL
-			if (CGameCfg.VSync != m[opt_gr_vsync].value || CGameCfg.Multisample != m[opt_gr_multisample].value)
+			if (CGameCfg.VSync != m[opt_gr_vsync].value)
 			{
 				struct warn_might_need_restart : passive_messagebox
 				{
 					warn_might_need_restart() :
-						passive_messagebox(menu_title{nullptr}, menu_subtitle{"On some systems, changing VSync or 4x Multisample\nrequires a restart."}, TXT_OK, grd_curscreen->sc_canvas)
+						passive_messagebox(menu_title{nullptr}, menu_subtitle{"On some systems, changing VSync\nrequires a restart."}, TXT_OK, grd_curscreen->sc_canvas)
 						{
 						}
 				};
 				run_blocking_newmenu<warn_might_need_restart>();
 			}
 
-			for (const uint8_t i : xrange(3u))
+			for (const uint8_t i : xrange(4u))
 				if (m[i + opt_filter_none].value)
 				{
 					CGameCfg.TexFilt = opengl_texture_filter{i};
 					break;
 				}
-			CGameCfg.TexAnisotropy = m[opt_filter_anisotropy].value;
 #if DXX_BUILD_DESCENT == 2
 			GameCfg.MovieTexFilt = m[opt_gr_movietexfilt].value;
 #endif
 			PlayerCfg.AlphaEffects = m[opt_gr_alphafx].value;
 			PlayerCfg.DynLightColor = m[opt_gr_dynlightcolor].value;
 			CGameCfg.VSync = m[opt_gr_vsync].value;
-			CGameCfg.Multisample = m[opt_gr_multisample].value;
 #endif
 			CGameCfg.GammaLevel = m[opt_gr_brightness].value;
 			CGameCfg.FPSIndicator = m[opt_gr_fpsindi].value;

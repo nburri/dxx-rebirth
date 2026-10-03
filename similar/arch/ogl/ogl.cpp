@@ -71,6 +71,7 @@
 #include <memory>
 #include <utility>
 #include "frame_probe.h"
+#include "ogl_effects.h"
 using std::max;
 
 //change to 1 for lots of spew.
@@ -590,6 +591,7 @@ void g3_draw_line(const g3_draw_line_context &context, const g3_draw_line_point 
 	}};
 	glVertexPointer(3, GL_FLOAT, 0, vertices.data());
 	glColorPointer(4, GL_FLOAT, 0, context.color_array.data());
+	ogl_world_shader_off();
 	glDrawArrays(GL_LINES, 0, 2);
 }
 
@@ -599,6 +601,7 @@ static void ogl_drawcircle(const unsigned nsides, const unsigned type, GLfloat *
 {
 	glEnableClientState(GL_VERTEX_ARRAY);
 	glVertexPointer(2, GL_FLOAT, 0, vertices);
+	ogl_world_shader_off();
 	glDrawArrays(type, 0, nsides);
 	glDisableClientState(GL_VERTEX_ARRAY);
 }
@@ -714,6 +717,7 @@ void ogl_draw_vertex_reticle(grs_canvas &canvas, int cross, int primary, int sec
 		-4.0, 2.0, -2.0, 0, -3.0, -4.0, -2.0, -3.0, 4.0, 2.0, 2.0, 0, 3.0, -4.0, 2.0, -3.0,
 	}};
 	glVertexPointer(2, GL_FLOAT, 0, cross_lva.data());
+	ogl_world_shader_off();
 	glDrawArrays(GL_LINES, 0, 8);
 	
 	std::array<GLfloat, 4 * 4> primary_lca0;
@@ -747,6 +751,7 @@ void ogl_draw_vertex_reticle(grs_canvas &canvas, int cross, int primary, int sec
 		10.0, -7.0, 10.0, -8.7, 15.0, -8.5, 15.0, -9.5
 	}};
 	glVertexPointer(2, GL_FLOAT, 0, primary_lva0.data());
+	ogl_world_shader_off();
 	glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 
 	std::array<GLfloat, 4 * 4> primary_lca1;
@@ -767,13 +772,16 @@ void ogl_draw_vertex_reticle(grs_canvas &canvas, int cross, int primary, int sec
 	}
 	glColorPointer(4, GL_FLOAT, 0, lca1_data);
 	glVertexPointer(2, GL_FLOAT, 0, primary_lva1.data());
+	ogl_world_shader_off();
 	glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 	//right primary bar
 	glColorPointer(4, GL_FLOAT, 0, lca0_data);
 	glVertexPointer(2, GL_FLOAT, 0, primary_lva2.data());
+	ogl_world_shader_off();
 	glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 	glColorPointer(4, GL_FLOAT, 0, lca1_data);
 	glVertexPointer(2, GL_FLOAT, 0, primary_lva3.data());
+	ogl_world_shader_off();
 	glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 	
 	GLfloat *secondary_lva_ptr;
@@ -926,7 +934,43 @@ void _g3_draw_poly(grs_canvas &canvas, const std::span<g3_draw_tmap_point *const
 
 	glVertexPointer(3, GL_FLOAT, 0, vertices.flat.data());
 	glColorPointer(4, GL_FLOAT, 0, color_array.flat.data());
+	ogl_world_shader_off();
 	glDrawArrays(GL_TRIANGLE_FAN, 0, pointlist.size());
+}
+
+/*
+ * The world shader (ogl_effects.h) for a textured draw: a quad with
+ * smooth lighting draws with the corner colors as uniforms and the
+ * corner coordinates as its color array; else the shader binds only
+ * for sharp pixels.  Returns the color array to draw with.
+ */
+static const GLfloat *ogl_bind_world_shader(const ogl_texture *const gltexture, const std::size_t nv, const GLfloat *const colors)
+{
+	if (!gltexture)
+	{
+		ogl_world_shader_off();
+		return colors;
+	}
+	if (nv == 4 && ogl_smooth_lighting_active())
+	{
+		std::array<std::array<float, 4>, 4> corners;
+		for (std::size_t i = 0; i < 4; ++i)
+			for (std::size_t j = 0; j < 4; ++j)
+				corners[i][j] = std::clamp(colors[i * 4 + j], 0.0f, 1.0f);
+		if (ogl_world_shader_quad(*gltexture, corners))
+		{
+			static constexpr std::array<GLfloat, 16> quad_coordinates{{
+				0, 0, 0, 1,
+				1, 0, 0, 1,
+				1, 1, 0, 1,
+				0, 1, 0, 1,
+			}};
+			return quad_coordinates.data();
+		}
+	}
+	if (!ogl_world_shader_plain(*gltexture))
+		ogl_world_shader_off();
+	return colors;
 }
 
 /*
@@ -937,10 +981,11 @@ void _g3_draw_tmap(grs_canvas &canvas, const std::span<g3_draw_tmap_point *const
 	GLfloat color_alpha = 1.0;
 
 	ogl_client_states<int, GL_VERTEX_ARRAY, GL_COLOR_ARRAY> cs;
+	ogl_texture *gltexture{nullptr};
 	if (tmap_drawer_ptr == draw_tmap) {
 		glEnableClientState(GL_TEXTURE_COORD_ARRAY);
 		OGL_ENABLE(TEXTURE_2D);
-		const auto gltexture{ogl_bindbmtex(bm, 0)};
+		gltexture = ogl_bindbmtex(bm, 0);
 		if (!gltexture) [[unlikely]]
 			/* `gltexture` will only be `nullptr` if a game data file is missing. */
 			return;
@@ -996,7 +1041,7 @@ void _g3_draw_tmap(grs_canvas &canvas, const std::span<g3_draw_tmap_point *const
 	}
 
 	glVertexPointer(3, GL_FLOAT, 0, vertices.flat.data());
-	glColorPointer(4, GL_FLOAT, 0, color_array.flat.data());
+	glColorPointer(4, GL_FLOAT, 0, ogl_bind_world_shader(gltexture, nv, color_array.flat.data()));
 	if (tmap_drawer_ptr == draw_tmap) {
 		glTexCoordPointer(2, GL_FLOAT, 0, texcoord_array.flat.data());
 	}
@@ -1090,7 +1135,7 @@ void _g3_draw_tmap_2(grs_canvas &canvas, const std::span<g3_draw_tmap_point *con
 		vert[2] = -f2glf(point->p3_vec.z);
 	}
 	glVertexPointer(3, GL_FLOAT, 0, vertices.flat.data());
-	glColorPointer(4, GL_FLOAT, 0, color_array.flat.data());
+	glColorPointer(4, GL_FLOAT, 0, ogl_bind_world_shader(gltexture, nv, color_array.flat.data()));
 	glTexCoordPointer(2, GL_FLOAT, 0, texcoord_array.flat.data());
 	glDrawArrays(GL_TRIANGLE_FAN, 0, nv);
 }
@@ -1175,6 +1220,8 @@ void g3_draw_bitmap(grs_canvas &canvas, const vms_vector &pos, const fix iwidth,
 	glVertexPointer(3, GL_FLOAT, 0, vertices.data());
 	glColorPointer(4, GL_FLOAT, 0, color_array.data());
 	glTexCoordPointer(2, GL_FLOAT, 0, texcoord_array.data());
+	if (!ogl_world_shader_plain(*gltexture))
+		ogl_world_shader_off();
 	glDrawArrays(GL_TRIANGLE_FAN, 0, 4); // Replaced GL_QUADS
 }
 
@@ -1248,6 +1295,7 @@ bool ogl_ubitblt_i(unsigned dw,unsigned dh,unsigned dx,unsigned dy, unsigned sw,
 	};
 	glColorPointer(4, GL_FLOAT, 0, color_array);
 	glTexCoordPointer(2, GL_FLOAT, 0, texcoord_array);  
+	ogl_world_shader_off();
 	glDrawArrays(GL_TRIANGLE_FAN, 0, 4);//replaced GL_QUADS
 	return 0;
 }
@@ -1296,10 +1344,14 @@ void ogl_start_frame(grs_canvas &canvas)
 {
 	r_polyc=0;r_tpolyc=0;r_bitmapc=0;r_ubitbltc=0;
 
-	OGL_VIEWPORT(canvas.cv_bitmap.bm_x, canvas.cv_bitmap.bm_y, canvas.cv_bitmap.bm_w, canvas.cv_bitmap.bm_h);
+	if (ogl_post_active())
+		/* Drawing into the off-screen view of ogl_effects.h. */
+		ogl_post_set_viewport();
+	else
+		OGL_VIEWPORT(canvas.cv_bitmap.bm_x, canvas.cv_bitmap.bm_y, canvas.cv_bitmap.bm_w, canvas.cv_bitmap.bm_h);
 	glClearColor(0.0, 0.0, 0.0, 0.0);
 
-	glLineWidth(linedotscale);
+	glLineWidth(linedotscale * ogl_post_scale());
 	glEnable(GL_BLEND);
 	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
@@ -1419,6 +1471,7 @@ void ogl_stereo_frame(const bool left_eye, const int xoff)
 #endif
 
 void ogl_end_frame(void){
+	ogl_world_shader_off();
 	OGL_VIEWPORT(0, 0, grd_curscreen->get_screen_width(), grd_curscreen->get_screen_height());
 	glMatrixMode(GL_PROJECTION);
 	glLoadIdentity();//clear matrix
@@ -1654,6 +1707,11 @@ static void tex_set_size(ogl_texture &tex)
 //stores OpenGL textured id in *texid and u/v values required to get only the real data in *u/*v
 static int ogl_loadtexture(const palette_array_t &pal, const uint8_t *data, const int dxo, int dyo, ogl_texture &tex, const int bm_flags, const int data_format, opengl_texture_filter texfilt, const bool texanis, const bool edgepad)
 {
+	if (texfilt == opengl_texture_filter::sharp)
+		/* Filtered like "Smooth"; the world shader keeps the texels
+		 * sharp.  Without shader support, like "Blocky Filtered".
+		 */
+		texfilt = ogl_effects_caps.texture_lod ? opengl_texture_filter::trilinear : opengl_texture_filter::upscale;
 	++frame_probe::counters.texture_uploads;
 	frame_probe::event_scope probe{frame_probe::phase::tex, frame_probe::event_kind::texture_upload, tex.w, 0};
 	tex.tw = {std::bit_ceil(tex.w)};
@@ -1865,7 +1923,7 @@ static int ogl_loadtexture(const palette_array_t &pal, const uint8_t *data, cons
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, gl_mag_filter_int);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, gl_min_filter_int);
 	if (texanis && ogl_maxanisotropy > 1.0f)
-		glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, ogl_maxanisotropy);
+		glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, std::min(ogl_maxanisotropy, std::max(2.0f, static_cast<float>(CGameCfg.TexAnisotropy))));
 
 #if DXX_USE_OGLES // in OpenGL ES 1.1 the mipmaps are automatically generated by a parameter
 	glTexParameteri (GL_TEXTURE_2D, GL_GENERATE_MIPMAP, buildmipmap ? GL_TRUE : GL_FALSE);
@@ -2051,6 +2109,8 @@ void ogl_ubitmapm_cs(grs_canvas &canvas, const int entry_x, const int entry_y, c
 	glVertexPointer(2, GL_FLOAT, 0, vertices.data());
 	glColorPointer(4, GL_FLOAT, 0, color_array.data());
 	glTexCoordPointer(2, GL_FLOAT, 0, texcoord_array.data());
+	if (!ogl_world_shader_plain(*gltexture))
+		ogl_world_shader_off();
 	glDrawArrays(GL_TRIANGLE_FAN, 0, 4);//replaced GL_QUADS
 }
 
