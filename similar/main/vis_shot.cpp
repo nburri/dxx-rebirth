@@ -46,6 +46,9 @@ namespace dsx {
 
 namespace {
 
+int exit_status = 1;
+
+#if DXX_USE_OGL
 struct vis_preset
 {
 	const char *name;
@@ -81,7 +84,6 @@ struct viewpoint
 };
 
 unsigned frames_seen;
-int exit_status = 1;
 
 double length(const vms_vector &v)
 {
@@ -178,7 +180,7 @@ std::vector<viewpoint> choose_viewpoints(const unsigned wanted)
 void spawn_effects(const viewpoint &vp)
 {
 	auto &Objects = LevelUniqueObjectState.Objects;
-	const double ahead{std::min(vp.run * 0.35, 70.0)};
+	const double ahead{std::min(vp.run * 0.35, 32.0)};
 	const auto seg_of{[](const vms_vector &p, const segnum_t start) {
 		return find_point_seg(LevelSharedSegmentState, LevelUniqueSegmentState, p, Segments.vmptridx(start) DXX_lighting_hack_pass_parameter);
 	}};
@@ -186,18 +188,19 @@ void spawn_effects(const viewpoint &vp)
 	if (const auto s{seg_of(p_expl, vp.segnum)}; s != segment_none)
 		object_create_explosion_without_damage(Vclip, s, p_expl, i2f(7), vclip_index::small_explosion);
 	const auto console{Objects.vmptridx(ConsoleObject)};
+	/* Units ahead, near enough to be seen. */
 	const std::array<std::pair<double, weapon_id_type>, 4> shots{{
-		{0.20, weapon_id_type::FLARE_ID},
-		{0.28, weapon_id_type::PLASMA_ID},
-		{0.45, weapon_id_type::LASER_ID_L4},
-		{0.55, weapon_id_type::FUSION_ID},
+		{12, weapon_id_type::FLARE_ID},
+		{16, weapon_id_type::PLASMA_ID},
+		{22, weapon_id_type::LASER_ID_L4},
+		{28, weapon_id_type::FUSION_ID},
 	}};
 	const auto side{vp.orient.rvec};
 	for (std::size_t i = 0; i < shots.size(); ++i)
 	{
 		const auto &[f, id] = shots[i];
 		const double off{i % 2 ? -4.0 : 4.0};
-		const auto p{vm_vec_build_add(vm_vec_build_add(vp.pos, scaled(vp.dir, std::min(vp.run * f, 90.0))), scaled(side, off))};
+		const auto p{vm_vec_build_add(vm_vec_build_add(vp.pos, scaled(vp.dir, std::min(vp.run * 0.8, f))), scaled(side, off))};
 		if (const auto s{seg_of(p, vp.segnum)}; s != segment_none)
 			Laser_create_new(vp.dir, p, s, console, id, weapon_sound_flag::silent);
 	}
@@ -217,7 +220,6 @@ void place_camera(const vms_vector &pos, const vms_matrix &orient, const segnum_
 	Viewer = ConsoleObject;
 }
 
-#if DXX_USE_OGL
 /* Every picture at the same game time, so that each preset sees the same
  * flicker and glow; a new GameTime64 and a FrameTime of 1/60 s make
  * set_dynamic_light compute the light of the new view.
@@ -243,6 +245,7 @@ bool write_ppm(const std::string &path, const unsigned w, const unsigned h)
 		con_printf(CON_URGENT, "visshot: cannot write %s", path.c_str());
 		return false;
 	}
+	glPixelStorei(GL_PACK_ALIGNMENT, 4);
 	std::fprintf(f.get(), "P6\n%u %u\n255\n", w, h);
 	for (unsigned y = h; y-- > 0;)
 		std::fwrite(&buf[static_cast<std::size_t>(y) * w * 3], 1, static_cast<std::size_t>(w) * 3, f.get());
@@ -392,9 +395,9 @@ bool vis_shot_start()
 
 window_event_result vis_shot_frame()
 {
+#if DXX_USE_OGL
 	if (++frames_seen < 4)
 		return window_event_result::ignored;
-#if DXX_USE_OGL
 	take_pictures();
 	exit_status = 0;
 #else

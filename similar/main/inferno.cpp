@@ -632,7 +632,10 @@ static int main(int argc, char *argv[])
 	}
 	if (vis_shot_active())
 	{
-		/* -visshot: a window of the size of the pictures. */
+		/* -visshot: a window of the size of the pictures, no VSync
+		 * (frame times).
+		 */
+		CGameCfg.VSync = false;
 		Game_screen_mode = screen_mode(CGameArg.DbgVisShotWidth ? CGameArg.DbgVisShotWidth : 1280, CGameArg.DbgVisShotHeight ? CGameArg.DbgVisShotHeight : 720);
 		CGameCfg.WindowMode = true;
 	}
