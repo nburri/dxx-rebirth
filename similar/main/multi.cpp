@@ -4200,6 +4200,7 @@ static void DropOrb ()
 
 	HUD_init_message_literal(HM_MULTI, "Orb dropped!");
 	digi_play_sample (sound_effect::SOUND_DROP_WEAPON,F1_0);
+	movement_record_mode_event(::dcx::movrec::mode_event_kind::orb_drop, Player_num, ::dcx::movrec::PLAYER_NONE, 0, 1, ::dcx::movrec::mode_drop_flag::by_hand);
 
 	-- proximity;
 
@@ -4237,6 +4238,7 @@ void DropFlag ()
 
 	HUD_init_message_literal(HM_MULTI, "Flag dropped!");
 	digi_play_sample (sound_effect::SOUND_DROP_WEAPON,F1_0);
+	movement_record_mode_event(::dcx::movrec::mode_event_kind::flag_drop, Player_num, multi_get_team_from_player(Netgame, Player_num) == team_number::blue ? 1 : 0, 0, 0, ::dcx::movrec::mode_drop_flag::by_hand);
 
 	player_info.powerup_flags &=~(player_flag::has_team_flag);
 }

@@ -122,6 +122,8 @@ int dump(const char *const path, const options &opt)
 	 * after the header lines.
 	 */
 	std::string level_event_lines;
+	/* Minor 6: the game mode's events, counted by kind. */
+	std::array<std::uint64_t, mode_event_kind::count + 1> mode_events{};
 	std::uint64_t ticks{}, events{};
 	unsigned syncs{};
 	std::uint32_t session_id{};
@@ -177,6 +179,14 @@ int dump(const char *const path, const options &opt)
 			std::snprintf(line.data(), line.size(), "  level %d \"%s\" of \"%s\" (%u segments, game mode 0x%x) at %.1f s%s%s%s%s\n", l->level_num, l->level_name.c_str(), l->mission.c_str(), l->segments, l->game_mode, last_time_ms / 1000.0,
 				l->mission_file.empty() && l->level_file.empty() ? "" : "; files ", l->mission_file.c_str(), l->mission_file.empty() || l->level_file.empty() ? "" : ", ", l->level_file.c_str());
 			level_lines += line.data();
+		}
+		else if (const auto g{std::get_if<mode_goal_record>(&r)})
+		{
+			std::array<char, 160> line;
+			std::snprintf(line.data(), line.size(), "    goal: team %s, segment %u at %.1f %.1f %.1f, mode %u\n", g->team == 0 ? "blue" : g->team == 1 ? "red" : "any", g->segment, g->pos[0] / 256.0, g->pos[1] / 256.0, g->pos[2] / 256.0, g->mode);
+			level_lines += line.data();
+			if (opt.records)
+				std::printf("mode_%s", line.data() + 4);
 		}
 		else if (const auto p{std::get_if<player_record>(&r)})
 		{
@@ -275,6 +285,17 @@ int dump(const char *const path, const options &opt)
 				if (opt.records)
 					std::printf("  level_event%s", line + 1);
 			}
+			else if (e->type == record_type::mode_event)
+			{
+				++mode_events[std::min<std::size_t>(e->kind, mode_event_kind::count)];
+				if (opt.records)
+				{
+					if (e->kind == mode_event_kind::role)
+						std::printf("  mode_event t=%.3f %s P#%u: %s\n", e->time_ms / 1000.0, mode_event_name(e->kind), e->pid, mode_role_name(e->id));
+					else
+						std::printf("  mode_event t=%.3f %s pid %u other %u value %u flags 0x%x\n", e->time_ms / 1000.0, mode_event_name(e->kind), e->pid, e->other, e->value, e->flags);
+				}
+			}
 			else if (opt.records)
 				std::printf("  %s t=%.3f pid %u other %u kind %u id %u value %u flags 0x%x\n", record_type_name(e->type), e->time_ms / 1000.0, e->pid, e->other, e->kind, e->id, e->value, e->flags);
 			switch (e->type)
@@ -358,6 +379,18 @@ int dump(const char *const path, const options &opt)
 	{
 		std::puts("  level events:");
 		std::fputs(level_event_lines.c_str(), stdout);
+	}
+	if (std::any_of(mode_events.begin(), mode_events.end(), [](const std::uint64_t n) { return n != 0; }))
+	{
+		std::fputs("  mode events:", stdout);
+		const char *sep{" "};
+		for (std::uint8_t k{}; k <= mode_event_kind::count; ++k)
+			if (mode_events[k])
+			{
+				std::printf("%s%s %" PRIu64, sep, mode_event_name(k), mode_events[k]);
+				sep = ", ";
+			}
+		std::fputs("\n", stdout);
 	}
 	for (unsigned pid{}; pid != MAX_PID; ++pid)
 	{

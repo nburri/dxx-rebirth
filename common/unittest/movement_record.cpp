@@ -8,7 +8,8 @@
  * Test of the movement recording format (movement_record_format.h) and
  * reader (movement_record_reader.h): record round trips, the chunks, a
  * file cut short at any byte or damaged in a chunk, the tick schedule at
- * several frame rates, the quantisation.
+ * several frame rates, the quantisation, the additions of each minor
+ * version (old files read, new records skipped by old readers).
  *
  * Build and run with SCons:
  *
@@ -827,6 +828,96 @@ void test_minor_5()
 
 }
 
+namespace {
+
+/* Minor 6: the game modes' events (event layout) and the goals of the
+ * level.  A reader of minor 5 knows neither type and skips both by their
+ * size (they are above its last type, level_event); this reader hands
+ * them over, and still reads the older types around them.
+ */
+void test_minor_6()
+{
+	static_assert(FORMAT_MINOR >= 6);
+	static_assert(is_event(record_type::mode_event));
+	static_assert(!is_event(record_type::mode_goal));
+	static_assert(static_cast<unsigned>(record_type::mode_event) == 15 && static_cast<unsigned>(record_type::mode_goal) == 16);
+	/* The values the bots' code depends on. */
+	static_assert(mode_event_kind::flag_pickup == 0 && mode_event_kind::flag_drop == 1 && mode_event_kind::flag_capture == 2 && mode_event_kind::flag_return == 3);
+	static_assert(mode_event_kind::orb_pickup == 4 && mode_event_kind::orb_score == 5 && mode_event_kind::orb_drop == 6 && mode_event_kind::role == 7 && mode_event_kind::capture_refused == 8);
+	static_assert(mode_role::none == 0 && mode_role::attack == 1 && mode_role::defend == 2 && mode_role::escort == 3 && mode_role::hunt == 4 && mode_role::carry == 5);
+	static_assert(mode_role::wait == 6 && mode_role::retrieve == 7 && mode_role::collect == 8 && mode_role::score == 9 && mode_role::count == 10);
+	static_assert(bot_goals::objective == 6 && bot_goals::count == 7);
+	record_buffer buf;
+	const mode_goal_record g{0, goal_mode::ctf_classic, 113, {{-39040, 45696, -8388608}}};
+	const auto gb{encode(buf, g)};
+	CHECK(gb.size() == RECORD_HEADER_SIZE + MODE_GOAL_SIZE);
+	CHECK(gb[0] == 16);
+	CHECK(decode_mode_goal(gb.subspan(RECORD_HEADER_SIZE)) == g);
+	CHECK(!decode_mode_goal(gb.subspan(RECORD_HEADER_SIZE, MODE_GOAL_SIZE - 1)));
+	const event_record e{record_type::mode_event, 213865, 1, 0, mode_event_kind::flag_pickup, 0, 0, 0};
+	const event_record role{record_type::mode_event, 214000, 2, PLAYER_NONE, mode_event_kind::role, mode_role::hunt, 0, 0};
+	const event_record ret{record_type::mode_event, 237670, PLAYER_NONE, 1, mode_event_kind::flag_return, 0, 0, flag_return_reason::idle};
+	CHECK(encode(buf, e).size() == RECORD_HEADER_SIZE + EVENT_SIZE);
+	CHECK(encode(buf, e)[0] == 15);
+	std::array<std::uint8_t, MAX_HEADER_SIZE> hb;
+	const auto n{encode_header(hb, make_header())};
+	std::vector<std::uint8_t> file(hb.begin(), hb.begin() + static_cast<std::ptrdiff_t>(n));
+	auto cb{std::make_unique<chunk_builder>()};
+	CHECK(cb->append(encode(buf, tick_record{1, 33})));
+	CHECK(cb->append(encode(buf, g)));
+	CHECK(cb->append(encode(buf, e)));
+	CHECK(cb->append(encode(buf, role)));
+	CHECK(cb->append(encode(buf, ret)));
+	CHECK(cb->append(encode(buf, tick_record{2, 66})));
+	const auto chunk{cb->finish()};
+	file.insert(file.end(), chunk.begin(), chunk.end());
+	std::vector<event_record> events;
+	std::vector<mode_goal_record> goals;
+	unsigned ticks{};
+	const auto res{read_recording(file, [&](const record &r) {
+		if (const auto p{std::get_if<event_record>(&r)})
+			events.push_back(*p);
+		else if (const auto q{std::get_if<mode_goal_record>(&r)})
+			goals.push_back(*q);
+		else if (std::holds_alternative<tick_record>(r))
+			++ticks;
+	})};
+	CHECK(res.stats.unknown_records == 0 && res.stats.malformed_records == 0);
+	CHECK(ticks == 2 && goals.size() == 1 && goals[0] == g);
+	CHECK(events.size() == 3 && events[0] == e && events[1] == role && events[2] == ret);
+	/* A minor 5 reader: the records framed by type and size, the types
+	 * it knows up to level_event; the new ones are unknown and skipped,
+	 * the ticks after them still read.
+	 */
+	{
+		byte_reader r{chunk.subspan(CHUNK_HEADER_SIZE)};
+		unsigned old_known{}, old_unknown{}, old_ticks{};
+		while (r.remaining() >= RECORD_HEADER_SIZE)
+		{
+			const auto type{r.u8()};
+			const auto len{r.u8()};
+			CHECK(r.take(len).size() == len);
+			if (type >= 1 && type <= 14)
+			{
+				++old_known;
+				old_ticks += type == static_cast<std::uint8_t>(record_type::tick);
+			}
+			else
+				++old_unknown;
+		}
+		CHECK(r.remaining() == 0 && old_known == 2 && old_ticks == 2 && old_unknown == 4);
+	}
+	CHECK(std::string_view{record_type_name(record_type::mode_event)} == "mode_event");
+	CHECK(std::string_view{record_type_name(record_type::mode_goal)} == "mode_goal");
+	CHECK(std::string_view{mode_event_name(mode_event_kind::flag_capture)} == "flag capture");
+	CHECK(std::string_view{mode_event_name(200)} == "mode event");
+	CHECK(std::string_view{mode_role_name(mode_role::retrieve)} == "retrieve");
+	CHECK(std::string_view{mode_role_name(mode_role::count)} == "?");
+	CHECK(std::string_view{bot_goal_name(bot_goals::objective)} == "objective");
+}
+
+}
+
 int main()
 {
 	test_crc();
@@ -844,6 +935,7 @@ int main()
 	test_minor_3();
 	test_minor_4();
 	test_minor_5();
+	test_minor_6();
 	std::puts("test-movement-record: all checks passed");
 	return 0;
 }

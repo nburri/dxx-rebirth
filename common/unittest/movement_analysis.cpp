@@ -2285,6 +2285,220 @@ void test_little_data()
 		CHECK(e.key.starts_with("measured.") || e.confidence == bot::style_confidence::low);
 }
 
+/* Section 8.13: a game of capture the flag (format minor 6).  Two
+ * players, 60 s at 30 Hz; the blue home at x = 0, the red home at
+ * x = 1000.  "Alpha" (blue, a human) flies to the red home in 20 s (50
+ * u/s), takes the red flag, flies back in 20 s and captures at 40 s, then
+ * waits at home.  "Beta" (red, a bot) stays at its home: defends to 30 s,
+ * then hunts; takes the blue flag at 45 s and dies with it at 50 s (the
+ * flag goes home by the dropped flag rule), is back at 52 s without a
+ * role.  `hoard`: the same two in hoard, with orbs.  Recorded by the host
+ * (Beta flown there) or by Alpha's machine, both with every event.
+ */
+std::vector<std::uint8_t> mode_file(const bool host, const bool hoard = false)
+{
+	constexpr std::uint32_t rate{30};
+	file_header h;
+	h.tick_rate = rate;
+	h.flags = static_cast<std::uint16_t>(header_flag::multiplayer) | (host ? static_cast<std::uint16_t>(header_flag::host) : std::uint16_t{0});
+	h.start_unix_time = 1800000000;
+	h.local_pid = host ? 1 : 0;
+	h.program = "test";
+	h.mission = "Flags";
+	h.level_name = "Two Homes";
+	h.level_num = 1;
+	h.num_players = 2;
+	const std::uint8_t recorded{player_flag::connected | player_flag::recorded};
+	h.players[0] = {0, static_cast<std::uint8_t>(recorded | (host ? 0 : player_flag::local)), 0, "Alpha"};
+	h.players[1] = {1, static_cast<std::uint8_t>(recorded | player_flag::bot | (host ? player_flag::local : 0)), 1, "Beta"};
+	std::array<std::uint8_t, MAX_HEADER_SIZE> hb;
+	const auto n{encode_header(hb, h)};
+	CHECK(n);
+	std::vector<std::uint8_t> bytes(hb.begin(), hb.begin() + static_cast<std::ptrdiff_t>(n));
+	const auto chunk{std::make_unique<chunk_builder>()};
+	const auto flush{[&] {
+		if (chunk->empty())
+			return;
+		const auto c{chunk->finish()};
+		bytes.insert(bytes.end(), c.begin(), c.end());
+		chunk->reset();
+	}};
+	record_buffer buf;
+	const auto put{[&](const std::span<const std::uint8_t> r) {
+		CHECK(!r.empty());
+		if (!chunk->fits(r.size()))
+			flush();
+		CHECK(chunk->append(r));
+	}};
+	put(encode_level(buf, 1, 100, 0x504, h.mission, h.level_name));
+	for (const auto &p : std::span(h.players).first(2))
+		put(encode_player(buf, p.pid, p.flags, p.team, p.callsign));
+	if (hoard)
+	{
+		put(encode(buf, mode_goal_record{GOAL_TEAM_ANY, goal_mode::hoard, 1, {{0, 0, 0}}}));
+		put(encode(buf, mode_goal_record{GOAL_TEAM_ANY, goal_mode::hoard, 2, {{1000 * 256, 0, 0}}}));
+	}
+	else
+	{
+		put(encode(buf, mode_goal_record{0, goal_mode::ctf_classic, 1, {{0, 0, 0}}}));
+		put(encode(buf, mode_goal_record{1, goal_mode::ctf_classic, 2, {{1000 * 256, 0, 0}}}));
+	}
+	const auto ev{[](const std::uint32_t ms, const record_type t, const std::uint8_t pid, const std::uint8_t other, const std::uint8_t kind, const std::uint8_t id, const std::uint16_t value, const std::uint8_t flags) {
+		return event_record{t, ms, pid, other, kind, id, value, flags};
+	}};
+	constexpr auto me{record_type::mode_event};
+	std::vector<event_record> events;
+	if (hoard)
+		/* Alpha takes 3 orbs and scores them, takes 2 more and dies with
+		 * them (3 dropped: the extra orb); Beta takes 1 and scores it.
+		 */
+		events = {
+			ev(5000, me, 0, PLAYER_NONE, mode_event_kind::orb_pickup, 0, 1, 0),
+			ev(10000, me, 0, PLAYER_NONE, mode_event_kind::orb_pickup, 0, 2, 0),
+			ev(15000, me, 0, PLAYER_NONE, mode_event_kind::orb_pickup, 0, 3, 0),
+			ev(20000, me, 1, PLAYER_NONE, mode_event_kind::orb_pickup, 0, 1, 0),
+			ev(25000, me, 1, PLAYER_NONE, mode_event_kind::orb_score, 0, 1, 0),
+			ev(40000, me, 0, PLAYER_NONE, mode_event_kind::orb_score, 0, 3, 0),
+			ev(44000, me, 0, PLAYER_NONE, mode_event_kind::orb_pickup, 0, 1, 0),
+			ev(46000, me, 0, PLAYER_NONE, mode_event_kind::orb_pickup, 0, 2, 0),
+			ev(50000, record_type::death, 0, PLAYER_NONE, 0, 0, 0, 0),
+			ev(50000, me, 0, PLAYER_NONE, mode_event_kind::orb_drop, 0, 3, 0),
+		};
+	else
+		events = {
+			ev(0, me, 1, PLAYER_NONE, mode_event_kind::role, mode_role::defend, 0, 0),
+			ev(20000, me, 0, 1, mode_event_kind::flag_pickup, 0, 0, 0),
+			ev(30000, me, 1, PLAYER_NONE, mode_event_kind::role, mode_role::hunt, 0, 0),
+			ev(40000, me, 0, 1, mode_event_kind::flag_capture, 0, 5, 0),
+			ev(45000, me, 1, 0, mode_event_kind::flag_pickup, 0, 0, 0),
+			ev(50000, record_type::death, 1, PLAYER_NONE, 0, 0, 0, 0),
+			ev(50000, me, 1, 0, mode_event_kind::flag_drop, 0, 0, mode_drop_flag::went_home),
+			ev(50000, me, PLAYER_NONE, 0, mode_event_kind::flag_return, 0, 0, flag_return_reason::dropped),
+			ev(52000, record_type::respawn, 1, PLAYER_NONE, 0, 0, 0, 0),
+		};
+	std::size_t next{};
+	for (std::uint32_t tick{}; tick <= 60 * rate; ++tick)
+	{
+		const std::uint32_t now{tick * 1000 / rate};
+		put(encode(buf, tick_record{tick, now}));
+		if (!(tick % rate))
+			put(encode(buf, sync_record{now, 0x77, std::int64_t{now} + 5000, static_cast<std::uint8_t>(sync_flag::clock_valid | (host ? sync_flag::host : 0))}));
+		const double t{now / 1000.0};
+		for (const std::uint8_t pid : {std::uint8_t{0}, std::uint8_t{1}})
+		{
+			sample s;
+			s.pid = pid;
+			s.flags = sample_flag::alive;
+			s.flags2 = static_cast<std::uint8_t>((pid == h.local_pid ? sample_flag2::local : 0) | (pid == 1 ? sample_flag2::bot : 0));
+			double x{1000}, v{};
+			if (pid == 0 && !hoard)
+			{
+				x = t < 20 ? 50 * t : t < 40 ? 1000 - 50 * (t - 20) : 0;
+				v = t < 20 ? 50 : t < 40 ? -50 : 0;
+			}
+			if (pid == 0 && hoard)
+				x = t < 30 ? 1000 : 0;
+			if (t > 50 && t < 52 && pid == (hoard ? 0 : 1))
+				s.flags = sample_flag::dying;
+			s.segment = 3;
+			s.pos = {{static_cast<std::int32_t>(std::lround(x * 256)), 0, 0}};
+			s.vel = {{static_cast<std::int16_t>(std::lround(v * 64)), 0, 0}};
+			s.shields = 100;
+			s.energy = 100;
+			put(encode(buf, s));
+		}
+		for (; next != events.size() && events[next].time_ms <= now; ++next)
+			put(encode(buf, events[next]));
+	}
+	put(encode(buf, event_record{record_type::end, 60000, PLAYER_NONE, PLAYER_NONE, end_reason::closed, 0, 0, 0}));
+	flush();
+	return bytes;
+}
+
+const mode_player_stats &mode_player(const mode_summary &m, const char *const callsign)
+{
+	for (const auto &p : m.players)
+		if (p.callsign == callsign)
+			return p;
+	CHECK(!"the player is in the mode summary");
+	return m.players.front();
+}
+
+void test_modes()
+{
+	for (const unsigned machines : {1u, 2u})
+	{
+		std::vector<recording> files;
+		files.push_back(load(mode_file(true), "host.dmr"));
+		if (machines == 2)
+			files.push_back(load(mode_file(false), "client.dmr"));
+		CHECK(files[0].goals.size() == 2 && files[0].players[0].team == 0 && files[0].players[1].team == 1);
+		const auto r{analyse_recordings(files)};
+		CHECK(r.sessions.size() == 1 && r.sessions[0].files.size() == machines);
+		CHECK(r.modes.size() == 1);
+		const auto &m{r.modes[0]};
+		if (verbose)
+			std::printf("%s", write_mode_report(m).c_str());
+		CHECK(m.mode == goal_mode::ctf_classic && !m.hoard && m.has_goals);
+		CHECK_RANGE(m.minutes, 0.99, 1.01);
+		CHECK(m.teams[0].captures == 1 && m.teams[1].captures == 0);
+		CHECK(m.teams[0].returns_alone == 1 && m.teams[1].returns_alone == 0);
+		const auto &a{mode_player(m, "Alpha")};
+		CHECK(!a.bot && a.team == 0 && !a.has_roles);
+		CHECK(a.flag_pickups == 1 && a.captures == 1 && a.flag_drops == 0 && a.returns == 0);
+		CHECK(a.carries == 1 && a.carries_captured == 1 && a.carries_dropped == 0);
+		CHECK_RANGE(a.carry_s, 19.9, 20.1);
+		CHECK_RANGE(a.mean_carry_s(), 19.9, 20.1);
+		CHECK_RANGE(a.carry_speed(), 49, 51);
+		CHECK_RANGE(a.alive_s, 59.9, 60.1);
+		/* Carrying 20 s; at its home 0-4 s and 40-60 s; at the red home
+		 * 16-20 s; elsewhere 4-16 s.
+		 */
+		CHECK_RANGE(a.zone_s[static_cast<std::size_t>(mode_zone::carry)], 19.8, 20.2);
+		CHECK_RANGE(a.zone_s[static_cast<std::size_t>(mode_zone::own_home)], 23.8, 24.2);
+		CHECK_RANGE(a.zone_s[static_cast<std::size_t>(mode_zone::enemy_home)], 3.8, 4.2);
+		CHECK_RANGE(a.zone_s[static_cast<std::size_t>(mode_zone::elsewhere)], 11.8, 12.2);
+		const auto &b{mode_player(m, "Beta")};
+		CHECK(b.bot && b.team == 1 && b.has_roles);
+		CHECK(b.flag_pickups == 1 && b.flag_drops == 1 && b.carries == 1 && b.carries_dropped == 1 && b.captures == 0);
+		CHECK_RANGE(b.carry_s, 4.9, 5.1);
+		/* Defends 30 s, hunts 20 s, dead 2 s, hunts on 8 s (a bot
+		 * keeps its role over a death).
+		 */
+		CHECK_RANGE(b.role_s[mode_role::defend], 29.9, 30.1);
+		CHECK_RANGE(b.role_s[mode_role::hunt], 27.9, 28.2);
+		CHECK_RANGE(b.role_s[mode_role::none], 0, 0.1);
+		CHECK_RANGE(b.alive_s, 57.9, 58.1);
+		const auto text{write_mode_report(m)};
+		CHECK(text.find("capture the flag (Classic)") != std::string::npos);
+		CHECK(text.find("blue team: 1 captures (10.0 per 10 min)") != std::string::npos);
+		CHECK(text.find("defend 52 %") != std::string::npos);
+	}
+	/* Hoard. */
+	{
+		const std::array<recording, 1> files{{load(mode_file(true, true), "hoard.dmr")}};
+		const auto r{analyse_recordings(files)};
+		CHECK(r.modes.size() == 1);
+		const auto &m{r.modes[0]};
+		if (verbose)
+			std::printf("%s", write_mode_report(m).c_str());
+		CHECK(m.hoard && m.mode == goal_mode::hoard);
+		CHECK(m.teams[2].orb_scores == 2 && m.teams[2].orbs_scored == 4);
+		const auto &a{mode_player(m, "Alpha")};
+		CHECK(a.orbs_picked == 5 && a.orb_scores == 1 && a.orbs_scored == 3 && a.orbs_dropped == 3 && a.orbs_dropped_by_hand == 0);
+		/* Carrying orbs 5-40 s and 44-50 s. */
+		CHECK_RANGE(a.zone_s[static_cast<std::size_t>(mode_zone::carry)], 40.8, 41.2);
+		const auto &b{mode_player(m, "Beta")};
+		CHECK(b.orbs_picked == 1 && b.orb_scores == 1 && b.orbs_scored == 1);
+		CHECK(write_mode_report(m).find("all: 2 scores, 4 orbs (20.0 scores per 10 min, 2.0 orbs per score)") != std::string::npos);
+	}
+	/* A recording without mode records has no such summary. */
+	{
+		const std::array<recording, 1> files{{load(record(fly(strafer(), 2), view{}), "plain.dmr")}};
+		CHECK(analyse_recordings(files).modes.empty());
+	}
+}
+
 /* -w DIR: the synthetic recordings as files, to try movrec-analyse and
  * movrec-dump on (a game of two recorded on both machines, and one
  * recording each of the sniper and the brawler).
@@ -2344,6 +2558,7 @@ int main(const int argc, char **const argv)
 	test_little_data();
 	test_level_geometry();
 	test_level_analysis();
+	test_modes();
 	std::puts("test-movement-analysis: all checks passed");
 	return 0;
 }

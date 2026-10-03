@@ -1269,6 +1269,18 @@ void net_modes_prepare_level_flags();
 /* The game is capture the flag (Classic). */
 [[nodiscard]]
 bool net_modes_ctf_classic();
+/* The home of team `team`'s flag (its largest goal segment, the same on
+ * every machine), if the level has a goal for the team.
+ */
+[[nodiscard]]
+std::optional<uint16_t> net_modes_home_segment(uint8_t team);
+/* Movement recording (format minor 6): what the ship of player `pnum`
+ * carried left it with its death or departure: a flag (`had_flag`; it
+ * went home by the dropped-flag rule: `flag_went_home`, or as this
+ * machine knows the rule when empty) and `orbs` orbs (0 on a client: as
+ * many as it was seen to take).
+ */
+void net_modes_record_drop(playernum_t pnum, bool had_flag, std::optional<bool> flag_went_home, bool had_orbs, unsigned orbs);
 /* The flag object `flag` lies in a goal of its own team. */
 [[nodiscard]]
 bool net_modes_flag_at_home(const object_base &flag);
