@@ -93,6 +93,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "multi.h"
 #include "bot.h"
 #include "bot_arena.h"
+#include "vis_shot.h"
 #include "movement_record.h"
 #include "cntrlcen.h"
 #include "pcx.h"
@@ -1793,6 +1794,9 @@ window_event_result game_window::event_handler(const d_event &event)
 			return ReadControls(LevelSharedRobotInfoState, event, Controls);
 
 		case event_type::window_draw:
+			/* -visshot: takes its pictures and ends the game. */
+			if (vis_shot_active() && vis_shot_frame() == window_event_result::close)
+				return window_event_result::close;
 			frame_probe::frame_mark();
 			if (frame_probe::session_report_due())
 				log_session_stats();

@@ -440,6 +440,25 @@ static void ReadCmdArgs(Inilist &ini, Arglist &&Args)
 			CGameArg.SndNoSound = true;
 			CGameArg.SndNoMusic = true;
 		}
+		else if (!d_stricmp(p, "-visshot"))
+		{
+			CGameArg.DbgVisShotMission = arg_string(pp, end);
+			CGameArg.DbgVisShotLevel = static_cast<uint8_t>(std::clamp<long>(arg_integer(pp, end), 1, 255));
+			CGameArg.DbgVisShotDir = arg_string(pp, end);
+			GameArg.SysNoMovies = true;
+			CGameArg.SysNoTitles = true;
+			CGameArg.SndNoSound = true;
+			CGameArg.SndNoMusic = true;
+		}
+		else if (!d_stricmp(p, "-visshot-presets"))
+			CGameArg.DbgVisShotPresets = arg_string(pp, end);
+		else if (!d_stricmp(p, "-visshot-frames"))
+			CGameArg.DbgVisShotFrames = static_cast<uint16_t>(std::clamp<long>(arg_integer(pp, end), 1, 10000));
+		else if (!d_stricmp(p, "-visshot-size"))
+		{
+			CGameArg.DbgVisShotWidth = static_cast<uint16_t>(std::clamp<long>(arg_integer(pp, end), 320, 7680));
+			CGameArg.DbgVisShotHeight = static_cast<uint16_t>(std::clamp<long>(arg_integer(pp, end), 200, 4320));
+		}
 		else if (!d_stricmp(p, "-fixedfps"))
 			CGameArg.DbgBotArenaFps = static_cast<uint16_t>(std::clamp<long>(arg_integer(pp, end), 10, 1000));
 		else if (!d_stricmp(p, "-botarena-bots"))

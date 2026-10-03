@@ -107,6 +107,7 @@ char copyright[] = "DESCENT II  COPYRIGHT (C) 1994-1996 PARALLAX SOFTWARE CORPOR
 #include "net_udp.h"
 #endif
 #include "bot_arena.h"
+#include "vis_shot.h"
 #include "dsx-ns.h"
 
 #if DXX_USE_SDLIMAGE
@@ -272,6 +273,10 @@ static void print_commandline_help()
 	VERB("  -frametimes                   Show the frame time and where it went\n\t\t\t\tnext to the FPS counter, and log long frames\n\t\t\t\tto gamelog.txt (-verbose logs every second).\n")	\
 	VERB("  -lagtest <ms>                 As network host, delay your own pickups as a\n\t\t\t\tclient with a round trip of <ms> feels them (0-500)\n")	\
 	VERB("  -botarena <m> <l> <n> <s>     Headless test: <n> bots (1-7) fight on level <l>\n\t\t\t\tof mission <m> (name or file) for <s> game\n\t\t\t\tseconds, then print a summary and quit\n")	\
+	VERB("  -visshot <m> <l> <dir>        Debug: render level <l> of mission <m> from a few\n\t\t\t\tviewpoints with each visual quality preset, write\n\t\t\t\tPPM pictures and frame times to <dir>, then quit\n")	\
+	VERB("  -visshot-presets <list>       -visshot: only these presets (names by commas)\n")	\
+	VERB("  -visshot-frames <n>           -visshot: frames timed per viewpoint (default 60)\n")	\
+	VERB("  -visshot-size <w> <h>         -visshot: picture size (default 1280 720)\n")	\
 	VERB("  -fixedfps <n>                 -botarena: <n> frames per game second (10-1000,\n\t\t\t\tdefault 200), as fast as the machine runs\n")	\
 	VERB("  -botarena-bots <list>         -botarena: the bots, skill:style[:name] by commas\n\t\t\t\t(default: the pilot's bot setup)\n")	\
 	VERB("  -botarena-seed <n>            -botarena: the game's random seed (default 1)\n")	\
@@ -625,6 +630,12 @@ static int main(int argc, char *argv[])
 		Game_screen_mode = screen_mode(640, 480);
 		CGameCfg.WindowMode = true;
 	}
+	if (vis_shot_active())
+	{
+		/* -visshot: a window of the size of the pictures. */
+		Game_screen_mode = screen_mode(CGameArg.DbgVisShotWidth ? CGameArg.DbgVisShotWidth : 1280, CGameArg.DbgVisShotHeight ? CGameArg.DbgVisShotHeight : 720);
+		CGameCfg.WindowMode = true;
+	}
 
 	PHYSFSX_addArchiveContent();
 
@@ -776,6 +787,12 @@ static int main(int argc, char *argv[])
 			if (!bot_arena_start())
 				return 1;
 		}
+		else if (vis_shot_active())
+		{
+			/* -visshot: likewise. */
+			if (!vis_shot_start())
+				return 1;
+		}
 		else
 			DoMenu();
 	}
@@ -795,6 +812,8 @@ static int main(int argc, char *argv[])
 
 	if (bot_arena_active())
 		return bot_arena_exit_status();
+	if (vis_shot_active())
+		return vis_shot_exit_status();
 
 	WriteConfigFile(CGameCfg, GameCfg);
 
