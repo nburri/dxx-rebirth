@@ -86,6 +86,9 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "d_levelstate.h"
 #include "d_range.h"
 #include <iterator>
+#if DXX_USE_OGL
+#include "ogl_effects.h"
+#endif
 
 using std::min;
 using std::max;
@@ -1189,6 +1192,14 @@ void render_endlevel_frame(grs_canvas &canvas, fix eye_offset)
 {
 	auto &Objects = LevelUniqueObjectState.Objects;
 	auto &vcobjptridx = Objects.vcptridx;
+#if DXX_USE_OGL
+	/* Anti-aliasing, render scale, bloom, gamma (ogl_effects.h). */
+	const bool post_effects{
+#if DXX_USE_STEREOSCOPIC_RENDER
+		VR_stereo == StereoFormat::None &&
+#endif
+		ogl_post_begin(canvas, true)};
+#endif
 	g3_start_frame(canvas);
 
 	if (Endlevel_sequence < EL_OUTSIDE)
@@ -1197,6 +1208,10 @@ void render_endlevel_frame(grs_canvas &canvas, fix eye_offset)
 		render_external_scene(vcobjptridx, canvas, LevelUniqueLightState, eye_offset);
 
 	g3_end_frame();
+#if DXX_USE_OGL
+	if (post_effects)
+		ogl_post_end();
+#endif
 }
 
 ///////////////////////// copy of flythrough code for endlevel

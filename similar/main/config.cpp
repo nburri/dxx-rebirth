@@ -110,6 +110,11 @@ Cfg GameCfg;
 #endif
 #define VSyncStr "VSync"
 #define MultisampleStr "Multisample"
+#define RenderScaleStr "RenderScale"
+#define BloomStr "Bloom"
+#define GammaCurveStr "GammaCurve"
+#define ContrastStr "Contrast"
+#define SmoothLightingStr "SmoothLighting"
 #define FPSIndicatorStr "FPSIndicator"
 #define GrabinputStr "GrabInput"
 
@@ -154,6 +159,11 @@ namespace {
 	DXX_DESCENT_CFG_ADLMIDI_BLOCK(VERB_d)	\
 	VERB_d(VSyncStr, CGameCfg.VSync)	\
 	VERB_d(MultisampleStr, CGameCfg.Multisample)	\
+	VERB_d(RenderScaleStr, CGameCfg.RenderScale)	\
+	VERB_d(BloomStr, CGameCfg.Bloom)	\
+	VERB_d(GammaCurveStr, CGameCfg.GammaCurve)	\
+	VERB_d(ContrastStr, CGameCfg.Contrast)	\
+	VERB_d(SmoothLightingStr, CGameCfg.SmoothLighting)	\
 	VERB_d(FPSIndicatorStr, CGameCfg.FPSIndicator)	\
 	VERB_d(GrabinputStr, CGameCfg.Grabinput)	\
 
@@ -287,13 +297,18 @@ void ReadConfigFile(CCfg &CGameCfg, Cfg &GameCfg)
 #if DXX_USE_OGL
 	CGameCfg.TexFilt = opengl_texture_filter::classic;
 #endif
-	CGameCfg.TexAnisotropy = 0;
+	CGameCfg.TexAnisotropy = 16;
 #if DXX_BUILD_DESCENT == 2
 	GameCfg.MovieTexFilt = 0;
 	GameCfg.MovieSubtitles = 0;
 #endif
 	CGameCfg.VSync = false;
-	CGameCfg.Multisample = 0;
+	CGameCfg.Multisample = 4;
+	CGameCfg.RenderScale = 100;
+	CGameCfg.Bloom = 3;
+	CGameCfg.GammaCurve = 100;
+	CGameCfg.Contrast = 100;
+	CGameCfg.SmoothLighting = true;
 	CGameCfg.FPSIndicator = 0;
 	CGameCfg.Grabinput = true;
 
@@ -398,6 +413,7 @@ void ReadConfigFile(CCfg &CGameCfg, Cfg &GameCfg)
 					case static_cast<unsigned>(opengl_texture_filter::classic):
 					case static_cast<unsigned>(opengl_texture_filter::upscale):
 					case static_cast<unsigned>(opengl_texture_filter::trilinear):
+					case static_cast<unsigned>(opengl_texture_filter::sharp):
 #else
 					default:
 						/* In SDL-only builds, accept any value and save it.
@@ -413,7 +429,11 @@ void ReadConfigFile(CCfg &CGameCfg, Cfg &GameCfg)
 			}
 		}
 		else if (compare_nonterminated_name(name, TexAnisStr))
-			convert_integer(CGameCfg.TexAnisotropy, value);
+		{
+			if (auto r = convert_integer<uint8_t>(value))
+				/* Older versions: 1 = on (the driver's maximum). */
+				CGameCfg.TexAnisotropy = *r == 1 ? 16 : std::min<uint8_t>(*r, 16);
+		}
 #if DXX_BUILD_DESCENT == 2
 		else if (compare_nonterminated_name(name, MovieTexFiltStr))
 			convert_integer(GameCfg.MovieTexFilt, value);
@@ -431,7 +451,33 @@ void ReadConfigFile(CCfg &CGameCfg, Cfg &GameCfg)
 		else if (compare_nonterminated_name(name, VSyncStr))
 			convert_integer(CGameCfg.VSync, value);
 		else if (compare_nonterminated_name(name, MultisampleStr))
-			convert_integer(CGameCfg.Multisample, value);
+		{
+			if (auto r = convert_integer<uint8_t>(value))
+				/* Older versions: 1 = their 4x multisampling. */
+				CGameCfg.Multisample = *r == 1 ? 4 : std::min<uint8_t>(*r, 8);
+		}
+		else if (compare_nonterminated_name(name, RenderScaleStr))
+		{
+			if (auto r = convert_integer<uint8_t>(value))
+				CGameCfg.RenderScale = std::clamp<uint8_t>(*r, 100, 200);
+		}
+		else if (compare_nonterminated_name(name, BloomStr))
+		{
+			if (auto r = convert_integer<uint8_t>(value))
+				CGameCfg.Bloom = std::min<uint8_t>(*r, 8);
+		}
+		else if (compare_nonterminated_name(name, GammaCurveStr))
+		{
+			if (auto r = convert_integer<uint8_t>(value))
+				CGameCfg.GammaCurve = std::clamp<uint8_t>(*r, 50, 200);
+		}
+		else if (compare_nonterminated_name(name, ContrastStr))
+		{
+			if (auto r = convert_integer<uint8_t>(value))
+				CGameCfg.Contrast = std::clamp<uint8_t>(*r, 50, 200);
+		}
+		else if (compare_nonterminated_name(name, SmoothLightingStr))
+			convert_integer(CGameCfg.SmoothLighting, value);
 		else if (compare_nonterminated_name(name, FPSIndicatorStr))
 			convert_integer(CGameCfg.FPSIndicator, value);
 		else if (compare_nonterminated_name(name, GrabinputStr))

@@ -69,8 +69,20 @@ struct CCfg : prohibit_void_ptr<>
 	bool Grabinput;
 	bool WindowMode;
 	opengl_texture_filter TexFilt;
-	bool TexAnisotropy;
-	bool Multisample;
+	/* Anisotropic filtering: 0 (off), 2, 4, 8 or 16 (limited to what
+	 * the driver supports).  Older versions wrote 1 for "on", read as 16.
+	 */
+	uint8_t TexAnisotropy;
+	/* Anti-aliasing samples: 0 (off), 2, 4 or 8.  Older versions wrote 1
+	 * for their 4x multisampling, read as 4.
+	 */
+	uint8_t Multisample;
+	/* The effects of ogl_effects.h. */
+	uint8_t RenderScale;	/* percent: 100, 150 or 200 */
+	uint8_t Bloom;		/* 0 (off) to 8 */
+	uint8_t GammaCurve;	/* percent, 100 = unchanged */
+	uint8_t Contrast;	/* percent, 100 = unchanged */
+	bool SmoothLighting;
 	bool FPSIndicator;
 	uint8_t GammaLevel;
 	bool ReverseStereo;

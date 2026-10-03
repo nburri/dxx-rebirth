@@ -63,6 +63,11 @@ enum class opengl_texture_filter : uint8_t
 	classic,
 	upscale,
 	trilinear,
+	/* Sharp pixels: linear filtering and mipmaps, with texel edges kept
+	 * crisp by the world shader (ogl_effects.h).  Without shader
+	 * support this falls back to `upscale`.
+	 */
+	sharp,
 };
 
 #define OGL_FLAG_MIPMAP (1 << 0)

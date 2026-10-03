@@ -47,6 +47,7 @@
 #include "args.h"
 #include "physfsx.h"
 #include "internal.h"
+#include "ogl_effects.h"
 #include "console.h"
 #include "config.h"
 #include "vers_id.h"
@@ -641,7 +642,7 @@ static void ogl_tune_for_current(void)
 	if (ogl_maxanisotropy < 1.0f && CGameCfg.TexAnisotropy)
 	{
 		con_puts(CON_VERBOSE, "DXX-Rebirth: OpenGL: anisotropic texture filter not supported");
-		CGameCfg.TexAnisotropy = false;
+		CGameCfg.TexAnisotropy = 0;
 	}
 #endif
 }
@@ -728,6 +729,7 @@ int gr_set_mode(screen_mode mode)
 
 	ogl_init_window(w,h);//platform specific code
 	ogl_extensions_init();
+	ogl_effects_init();
 	ogl_tune_for_current();
 	sync_helper.init(CGameArg.OglSyncMethod, CGameArg.OglSyncWait);
 
@@ -787,18 +789,11 @@ void gr_set_attributes(void)
 #elif SDL_MAJOR_VERSION == 2
 	SDL_GL_SetSwapInterval(CGameCfg.VSync ? 1 : 0);
 #endif
-	int buffers, samples;
-	if (CGameCfg.Multisample)
-	{
-		buffers = 1;
-		samples = 4;
-	}
-	else
-	{
-		buffers = samples = 0;
-	}
-	SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, buffers);
-	SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, samples);
+	/* Anti-aliasing (CGameCfg.Multisample) multisamples the 3D views in
+	 * framebuffer objects (ogl_effects.h), not the window.
+	 */
+	SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, 0);
+	SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, 0);
 #else
 #if SDL_MAJOR_VERSION == 2
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
@@ -974,6 +969,7 @@ void ogl_upixelc(const grs_bitmap &cv_bitmap, unsigned x, unsigned y, const colo
 	glEnableClientState(GL_COLOR_ARRAY);
 	glVertexPointer(2, GL_FLOAT, 0, vertices.data());
 	glColorPointer(4, GL_FLOAT, 0, color_array);
+	ogl_world_shader_off();
 	glDrawArrays(GL_POINTS, 0, 1);
 	glDisableClientState(GL_VERTEX_ARRAY);
 	glDisableClientState(GL_COLOR_ARRAY);
@@ -1033,6 +1029,7 @@ void ogl_urect(grs_canvas &canvas, const int left, const int top, const int righ
 	vertices[7] = yo;
 	glVertexPointer(2, GL_FLOAT, 0, vertices.data());
 	glColorPointer(4, GL_FLOAT, 0, color_array.data());
+	ogl_world_shader_off();
 	glDrawArrays(GL_TRIANGLE_FAN, 0, 4);//replaced GL_QUADS
 	glDisableClientState(GL_VERTEX_ARRAY);
 	glDisableClientState(GL_COLOR_ARRAY);
@@ -1074,6 +1071,7 @@ void ogl_ulinec(grs_canvas &canvas, const int left, const int top, const int rig
 
 	glVertexPointer(2, GL_FLOAT, 0, vertices.data());
 	glColorPointer(4, GL_FLOAT, 0, color_array);
+	ogl_world_shader_off();
 	glDrawArrays(GL_LINES, 0, 2);
 	glDisableClientState(GL_VERTEX_ARRAY);
 	glDisableClientState(GL_COLOR_ARRAY);
@@ -1125,6 +1123,7 @@ void ogl_do_palfx(void)
 	}};
 	glVertexPointer(2, GL_FLOAT, 0, vertices.data());
 	glColorPointer(4, GL_FLOAT, 0, color_array);
+	ogl_world_shader_off();
 	glDrawArrays(GL_TRIANGLE_FAN, 0, 4);//replaced GL_QUADS
 	glDisableClientState(GL_VERTEX_ARRAY);
 	glDisableClientState(GL_COLOR_ARRAY);

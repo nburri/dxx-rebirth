@@ -102,6 +102,7 @@ struct CArg : prohibit_void_ptr<>
 	bool OglFixedFont;
 	SyncGLMethod OglSyncMethod;
 	bool OglDarkEdges;
+	bool OglNoEffects;
 	bool DbgUseOldTextureMerge;
 	bool DbgGlIntensity4Ok;
 	bool DbgGlReadPixelsOk;

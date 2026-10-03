@@ -76,6 +76,9 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #endif
 #include <utility>
 #include "frame_probe.h"
+#if DXX_USE_OGL
+#include "ogl_effects.h"
+#endif
 
 using std::min;
 using std::max;
@@ -1295,6 +1298,14 @@ void render_frame(grs_canvas &canvas, fix eye_offset, window_rendered_data &wind
 
 	start_lighting_frame(*Viewer);		//this is for ugly light-smoothing hack
   
+#if DXX_USE_OGL
+	/* Anti-aliasing, render scale, bloom, gamma (ogl_effects.h). */
+	const bool post_effects{
+#if DXX_USE_STEREOSCOPIC_RENDER
+		VR_stereo == StereoFormat::None &&
+#endif
+		ogl_post_begin(canvas, true)};
+#endif
 	g3_start_frame(canvas);
 
 #if DXX_USE_STEREOSCOPIC_RENDER
@@ -1350,6 +1361,10 @@ void render_frame(grs_canvas &canvas, fix eye_offset, window_rendered_data &wind
 	render_mine(canvas, Viewer_eye, start_seg_num, eye_offset, window);
 
 	g3_end_frame();
+#if DXX_USE_OGL
+	if (post_effects)
+		ogl_post_end();
+#endif
 
    //RenderingType=0;
 
