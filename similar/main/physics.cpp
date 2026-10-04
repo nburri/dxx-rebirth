@@ -26,10 +26,13 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <algorithm>
+#include <array>
 #include <cmath>
 
 #include "joy.h"
 #include "dxxerror.h"
+#include "console.h"
 
 #include "inferno.h"
 #include "segment.h"
@@ -315,6 +318,65 @@ static void apply_drag_integration(const drag_integration &di, vms_vector &v, co
 }
 
 //	-----------------------------------------------------------------------------------------------------------
+namespace dsx {
+
+/* Whether a ship can have flown from segment `from` into `to` during one
+ * physics step: the same segment, or one reached from it through sides a
+ * ship flies through (no wall, an open door, an illusion), at most
+ * PHYS_FLY_REACH_STEPS sides away.  The segment fixups of do_physics_sim
+ * (find_object_seg, update_object_seg) look for the segment that holds
+ * the ship's centre by the segments' links whatever their walls, and
+ * then in the whole mine: where two segments touch without a link, or
+ * across a closed wall, a centre pushed a little past a side was put in
+ * the segment behind it (on Corona, a ship scraping the side of a floor
+ * opening ended up inside the closed slab of floor next to it, and flew
+ * on in there, seen from below in the roof).  A search too large for
+ * the queue counts as reached (the fixups' choice stands).
+ */
+constexpr unsigned PHYS_FLY_REACH_STEPS{4};
+
+bool phys_segment_reachable_by_flying(const segnum_t from, const segnum_t to)
+{
+	if (from == to)
+		return true;
+	auto &Walls = LevelUniqueWallSubsystemState.Walls;
+	auto &vcwallptr = Walls.vcptr;
+	constexpr std::size_t queue_size{256};
+	std::array<segnum_t, queue_size> queue;
+	queue[0] = from;
+	std::array<uint8_t, queue_size> steps{};
+	std::size_t head{0}, tail{1};
+	while (head != tail)
+	{
+		const auto seg{queue[head]};
+		const unsigned n{steps[head]};
+		++head;
+		if (n >= PHYS_FLY_REACH_STEPS)
+			continue;
+		const auto &&segp{vcsegptridx(seg)};
+		for (const auto side : MAX_SIDES_PER_SEGMENT)
+		{
+			const auto child{segp->shared_segment::children[side]};
+			if (!IS_CHILD(child))
+				continue;
+			if (!(WALL_IS_DOORWAY(GameBitmaps, Textures, vcwallptr, segp, side) & WALL_IS_DOORWAY_FLAG::fly))
+				continue;
+			if (child == to)
+				return true;
+			if (std::find(queue.begin(), queue.begin() + tail, child) != queue.begin() + tail)
+				continue;
+			if (tail == queue_size)
+				return true;
+			queue[tail] = child;
+			steps[tail] = static_cast<uint8_t>(n + 1);
+			++tail;
+		}
+	}
+	return false;
+}
+
+}
+
 // add rotational velocity & acceleration
 namespace dsx {
 namespace {
@@ -389,6 +451,21 @@ static void do_physics_sim_rot(object_base &obj)
 				}));
 	}
 	check_and_fix_matrix(obj.orient);
+}
+
+/* A ship that the segment fixups put into a segment it cannot have flown
+ * to goes back to where it started this step, in its segment.
+ */
+static void keep_ship_in_reach(const vmobjptridx_t obj, const segnum_t orig_segnum, const vms_vector &start_pos)
+{
+	if (obj->type != object_type::OBJ_PLAYER || obj->segnum == orig_segnum || cheats.ghostphysics)
+		return;
+	if (phys_segment_reachable_by_flying(orig_segnum, obj->segnum))
+		return;
+	con_printf(CON_VERBOSE, "physics: player %u put into segment %hu, which segment %hu does not lead to: kept in %hu", get_player_id(obj), static_cast<uint16_t>(obj->segnum), static_cast<uint16_t>(orig_segnum), static_cast<uint16_t>(orig_segnum));
+	auto &Objects = LevelUniqueObjectState.Objects;
+	obj->pos = start_pos;
+	obj_relink(Objects.vmptr, vmsegptr, obj, vmsegptridx(orig_segnum));
 }
 
 // On joining edges fvi tends to get inaccurate as hell. Approach is to check if the object interects with the wall and if so, move away from it.
@@ -604,6 +681,7 @@ window_event_result do_physics_sim(const d_robot_info_array &Robot_info, const v
 				if (obj->type == object_type::OBJ_WEAPON)
 					obj->flags |= OF_SHOULD_BE_DEAD;
 			}
+			keep_ship_in_reach(obj, orig_segnum, start_pos);
 			return window_event_result::ignored;
 		}
 
@@ -883,6 +961,7 @@ window_event_result do_physics_sim(const d_robot_info_array &Robot_info, const v
 		}
 	}
 
+	keep_ship_in_reach(obj, orig_segnum, start_pos);
 	return result;
 //--WE ALWYS WANT THIS IN, MATT AND MIKE DECISION ON 12/10/94, TWO MONTHS AFTER FINAL 	#endif
 }
