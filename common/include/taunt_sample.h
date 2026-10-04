@@ -176,10 +176,12 @@ bool cut_and_fade(std::vector<float> &s);
 [[nodiscard]]
 float loudness(std::span<const float> s);
 /* Bring the loudness to LOUDNESS_TARGET (see there) with the soft
- * limiter.  Returns the gain applied before the limiter, 0 if `s` is
- * silent, empty or not finite.
+ * limiter; with `may_raise` false only lower it (a received sample: the
+ * sender raised it already, within MAX_GAIN and MAX_LIMITING, which must
+ * not apply twice).  Returns the gain applied before the limiter, 0 if
+ * `s` is silent, empty or not finite.
  */
-float normalise(std::vector<float> &s);
+float normalise(std::vector<float> &s, bool may_raise = true);
 [[nodiscard]]
 pcm to_pcm(std::span<const float> s);
 [[nodiscard]]
@@ -198,8 +200,8 @@ std::optional<pcm> prepare_file(std::span<const std::uint8_t> bytes, std::string
 [[nodiscard]]
 std::vector<std::uint8_t> encode_wire(std::span<const std::int16_t> s);
 /* Strict checks (magic, rate, flags, count, exact size); the samples are
- * then cut, faded and normalised again, so a sample from the network
- * obeys the limits whoever made it.
+ * then cut, faded and normalised again (lowered only), so a sample from
+ * the network obeys the limits whoever made it.
  */
 [[nodiscard]]
 std::optional<pcm> decode_wire(std::span<const std::uint8_t> bytes);

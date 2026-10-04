@@ -292,7 +292,7 @@ float loudness(const std::span<const float> s)
 	return n ? static_cast<float>(std::sqrt(sum / static_cast<double>(n))) : 0.0f;
 }
 
-float normalise(std::vector<float> &s)
+float normalise(std::vector<float> &s, const bool may_raise)
 {
 	float peak{};
 	for (const float v : s)
@@ -313,7 +313,7 @@ float normalise(std::vector<float> &s)
 	 * found again from the original a few times, so the result lands on
 	 * the target unless MAX_GAIN or MAX_LIMITING stop it.
 	 */
-	const float max_gain{std::min(MAX_GAIN, PEAK_TARGET * MAX_LIMITING / peak)};
+	const float max_gain{std::min({MAX_GAIN, PEAK_TARGET * MAX_LIMITING / peak, may_raise ? MAX_GAIN : 1.0f})};
 	const std::vector<float> original{s};
 	float gain{std::min(LOUDNESS_TARGET / level, max_gain)};
 	for (unsigned pass{};; ++pass)
@@ -416,7 +416,7 @@ std::optional<pcm> decode_wire(const std::span<const std::uint8_t> bytes)
 		raw[i] = static_cast<std::int16_t>(get_u16(&bytes[WIRE_HEADER_SIZE + 2 * i]));
 	auto s{to_float(raw)};
 	cut_and_fade(s);
-	if (!normalise(s))
+	if (!normalise(s, false))
 		return std::nullopt;
 	return to_pcm(s);
 }

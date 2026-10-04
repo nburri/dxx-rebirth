@@ -89,10 +89,13 @@ the samples travel with the custom ships' asset transfer.
   at full sound effects volume) is applied to the samples with the same
   soft limiter. Before, a horn was at most 0.20 RMS with peaks at 0.70
   (3 to 6 dB under a laser shot).
-- **Older versions:** the transfer format is unchanged. A receiver
-  normalises a sample again: one from an older version is raised to the
-  new level; an older receiver lowers a new one to its old level. A
-  sample already within the limits is left as it is.
+- **Received samples:** a receiver normalises a sample again, but only
+  lowers it (the sender's gain and limiting must not apply twice: a
+  quiet file raised 16 times would otherwise be raised again), so
+  everyone hears the owner's horn as the owner does. The transfer format
+  is unchanged: an own sample from an older version (at most 0.20 RMS)
+  stays at its old level; an older receiver lowers a new one to its old
+  level. The starter horns are made on every machine at the new level.
 - **Transfer format "DXT1":** magic, rate u16 = 22050, flags u16 = 0,
   count u32 (1 102 to 44 100), then mono int16 samples, little-endian:
   at most 88 212 bytes (≤ 100 KB, uncompressed so that it needs no
@@ -151,7 +154,8 @@ are kind 2 (at most 128 KiB; a DXT1 sample is at most 88 212 bytes):
   network pass the receivers), the normalisation (quiet, very quiet,
   normal, loud, clipped, square and spiky input: loudness on the target
   or stopped by the gain limits, peaks under 95 %, normalising again
-  changes nothing, the limiter's curve), WAV in four sample formats and five rates,
+  changes nothing, a received sample is never raised, the limiter's
+  curve), WAV in four sample formats and five rates,
   the Ogg/MP3/FLAC files of `common/unittest/data` (made by
   `make_taunt_files.sh`, CC0), trimming, cut and fade, loudness limits,
   hostile input (truncated and bit-flipped files of every format; the

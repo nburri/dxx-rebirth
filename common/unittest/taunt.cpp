@@ -360,19 +360,28 @@ void test_normalise()
 		CHECK(twice.peak < PEAK_TARGET);
 		if (in.on_target)
 			CHECK(std::fabs(twice.loud - after.loud) < 0.01f);
-		/* Through the transfer format: the same limits. */
+		/* Through the transfer format: the same limits, and a sample
+		 * the gain limits kept quiet is not raised again by the
+		 * receiver (MAX_GAIN and MAX_LIMITING apply once).
+		 */
 		if (const auto w{decode_wire(encode_wire(to_pcm(s)))})
 		{
 			const auto l{measure(*w)};
 			CHECK(l.peak <= PEAK_TARGET + 0.001f && l.loud <= LOUDNESS_TARGET * 1.01f);
+			CHECK(l.loud <= after.loud * 1.01f);
 		}
 	}
-	/* A sample from an older version (peak 0.7, RMS 0.2) is raised. */
+	/* A received sample is only lowered: a too loud one comes down to
+	 * the target, a quiet one stays as it is.
+	 */
 	{
-		auto old{tone(0.2f / 0.53f)};
-		auto s{old};
-		normalise(s);
-		CHECK(measure(s).loud > measure(old).loud * 1.5f);
+		auto loud{tone(4.0f, 1.0f)};
+		CHECK(normalise(loud, false) < 1.0f);
+		CHECK(measure(loud).loud <= LOUDNESS_TARGET * 1.01f);
+		auto quiet{tone(0.1f)};
+		const auto before{quiet};
+		CHECK(normalise(quiet, false) == 1.0f);
+		CHECK(quiet == before);
 	}
 	/* The limiter: unchanged below the knee, never beyond PEAK_TARGET,
 	 * monotonic, odd.
