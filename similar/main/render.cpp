@@ -39,6 +39,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "bm.h"
 #include "texmap.h"
 #include "render.h"
+#include "custom_ship.h"
 #include "game.h"
 #include "object.h"
 #include "textures.h"
@@ -1359,6 +1360,8 @@ void render_frame(grs_canvas &canvas, fix eye_offset, window_rendered_data &wind
 	}
 
 	render_mine(canvas, Viewer_eye, start_seg_num, eye_offset, window);
+	/* The flying pieces of exploded custom ships (custom_ship.h). */
+	custom_ship_draw_pieces(canvas);
 
 	g3_end_frame();
 #if DXX_USE_OGL

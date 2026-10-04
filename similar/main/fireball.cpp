@@ -51,6 +51,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "ai.h"
 #include "weapon.h"
 #include "fireball.h"
+#include "custom_ship.h"
 #include "collide.h"
 #include "physics.h"
 #include "laser.h"
@@ -662,6 +663,8 @@ static void explode_badass_object(const d_robot_info_array &Robot_info, fvmsegpt
 //return the explosion object
 void explode_badass_player(const d_robot_info_array &Robot_info, const vmobjptridx_t objp)
 {
+	/* A custom ship's parts fly apart (cosmetic, custom_ship.h). */
+	custom_ship_player_exploded(objp);
 	explode_badass_object(Robot_info, vmsegptridx, objp, F1_0*50, F1_0*40, F1_0*150);
 }
 
@@ -672,7 +675,11 @@ static void object_create_debris(fvmsegptridx &vmsegptridx, const object_base &p
 	Assert(parent.type == object_type::OBJ_ROBOT || parent.type == object_type::OBJ_PLAYER);
 
 	if (const auto objpi{obj_create(LevelUniqueObjectState, LevelSharedSegmentState, LevelUniqueSegmentState, object_type::OBJ_DEBRIS, 0, vmsegptridx(parent.segnum), parent.pos, &parent.orient, subobject_radius, object::control_type::debris, object::movement_type::physics, render_type::RT_POLYOBJ)})
+	{
 		init_debris_object(*objpi, parent, subobj_num);
+		/* Still flies, but a custom ship draws its own pieces. */
+		custom_ship_debris_created(parent, objpi.get_unchecked_index(), objpi->signature);
+	}
 	/* Ignore failure to create debris.  Debris is cosmetic. */
 }
 

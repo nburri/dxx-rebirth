@@ -33,6 +33,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "taunt.h"
 #include "taunt_sample.h"
 #include "menu.h"
+#include "custom_ship.h"
 #include "inferno.h"
 #include "game.h"
 #include "gr.h"
@@ -1108,6 +1109,7 @@ static void gameplay_config();
 }
 
 #define DXX_OPTIONS_MENU(VERB)	\
+	DXX_MENUITEM(VERB, MENU, "Ship...", ship)	\
 	DXX_MENUITEM(VERB, MENU, "Sound & music...", sfx)	\
 	DXX_MENUITEM(VERB, MENU, TXT_CONTROLS_, controls)	\
 	DXX_MENUITEM(VERB, MENU, "Graphics...", graphics)	\
@@ -1148,6 +1150,9 @@ window_event_result options_menu::event_handler(const d_event &event)
 			auto &citem = static_cast<const d_select_event &>(event).citem;
 			switch (citem)
 			{
+				case options_menu_items::ship:
+					custom_ship_menu();
+					break;
 				case options_menu_items::sfx:
 					do_sound_menu();
 					break;

@@ -187,6 +187,9 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #define TOGGLES_THIEF_NO_ENERGY_WEAPONS_SP	"thiefnoenergyweapons"
 #define TOGGLES_AUTOSAVE_INTERVAL_SP	"autosaveinterval"
 #define GRAPHICS_HEADER_TEXT "[graphics]"
+#define SHIPS_HEADER_TEXT "[ships]"
+#define SHIPS_SHIP_NAME_TEXT "ship"
+#define SHIPS_ACCEPT_NAME_TEXT "accept"
 #define GRAPHICS_ALPHAEFFECTS_NAME_TEXT "alphaeffects"
 #define GRAPHICS_DYNLIGHTCOLOR_NAME_TEXT "dynlightcolor"
 #define PLX_VERSION_HEADER_TEXT "[plx version]"
@@ -342,6 +345,8 @@ void new_player_config()
         PlayerCfg.CloakInvulTimer = 0;
 	PlayerCfg.AlphaEffects = 0;
 	PlayerCfg.DynLightColor = 0;
+	PlayerCfg.ShipName = {};
+	PlayerCfg.AcceptShips = true;
 
 	// Default taunt macros
 #if DXX_BUILD_DESCENT == 1
@@ -618,6 +623,19 @@ static void read_player_dxx(const char *filename)
 					PlayerCfg.AlphaEffects = atoi(value);
 				if(!strcmp(line,GRAPHICS_DYNLIGHTCOLOR_NAME_TEXT))
 					PlayerCfg.DynLightColor = atoi(value);
+			}
+		}
+		else if (!strcmp(line, SHIPS_HEADER_TEXT))
+		{
+			while (PHYSFSX_fgets(line, f) && strcmp(line, END_TEXT))
+			{
+				const char *value = splitword(line, '=');
+				if (!value)
+					continue;
+				if (!strcmp(line, SHIPS_SHIP_NAME_TEXT))
+					PlayerCfg.ShipName.copy_if(value, std::min<std::size_t>(strlen(value) + 1, PlayerCfg.ShipName.size()));
+				else if (!strcmp(line, SHIPS_ACCEPT_NAME_TEXT))
+					PlayerCfg.AcceptShips = atoi(value) != 0;
 			}
 		}
 		else if (!strcmp(line,PLX_VERSION_HEADER_TEXT)) // know the version this pilot was used last with - allow modifications
@@ -934,6 +952,11 @@ static int write_player_dxx(const char *filename)
 							);
 		PHYSFSX_printf(fout,GRAPHICS_ALPHAEFFECTS_NAME_TEXT "=%i\n",PlayerCfg.AlphaEffects);
 		PHYSFSX_printf(fout,GRAPHICS_DYNLIGHTCOLOR_NAME_TEXT "=%i\n",PlayerCfg.DynLightColor);
+		PHYSFSX_puts_literal(fout, END_TEXT "\n"
+							SHIPS_HEADER_TEXT "\n"
+							);
+		PHYSFSX_printf(fout, SHIPS_SHIP_NAME_TEXT "=%s\n", PlayerCfg.ShipName.data());
+		PHYSFSX_printf(fout, SHIPS_ACCEPT_NAME_TEXT "=%i\n", PlayerCfg.AcceptShips ? 1 : 0);
 		PHYSFSX_puts_literal(fout, END_TEXT "\n"
 							PLX_VERSION_HEADER_TEXT "\n"
 							"plx version=" DXX_VERSION_STR "\n"

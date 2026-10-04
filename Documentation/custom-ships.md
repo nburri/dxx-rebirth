@@ -552,3 +552,58 @@ Consequences for the text above: the converter is `shipconv`
 (`common/tools/shipconv.cpp`), debris parts are glTF nodes named
 `debris_*` (not `partN`), §5.1 and §5.3 are one stage (S3), and
 "ask" in §5.3 is replaced by the refuse option of D8.
+
+## 11. As implemented
+
+### 11.1 S1: format and converter
+
+`dxship_format.h` (§3.2), `sha256.h`, `common/tools/shipconv.cpp`
+(`Documentation/custom-ships-authoring.md`). The converter greys the
+colour zone's texels (keeping their relative brightness) so that the game
+only multiplies them with the player's colour. Long, thin ships come out
+smaller than a Pyro seen from the front or the side (the free ships of
+`data/ships` have 0.4–1.1 × the Pyro's silhouette); D3 only limits the
+upper end.
+
+### 11.2 S2: drawing
+
+- `common/arch/ogl/ogl_ship.cpp`: decodes the PNGs (vendored stb_image,
+  after the reader's header checks; the decoded size must equal the
+  header's), keeps per material and part index lists, uploads the albedo
+  with the colour zone already tinted, one texture set per player colour,
+  with CPU-built mipmaps and the anisotropic filter setting. Each draw
+  multiplies the 3D library's instance matrix into the modelview, turns
+  culling off (both sides, lit by |n·view|), computes the vertex colours
+  as the polygon models do (`get_noglow_light`: object light ×
+  (1/4 + 3/4 facing)) times vertex colour, base colour and the tint of
+  untextured zones, and calls `glDrawElements` per material and part.
+  The world shader is switched off for it; bloom and the other
+  post-process effects of exp-visuals apply to it like to everything.
+- `similar/main/custom_ship.cpp`: the registry of `ships/` and
+  `ships/cache/` (scanned on first use and when the menu opens; every
+  file fully checked), the per-player table, the hooks:
+  `draw_polygon_object` and `draw_cloaked_object` (`object.cpp`) draw the
+  custom ship for an `OBJ_PLAYER` (fading: the light scaled; cloaked:
+  flat black with the cloak's alpha), else the Pyro as before.
+- Death (D6): `explode_badass_player` (every player death: the local
+  death sequence, a remote `MULTI_PLAYER_DERES`, a bot) starts the
+  ship's parts as cosmetic pieces: no objects, no collisions, drawn after
+  the mine (`render_frame`), each flying from its place with the ship's
+  velocity plus an outward push and a spin, dimming from glowing to
+  charred, gone after 1.2–3 s or when it leaves the mine. The Pyro's
+  own debris objects of the local death (which still fly, as before) are
+  not drawn for a custom ship. Remote deaths had no debris before and now
+  show the pieces, without any object being created.
+- Views: every view that draws player objects uses the hook: other ships
+  in the normal and rear view, your own ship in the death camera and the
+  end-level fly-out, guided-missile and marker views. There is no
+  third-person camera in the game (it would show around corners in
+  multiplayer); none was added.
+- Pilot setting: `[ships]` section of the `.plx` (`ship=`, `accept=`);
+  Options → Ship... (`custom_ship_menu.cpp`): the list, a turning
+  preview in a player colour (C cycles the colours), author, licence and
+  source; applies at the next level start.
+- Debug: `-shipfor pid:name,...` gives other players or bots ships on
+  this machine only; `-shipshot <mission> <level> <dir>` writes pictures
+  of every ship (poses, a second colour, fading, cloaked, debris, the
+  menu) for review (like `-visshot`).
