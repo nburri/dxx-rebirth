@@ -84,4 +84,61 @@ rgba_image scale_nearest(const rgba_image &in, unsigned w, unsigned h);
  */
 rgba_image composite(const rgba_image &base, const rgba_image &top, unsigned orient, bool supertransparent);
 
+/* Which bitmaps a texture pack replaces, and from which file: decided
+ * at once for all bitmaps (on a level load and when the "HD texture
+ * packs" toggle changes), not when a bitmap is first drawn.  Bitmaps
+ * drawn first later in the level (the frames of an opening door, of an
+ * animation) then use the same pack as those drawn from the start,
+ * even if a download or a copy adds files in the meantime, and none of
+ * them use a pack while the toggle is off.
+ */
+class replacement_index
+{
+	/* Per bitmap index: the file of its replacement, or empty. */
+	std::vector<std::string> paths;
+	bool decided{};
+public:
+	/* Decide for the bitmaps 0 to count - 1: path(i) is the file of
+	 * bitmap i, or empty; not called if disabled.  Calls changed(i) for
+	 * each bitmap whose file is not the same as before (its texture
+	 * must be loaded again).
+	 */
+	template <typename Path, typename Changed>
+		void decide(const bool enabled, const std::size_t count, Path &&path, Changed &&changed)
+		{
+			std::vector<std::string> next(enabled ? count : 0);
+			for (std::size_t i = 0; i < next.size(); ++i)
+				next[i] = path(i);
+			const std::size_t n{next.size() > paths.size() ? next.size() : paths.size()};
+			for (std::size_t i = 0; i < n; ++i)
+			{
+				const bool had{i < paths.size() && !paths[i].empty()};
+				const bool has{i < next.size() && !next[i].empty()};
+				if (had != has || (has && paths[i] != next[i]))
+					changed(i);
+			}
+			paths = std::move(next);
+			decided = true;
+		}
+	bool is_decided() const
+	{
+		return decided;
+	}
+	/* The file to load for bitmap i, or nullptr: none while the toggle
+	 * (enabled) is off, whatever was decided.
+	 */
+	const std::string *find(const bool enabled, const std::size_t i) const
+	{
+		if (!enabled || i >= paths.size() || paths[i].empty())
+			return nullptr;
+		return &paths[i];
+	}
+	/* Bitmap i has no usable replacement after all (a broken file). */
+	void forget(const std::size_t i)
+	{
+		if (i < paths.size())
+			paths[i].clear();
+	}
+};
+
 }

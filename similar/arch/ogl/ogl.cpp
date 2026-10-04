@@ -445,29 +445,32 @@ bitmap_index game_bitmap_index(const grs_bitmap &bm)
 	return bitmap_index{static_cast<uint16_t>(&bm - first)};
 }
 
-/* Wall textures (with the frames of their animations) and the textures
- * of robots and other models; not sprites, the cockpit or the HUD.
+/* Wall textures (with the frames of their animations, such as the
+ * frames of doors) and the textures of robots and other models; not
+ * sprites, the cockpit or the HUD.
  */
-bool is_world_bitmap(const bitmap_index bi)
+std::bitset<MAX_BITMAP_FILES> world_bitmaps()
 {
+	std::bitset<MAX_BITMAP_FILES> r;
+	const auto add{[&r](const bitmap_index bi) {
+		if (const std::size_t i{underlying_value(bi)}; i < r.size())
+			r.set(i);
+	}};
 	const std::size_t textures{std::min<std::size_t>(NumTextures, Textures.size())};
 	for (std::size_t i = 0; i < textures; ++i)
-		if (Textures[i] == bi)
-			return true;
+		add(Textures[i]);
 	auto &Effects = LevelUniqueEffectsClipState.Effects;
 	for (auto &ec : partial_const_range(Effects, Num_effects))
 	{
 		/* Unused clips have num_frames -1. */
 		const std::size_t frames{static_cast<std::size_t>(ec.vc.num_frames) <= ec.vc.frames.size() ? static_cast<std::size_t>(ec.vc.num_frames) : 0};
 		for (std::size_t i = 0; i < frames; ++i)
-			if (ec.vc.frames[i] == bi)
-				return true;
+			add(ec.vc.frames[i]);
 	}
 	const std::size_t objbitmaps{std::min<std::size_t>(N_ObjBitmaps, ObjBitmaps.size())};
 	for (std::size_t i = 0; i < objbitmaps; ++i)
-		if (ObjBitmaps[static_cast<object_bitmap_index>(i)] == bi)
-			return true;
-	return false;
+		add(ObjBitmaps[static_cast<object_bitmap_index>(i)]);
+	return r;
 }
 
 texture_pack::rgba_image load_png(const char *const path)
@@ -528,31 +531,63 @@ std::string texture_pack_mission;
 /* texture_download::installed_generation() when they were loaded. */
 unsigned texture_pack_generation;
 
-/* Per level: the bitmaps without a replacement, and the decoded
+/* Which bitmaps the pack replaces (texture_pack.h), and the decoded
  * replacements of the bitmaps merged by texmerge.cpp, whose merged
  * textures can leave its cache and be merged again during the game.
  */
-std::bitset<MAX_BITMAP_FILES> texture_pack_missing;
+texture_pack::replacement_index texture_pack_index;
 std::unordered_map<uint16_t, texture_pack::rgba_image> texture_pack_merge_sources;
+
+/* Decide again which bitmaps the pack replaces, for the current
+ * mission, level and toggle; the textures of the bitmaps whose
+ * replacement changed (all of them if free_all) load again when next
+ * drawn.  The textures merged by texmerge.cpp are merged again.
+ */
+void texture_pack_decide(const bool free_all)
+{
+	texture_pack_merge_sources.clear();
+	const bool enabled{texture_pack_enabled()};
+	const auto world{enabled ? world_bitmaps() : std::bitset<MAX_BITMAP_FILES>{}};
+	const std::string mission{current_mission_directory()};
+	bool changed{free_all};
+	texture_pack_index.decide(enabled, std::min<std::size_t>(GameBitmaps.size(), world.size()), [&](const std::size_t i) -> std::string {
+		if (!world.test(i))
+			return {};
+		const bitmap_index bi{static_cast<uint16_t>(i)};
+		const auto &name{AllBitmaps[bi].name};
+		for (auto &path : texture_pack::candidate_paths(std::string_view{name.data(), strnlen(name.data(), name.size())}, mission, piggy_bitmap_replaced_by_level(bi)))
+			if (PHYSFS_exists(path.c_str()))
+				return std::move(path);
+		return {};
+	}, [&](const std::size_t i) {
+		changed = true;
+		if (!free_all)
+			ogl_freebmtexture(GameBitmaps[bitmap_index{static_cast<uint16_t>(i)}]);
+	});
+	if (free_all)
+		for (auto &bm : GameBitmaps)
+			ogl_freebmtexture(bm);
+	if (changed)
+		texmerge_flush();
+}
 
 /* The replacement of a bitmap of GameBitmaps, if the pack has one. */
 texture_pack::rgba_image find_replacement(const bitmap_index bi)
 {
-	if (!GameBitmaps.valid_index(bi) || texture_pack_missing.test(underlying_value(bi)) || !is_world_bitmap(bi))
+	if (!GameBitmaps.valid_index(bi))
 		return {};
-	const auto &name{AllBitmaps[bi].name};
-	const std::string mission{current_mission_directory()};
-	for (const auto &path : texture_pack::candidate_paths(std::string_view{name.data(), strnlen(name.data(), name.size())}, mission, piggy_bitmap_replaced_by_level(bi)))
+	/* Before the first level (a briefing's robot). */
+	if (!texture_pack_index.is_decided())
+		texture_pack_decide(false);
+	const auto path{texture_pack_index.find(texture_pack_enabled(), underlying_value(bi))};
+	if (!path)
+		return {};
+	if (auto img{load_png(path->c_str())}; !img.empty())
 	{
-		if (!PHYSFS_exists(path.c_str()))
-			continue;
-		if (auto img{load_png(path.c_str())}; !img.empty())
-		{
-			con_printf(CON_VERBOSE, "texture pack: %s for bitmap %u", path.c_str(), underlying_value(bi));
-			return texture_pack::to_power_of_two(img, texture_size_limit());
-		}
+		con_printf(CON_VERBOSE, "texture pack: %s for bitmap %u", path->c_str(), underlying_value(bi));
+		return texture_pack::to_power_of_two(img, texture_size_limit());
 	}
-	texture_pack_missing.set(underlying_value(bi));
+	texture_pack_index.forget(underlying_value(bi));
 	return {};
 }
 
@@ -718,6 +753,16 @@ static void ogl_cache_weapon_textures(const d_vclip_array &Vclip, const weapon_i
 
 namespace dsx {
 
+void ogl_texture_pack_toggled()
+{
+#if DXX_TEXTURE_PACK
+	/* At once, not from the next level on: the textures drawn so far
+	 * and those first drawn later (door frames) must agree.
+	 */
+	texture_pack_decide(true);
+#endif
+}
+
 void ogl_cache_level_textures(void)
 {
 	auto &Effects = LevelUniqueEffectsClipState.Effects;
@@ -728,21 +773,22 @@ void ogl_cache_level_textures(void)
 	ogl_reset_texture_stats_internal();//loading a new lev should reset textures
 #if DXX_TEXTURE_PACK
 	texture_pack_stats = {};
-	texture_pack_missing.reset();
-	texture_pack_merge_sources.clear();
-	if (auto mission{current_mission_directory()}; mission != texture_pack_mission || texture_pack_generation != texture_download::installed_generation())
 	{
-		/* Textures of the previous mission's pack directory, or a
-		 * pack was downloaded or deleted since: load them all again.
+		/* Another mission's pack directory, or a pack was downloaded or
+		 * deleted since: load all textures again.  Otherwise those of
+		 * the bitmaps whose replacement changed (a level's own art, a
+		 * file added since the last level).  The replacements are
+		 * decided here for the whole level: a pack that a download
+		 * adds during the level is used from the next level load on,
+		 * also for the frames of doors and animations first drawn
+		 * later.
 		 */
+		auto mission{current_mission_directory()};
+		const auto generation{texture_download::installed_generation()};
+		const bool free_all{mission != texture_pack_mission || texture_pack_generation != generation};
 		texture_pack_mission = std::move(mission);
-		texture_pack_generation = texture_download::installed_generation();
-		if (texture_pack_enabled())
-		{
-			for (auto &bm : GameBitmaps)
-				ogl_freebmtexture(bm);
-			texmerge_flush();
-		}
+		texture_pack_generation = generation;
+		texture_pack_decide(free_all);
 	}
 	/* Download this mission's pack if there is a newer one: used from
 	 * the next level load on.
