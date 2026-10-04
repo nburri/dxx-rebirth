@@ -76,8 +76,10 @@
 #include "mission.h"
 #include "bm.h"
 #include "physfsx.h"
+#include <bitset>
 #include <chrono>
 #include <functional>
+#include <unordered_map>
 #include <string>
 #include <vector>
 #if DXX_USE_SCREENSHOT_FORMAT_PNG
@@ -512,13 +514,28 @@ unsigned texture_size_limit()
 	return limit;
 }
 
+std::string current_mission_directory()
+{
+	return Current_mission ? texture_pack::mission_directory(&*Current_mission->filename) : std::string{};
+}
+
+/* The mission whose textures are loaded. */
+std::string texture_pack_mission;
+
+/* Per level: the bitmaps without a replacement, and the decoded
+ * replacements of the bitmaps merged by texmerge.cpp, whose merged
+ * textures can leave its cache and be merged again during the game.
+ */
+std::bitset<MAX_BITMAP_FILES> texture_pack_missing;
+std::unordered_map<uint16_t, texture_pack::rgba_image> texture_pack_merge_sources;
+
 /* The replacement of a bitmap of GameBitmaps, if the pack has one. */
 texture_pack::rgba_image find_replacement(const bitmap_index bi)
 {
-	if (!GameBitmaps.valid_index(bi) || !is_world_bitmap(bi))
+	if (!GameBitmaps.valid_index(bi) || texture_pack_missing.test(underlying_value(bi)) || !is_world_bitmap(bi))
 		return {};
 	const auto &name{AllBitmaps[bi].name};
-	const std::string mission{Current_mission ? texture_pack::mission_directory(&*Current_mission->filename) : std::string{}};
+	const std::string mission{current_mission_directory()};
 	for (const auto &path : texture_pack::candidate_paths(std::string_view{name.data(), strnlen(name.data(), name.size())}, mission, piggy_bitmap_replaced_by_level(bi)))
 	{
 		if (!PHYSFS_exists(path.c_str()))
@@ -529,7 +546,16 @@ texture_pack::rgba_image find_replacement(const bitmap_index bi)
 			return texture_pack::to_power_of_two(img, texture_size_limit());
 		}
 	}
+	texture_pack_missing.set(underlying_value(bi));
 	return {};
+}
+
+const texture_pack::rgba_image &find_merge_source(const bitmap_index bi)
+{
+	const auto [i, inserted]{texture_pack_merge_sources.try_emplace(underlying_value(bi))};
+	if (inserted)
+		i->second = find_replacement(bi);
+	return i->second;
 }
 
 /* An original bitmap as RGBA, for a merge with a replacement. */
@@ -592,8 +618,8 @@ texture_pack::rgba_image texture_pack_image(const grs_bitmap &bm)
 		/* A wall texture with a supertransparent overlay, merged by
 		 * texmerge.cpp: merge again from the replacements.
 		 */
-		auto base{find_replacement(bottom)};
-		auto overlay{find_replacement(top)};
+		auto base{find_merge_source(bottom)};
+		auto overlay{find_merge_source(top)};
 		if (!base.empty() || !overlay.empty())
 		{
 			if (base.empty())
@@ -696,6 +722,21 @@ void ogl_cache_level_textures(void)
 	ogl_reset_texture_stats_internal();//loading a new lev should reset textures
 #if DXX_TEXTURE_PACK
 	texture_pack_stats = {};
+	texture_pack_missing.reset();
+	texture_pack_merge_sources.clear();
+	if (auto mission{current_mission_directory()}; mission != texture_pack_mission)
+	{
+		/* Textures of the previous mission's pack directory: load
+		 * them all again.
+		 */
+		texture_pack_mission = std::move(mission);
+		if (texture_pack_enabled())
+		{
+			for (auto &bm : GameBitmaps)
+				ogl_freebmtexture(bm);
+			texmerge_flush();
+		}
+	}
 #endif
 	
 	range_for (auto &ec, partial_const_range(Effects, Num_effects))
