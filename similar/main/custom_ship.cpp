@@ -434,6 +434,17 @@ void custom_ship_apply_local_choice()
 		else
 			con_printf(CON_NORMAL, "ships: -shipfor: no ship \"%.*s\"", static_cast<int>(ship.size()), ship.data());
 	}
+	custom_ship_preload();
+}
+
+void custom_ship_preload()
+{
+#if DXX_USE_OGL
+	/* Decode now, not at the first sight in the middle of a fight. */
+	for (const auto &s : Player_ships)
+		if (s)
+			load(*s);
+#endif
 }
 
 void custom_ship_level_start()

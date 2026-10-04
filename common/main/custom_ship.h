@@ -90,6 +90,8 @@ void custom_ship_clear_players();
  * debug assignments of -shipfor; at the start of a game or level.
  */
 void custom_ship_apply_local_choice();
+/* Decode the ships of every player (at a level start). */
+void custom_ship_preload();
 /* A level starts: debris pieces of the last one are gone. */
 void custom_ship_level_start();
 
