@@ -194,8 +194,9 @@ static inline player_ship_color get_team_color(const team_number tnum)
  * they never collide with those of experimental-netcode (the low byte, a
  * v1 build's packet type, stays 100 and up):
  * 0x7000 + 112 = 28784: taunts (TAUNT_REQUEST, TAUNT; Documentation/taunts.md).
+ * 0x7000 + 113 = 28785: custom ships (SHIP_INFO, ASSET_*; Documentation/custom-ships.md).
  */
-constexpr std::uint16_t MULTI_PROTO_VERSION{0x7000 + 112};
+constexpr std::uint16_t MULTI_PROTO_VERSION{0x7000 + 113};
 // PROTOCOL VARIABLES AND DEFINES - END
 
 /* The network tick rate (positions per second, and the pacing of every
@@ -1201,6 +1202,15 @@ std::optional<unsigned> net_spawn_take_assigned();
  * client, on the host; the host, on a client).
  */
 void net_spawn_receive(playernum_t from, uint8_t type, std::span<const uint8_t> payload);
+/* Custom ships over the network (similar/main/net_ships.cpp,
+ * net_v2_ships.h).
+ */
+void net_ships_start(bool host, uint8_t self);
+void net_ships_reset();
+void net_ships_frame();
+void net_ships_receive(playernum_t from, uint8_t type, std::span<const uint8_t> payload);
+void net_ships_client_joined(playernum_t slot);
+void net_ships_slot_cleared(playernum_t slot);
 /* The host: player `pnum` enters the level in progress (CLIENT_READY);
  * assign its first spawn and send it ahead of LEVEL_GO.
  */

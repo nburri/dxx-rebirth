@@ -43,6 +43,8 @@ bool vis_shot_start();
  */
 window_event_result vis_shot_frame();
 int vis_shot_exit_status();
+/* -botarena-shots: game.cpp, after each game frame of the arena. */
+void arena_shot_frame();
 
 }
 #endif

@@ -5211,6 +5211,14 @@ class DXXArchive(DXXCommon):
 			'common/misc/dxship_format.cpp',
 			'common/misc/sha256.cpp',
 			)),
+		# Test of the custom ship exchange over the network: messages,
+		# assembly, a host with clients and a bot over simulated links
+		# (net_v2_ships.h, Documentation/custom-ships.md section 5).
+		RuntimeTest('test-net-v2-ships', (
+			'common/unittest/net_v2_ships.cpp',
+			'common/misc/sha256.cpp',
+			'common/main/net_v2_transport.cpp',
+			)),
 		# Not a test: the converter of ship models into custom ship files
 		# (Documentation/custom-ships-authoring.md).
 		RuntimeTest('shipconv', (
@@ -5759,6 +5767,7 @@ class DXXProgram(DXXCommon):
 'similar/main/net_modes.cpp',
 'similar/main/net_objects.cpp',
 'similar/main/net_spawn.cpp',
+'similar/main/net_ships.cpp',
 ),
 		transform_target=_apply_target_name,
 	),

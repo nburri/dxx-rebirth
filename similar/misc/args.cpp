@@ -454,6 +454,8 @@ static void ReadCmdArgs(Inilist &ini, Arglist &&Args)
 			CGameArg.SndNoSound = true;
 			CGameArg.SndNoMusic = true;
 		}
+		else if (!d_stricmp(p, "-botarena-shots"))
+			CGameArg.DbgArenaShotDir = arg_string(pp, end);
 		else if (!d_stricmp(p, "-shipfor"))
 			CGameArg.DbgShipFor = arg_string(pp, end);
 		else if (!d_stricmp(p, "-shipshot"))

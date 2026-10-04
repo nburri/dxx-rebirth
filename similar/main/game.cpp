@@ -1809,6 +1809,9 @@ window_event_result game_window::event_handler(const d_event &event)
 				}
 				const frame_probe::scope probe{frame_probe::phase::game};
 				result = GameProcessFrame(LevelSharedRobotInfoState);
+				/* -botarena-shots: a picture now and then. */
+				if (!CGameArg.DbgArenaShotDir.empty())
+					arena_shot_frame();
 			}
 
 			/* -botarena (timer.h): nobody watches. */

@@ -493,6 +493,56 @@ void take_ship_pictures()
 
 }
 
+void arena_shot_frame()
+{
+#if DXX_USE_OGL
+	static fix64 next{F1_0 * 5};
+	static unsigned shots, turn;
+	if (GameTime64 < next || shots >= 40)
+		return;
+	next = GameTime64 + F1_0 * 10;
+	auto &Objects = LevelUniqueObjectState.Objects;
+	/* The next bot that is alive. */
+	for (unsigned tries = 0; tries < MAX_PLAYERS; ++tries)
+	{
+		const playernum_t p{1 + (turn++ % (MAX_PLAYERS - 1))};
+		if (p >= N_players || vcplayerptr(p)->connected != player_connection_status::playing)
+			continue;
+		auto &bot{*Objects.vmptr(vcplayerptr(p)->objnum)};
+		if (bot.type != object_type::OBJ_PLAYER)
+			continue;
+		/* A camera for this picture only (the arena has no clients
+		 * whose object numbers it could disturb).
+		 */
+		const auto camera{obj_create(LevelUniqueObjectState, LevelSharedSegmentState, LevelUniqueSegmentState, object_type::OBJ_CAMERA, 0, Segments.vmptridx(bot.segnum), bot.pos, &bot.orient, F1_0, object::control_type::None, object::movement_type::None, render_type::RT_NONE)};
+		if (!camera)
+			return;
+		/* Behind and above, inside the mine. */
+		const auto pos{vm_vec_build_add(vm_vec_build_sub(bot.pos, scaled(bot.orient.fvec, 13)), scaled(bot.orient.uvec, 3))};
+		if (find_point_seg(LevelSharedSegmentState, LevelUniqueSegmentState, pos, Segments.vmptridx(bot.segnum) DXX_lighting_hack_pass_parameter) == segment_none)
+		{
+			obj_delete(LevelUniqueObjectState, Segments, camera);
+			continue;
+		}
+		place_object(*camera, pos, bot.orient, bot.segnum);
+		const auto viewer_save{Viewer};
+		const auto reticle_save{PlayerCfg.ReticleType};
+		Viewer = camera;
+		PlayerCfg.ReticleType = reticle_type::none;
+		game_render_frame(LevelSharedRobotInfoState.Robot_info, Controls);
+		glFinish();
+		std::array<char, 64> name;
+		std::snprintf(name.data(), name.size(), "/arena-%02u-p%u.ppm", shots++, p);
+		write_ppm(CGameArg.DbgArenaShotDir + name.data(), grd_curscreen->get_screen_width(), grd_curscreen->get_screen_height());
+		gr_flip();
+		Viewer = viewer_save;
+		PlayerCfg.ReticleType = reticle_save;
+		obj_delete(LevelUniqueObjectState, Segments, camera);
+		return;
+	}
+#endif
+}
+
 bool vis_shot_start()
 {
 	if (!InterfaceUniqueState.PilotName[0u])
