@@ -117,6 +117,10 @@ d_level_unique_seismic_state LevelUniqueSeismicState;
 void reset_globals_for_new_game()
 {
 	::dcx::reset_globals_for_new_game();
+	/* The death camera of an earlier game is an object of the state
+	 * reconstructed below.
+	 */
+	dead_player_forget();
 	/* Skip LevelUniqueEffectsClipState because it contains some fields
 	 * that are initialized from game data, and those fields should not
 	 * be reconstructed.
