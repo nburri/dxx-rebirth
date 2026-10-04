@@ -511,18 +511,19 @@ void arena_shot_frame()
 		auto &bot{*Objects.vmptr(vcplayerptr(p)->objnum)};
 		if (bot.type != object_type::OBJ_PLAYER)
 			continue;
-		static object *camera;
+		/* A camera for this picture only (the arena has no clients
+		 * whose object numbers it could disturb).
+		 */
+		const auto camera{obj_create(LevelUniqueObjectState, LevelSharedSegmentState, LevelUniqueSegmentState, object_type::OBJ_CAMERA, 0, Segments.vmptridx(bot.segnum), bot.pos, &bot.orient, F1_0, object::control_type::None, object::movement_type::None, render_type::RT_NONE)};
 		if (!camera)
-		{
-			const auto c{obj_create(LevelUniqueObjectState, LevelSharedSegmentState, LevelUniqueSegmentState, object_type::OBJ_CAMERA, 0, Segments.vmptridx(bot.segnum), bot.pos, &bot.orient, F1_0, object::control_type::None, object::movement_type::None, render_type::RT_NONE)};
-			if (!c)
-				return;
-			camera = c;
-		}
+			return;
 		/* Behind and above, inside the mine. */
 		const auto pos{vm_vec_build_add(vm_vec_build_sub(bot.pos, scaled(bot.orient.fvec, 13)), scaled(bot.orient.uvec, 3))};
 		if (find_point_seg(LevelSharedSegmentState, LevelUniqueSegmentState, pos, Segments.vmptridx(bot.segnum) DXX_lighting_hack_pass_parameter) == segment_none)
+		{
+			obj_delete(LevelUniqueObjectState, Segments, camera);
 			continue;
+		}
 		place_object(*camera, pos, bot.orient, bot.segnum);
 		const auto viewer_save{Viewer};
 		const auto reticle_save{PlayerCfg.ReticleType};
@@ -536,6 +537,7 @@ void arena_shot_frame()
 		gr_flip();
 		Viewer = viewer_save;
 		PlayerCfg.ReticleType = reticle_save;
+		obj_delete(LevelUniqueObjectState, Segments, camera);
 		return;
 	}
 #endif

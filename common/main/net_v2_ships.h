@@ -95,6 +95,8 @@ static_assert(SHIP_DATA_HEADER + SHIP_DATA_CHUNK <= NET_V2_MAX_MESSAGE);
 constexpr std::size_t SHIP_RATE_LOBBY{96 * 1024};
 constexpr std::size_t SHIP_RATE_LEVEL{16 * 1024};
 constexpr std::size_t SHIP_QUEUE_LIMIT{12 * 1024};
+/* Seconds between two changes of a player's ship that the host takes. */
+constexpr double SHIP_CHANGE_INTERVAL{3};
 
 /* SHIP_INFO (pid, flags, size, hash, name): any player to the host for
  * itself, the host to everyone for every player (its bots too).
@@ -264,8 +266,6 @@ public:
 		if (m.key != expected || (total && m.total != total) || m.offset != bytes.size())
 			return result::error;
 		total = m.total;
-		if (bytes.empty())
-			bytes.reserve(total);
 		bytes.insert(bytes.end(), m.data.begin(), m.data.end());
 		return bytes.size() == total ? result::complete : result::more;
 	}
@@ -354,6 +354,12 @@ private:
 	std::multimap<asset_key, owner_entry> owners;
 	/* Pacing: bytes the transfers may still send, refilled per second. */
 	double allowance{};
+	/* Seconds the exchange has run (from pump), and when each slot last
+	 * changed its ship: a change sooner than SHIP_CHANGE_INTERVAL after
+	 * the last is ignored, so that nobody floods the others.
+	 */
+	double clock{};
+	std::array<double, MAX_SLOTS> last_change{};
 	template <typename M>
 	void send_msg(const std::uint8_t slot, const std::uint8_t type, const M &m)
 	{
@@ -417,8 +423,20 @@ private:
 		if (host)
 		{
 			/* A player speaks for itself only. */
-			if (m.pid != from || from == self)
+			if (m.pid != from || from == self || !env.is_client(from))
 				return;
+			/* Nothing new: nothing to tell anyone. */
+			if (table[from] && table[from]->pyro == m.pyro && table[from]->hash == m.hash && table[from]->size == m.size)
+				return;
+			if (table[from] && clock - last_change[from] < SHIP_CHANGE_INTERVAL)
+				return;
+			last_change[from] = clock;
+			/* What the host fetched of its old ship is not needed. */
+			for (auto i{fetches.begin()}; i != fetches.end();)
+				if (i->second.owner == from && !(i->first == ship_key(m.hash) && !m.pyro))
+					fetch_failed(i++, ship_unavailable_reason::owner_left);
+				else
+					++i;
 			table[from] = m;
 			std::erase_if(owners, [from](const auto &o) { return o.second.slot == from && o.first.kind == static_cast<std::uint8_t>(asset_kind::ship); });
 			if (!m.pyro)
@@ -436,7 +454,12 @@ private:
 			table[m.pid] = m;
 			env.player_ship(m.pid, m.pyro ? nullptr : &m);
 			if (!m.pyro)
+			{
+				/* Announced anew: one that failed before may work now. */
+				if (const auto i{wants.find(ship_key(m.hash))}; i != wants.end() && i->second.state == want_state::failed)
+					wants.erase(i);
 				request(ship_key(m.hash), m.size);
+			}
 		}
 	}
 	void receive_request(const std::uint8_t from, const ship_request_msg &m)
@@ -633,7 +656,11 @@ public:
 		table[pid].reset();
 		env.player_ship(pid, nullptr);
 		out[pid].clear();
+		last_change[pid] = 0;
 		std::erase_if(owners, [pid](const auto &o) { return o.second.slot == pid; });
+		/* The others draw a Pyro there until someone new announces. */
+		if (host)
+			broadcast_info(pid);
 		for (auto i{fetches.begin()}; i != fetches.end();)
 		{
 			i->second.waiters.erase(pid);
@@ -649,6 +676,8 @@ public:
 		if (!host || slot >= MAX_SLOTS)
 			return;
 		table[slot].reset();
+		last_change[slot] = 0;
+		env.player_ship(slot, nullptr);
 		for (std::uint8_t p = 0; p < MAX_SLOTS; ++p)
 			if (p != slot && table[p])
 				send_msg(slot, SHIP_MSG_INFO, *table[p]);
@@ -684,6 +713,7 @@ public:
 	 */
 	void pump(const double seconds, const bool in_level)
 	{
+		clock += std::max(seconds, 0.0);
 		const double rate{static_cast<double>(in_level ? SHIP_RATE_LEVEL : SHIP_RATE_LOBBY)};
 		allowance = std::min(allowance + rate * std::max(seconds, 0.0), rate / 4);
 		for (std::uint8_t slot = 0; slot < MAX_SLOTS && allowance > 0; ++slot)

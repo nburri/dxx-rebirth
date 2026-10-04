@@ -464,6 +464,41 @@ void test_failures()
 		c1.ex.receive(2, SHIP_MSG_INFO, ib);
 		CHECK(!c1.ex.info(1));
 	}
+	/* A client that changes its ship again and again: the host takes a
+	 * change only every SHIP_CHANGE_INTERVAL, drops what it fetched of
+	 * the old one, and holds at most one fetch for it.
+	 */
+	{
+		world w;
+		machine host{w, 0}, c1{w, 1};
+		w.m = {&host, &c1};
+		host.clients[1] = true;
+		host.ex.client_joined(1);
+		w.link_rate = 0;
+		for (unsigned i = 0; i < 50; ++i)
+		{
+			const auto ship{make_ship(100 + i, 4000)};
+			std::array<std::uint8_t, ship_info_msg::SIZE> ib;
+			auto m{info_of(ship, "spam")};
+			m.pid = 1;
+			m.write(ib.data());
+			host.ex.receive(1, SHIP_MSG_INFO, ib);
+			host.ex.pump(i % 10 == 9 ? 3.5 : 0.1, false);
+		}
+		/* 50 announcements over about 20 s: 1 + 5 taken. */
+		std::size_t requests{};
+		for (const auto &msg : w.links[std::make_pair(0u, 1u)])
+			if (msg.type == SHIP_MSG_REQUEST)
+				++requests;
+		CHECK(requests >= 2 && requests <= 7);
+		/* Announcing the same again changes nothing. */
+		const auto before{w.links[std::make_pair(0u, 1u)].size()};
+		std::array<std::uint8_t, ship_info_msg::SIZE> ib;
+		auto again{*host.ex.info(1)};
+		again.write(ib.data());
+		host.ex.receive(1, SHIP_MSG_INFO, ib);
+		CHECK(w.links[std::make_pair(0u, 1u)].size() == before);
+	}
 	/* Nobody has it. */
 	{
 		world w;
