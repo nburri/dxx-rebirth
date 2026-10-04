@@ -154,7 +154,11 @@ window_event_result ship_menu_window::event_handler(const d_event &event)
 	{
 		case event_type::window_activated:
 #if DXX_BUILD_DESCENT == 2
-			gr_use_palette_table("groupa.256");
+			/* In a game the level's palette stays (the Pyro's preview
+			 * looks a little off, the HUD keeps its colours).
+			 */
+			if (!Game_wind)
+				gr_use_palette_table("groupa.256");
 #endif
 			key_toggle_repeat(1);
 			break;
@@ -241,7 +245,8 @@ window_event_result ship_menu_window::event_handler(const d_event &event)
 			break;
 		case event_type::window_close:
 #if DXX_BUILD_DESCENT == 2
-			load_palette(MENU_PALETTE, load_palette_use::background, load_palette_change_screen::delayed);
+			if (!Game_wind)
+				load_palette(MENU_PALETTE, load_palette_use::background, load_palette_change_screen::delayed);
 #endif
 			key_toggle_repeat(0);
 			break;

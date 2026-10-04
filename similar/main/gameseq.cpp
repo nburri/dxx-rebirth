@@ -1098,6 +1098,8 @@ void LoadLevel(int level_num,int page_in_textures)
 	auto &vmobjptr = Objects.vmptr;
 	preserve_player_object_info p(vcobjptr, vcplayerptr(Player_num)->objnum);
 	const preserve_player_scores scores{vcobjptr};
+	/* The flying pieces of custom ships belong to the old level. */
+	custom_ship_level_start();
 
 	auto &plr = get_local_player();
 	auto save_player = plr;

@@ -36,8 +36,15 @@ namespace ship_gl {
 
 namespace {
 
-/* Every live mesh, so that a lost context can reach their handles. */
-std::set<mesh *> Meshes;
+/* Every live mesh, so that a lost context can reach their handles.
+ * Never destroyed: meshes owned by other files' globals may outlive any
+ * global of this file at exit.
+ */
+std::set<mesh *> &meshes()
+{
+	static auto *const s{new std::set<mesh *>};
+	return *s;
+}
 
 [[nodiscard]]
 std::uint8_t to_byte(const float v)
@@ -87,13 +94,13 @@ unsigned upload(const rgba_image &img)
 
 mesh::mesh()
 {
-	Meshes.insert(this);
+	meshes().insert(this);
 }
 
 mesh::~mesh()
 {
 	free_textures();
-	Meshes.erase(this);
+	meshes().erase(this);
 }
 
 void mesh::free_textures()
@@ -108,7 +115,7 @@ void mesh::free_textures()
 
 void textures_lost()
 {
-	for (const auto m : Meshes)
+	for (const auto m : meshes())
 		m->free_textures();
 }
 

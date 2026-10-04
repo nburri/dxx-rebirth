@@ -506,7 +506,14 @@ bool custom_ship_hides_debris(const objnum_t objnum, const object_signature_t si
 void custom_ship_debris_created(const object_base &obj, const objnum_t debris, const object_signature_t signature)
 {
 #if DXX_USE_OGL
-	if (obj.type != object_type::OBJ_PLAYER || !custom_ship_of_player(get_player_id(obj)))
+	if (obj.type != object_type::OBJ_PLAYER)
+		return;
+	/* Only when the ship's own pieces fly instead. */
+	const auto &hash{custom_ship_of_player(get_player_id(obj))};
+	if (!hash)
+		return;
+	const auto m{load(*hash)};
+	if (!m || m->parts.empty())
 		return;
 	if (Hidden_debris.size() > 256)
 		Hidden_debris.clear();

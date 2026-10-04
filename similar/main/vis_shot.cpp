@@ -371,16 +371,16 @@ vms_vector offset(const vms_vector &p, const vms_vector &dir, const double f)
 	return vm_vec_build_add(p, scaled(dir, f));
 }
 
-void place_object(object &o, const vms_vector &pos, const vms_matrix &orient, const segnum_t near)
+void place_object(object &o, const vms_vector &pos, const vms_matrix &orient, const segnum_t hint_seg)
 {
 	auto &Objects = LevelUniqueObjectState.Objects;
 	o.pos = pos;
 	o.orient = orient;
-	const auto s{find_point_seg(LevelSharedSegmentState, LevelUniqueSegmentState, pos, Segments.vmptridx(near) DXX_lighting_hack_pass_parameter)};
+	const auto s{find_point_seg(LevelSharedSegmentState, LevelUniqueSegmentState, pos, Segments.vmptridx(hint_seg) DXX_lighting_hack_pass_parameter)};
 	if (s != segment_none)
 		obj_relink(Objects.vmptr, Segments.vmptr, Objects.vmptridx(&o), s);
 	else
-		obj_relink(Objects.vmptr, Segments.vmptr, Objects.vmptridx(&o), Segments.vmptridx(near));
+		obj_relink(Objects.vmptr, Segments.vmptr, Objects.vmptridx(&o), Segments.vmptridx(hint_seg));
 }
 
 void take_ship_pictures()
