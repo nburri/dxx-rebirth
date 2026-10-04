@@ -638,6 +638,23 @@ reject (such a client sees a Pyro).
   it measures every ship's area on the screen against the Pyro's
   instead (§11.1).
 
+### 11.2.1 Textures of the fork's own ships
+
+Anvil, Manta, Locust and Bulwark carry one 512 × 512 atlas each
+(`data/ships/src/texture/texture_ships.py`, run by `convert-own.sh`):
+box-projected charts (flat groups along their own normal), the mirrored
+half of a symmetric ship sharing the texels of the other (about 33
+texels per unit), skyline-packed with 4-texel gutters. The atlas is
+painted per texel from its point on the hull: a tileable hull tile per
+material (AI tiles from text prompts, CC0, `tiles/`), recoloured to the
+ship's style, with creases and worn paint along the geometry's edges,
+soot towards the rear, grime, hazard stripes, vents and a hull number.
+Canopies and nozzles are painted bright; the renderer has no emissive
+channel (mask G is not implemented), so they follow the room light like
+everything else. The colour zone stays the material `accent`: its plate
+is near white with shallow seams and little wear, so after the
+converter's greying the player's colour reads clearly. Files: 360–480 KB.
+
 ### 11.3 S3: network
 
 `common/main/net_v2_ships.h` (the protocol and the whole exchange as a

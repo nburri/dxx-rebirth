@@ -1,0 +1,25 @@
+Hull tiles of the fork's own ships - prompts and provenance
+
+Generator: Scenario (https://www.scenario.com), model "Scenario Texture"
+(model_scenario-texture), text-to-image only (no image input), 1024x1024,
+quality "medium", eraseSeam on, 12 compute units per picture.  Two
+pictures per prompt; variant 1 of each was kept and scaled to 256x256 by
+our script.  The ships' atlases are painted from these tiles by
+../texture_ships.py (recoloured per ship and material, plus procedural
+detail).
+
+== gunmetal.png
+   seamless tileable game texture, flat orthographic top-down view of a spacecraft hull surface, even flat lighting, crisp readable detail at low resolution, the tile shows about 2 x 2 metres of hull: worn painted gunmetal spaceship hull plating, rectangular panels of different sizes with thin dark panel seams and small rivets along the seams, chipped paint at the edges, subtle grime, colours #4a4f55 #5c6168 #2c3035. No perspective, no 3D scene, no cast shadows, no text, no letters, no numbers, no logos, no watermark, no border, no frame, no vignette
+
+== military.png
+   seamless tileable game texture, flat orthographic top-down view of a spacecraft hull surface, even flat lighting, crisp readable detail at low resolution, the tile shows about 2 x 2 metres of hull: battle-scarred military grey hull panels, chipped and scratched paint showing bare metal, scorch marks, a few bolted access hatches, thin panel seams, colours #5a5e58 #6b6f66 #3a3d39. No perspective, no 3D scene, no cast shadows, no text, no letters, no numbers, no logos, no watermark, no border, no frame, no vignette
+
+== darkarmour.png
+   seamless tileable game texture, flat orthographic top-down view of a spacecraft hull surface, even flat lighting, crisp readable detail at low resolution, the tile shows about 2 x 2 metres of hull: dark industrial armour plating, thick heavy plates with deep seams and hex bolts, worn edges, oil stains, colours #26282b #34373b #4a4d50. No perspective, no 3D scene, no cast shadows, no text, no letters, no numbers, no logos, no watermark, no border, no frame, no vignette
+
+== composite.png
+   seamless tileable game texture, flat orthographic top-down view of a spacecraft hull surface, even flat lighting, crisp readable detail at low resolution, the tile shows about 2 x 2 metres of hull: smooth light grey composite spaceship hull panels, long thin panel seams, a few small square inspection hatches, faint streaks, clean and sleek, colours #8c9096 #a3a7ad #6f7378. No perspective, no 3D scene, no cast shadows, no text, no letters, no numbers, no logos, no watermark, no border, no frame, no vignette
+
+== whitepaint.png
+   seamless tileable game texture, flat orthographic top-down view of a spacecraft hull surface, even flat lighting, crisp readable detail at low resolution, the tile shows about 2 x 2 metres of hull: white painted spaceship hull panels, light scratches and small chips, thin grey panel seams, a few rivets, nearly white and evenly bright overall, colours #e4e4e2 #d2d3d1 #bcbdbb. No perspective, no 3D scene, no cast shadows, no text, no letters, no numbers, no logos, no watermark, no border, no frame, no vignette
+
