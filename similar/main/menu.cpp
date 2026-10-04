@@ -2093,7 +2093,7 @@ void hud_config()
 /* Options -> Graphics -> Visual Quality: the settings of ogl_effects.h,
  * the anisotropic filtering level and the texture pack.  Changes apply
  * at once (the anisotropic level and the texture pack when the graphics
- * menu reloads the textures).
+ * menu reloads the textures, i.e. on leaving Options -> Graphics).
  */
 struct visual_quality_menu_items
 {
@@ -2107,6 +2107,7 @@ struct visual_quality_menu_items
 		opt_vq_gamma,
 		opt_vq_contrast,
 		opt_vq_texpack,
+		opt_vq_texpack_info,
 		opt_vq_blank,
 		opt_vq_info,
 		opt_vq_count
@@ -2118,6 +2119,34 @@ struct visual_quality_menu_items
 	std::array<ntstring<NM_MAX_TEXT_LEN>, opt_vq_count> saved_text;
 	std::array<std::array<char, 48>, opt_vq_count> label;
 	std::array<char, 80> info;
+	std::array<char, 80> texpack_info;
+	/* Which missions have a texture pack (texture_pack.h): the
+	 * subdirectories of textures/, and "all" for files directly in it.
+	 */
+	void describe_texture_packs()
+	{
+		std::string packs;
+		bool generic{false};
+		if (const auto list{PHYSFSX_uncounted_list{PHYSFS_enumerateFiles("textures")}})
+			for (const auto i : list)
+			{
+				const std::string path{std::string{"textures/"} + i};
+				PHYSFS_Stat st{};
+				if (!PHYSFS_stat(path.c_str(), &st))
+					continue;
+				if (st.filetype == PHYSFS_FILETYPE_DIRECTORY)
+				{
+					if (!packs.empty())
+						packs += ", ";
+					packs += i;
+				}
+				else if (const std::string_view n{i}; n.size() > 4 && !d_stricmp(n.substr(n.size() - 4).data(), ".png"))
+					generic = true;
+			}
+		if (generic)
+			packs = packs.empty() ? std::string{"all missions"} : "all missions, " + packs;
+		std::snprintf(texpack_info.data(), texpack_info.size(), "  Packs: %s", packs.empty() ? "none installed (textures folder)" : packs.c_str());
+	}
 	template <std::size_t N>
 	static unsigned index_of(const std::array<uint8_t, N> &levels, const unsigned value)
 	{
@@ -2141,7 +2170,9 @@ struct visual_quality_menu_items
 		nm_set_item_slider(m[opt_vq_bloom], label[opt_vq_bloom].data(), std::min<unsigned>(CGameCfg.Bloom, 8), 0, 8, saved_text[opt_vq_bloom]);
 		nm_set_item_slider(m[opt_vq_gamma], label[opt_vq_gamma].data(), percent_index(CGameCfg.GammaCurve), 0, 12, saved_text[opt_vq_gamma]);
 		nm_set_item_slider(m[opt_vq_contrast], label[opt_vq_contrast].data(), percent_index(CGameCfg.Contrast), 0, 12, saved_text[opt_vq_contrast]);
-		nm_set_item_checkbox(m[opt_vq_texpack], "Texture Pack (textures folder)", CGameCfg.TexturePack);
+		nm_set_item_checkbox(m[opt_vq_texpack], "HD texture packs (AI)", CGameCfg.TexturePack);
+		describe_texture_packs();
+		nm_set_item_text(m[opt_vq_texpack_info], texpack_info.data());
 		nm_set_item_text(m[opt_vq_blank], "");
 		std::snprintf(info.data(), info.size(), "Shaders: %s  Framebuffers: %s  Max. MSAA: %ix",
 			c.shaders ? "yes" : "no", c.fbo ? "yes" : "no", c.fbo_multisample ? c.max_samples : 0);
@@ -2177,7 +2208,9 @@ struct visual_quality_menu_items
 		CGameCfg.Bloom = m[opt_vq_bloom].value;
 		CGameCfg.GammaCurve = 70 + 5 * m[opt_vq_gamma].value;
 		CGameCfg.Contrast = 70 + 5 * m[opt_vq_contrast].value;
-		/* The textures load again when the graphics menu closes. */
+		/* The textures load again when the graphics menu closes;
+		 * saved in descent.cfg (TexturePack).
+		 */
 		CGameCfg.TexturePack = m[opt_vq_texpack].value;
 	}
 };
