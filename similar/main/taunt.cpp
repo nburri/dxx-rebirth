@@ -61,8 +61,34 @@ namespace {
 namespace tt = ::dcx::taunt;
 namespace mr = ::dcx::movrec;
 
-/* Taunts are heard as far as a weapon's sound (digi_link_sound_to_object). */
-constexpr vm_distance TAUNT_DISTANCE{F1_0 * 256};
+/* How loud a horn sounds against a game sound of the same level: the
+ * mixer gain times the player's "Horn volume".
+ */
+float horn_gain()
+{
+	return tt::MIX_GAIN * static_cast<float>(std::min<unsigned>(CGameCfg.HornVolume, tt::MAX_HORN_VOLUME)) / 100.0f;
+}
+
+/* The volume and pan of a horn from `ship`: full within
+ * FULL_VOLUME_DISTANCE along the path through the mine, nothing from
+ * SILENT_DISTANCE (taunt_sample.h); the own ship's at full volume in the
+ * middle.  digi_sound_location fades linearly from `max_volume` to 0 at
+ * 1.25 times `max_distance` along the path: asked with F1_0 and
+ * SILENT_DISTANCE / 1.25 its volume v is F1_0 * (1 - path / SILENT), so
+ * the horn's (SILENT - path) / (SILENT - FULL) is v * SILENT / (SILENT -
+ * FULL).
+ */
+std::pair<int, sound_pan> horn_location(const object &ship)
+{
+	if (&ship == Viewer)
+		return {F1_0, sound_pan{0x7fff}};
+	constexpr unsigned silent{tt::SILENT_DISTANCE}, full{tt::FULL_VOLUME_DISTANCE};
+	static_assert(full < silent && silent % 5 == 0);
+	const auto &&[v, pan]{digi_sound_location(ship.pos, vcsegptridx(ship.segnum), F1_0, vm_distance{F1_0 * static_cast<fix>(silent * 4 / 5)})};
+	if (v <= 0)
+		return {0, pan};
+	return {static_cast<int>(std::min<std::int64_t>(F1_0, std::int64_t{v} * silent / (silent - full))), pan};
+}
 
 /* What a taunt plays: a starter horn, or a player's own sample named by
  * its size and SHA-256.
@@ -374,7 +400,7 @@ bool play(const playernum_t pnum, const sample_ref &r)
 	const auto ship{ship_of(pnum)};
 	if (!ship)
 		return false;
-	const auto &&[volume, pan]{digi_sound_location(ship->pos, vcsegptridx(ship->segnum), F1_0, TAUNT_DISTANCE)};
+	const auto [volume, pan]{horn_location(*ship)};
 	/* A new taunt of this player stops its last one. */
 	::dcx::digi_stop_custom(pnum);
 	if (volume <= 0)
@@ -382,7 +408,7 @@ bool play(const playernum_t pnum, const sample_ref &r)
 		con_printf(CON_VERBOSE, "taunt: P#%u's horn out of earshot", pnum);
 		return false;
 	}
-	const auto channel{::dcx::digi_play_custom(pnum, samples_of(pnum, r), volume, pan)};
+	const auto channel{::dcx::digi_play_custom(pnum, samples_of(pnum, r), volume, pan, horn_gain())};
 	con_printf(CON_VERBOSE, "taunt: P#%u's horn (sample %u) at volume %i, channel %u", pnum, static_cast<unsigned>(r.kind), volume, static_cast<unsigned>(channel));
 	if (channel == sound_channel::None)
 		return false;
@@ -484,7 +510,7 @@ void taunt_frame()
 			::dcx::digi_stop_custom(pnum);
 			continue;
 		}
-		const auto &&[volume, pan]{digi_sound_location(ship->pos, vcsegptridx(ship->segnum), F1_0, TAUNT_DISTANCE)};
+		const auto [volume, pan]{horn_location(*ship)};
 		if (volume <= 0)
 		{
 			::dcx::digi_stop_custom(pnum);
@@ -509,7 +535,7 @@ void taunt_preview()
 		::dcx::digi_stop_custom(PREVIEW_SLOT);
 		return;
 	}
-	::dcx::digi_play_custom(PREVIEW_SLOT, samples_of(Player_num, own_ref()), F1_0, sound_pan{F1_0 / 2});
+	::dcx::digi_play_custom(PREVIEW_SLOT, samples_of(Player_num, own_ref()), F1_0, sound_pan{F1_0 / 2}, horn_gain());
 }
 
 void taunt_level_start()

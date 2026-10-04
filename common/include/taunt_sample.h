@@ -34,13 +34,48 @@ constexpr unsigned EDGE_FADE_SAMPLES{SAMPLE_RATE / 500};	/* 2 ms at both ends ag
 /* Shorter samples are refused (a click is no taunt). */
 constexpr unsigned MIN_SAMPLES{SAMPLE_RATE / 20};			/* 50 ms */
 
-/* Loudness: the peak at most PEAK_TARGET and the RMS at most RMS_TARGET
- * of full scale, so no taunt is louder than a weapon sound; a quiet
- * file is raised by at most MAX_GAIN.
+/* Loudness (normalise): the loudness (`loudness`, the RMS over the
+ * audible part) is brought to LOUDNESS_TARGET of full scale, a quiet
+ * file raised by at most MAX_GAIN.  Peaks above LIMIT_KNEE are bent
+ * smoothly towards PEAK_TARGET (`soft_limit`), never beyond; to keep
+ * the sound clean, a peak is squashed at most MAX_LIMITING times (a
+ * spiky file stays quieter than the target).  The game's weapon sounds
+ * (DESCENT2.S22, 8-bit) peak at full scale with a loudness of 0.25 to
+ * 0.29 for the lasers, 0.33 for the plasma and 0.42 for the vulcan; with
+ * the mixer's MIX_GAIN a horn sounds about 1.6 times as loud as a laser
+ * shot (+7 dB).
  */
-constexpr float PEAK_TARGET{0.70f};
-constexpr float RMS_TARGET{0.20f};
-constexpr float MAX_GAIN{8.0f};
+constexpr float LOUDNESS_TARGET{0.40f};
+constexpr float PEAK_TARGET{0.95f};
+constexpr float LIMIT_KNEE{0.70f};
+constexpr float MAX_LIMITING{2.0f};
+constexpr float MAX_GAIN{16.0f};
+/* The loudness is measured over windows of this length; windows more
+ * than 20 dB below the loudest are not counted (pauses, tails).
+ */
+constexpr unsigned LOUDNESS_WINDOW{SAMPLE_RATE / 20};	/* 50 ms */
+constexpr float LOUDNESS_GATE{0.1f};
+
+/* Playback: a horn plays MIX_GAIN times as loud in the mixer as a game
+ * sound of the same level, times the player's "Horn volume" (descent.cfg
+ * HornVolume, percent, 0 to MAX_HORN_VOLUME in steps of
+ * HORN_VOLUME_STEP; DEFAULT_HORN_VOLUME = this level).  Heard at full
+ * volume within FULL_VOLUME_DISTANCE of the ship, fading to nothing at
+ * SILENT_DISTANCE (a weapon's sound fades from its source to 320).
+ */
+constexpr float MIX_GAIN{1.5f};
+constexpr unsigned DEFAULT_HORN_VOLUME{100};
+constexpr unsigned MAX_HORN_VOLUME{200};
+constexpr unsigned HORN_VOLUME_STEP{10};
+constexpr unsigned FULL_VOLUME_DISTANCE{80};
+constexpr unsigned SILENT_DISTANCE{400};
+
+/* The soft limiter: unchanged up to LIMIT_KNEE, above it bent towards
+ * PEAK_TARGET (tanh), which it never reaches.
+ */
+[[nodiscard]]
+float soft_limit(float v);
+
 /* Leading and trailing silence (below this fraction of full scale) is
  * cut before the 2 s are counted.
  */
@@ -135,11 +170,18 @@ void trim_silence(std::vector<float> &s);
  * fade both ends by EDGE_FADE_SAMPLES.  True if it was cut.
  */
 bool cut_and_fade(std::vector<float> &s);
-/* Scale so that the peak is at most PEAK_TARGET and the RMS at most
- * RMS_TARGET; quiet samples are raised by at most MAX_GAIN.  Returns the
- * gain applied.
+/* The loudness of `s`: the RMS over LOUDNESS_WINDOW windows, without
+ * those more than 20 dB below the loudest.
  */
-float normalise(std::vector<float> &s);
+[[nodiscard]]
+float loudness(std::span<const float> s);
+/* Bring the loudness to LOUDNESS_TARGET (see there) with the soft
+ * limiter; with `may_raise` false only lower it (a received sample: the
+ * sender raised it already, within MAX_GAIN and MAX_LIMITING, which must
+ * not apply twice).  Returns the gain applied before the limiter, 0 if
+ * `s` is silent, empty or not finite.
+ */
+float normalise(std::vector<float> &s, bool may_raise = true);
 [[nodiscard]]
 pcm to_pcm(std::span<const float> s);
 [[nodiscard]]
@@ -158,8 +200,8 @@ std::optional<pcm> prepare_file(std::span<const std::uint8_t> bytes, std::string
 [[nodiscard]]
 std::vector<std::uint8_t> encode_wire(std::span<const std::int16_t> s);
 /* Strict checks (magic, rate, flags, count, exact size); the samples are
- * then cut, faded and normalised again, so a sample from the network
- * obeys the limits whoever made it.
+ * then cut, faded and normalised again (lowered only), so a sample from
+ * the network obeys the limits whoever made it.
  */
 [[nodiscard]]
 std::optional<pcm> decode_wire(std::span<const std::uint8_t> bytes);

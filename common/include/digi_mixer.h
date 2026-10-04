@@ -69,7 +69,7 @@ void digi_mixer_set_digi_volume(int);
 int digi_mixer_is_channel_playing(sound_channel);
 void digi_mixer_stop_all_channels();
 int digi_mixer_init();
-sound_channel digi_mixer_play_custom(unsigned slot, std::span<const int16_t> samples, fix volume, sound_pan pan);
+sound_channel digi_mixer_play_custom(unsigned slot, std::span<const int16_t> samples, fix volume, sound_pan pan, float gain);
 sound_channel digi_mixer_custom_channel(unsigned slot);
 void digi_mixer_stop_custom(unsigned slot);
 }

@@ -179,11 +179,17 @@ namespace dcx {
 
 /* Sounds that are no game sound (the taunts, Documentation/taunts.md):
  * `slot` 0 to DIGI_CUSTOM_SLOTS - 1 plays `samples` (44100 Hz, stereo,
- * int16, interleaved; copied), stopping what the slot played.  Only with
- * SDL_mixer; otherwise nothing plays.
+ * int16, interleaved; copied), stopping what the slot played.  Each slot
+ * has a mixer channel of its own that no game sound takes, so a custom
+ * sound is never dropped for want of a channel.  `gain` is its loudness
+ * against a game sound of the same level (1: as loud; up to
+ * DIGI_CUSTOM_MAX_GAIN), under the sound effects volume; what the mixer's
+ * channel volume cannot give is applied to the samples with a soft
+ * limiter.  Only with SDL_mixer; otherwise nothing plays.
  */
 constexpr unsigned DIGI_CUSTOM_SLOTS{9};
-sound_channel digi_play_custom(unsigned slot, std::span<const int16_t> samples, fix volume, sound_pan pan);
+constexpr float DIGI_CUSTOM_MAX_GAIN{4.0f};
+sound_channel digi_play_custom(unsigned slot, std::span<const int16_t> samples, fix volume, sound_pan pan, float gain);
 /* The channel of what the slot plays, or sound_channel::None if it
  * finished or was stopped (also by another sound taking the channel).
  */

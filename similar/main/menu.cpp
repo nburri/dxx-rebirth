@@ -2736,6 +2736,7 @@ namespace {
 	DXX_MENUITEM(VERB, RADIO, "Horn 4: beep beep", opt_sm_taunt_horn4, CGameCfg.TauntChoice == DXX_TAUNT_CHOICE(horn4), optgrp_taunt)	\
 	DXX_MENUITEM(VERB, RADIO, "Off", opt_sm_taunt_off, CGameCfg.TauntChoice == DXX_TAUNT_CHOICE(off), optgrp_taunt)	\
 	DXX_MENUITEM(VERB, CHECK, "Hear other players' horns", opt_sm_taunts_heard, CGameCfg.TauntsHeard)	\
+	DXX_MENUITEM(VERB, SCALE_SLIDER, horn_volume_text.data(), opt_sm_horn_volume, CGameCfg.HornVolume, 0, ::dcx::taunt::MAX_HORN_VOLUME / ::dcx::taunt::HORN_VOLUME_STEP, ::dcx::taunt::HORN_VOLUME_STEP)	\
 
 #else
 #define DXX_SOUND_TAUNT_MENU_ITEMS(VERB)
@@ -2782,11 +2783,18 @@ public:
 	{
 		std::snprintf(taunt_status.data(), taunt_status.size(), "   %s", taunt_own_status(reload).c_str());
 	}
+	/* "Horn volume" with its value: all horns heard here. */
+	std::array<char, 32> horn_volume_text{};
+	void update_horn_volume_text()
+	{
+		std::snprintf(horn_volume_text.data(), horn_volume_text.size(), "Horn volume: %u %%", static_cast<unsigned>(CGameCfg.HornVolume));
+	}
 #endif
 	sound_menu_items()
 	{
 #if DXX_BUILD_DESCENT == 2
 		update_taunt_status(false);
+		update_horn_volume_text();
 #endif
 		DSX_SOUND_MENU(ADD);
 	}
@@ -2842,6 +2850,12 @@ window_event_result sound_menu::event_handler(const d_event &event)
 #if DXX_BUILD_DESCENT == 2
 			else if (citem == opt_sm_taunts_heard)
 				CGameCfg.TauntsHeard = items[citem].value;
+			else if (citem == opt_sm_horn_volume)
+			{
+				CGameCfg.HornVolume = static_cast<uint8_t>(items[citem].value * ::dcx::taunt::HORN_VOLUME_STEP);
+				update_horn_volume_text();
+				taunt_preview();
+			}
 			else if (citem == opt_sm_taunt_own || citem == opt_sm_taunt_horn1 || citem == opt_sm_taunt_horn2 || citem == opt_sm_taunt_horn3 || citem == opt_sm_taunt_horn4 || citem == opt_sm_taunt_off)
 			{
 				CGameCfg.TauntChoice = citem == opt_sm_taunt_own ? DXX_TAUNT_CHOICE(own) : citem == opt_sm_taunt_horn1 ? DXX_TAUNT_CHOICE(horn1) : citem == opt_sm_taunt_horn2 ? DXX_TAUNT_CHOICE(horn2) : citem == opt_sm_taunt_horn3 ? DXX_TAUNT_CHOICE(horn3) : citem == opt_sm_taunt_horn4 ? DXX_TAUNT_CHOICE(horn4) : DXX_TAUNT_CHOICE(off);

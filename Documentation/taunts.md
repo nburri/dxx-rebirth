@@ -24,13 +24,21 @@ the samples travel with the custom ships' asset transfer.
   Vorbis (not Opus) or FLAC, any sample rate from 4 to 192 kHz, mono or up
   to 8 channels, at most 16 MiB. The channels are mixed to mono at
   22050 Hz; silence at the start and the end is cut; the sound is cut to
-  2.0 s with a 50 ms fade-out; its loudness is evened out (peak at most
-  70 % and RMS at most 20 % of full scale, a quiet file raised at most 8
-  times), so no horn is louder than a weapon's sound. A file that cannot
-  be read, is silent or is shorter than 50 ms is not used.
-- **Who hears it:** everyone near the ship, from where the ship is, as far
-  as a weapon's sound carries (256 units). A new horn of the same player
-  stops that player's last one.
+  2.0 s with a 50 ms fade-out; its loudness is evened out to 40 % of full
+  scale (RMS over the audible part; a quiet file is raised at most 16
+  times), with a soft limiter that keeps the peaks under 95 % instead of
+  clipping them. The starter horns get the same. A file that cannot be
+  read, is silent or is shorter than 50 ms is not used.
+- **How loud:** clearly over gunfire: about 1.6 times as loud as a laser
+  shot (+7 dB; see 2. Design). *Horn volume* (same menu, 0 to 200 %,
+  default 100 %, saved in `descent.cfg` as `HornVolume`) scales all horns
+  you hear, your own and the others', on top of the sound effects
+  volume; moving it plays your horn.
+- **Who hears it:** everyone near the ship, from where the ship is: at
+  full volume within 80 units (along the way through the mine), fading
+  to nothing at 400 units (a weapon's sound fades from its source and is
+  gone at 320). Your own horn sounds at full volume. A new horn of the
+  same player stops that player's last one.
 - **Limits:** at most 3 horns within 2 s and 4 within 10 s; one more locks
   the horn for 5 s ("Horn cooling down (5 s)").
 - **Muting:** *Hear other players' horns* (same menu) turns all others
@@ -58,9 +66,36 @@ the samples travel with the custom ships' asset transfer.
   Only the local file is decoded; peers never decode MP3/Ogg/FLAC.
 - `similar/main/taunt.cpp`: the key, playback, network, bots, muting.
   Playback uses one mixer channel per player (`digi_play_custom`, 9
-  slots: 8 players and the menu's preview) with the volume and pan of a
-  sound linked to the ship (`digi_sound_location`), updated every frame;
-  the horn stops when the ship dies or leaves.
+  slots: 8 players and the menu's preview); these are the mixer's
+  channels 0 to 8, which no game sound takes, so a horn is never dropped
+  when many sounds play. Volume and pan follow the ship every frame
+  (`horn_location`: `digi_sound_location` asked for 320 units, its
+  linear fade turned into full within 80 and nothing at 400); the horn
+  stops when the ship dies or leaves.
+- **Loudness:** the game's weapon sounds (8-bit, `DESCENT2.S22`) peak at
+  full scale; their loudness (RMS over 50 ms windows, without those 20 dB
+  below the loudest) is 0.25 to 0.29 for the lasers (`laser01`-`05`),
+  0.33 for the plasma, 0.42 for the vulcan (your own vulcan plays at
+  half volume). They play at the mixer channel volume of the sound
+  effects setting, which is at most half of SDL_mixer's range (64 of
+  128). A horn is normalised to 0.40 (`taunt::normalise`: gain, then
+  `soft_limit`, unchanged up to 0.70 and bent towards 0.95; the gain is
+  found again from the original until the limited sound is on target; at
+  most 16 times, and peaks are squashed at most 2 times, so a spiky file
+  stays quieter) and its channel plays 1.5 times as loud as a game sound
+  (`taunt::MIX_GAIN`) times *Horn volume*: 0.40 × 1.5 = 0.60 against
+  0.25-0.29, +6.3 to +7.6 dB, about 1.6 times as loud to the ear. The part
+  of the gain the channel volume cannot give (*Horn volume* over 133 %
+  at full sound effects volume) is applied to the samples with the same
+  soft limiter. Before, a horn was at most 0.20 RMS with peaks at 0.70
+  (3 to 6 dB under a laser shot).
+- **Received samples:** a receiver normalises a sample again, but only
+  lowers it (the sender's gain and limiting must not apply twice: a
+  quiet file raised 16 times would otherwise be raised again), so
+  everyone hears the owner's horn as the owner does. The transfer format
+  is unchanged: an own sample from an older version (at most 0.20 RMS)
+  stays at its old level; an older receiver lowers a new one to its old
+  level. The starter horns are made on every machine at the new level.
 - **Transfer format "DXT1":** magic, rate u16 = 22050, flags u16 = 0,
   count u32 (1 102 to 44 100), then mono int16 samples, little-endian:
   at most 88 212 bytes (≤ 100 KB, uncompressed so that it needs no
@@ -116,7 +151,11 @@ are kind 2 (at most 128 KiB; a DXT1 sample is at most 88 212 bytes):
 
 - `test-taunt` (run from the top of the tree): the rate limiter (bursts,
   lockout, steady taunting, the host's allowed sequences bunched by the
-  network pass the receivers), WAV in four sample formats and five rates,
+  network pass the receivers), the normalisation (quiet, very quiet,
+  normal, loud, clipped, square and spiky input: loudness on the target
+  or stopped by the gain limits, peaks under 95 %, normalising again
+  changes nothing, a received sample is never raised, the limiter's
+  curve), WAV in four sample formats and five rates,
   the Ogg/MP3/FLAC files of `common/unittest/data` (made by
   `make_taunt_files.sh`, CC0), trimming, cut and fade, loudness limits,
   hostile input (truncated and bit-flipped files of every format; the

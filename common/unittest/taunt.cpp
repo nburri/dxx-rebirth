@@ -20,6 +20,7 @@
 #include <fstream>
 #include <iterator>
 #include <random>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -54,21 +55,28 @@ struct levels
 {
 	float peak{};
 	float rms{};
+	/* taunt_sample.h `loudness`. */
+	float loud{};
 };
 
-levels measure(const pcm &s)
+levels measure(const std::span<const float> s)
 {
 	levels l;
 	double e{};
-	for (const auto v : s)
+	for (const float f : s)
 	{
-		const float f{static_cast<float>(v) / 32768.0f};
 		l.peak = std::max(l.peak, std::fabs(f));
 		e += static_cast<double>(f) * f;
 	}
 	if (!s.empty())
 		l.rms = static_cast<float>(std::sqrt(e / static_cast<double>(s.size())));
+	l.loud = loudness(s);
 	return l;
+}
+
+levels measure(const pcm &s)
+{
+	return measure(to_float(s));
 }
 
 /* Every sample the game would play obeys the limits. */
@@ -77,7 +85,7 @@ void check_limits(const pcm &s)
 	CHECK(s.size() >= MIN_SAMPLES && s.size() <= MAX_SAMPLES);
 	const auto l{measure(s)};
 	CHECK(l.peak <= PEAK_TARGET + 0.001f);
-	CHECK(l.rms <= RMS_TARGET + 0.001f);
+	CHECK(l.loud <= LOUDNESS_TARGET * 1.01f);
 	/* The ends are faded: no click. */
 	CHECK(std::abs(s.front()) < 400 && std::abs(s.back()) < 400);
 }
@@ -263,20 +271,6 @@ void test_processing()
 		const auto before{measure(pcm(s->end() - static_cast<long>(FADE_OUT_SAMPLES) - 600, s->end() - static_cast<long>(FADE_OUT_SAMPLES) - 300))};
 		CHECK(tail.peak < before.peak * 0.4f);
 	}
-	/* Loudness: a full-scale square wave is brought down to the limits;
-	 * a quiet one is raised by at most MAX_GAIN.
-	 */
-	{
-		std::vector<float> loud(SAMPLE_RATE);
-		for (std::size_t i{}; i != loud.size(); ++i)
-			loud[i] = (i / 25) & 1 ? 1.0f : -1.0f;
-		const float g{normalise(loud)};
-		CHECK(g > 0 && g <= RMS_TARGET + 0.001f);
-		std::vector<float> quiet(SAMPLE_RATE);
-		for (std::size_t i{}; i != quiet.size(); ++i)
-			quiet[i] = 0.02f * std::sin(static_cast<float>(i) * 0.1f);
-		CHECK(normalise(quiet) == MAX_GAIN);
-	}
 	/* Silent and too short files are refused. */
 	{
 		std::string error;
@@ -296,6 +290,116 @@ void test_processing()
 	}
 }
 
+/* The loudness of normalise's output: on the target for quiet, loud and
+ * clipped input, the peaks under PEAK_TARGET; spiky input is limited at
+ * most MAX_LIMITING times; normalising again changes little (a receiver
+ * normalises what it gets).
+ */
+std::vector<float> tone(const float amplitude, const float clip = 0)
+{
+	std::vector<float> s(SAMPLE_RATE);
+	for (std::size_t i{}; i != s.size(); ++i)
+	{
+		const float t{static_cast<float>(i) / SAMPLE_RATE};
+		/* A horn-like tone: two partials and a slow swell. */
+		float v{amplitude * (0.8f * std::sin(6.2831853f * 440 * t) + 0.3f * std::sin(6.2831853f * 1320 * t)) * (0.6f + 0.4f * std::sin(6.2831853f * 2 * t))};
+		if (clip > 0)
+			v = std::clamp(v, -clip, clip);
+		s[i] = v;
+	}
+	return s;
+}
+
+void test_normalise()
+{
+	struct input
+	{
+		const char *name;
+		std::vector<float> s;
+		bool on_target;
+	};
+	std::vector<input> inputs;
+	inputs.push_back({"quiet (loudness 0.04)", tone(0.1f), true});
+	inputs.push_back({"very quiet (loudness 0.002)", tone(0.005f), false});
+	inputs.push_back({"normal", tone(0.5f), true});
+	inputs.push_back({"loud", tone(1.0f), true});
+	inputs.push_back({"clipped (x4, clipped at full scale)", tone(4.0f, 1.0f), true});
+	{
+		std::vector<float> square(SAMPLE_RATE);
+		for (std::size_t i{}; i != square.size(); ++i)
+			square[i] = (i / 25) & 1 ? 1.0f : -1.0f;
+		inputs.push_back({"full-scale square", std::move(square), true});
+	}
+	{
+		/* A click every 100 ms: peaks far above the loudness. */
+		std::vector<float> spiky(SAMPLE_RATE);
+		for (std::size_t i{}; i < spiky.size(); i += SAMPLE_RATE / 10)
+			for (std::size_t k{}; k != 40 && i + k < spiky.size(); ++k)
+				spiky[i + k] = (k & 1 ? 0.6f : -0.6f) * (1.0f - k / 40.0f);
+		inputs.push_back({"clicks", std::move(spiky), false});
+	}
+	for (auto &in : inputs)
+	{
+		const auto before{measure(in.s)};
+		auto s{in.s};
+		const float g{normalise(s)};
+		const auto after{measure(s)};
+		std::printf("taunt: normalise %-40s loudness %.3f -> %.3f, peak %.2f -> %.2f, gain %.2f\n", in.name, before.loud, after.loud, before.peak, after.peak, g);
+		CHECK(g > 0 && g <= MAX_GAIN);
+		CHECK(after.peak < PEAK_TARGET);
+		CHECK(after.loud <= LOUDNESS_TARGET * 1.01f);
+		if (in.on_target)
+			CHECK(after.loud >= LOUDNESS_TARGET * 0.97f);
+		else
+			/* Stopped by MAX_GAIN or MAX_LIMITING, nothing else. */
+			CHECK(g == MAX_GAIN || g * before.peak >= PEAK_TARGET * MAX_LIMITING * 0.999f);
+		/* Normalising the result again (as a receiver does). */
+		auto again{s};
+		normalise(again);
+		const auto twice{measure(again)};
+		CHECK(twice.peak < PEAK_TARGET);
+		if (in.on_target)
+			CHECK(std::fabs(twice.loud - after.loud) < 0.01f);
+		/* Through the transfer format: the same limits, and a sample
+		 * the gain limits kept quiet is not raised again by the
+		 * receiver (MAX_GAIN and MAX_LIMITING apply once).
+		 */
+		if (const auto w{decode_wire(encode_wire(to_pcm(s)))})
+		{
+			const auto l{measure(*w)};
+			CHECK(l.peak <= PEAK_TARGET + 0.001f && l.loud <= LOUDNESS_TARGET * 1.01f);
+			CHECK(l.loud <= after.loud * 1.01f);
+		}
+	}
+	/* A received sample is only lowered: a too loud one comes down to
+	 * the target, a quiet one stays as it is.
+	 */
+	{
+		auto loud{tone(4.0f, 1.0f)};
+		CHECK(normalise(loud, false) < 1.0f);
+		CHECK(measure(loud).loud <= LOUDNESS_TARGET * 1.01f);
+		auto quiet{tone(0.1f)};
+		const auto before{quiet};
+		CHECK(normalise(quiet, false) == 1.0f);
+		CHECK(quiet == before);
+	}
+	/* The limiter: unchanged below the knee, never beyond PEAK_TARGET,
+	 * monotonic, odd.
+	 */
+	CHECK(soft_limit(0.5f) == 0.5f && soft_limit(-LIMIT_KNEE) == -LIMIT_KNEE);
+	CHECK(soft_limit(10.0f) <= PEAK_TARGET && soft_limit(-10.0f) >= -PEAK_TARGET);
+	for (float v{0}; v < 4; v += 0.01f)
+	{
+		CHECK(soft_limit(v + 0.01f) >= soft_limit(v));
+		CHECK(soft_limit(-v) == -soft_limit(v));
+	}
+	/* Silent and broken input. */
+	std::vector<float> silent(1000);
+	CHECK(normalise(silent) == 0);
+	std::vector<float> empty;
+	CHECK(normalise(empty) == 0);
+}
+
 void test_files()
 {
 	for (const char *const name : {"taunt-test.ogg", "taunt-test.mp3", "taunt-test.flac"})
@@ -312,8 +416,8 @@ void test_files()
 		/* 2.4 s of tone after 0.3 s of silence: cut to 2.0 s. */
 		CHECK(s->size() == MAX_SAMPLES);
 		check_limits(*s);
-		/* The tone was at the RMS limit's level: the RMS lands there. */
-		CHECK(measure(*s).rms > RMS_TARGET * 0.9f);
+		/* A steady tone lands on the target. */
+		CHECK(measure(*s).loud > LOUDNESS_TARGET * 0.97f);
 		/* The first 20 ms are already the tone (the silence is gone);
 		 * the decoders' leading delay (MP3) is short.
 		 */
@@ -426,9 +530,10 @@ void test_horns()
 	{
 		const auto h{starter_horn(n)};
 		check_limits(h);
-		/* Loud enough to be heard: within 6 dB of the limits. */
+		/* As loud as an own file: on the target. */
 		const auto l{measure(h)};
-		CHECK(l.peak > PEAK_TARGET * 0.5f || l.rms > RMS_TARGET * 0.5f);
+		std::printf("taunt: horn %u: peak %.2f, RMS %.3f, loudness %.3f\n", n, l.peak, l.rms, l.loud);
+		CHECK(l.loud > LOUDNESS_TARGET * 0.97f);
 		/* Through the transfer format unchanged in length. */
 		CHECK(decode_wire(encode_wire(h))->size() == h.size());
 		for (const auto &other : horns)
@@ -523,6 +628,7 @@ int main(const int argc, char **const argv)
 		data_dir = argv[1];
 	test_rate_limiter();
 	test_processing();
+	test_normalise();
 	test_files();
 	test_hostile_files();
 	test_wire();

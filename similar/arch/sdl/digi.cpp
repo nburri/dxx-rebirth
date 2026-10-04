@@ -255,16 +255,17 @@ void digi_set_digi_volume(int dvolume) { fptr->set_digi_volume(dvolume); }
 }
 
 namespace dcx {
-sound_channel digi_play_custom(const unsigned slot, const std::span<const int16_t> samples, const fix volume, const sound_pan pan)
+sound_channel digi_play_custom(const unsigned slot, const std::span<const int16_t> samples, const fix volume, const sound_pan pan, const float gain)
 {
 #if DXX_USE_SDLMIXER
 	if (!CGameArg.SndDisableSdlMixer)
-		return digi_mixer_play_custom(slot, samples, volume, pan);
+		return digi_mixer_play_custom(slot, samples, volume, pan, gain);
 #else
 	(void)slot;
 	(void)samples;
 	(void)volume;
 	(void)pan;
+	(void)gain;
 #endif
 	return sound_channel::None;
 }

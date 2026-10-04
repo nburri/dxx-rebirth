@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cmath>
 #include <numbers>
+#include <utility>
 #include "taunt_sample.h"
 #include "sha256.h"
 
@@ -250,23 +251,81 @@ bool cut_and_fade(std::vector<float> &s)
 	return cut;
 }
 
-float normalise(std::vector<float> &s)
+float soft_limit(const float v)
+{
+	const float a{std::fabs(v)};
+	if (!(a > LIMIT_KNEE))
+		return v;
+	constexpr float room{PEAK_TARGET - LIMIT_KNEE};
+	return std::copysign(LIMIT_KNEE + room * std::tanh((a - LIMIT_KNEE) / room), v);
+}
+
+float loudness(const std::span<const float> s)
+{
+	if (s.empty())
+		return 0;
+	/* The energy (sum of squares) and length of each window. */
+	std::vector<std::pair<double, std::size_t>> windows;
+	windows.reserve(s.size() / LOUDNESS_WINDOW + 1);
+	double loudest{};
+	for (std::size_t i{}; i < s.size(); i += LOUDNESS_WINDOW)
+	{
+		const auto w{s.subspan(i, std::min<std::size_t>(LOUDNESS_WINDOW, s.size() - i))};
+		double e{};
+		for (const float v : w)
+			e += static_cast<double>(v) * v;
+		windows.emplace_back(e, w.size());
+		loudest = std::max(loudest, e / static_cast<double>(w.size()));
+	}
+	/* The gate is on the RMS: the mean energy is its square.  Each window
+	 * counts by its length (a short last one hardly).
+	 */
+	const double gate{loudest * LOUDNESS_GATE * LOUDNESS_GATE};
+	double sum{};
+	std::size_t n{};
+	for (const auto &[e, len] : windows)
+		if (e / static_cast<double>(len) >= gate)
+		{
+			sum += e;
+			n += len;
+		}
+	return n ? static_cast<float>(std::sqrt(sum / static_cast<double>(n))) : 0.0f;
+}
+
+float normalise(std::vector<float> &s, const bool may_raise)
 {
 	float peak{};
-	double energy{};
 	for (const float v : s)
 	{
 		if (!std::isfinite(v))
 			return 0;
 		peak = std::max(peak, std::fabs(v));
-		energy += static_cast<double>(v) * v;
 	}
-	if (peak <= 0 || s.empty())
+	const float level{loudness(s)};
+	if (peak <= 0 || !(level > 0))
 		return 0;
-	const float rms{static_cast<float>(std::sqrt(energy / static_cast<double>(s.size())))};
-	const float gain{std::min({PEAK_TARGET / peak, RMS_TARGET / rms, MAX_GAIN})};
-	for (float &v : s)
-		v *= gain;
+	/* Already within the limits (a sample normalised before, as a
+	 * receiver gets it): left as it is.
+	 */
+	if (peak <= PEAK_TARGET && level >= LOUDNESS_TARGET * 0.97f && level <= LOUDNESS_TARGET * 1.005f)
+		return 1;
+	/* The limiter takes some loudness off what it bends: the gain is
+	 * found again from the original a few times, so the result lands on
+	 * the target unless MAX_GAIN or MAX_LIMITING stop it.
+	 */
+	const float max_gain{std::min({MAX_GAIN, PEAK_TARGET * MAX_LIMITING / peak, may_raise ? MAX_GAIN : 1.0f})};
+	const std::vector<float> original{s};
+	float gain{std::min(LOUDNESS_TARGET / level, max_gain)};
+	for (unsigned pass{};; ++pass)
+	{
+		std::ranges::transform(original, s.begin(), [gain](const float v) { return soft_limit(v * gain); });
+		if (pass == 3 || gain >= max_gain)
+			break;
+		const float now{loudness(s)};
+		if (!(now > 0) || now >= LOUDNESS_TARGET * 0.995f)
+			break;
+		gain = std::min(gain * LOUDNESS_TARGET / now, max_gain);
+	}
 	return gain;
 }
 
@@ -357,7 +416,7 @@ std::optional<pcm> decode_wire(const std::span<const std::uint8_t> bytes)
 		raw[i] = static_cast<std::int16_t>(get_u16(&bytes[WIRE_HEADER_SIZE + 2 * i]));
 	auto s{to_float(raw)};
 	cut_and_fade(s);
-	if (!normalise(s))
+	if (!normalise(s, false))
 		return std::nullopt;
 	return to_pcm(s);
 }
