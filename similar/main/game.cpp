@@ -1835,6 +1835,10 @@ window_event_result game_window::event_handler(const d_event &event)
 			movement_record_end_session();
 
 			multi_leave_game();
+			/* A death sequence still running (the host left while this
+			 * player was dead) ends with the game.
+			 */
+			dead_player_forget();
 
 			if ( Newdemo_state == ND_STATE_PLAYBACK )
 				newdemo_stop_playback();

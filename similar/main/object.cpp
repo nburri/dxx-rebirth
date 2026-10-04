@@ -1428,7 +1428,16 @@ imobjptridx_t obj_create_copy(const object &srcobj, const vmsegptridx_t newsegnu
 void obj_delete(d_level_unique_object_state &LevelUniqueObjectState, segment_array &Segments, const vmobjptridx_t obj)
 {
 	auto &Objects = LevelUniqueObjectState.Objects;
-	Assert(obj->type != object_type::OBJ_NONE);
+	/* Release builds too: deleting a free slot, or any object while
+	 * none is allocated (the object state was reset for a new game),
+	 * would free the slot twice and, with nothing allocated, write far
+	 * outside the free list (the v0.61-vis-8 crash after the host left).
+	 */
+	if (obj->type == object_type::OBJ_NONE || LevelUniqueObjectState.num_objects == 0) [[unlikely]]
+	{
+		con_printf(CON_URGENT, "BUG: obj_delete of object %hu (type %u) that is not allocated (%u objects allocated); ignored", obj.get_unchecked_index(), static_cast<unsigned>(underlying_value(obj->type)), LevelUniqueObjectState.num_objects);
+		return;
+	}
 	Assert(obj != ConsoleObject);
 
 #if DXX_BUILD_DESCENT == 2
@@ -1517,8 +1526,18 @@ void dead_player_end(void)
 		newdemo_record_restore_cockpit();
 
 	Player_dead_state = player_dead_state::no;
-	obj_delete(LevelUniqueObjectState, Segments, vmobjptridx(Dead_player_camera));
-	Dead_player_camera = NULL;
+	/* The camera is deleted only if it still is one: start_player_death_sequence
+	 * falls back to the player's own ship, and a camera left over from
+	 * an earlier game (dead_player_forget) must not be freed again.
+	 */
+	if (const auto camera{std::exchange(Dead_player_camera, nullptr)}; camera && camera != ConsoleObject)
+	{
+		const auto &&camera_idx{vmobjptridx(camera)};
+		if (camera->type == object_type::OBJ_CAMERA && camera_idx.get_unchecked_index() < Objects.get_count())
+			obj_delete(LevelUniqueObjectState, Segments, camera_idx);
+		else
+			con_printf(CON_URGENT, "BUG: death sequence camera %hu is no longer a camera (type %u); not deleted", camera_idx.get_unchecked_index(), static_cast<unsigned>(underlying_value(camera->type)));
+	}
 	select_cockpit(PlayerCfg.CockpitMode[0]);
 	Viewer = Viewer_save;
 	ConsoleObject->type = object_type::OBJ_PLAYER;
@@ -1531,6 +1550,25 @@ void dead_player_end(void)
 	auto &player_info = ConsoleObject->ctype.player_info;
 	player_info.powerup_flags &= ~player_flag::invulnerable;
 	player_info.Player_eggs_dropped = false;
+}
+
+/* The game ends, or the object state is reset for a new one, while the
+ * local player's death sequence runs (e.g. the host left a network game
+ * while this player was dead): forget the death camera without touching
+ * the objects.  Otherwise the next game's init_player_stats_new_ship ->
+ * dead_player_end deletes the stale camera after reset_globals_for_new_game
+ * emptied the object state (num_objects 0), which wrote far outside the
+ * free list in release builds (the v0.61-vis-8 crash).
+ */
+void dead_player_forget()
+{
+	if (Player_dead_state == player_dead_state::no && !Dead_player_camera)
+		return;
+	con_printf(CON_VERBOSE, "teardown: death sequence dropped with the game");
+	Player_dead_state = player_dead_state::no;
+	Dead_player_camera = nullptr;
+	Viewer_save = nullptr;
+	Viewer = ConsoleObject;
 }
 
 namespace {
