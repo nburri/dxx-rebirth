@@ -281,8 +281,10 @@ constexpr struct player_config::KeySettings DefaultKeySettings{
 		// Converter
 		KEY_T, 0xff,
 		// Toggle bomb
-		0xff, 0xff,
-		0x0, 0x0
+		0xff,
+		// Taunt / horn (Documentation/taunts.md)
+		KEY_V, 0xff,
+		0x0
 #endif
 	}}},
 #if DXX_MAX_JOYSTICKS
@@ -422,7 +424,11 @@ constexpr struct player_config::KeySettings DefaultKeySettings{
 		0xff, 0xff,
 #endif
 		// Menu
-		0xff, 0xff
+		0xff, 0xff,
+#if DXX_BUILD_DESCENT == 2
+		// Taunt / horn
+		0xff, 0xff,
+#endif
 	}}},
 #endif
 	/* Mouse */ {{{
@@ -509,8 +515,9 @@ constexpr struct player_config::KeySettings DefaultKeySettings{
 		0x0,
 		0x0,
 #elif DXX_BUILD_DESCENT == 2
-		/* unused */
+		// Taunt / horn
 		0xff,
+		/* unused */
 		0xff,
 		0xff,
 		0xff,
@@ -665,8 +672,8 @@ constexpr enumerated_array<uint8_t, MAX_CONTROLS, dxx_kconfig_ui_kc_joystick> De
 		SDL_CONTROLLER_BUTTON_DPAD_DOWN, 0xff,
 		// Energy->Shield (unbound)
 		0xff, 0xff,
-		// Remaining (unbound)
-		0xff, 0xff, 0xff, 0xff, 0xff
+		// Remaining (unbound): toggle bomb, menu, taunt
+		0xff, 0xff, 0xff, 0xff, 0xff, 0xff
 #endif
 }}};
 #endif
@@ -2134,6 +2141,22 @@ void reset_cruise(void)
 	Cruise_speed=0;
 }
 
+
+#if DXX_BUILD_DESCENT == 2
+void kconfig_default_taunt_bindings()
+{
+	auto &k{PlayerCfg.KeySettings.Keyboard};
+	const auto taunt_key{DefaultKeySettings.Keyboard[dxx_kconfig_ui_kc_keyboard::taunt]};
+	const bool key_taken{std::ranges::find(k, taunt_key) != k.end()};
+	k[dxx_kconfig_ui_kc_keyboard::taunt] = key_taken ? uint8_t{0xff} : taunt_key;
+	k[dxx_kconfig_ui_kc_keyboard::taunt_2] = 0xff;
+#if DXX_MAX_JOYSTICKS
+	PlayerCfg.KeySettings.Joystick[dxx_kconfig_ui_kc_joystick::taunt] = 0xff;
+	PlayerCfg.KeySettings.Joystick[dxx_kconfig_ui_kc_joystick::taunt_2] = 0xff;
+#endif
+	PlayerCfg.KeySettings.Mouse[dxx_kconfig_ui_kc_mouse::taunt] = 0xff;
+}
+#endif
 
 void kc_set_controls()
 {

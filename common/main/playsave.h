@@ -162,6 +162,10 @@ struct player_config : prohibit_void_ptr<>
 	HudType HudMode;
 	RespawnPress RespawnMode;
 	uint8_t MouselookFlags;
+#if DXX_BUILD_DESCENT == 2
+	/* The pilot file has the taunt key's bindings (Documentation/taunts.md). */
+	bool TauntBindings;
+#endif
 	uint8_t PitchLockFlags;
 	using primary_weapon_order = std::array<primary_weapon_index, MAX_PRIMARY_WEAPONS + 1>;
 	using secondary_weapon_order = std::array<secondary_weapon_index, MAX_SECONDARY_WEAPONS + 1>;

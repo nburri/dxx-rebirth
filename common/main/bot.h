@@ -68,6 +68,8 @@ struct bot_setup
 	 * recently added bot.
 	 */
 	bool replace{true};
+	/* Bots sound their horn after some kills (Documentation/taunts.md). */
+	bool taunt{false};
 	bool initialized{};
 };
 
@@ -86,6 +88,7 @@ struct bot_game_options
 	bot::bot_style default_style{bot::bot_style::balanced};
 	bot::style_name default_profile{};
 	bool replace{true};
+	bool taunt{false};
 };
 
 extern bot_game_options Bot_game;
@@ -247,6 +250,9 @@ unsigned bot_added_order(playernum_t pnum);
 /* The host lets humans replace bots. */
 [[nodiscard]]
 bool bots_replaceable();
+/* The host lets bots sound their horn after kills (Documentation/taunts.md). */
+[[nodiscard]]
+bool bots_taunt();
 /* The bot's ship is in its death tumble (the bundle's `dying`). */
 [[nodiscard]]
 bool bot_ship_dying(playernum_t pnum);

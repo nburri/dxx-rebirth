@@ -50,15 +50,20 @@ constexpr net_clock net_milliseconds(const net_clock ms)
  * bot flag, 105: host-assigned spawns, SPAWN_REQUEST and SPAWN_SITE,
  * 106: stage 4, 107: the shared controls in INPUT, -sharemoves, 108:
  * ADDRESS_SEEN, 109: CAPTURE, 110: ORB_BONUS, 111: CTF Classic,
- * CTF_NOTICE; the exp-visuals side branch uses 0x7000 plus a counter
- * of its own in the low byte, so that the two lines never share a number
- * and the low byte, which a v1 build reads as the packet type, stays an
- * unknown one (>= 100): 0x7070 = 28784 custom ships, SHIP_INFO and the
- * ASSET_* transfer, net_v2_ships.h);
- * named differently so that the two never shadow each other in a
+ * CTF_NOTICE);
+ * the side branch exp-visuals adds 0x7000 to its own protocols, so that
+ * they never collide with those of experimental-netcode, while the low
+ * byte keeps counting (0x7000 + 112: taunts, Documentation/taunts.md;
+ * 0x7000 + 113: custom ships, SHIP_INFO and the ASSET_* transfer,
+ * net_v2_ships.h).
+ * Named differently so that the two never shadow each other in a
  * translation unit that sees both.
  */
-constexpr std::uint16_t NET_V2_PROTO_VERSION{0x7070};
+constexpr std::uint16_t NET_V2_PROTO_VERSION{0x7000 + 113};
+/* The protocol's low byte is the first byte of a datagram: a v1 build
+ * reads it as the packet type, and 100 and up are no v1 packet type.
+ */
+static_assert((NET_V2_PROTO_VERSION & 0xff) >= 100);
 constexpr std::size_t NET_V2_HEADER_SIZE{34};
 constexpr std::size_t NET_V2_MAX_PACKET{1200};
 constexpr std::size_t NET_V2_ACK_BITS{64};

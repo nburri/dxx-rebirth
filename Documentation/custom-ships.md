@@ -613,7 +613,7 @@ upper end.
 `common/main/net_v2_ships.h` (the protocol and the whole exchange as a
 state machine, tested by `test-net-v2-ships`, also over the real
 transport with loss) and `similar/main/net_ships.cpp` (the game's side).
-Protocol 0x7070 (28784): the exp-visuals line counts 0x7000 plus a
+Protocol 0x7071 (28785, after the taunts' 28784): the exp-visuals line counts 0x7000 plus a
 counter in the low byte, so it never shares a number with
 experimental-netcode, and the low byte that a v1 build reads as its
 packet type stays an unknown one.

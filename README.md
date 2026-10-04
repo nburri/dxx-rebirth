@@ -75,6 +75,17 @@ The host sets three flag rules under *Advanced Options* → *CTF Classic: flag r
 When *score only with own flag home* is on but *own team returns its flag by touch* is off, a flag lying away from home goes home by itself after 30 seconds. Without this, a team whose flag was dropped somewhere could never score again. The level needs a goal for each team. When a team has several goal segments, the flag goes to the largest one. All players need a build with this mode (network protocol 111).
 
 
+### Taunts (horn)
+
+Press **V** (Controls → *Taunt / Horn*; it can also be put on a joystick or mouse button) and your ship sounds its horn. Everyone near your ship hears it from where you are, like a weapon's sound.
+
+- **Your own sound:** put a file named `taunt.wav`, `taunt.mp3`, `taunt.ogg` or `taunt.flac` in the folder with your pilot files (`.plr`) and `descent.cfg`, and choose *Own file* in *Options → Sound Effects & Music* (the default). The menu shows whether the file was found. The game uses at most the first 2 seconds (after any silence at the start) and evens out the volume, so no horn is louder than a weapon.
+- **Starter horns:** the same menu offers a car horn, a bike bell, an air horn and a beep, and *Off*. Choosing one plays it.
+- **Limits:** up to 3 horns within 2 seconds and 4 within 10 seconds; more and your horn cools down for 5 seconds ("Horn cooling down"). The host enforces this for everyone.
+- **Muting:** uncheck *Hear other players' horns* in the same menu, or type `/mute name` in the chat (F8) to mute one player for this session (`/unmute name`, `/mute` lists them).
+- **Bots:** the host can let bots honk after some of their kills (*Bots taunt after kills* on the Bots screens, default off).
+- Until a later version sends the files, the other players hear your own file as the car horn. All players need a build with network protocol 28784 (0x7000 + 112). Details: [Documentation/taunts.md](Documentation/taunts.md).
+
 ## 4. Legal stuff:
 
 See [COPYING.txt](COPYING.txt) and [GPL-3.txt](GPL-3.txt)
