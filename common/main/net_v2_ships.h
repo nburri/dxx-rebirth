@@ -43,7 +43,8 @@ namespace net_v2 {
 
 /* Message ids (session_msg, net_v2_session.h; 0x50/0x51 are the
  * taunts').  REQUEST, DATA and UNAVAILABLE move any kind of asset, named
- * by kind and SHA-256: ships now, the taunts' sounds later.
+ * by kind and SHA-256: ships (kind 1) and the taunts' sounds (kind 2,
+ * Documentation/taunts.md).
  */
 constexpr std::uint8_t SHIP_MSG_INFO{0x4b};
 constexpr std::uint8_t SHIP_MSG_REQUEST{0x4c};
@@ -56,7 +57,7 @@ using ship_hash = std::array<std::uint8_t, SHIP_HASH_SIZE>;
 enum class asset_kind : std::uint8_t
 {
 	ship = 1,
-	/* Reserved for the taunts' sounds. */
+	/* The taunts' sounds (Documentation/taunts.md). */
 	taunt = 2,
 };
 
@@ -433,7 +434,7 @@ private:
 			last_change[from] = clock;
 			/* What the host fetched of its old ship is not needed. */
 			for (auto i{fetches.begin()}; i != fetches.end();)
-				if (i->second.owner == from && !(i->first == ship_key(m.hash) && !m.pyro))
+				if (i->second.owner == from && i->first.kind == static_cast<std::uint8_t>(asset_kind::ship) && !(i->first == ship_key(m.hash) && !m.pyro))
 					fetch_failed(i++, ship_unavailable_reason::owner_left);
 				else
 					++i;
@@ -507,6 +508,17 @@ private:
 	{
 		for (const auto w : i->second.waiters)
 			unavailable(w, i->first, r);
+		/* Another kind's owner that failed is forgotten, so that the next
+		 * request goes to another owner (it registers again when it
+		 * announces the asset again).  Ships keep theirs: SHIP_INFO.
+		 */
+		if (i->first.kind != static_cast<std::uint8_t>(asset_kind::ship))
+		{
+			const auto owner{i->second.owner};
+			const auto [b, e]{owners.equal_range(i->first)};
+			for (auto o{b}; o != e;)
+				o = o->second.slot == owner ? owners.erase(o) : std::next(o);
+		}
 		env.note("could not fetch", i->first, i->second.owner);
 		fetches.erase(i);
 	}
@@ -614,12 +626,23 @@ public:
 	}
 	/* Client: get an asset this machine lacks from the host (ships ask by
 	 * themselves; another kind announces its assets its own way and asks
-	 * through here).
+	 * through here).  `accept` is the pilot's option for ships; another
+	 * kind's caller decides for itself (the taunts: "Hear other players'
+	 * horns").
 	 */
 	void request(const asset_key &k, const std::uint32_t size)
 	{
-		if (host || !accept || !asset_max_size(k.kind) || size > asset_max_size(k.kind) || env.has_asset(k) || wants.contains(k))
+		if (host || (!accept && k.kind == static_cast<std::uint8_t>(asset_kind::ship)) || !asset_max_size(k.kind) || size > asset_max_size(k.kind) || env.has_asset(k))
 			return;
+		/* Another kind asks again after a failure (its owner may be back);
+		 * the caller paces its asking (the taunts' rate limits).
+		 */
+		if (const auto i{wants.find(k)}; i != wants.end())
+		{
+			if (i->second.state != want_state::failed || k.kind == static_cast<std::uint8_t>(asset_kind::ship))
+				return;
+			wants.erase(i);
+		}
 		wants[k].size = size;
 		env.note("asking the host for", k, 0);
 		send_msg(0, SHIP_MSG_REQUEST, ship_request_msg{k});
@@ -629,8 +652,23 @@ public:
 	 */
 	void note_owner(const asset_key &k, const std::uint8_t slot, const std::uint32_t size)
 	{
-		if (host && slot < MAX_SLOTS && size <= asset_max_size(k.kind))
-			owners.insert({k, {slot, size}});
+		if (!host || slot >= MAX_SLOTS || !size || size > asset_max_size(k.kind))
+			return;
+		const auto [b, e]{owners.equal_range(k)};
+		for (auto i{b}; i != e; ++i)
+			if (i->second.slot == slot)
+				return;
+		owners.insert({k, {slot, size}});
+	}
+	/* Host: get an asset of another kind (a taunt's sound) from its owner
+	 * `slot` for this machine itself; clients that ask later wait for the
+	 * same fetch.
+	 */
+	void host_want(const asset_key &k, const std::uint8_t slot, const std::uint32_t size)
+	{
+		if (!host || slot >= MAX_SLOTS || slot == self || !size || size > asset_max_size(k.kind) || !env.is_client(slot) || env.has_asset(k) || fetches.contains(k))
+			return;
+		host_fetch(k, slot, std::nullopt, size);
 	}
 	/* This machine's own ship (and, on the host, a bot's): announce it.
 	 * A client sends it to the host; the host tells everyone.

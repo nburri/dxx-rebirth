@@ -195,8 +195,10 @@ static inline player_ship_color get_team_color(const team_number tnum)
  * v1 build's packet type, stays 100 and up):
  * 0x7000 + 112 = 28784: taunts (TAUNT_REQUEST, TAUNT; Documentation/taunts.md).
  * 0x7000 + 113 = 28785: custom ships (SHIP_INFO, ASSET_*; Documentation/custom-ships.md).
+ * 0x7000 + 114 = 28786: the taunts' samples as asset kind 2, TAUNT and
+ * TAUNT_REQUEST name a sample by SHA-256 (Documentation/taunts.md).
  */
-constexpr std::uint16_t MULTI_PROTO_VERSION{0x7000 + 113};
+constexpr std::uint16_t MULTI_PROTO_VERSION{0x7000 + 114};
 // PROTOCOL VARIABLES AND DEFINES - END
 
 /* The network tick rate (positions per second, and the pacing of every
@@ -1211,6 +1213,12 @@ void net_ships_frame();
 void net_ships_receive(playernum_t from, uint8_t type, std::span<const uint8_t> payload);
 void net_ships_client_joined(playernum_t slot);
 void net_ships_slot_cleared(playernum_t slot);
+/* The taunts' samples (Documentation/taunts.md), asset kind 2: a client
+ * asks the host for one; the host learns that player `slot` has one
+ * (and fetches it for itself if `want`).
+ */
+void net_ships_taunt_request(std::span<const uint8_t, 32> hash, uint32_t size);
+void net_ships_taunt_owner(playernum_t slot, std::span<const uint8_t, 32> hash, uint32_t size, bool want);
 /* The host: player `pnum` enters the level in progress (CLIENT_READY);
  * assign its first spawn and send it ahead of LEVEL_GO.
  */

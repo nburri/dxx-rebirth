@@ -5051,6 +5051,7 @@ class DXXArchive(DXXCommon):
 			'common/unittest/taunt.cpp',
 			'common/misc/taunt_sample.cpp',
 			'common/misc/taunt_decode.cpp',
+			'common/misc/sha256.cpp',
 			)),
 		# Test of the deathmatch spawn site choice (spawn_site.h) against
 		# the code it was extracted from.

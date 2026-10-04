@@ -15,6 +15,9 @@
 #include <array>
 #include <cinttypes>
 #include <cstring>
+#include <map>
+#include <memory>
+#include <set>
 #include <optional>
 #include <span>
 #include <string>
@@ -23,6 +26,7 @@
 
 #include "taunt.h"
 #include "taunt_sample.h"
+#include "sha256.h"
 
 #if DXX_BUILD_DESCENT == 2
 #include "config.h"
@@ -61,13 +65,30 @@ namespace mr = ::dcx::movrec;
 constexpr vm_distance TAUNT_DISTANCE{F1_0 * 256};
 
 /* What a taunt plays: a starter horn, or a player's own sample named by
- * its id and size.
+ * its size and SHA-256.
  */
 struct sample_ref
 {
 	tt::sample_kind kind{tt::sample_kind::horn1};
-	std::uint32_t id{};
 	std::uint32_t size{};
+	tt::sample_hash hash{};
+};
+
+/* Other players' samples received (asset kind 2 of the ships' transfer),
+ * kept in taunts/cache/<sha256>.dxt (at most CACHE_FILES of them).
+ */
+constexpr const char *CACHE_DIR{"taunts/cache"};
+constexpr unsigned CACHE_FILES{64};
+/* Samples kept in memory (up to about 440 KB each); the least recently
+ * used go first.
+ */
+constexpr std::size_t MEMORY_SAMPLES{16};
+
+struct cached_sample
+{
+	std::shared_ptr<const std::vector<std::uint8_t>> wire;
+	std::vector<std::int16_t> mixer;
+	std::uint64_t used{};
 };
 
 /* The own sample, read once from the user's directory (again after a
@@ -77,8 +98,9 @@ struct own_sample
 {
 	bool read{};
 	std::vector<std::uint8_t> wire;
+	std::shared_ptr<const std::vector<std::uint8_t>> wire_file;
 	std::vector<std::int16_t> mixer;
-	std::uint32_t id{};
+	tt::sample_hash hash{};
 	std::size_t samples{};
 	std::string status;
 };
@@ -102,6 +124,13 @@ struct taunt_state
 	tt::rate_limiter local;
 	/* Callsigns muted with `/mute` (for the session). */
 	std::vector<callsign_t> muted;
+	/* Other players' samples, by hash (loaded from the cache or received). */
+	std::map<tt::sample_hash, cached_sample> samples;
+	std::uint64_t use_counter{};
+	/* Hashes not in the cache directory (not looked for again until one
+	 * is stored).
+	 */
+	std::set<tt::sample_hash> missing;
 };
 
 taunt_state T;
@@ -155,13 +184,14 @@ void read_own_sample()
 			continue;
 		}
 		o.wire = tt::encode_wire(*pcm);
-		o.id = tt::wire_id(o.wire);
+		o.wire_file = std::make_shared<const std::vector<std::uint8_t>>(o.wire);
+		o.hash = tt::wire_hash(o.wire);
 		o.samples = pcm->size();
 		o.mixer = tt::to_mixer_format(*pcm);
 		char text[96];
 		std::snprintf(text, sizeof(text), "%s, %.1f s", name, static_cast<double>(o.samples) / tt::SAMPLE_RATE);
 		o.status = text;
-		con_printf(CON_NORMAL, "taunt: own sample %s (%zu bytes to send, id %08" PRIx32 ")", text, o.wire.size(), o.id);
+		con_printf(CON_NORMAL, "taunt: own sample %s (%zu bytes to send, %s)", text, o.wire.size(), ::dcx::sha256_hex(o.hash).substr(0, 12).c_str());
 		return;
 	}
 	o.status = problems.empty() ? std::string{"no taunt.wav/.mp3/.ogg/.flac found"} : problems + "; Horn 1";
@@ -193,10 +223,10 @@ sample_ref own_ref()
 		case tt::choice::horn2:
 		case tt::choice::horn3:
 		case tt::choice::horn4:
-			return {tt::horn_kind(static_cast<unsigned>(choice) - 1), 0, 0};
+			return {tt::horn_kind(static_cast<unsigned>(choice) - 1), 0, {}};
 		case tt::choice::own:
 			if (const auto &o{own()}; !o.wire.empty())
-				return {tt::sample_kind::custom, o.id, static_cast<std::uint32_t>(o.wire.size())};
+				return {tt::sample_kind::custom, static_cast<std::uint32_t>(o.wire.size()), o.hash};
 			[[fallthrough]];
 		case tt::choice::off:
 		default:
@@ -204,17 +234,103 @@ sample_ref own_ref()
 	}
 }
 
-/* The samples of `r` as player `pnum` taunts it: a player's own sample
- * is known here only for the local player (Documentation/taunts.md:
- * the others hear Horn 1 until their sample arrives).
+std::string cache_path(const tt::sample_hash &h)
+{
+	return std::string{CACHE_DIR} + "/" + ::dcx::sha256_hex(h) + ".dxt";
+}
+
+/* A sample in the transfer format that checks out (size, SHA-256, every
+ * field): kept in memory.
+ */
+const cached_sample *keep_sample(const tt::sample_hash &h, const std::span<const std::uint8_t> bytes)
+{
+	if (tt::wire_hash(bytes) != h)
+		return nullptr;
+	const auto pcm{tt::decode_wire(bytes)};
+	if (!pcm)
+		return nullptr;
+	if (T.samples.size() >= MEMORY_SAMPLES && !T.samples.contains(h))
+		T.samples.erase(std::ranges::min_element(T.samples, {}, [](const auto &e) { return e.second.used; }));
+	auto &c{T.samples[h]};
+	c.wire = std::make_shared<const std::vector<std::uint8_t>>(bytes.begin(), bytes.end());
+	c.mixer = tt::to_mixer_format(*pcm);
+	c.used = ++T.use_counter;
+	T.missing.erase(h);
+	return &c;
+}
+
+/* The sample with this hash, from memory or the cache directory. */
+const cached_sample *find_sample(const tt::sample_hash &h)
+{
+	if (const auto i{T.samples.find(h)}; i != T.samples.end())
+	{
+		i->second.used = ++T.use_counter;
+		return &i->second;
+	}
+	if (T.missing.contains(h))
+		return nullptr;
+	const auto path{cache_path(h)};
+	const cached_sample *c{};
+	if (auto f{PHYSFSX_openReadBuffered(path.c_str()).first})
+	{
+		const auto length{PHYSFS_fileLength(f)};
+		std::vector<std::uint8_t> bytes;
+		if (length > 0 && static_cast<std::uint64_t>(length) <= tt::MAX_WIRE_SIZE)
+		{
+			bytes.resize(static_cast<std::size_t>(length));
+			if (PHYSFSX_readBytes(f, bytes.data(), bytes.size()) != static_cast<PHYSFS_sint64>(bytes.size()))
+				bytes.clear();
+		}
+		f.reset();
+		if (!bytes.empty())
+			c = keep_sample(h, bytes);
+		if (!c)
+		{
+			/* Empty, too large, cut short or not this sample. */
+			con_printf(CON_URGENT, "taunt: %s does not check out; removed", path.c_str());
+			PHYSFS_delete(path.c_str());
+		}
+	}
+	if (!c)
+		T.missing.insert(h);
+	return c;
+}
+
+/* At most CACHE_FILES samples on disk: the oldest go, never `keep`. */
+void trim_cache(const std::string &keep)
+{
+	const auto names{PHYSFS_enumerateFiles(CACHE_DIR)};
+	if (!names)
+		return;
+	std::vector<std::pair<PHYSFS_sint64, std::string>> files;
+	for (auto n{names}; *n; ++n)
+	{
+		const std::string path{std::string{CACHE_DIR} + "/" + *n};
+		PHYSFS_Stat st;
+		if (path != keep && PHYSFS_stat(path.c_str(), &st) && st.filetype == PHYSFS_FILETYPE_REGULAR)
+			files.emplace_back(st.modtime, path);
+	}
+	PHYSFS_freeList(names);
+	if (files.size() < CACHE_FILES)
+		return;
+	std::ranges::sort(files);
+	for (std::size_t i{}; i != files.size() + 1 - CACHE_FILES; ++i)
+		PHYSFS_delete(files[i].second.c_str());
+}
+
+/* The samples of `r` as player `pnum` taunts it: Horn 1 for an own
+ * sample this machine does not have (yet; Documentation/taunts.md).
  */
 const std::vector<std::int16_t> &samples_of(const playernum_t pnum, const sample_ref &r)
 {
 	if (r.kind == tt::sample_kind::custom)
 	{
-		if (pnum == Player_num)
-			if (const auto &o{own()}; !o.mixer.empty() && o.id == r.id)
-				return o.mixer;
+		/* The own sample, also when another player uses the same file. */
+		if (const auto &o{own()}; !o.mixer.empty() && o.hash == r.hash)
+			return o.mixer;
+		(void)pnum;
+		if (const auto c{find_sample(r.hash)})
+			return c->mixer;
 		return horn_samples(tt::sample_kind::horn1);
 	}
 	return horn_samples(r.kind);
@@ -285,7 +401,7 @@ namespace nv = ::dcx::net_v2;
 /* The host: player `pnum`'s taunt to everyone but `exclude`. */
 void host_relay(const playernum_t pnum, const sample_ref &r, const playernum_t exclude)
 {
-	const tt::taunt_msg m{static_cast<std::uint8_t>(pnum), r.kind, r.id, r.size};
+	const tt::taunt_msg m{static_cast<std::uint8_t>(pnum), r.kind, r.size, r.hash};
 	std::array<std::uint8_t, tt::taunt_msg::SIZE> buf;
 	m.write(buf);
 	::dsx::net_v2::game_broadcast(static_cast<std::uint8_t>(nv::session_msg::taunt), buf, exclude);
@@ -293,7 +409,7 @@ void host_relay(const playernum_t pnum, const sample_ref &r, const playernum_t e
 
 void send_request(const sample_ref &r)
 {
-	const tt::taunt_request_msg m{r.kind, r.id, r.size};
+	const tt::taunt_request_msg m{r.kind, r.size, r.hash};
 	std::array<std::uint8_t, tt::taunt_request_msg::SIZE> buf;
 	m.write(buf);
 	::dsx::net_v2::game_broadcast(static_cast<std::uint8_t>(nv::session_msg::taunt_request), buf);
@@ -416,7 +532,7 @@ void taunt_bot_kill(const playernum_t pnum)
 		return;
 	if (T.received[pnum].check(now_ms(), tt::HOST_LIMITS) != tt::verdict::allowed)
 		return;
-	const sample_ref r{tt::horn_kind(1u + pnum % tt::STARTER_HORNS), 0, 0};
+	const sample_ref r{tt::horn_kind(1u + pnum % tt::STARTER_HORNS), 0, {}};
 	record(pnum, r, play(pnum, r));
 	host_relay(pnum, r, MAX_PLAYERS);
 #else
@@ -445,7 +561,12 @@ void net_taunt_receive(const playernum_t from, const std::uint8_t type, const st
 			con_printf(CON_VERBOSE, "taunt: P#%u's taunt refused (%s)", from, v == tt::verdict::locked ? "locked out" : "too many, locked out for 5 s");
 			return;
 		}
-		const sample_ref r{m->kind, m->id, m->size};
+		const sample_ref r{m->kind, m->size, m->hash};
+		/* Phase 2: the host knows who has the sample, for the clients
+		 * that ask, and gets it for itself.
+		 */
+		if (r.kind == tt::sample_kind::custom)
+			net_ships_taunt_owner(from, r.hash, r.size, !muted(from));
 		record(from, r, play(from, r));
 		host_relay(from, r, from);
 	}
@@ -461,7 +582,12 @@ void net_taunt_receive(const playernum_t from, const std::uint8_t type, const st
 			con_printf(CON_VERBOSE, "taunt: P#%u's relayed taunt refused here", m->pid);
 			return;
 		}
-		const sample_ref r{m->kind, m->id, m->size};
+		const sample_ref r{m->kind, m->size, m->hash};
+		/* Phase 2: a sample this machine lacks comes from the host (the
+		 * horn sounds as Horn 1 meanwhile).
+		 */
+		if (r.kind == tt::sample_kind::custom && !muted(m->pid) && !find_sample(r.hash))
+			net_ships_taunt_request(r.hash, r.size);
 		record(m->pid, r, play(m->pid, r));
 	}
 #else
@@ -469,6 +595,43 @@ void net_taunt_receive(const playernum_t from, const std::uint8_t type, const st
 	(void)type;
 	(void)payload;
 #endif
+}
+
+bool taunt_asset_has(const std::span<const std::uint8_t, 32> hash)
+{
+	tt::sample_hash h;
+	std::ranges::copy(hash, h.begin());
+	if (const auto &o{own()}; !o.wire.empty() && o.hash == h)
+		return true;
+	return find_sample(h) != nullptr;
+}
+
+std::shared_ptr<const std::vector<std::uint8_t>> taunt_asset_file(const std::span<const std::uint8_t, 32> hash)
+{
+	tt::sample_hash h;
+	std::ranges::copy(hash, h.begin());
+	if (const auto &o{own()}; !o.wire.empty() && o.hash == h)
+		return o.wire_file;
+	if (const auto c{find_sample(h)})
+		return c->wire;
+	return nullptr;
+}
+
+bool taunt_asset_store(const std::span<const std::uint8_t, 32> hash, const std::span<const std::uint8_t> bytes)
+{
+	tt::sample_hash h;
+	std::ranges::copy(hash, h.begin());
+	if (!keep_sample(h, bytes))
+	{
+		con_printf(CON_URGENT, "taunt: a received sample (%s) is refused", ::dcx::sha256_hex(h).substr(0, 12).c_str());
+		return false;
+	}
+	PHYSFS_mkdir(CACHE_DIR);
+	const auto path{cache_path(h)};
+	if (auto f{PHYSFSX_openWriteBuffered(path.c_str()).first}; !f || PHYSFS_writeBytes(f, bytes.data(), bytes.size()) != static_cast<PHYSFS_sint64>(bytes.size()))
+		con_printf(CON_URGENT, "taunt: cannot write %s (the sample is kept for this session)", path.c_str());
+	trim_cache(path);
+	return true;
 }
 
 bool taunt_chat_command(const char *const text)

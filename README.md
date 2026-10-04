@@ -84,7 +84,7 @@ Press **V** (Controls → *Taunt / Horn*; it can also be put on a joystick or mo
 - **Limits:** up to 3 horns within 2 seconds and 4 within 10 seconds; more and your horn cools down for 5 seconds ("Horn cooling down"). The host enforces this for everyone.
 - **Muting:** uncheck *Hear other players' horns* in the same menu, or type `/mute name` in the chat (F8) to mute one player for this session (`/unmute name`, `/mute` lists them).
 - **Bots:** the host can let bots honk after some of their kills (*Bots taunt after kills* on the Bots screens, default off).
-- Until a later version sends the files, the other players hear your own file as the car horn. All players need a build with network protocol 28784 (0x7000 + 112). Details: [Documentation/taunts.md](Documentation/taunts.md).
+- Your own file is sent to the other players through the host (like custom ships); until it has arrived, they hear the car horn. All players need a build with network protocol 28786 (0x7000 + 114). Details: [Documentation/taunts.md](Documentation/taunts.md).
 
 ## 4. Legal stuff:
 

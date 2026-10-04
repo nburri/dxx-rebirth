@@ -1434,23 +1434,24 @@ payload + `pid`), `CREATE_EXPLOSION` (`pid`), `DROP_BLOB` (`pid`),
 `SOUND_FUNCTION` (`pid`, function, sound), `TYPING_STATE` (`pid`, state).
 Chat (`MESSAGE`) is reliable because a lost chat line is noticed.
 
-### 6.9a Taunts (protocol 28784 (0x7000 + 112))
+### 6.9a Taunts (protocols 0x7000 + 112 and + 114)
 
 A player's horn (Documentation/taunts.md). Reliable, in the level only
 (`peer_sends_game_data`, `event_processing_allowed`); integers
 little-endian.
 
-- **`TAUNT_REQUEST` (0x50, client → host, 9 bytes):** `kind` u8 (1–4 a
-  starter horn, 16 the player's own sample), `id` u32, `size` u32. For a
-  starter horn `id` and `size` are 0; for an own sample `id` is the CRC-32
-  of the sample in the transfer format and `size` its length in bytes
-  (12 + 2 × samples, at most 88 212, even). Anything else is malformed and
-  dropped.
+- **`TAUNT_REQUEST` (0x50, client → host, 37 bytes):** `kind` u8 (1–4 a
+  starter horn, 16 the player's own sample), `size` u32, `hash` 32 bytes.
+  For a starter horn `size` and `hash` are 0; for an own sample `hash` is
+  the SHA-256 of the sample in the transfer format and `size` its length
+  in bytes (12 + 2 × samples, at most 88 212, even). Anything else is
+  malformed and dropped. (Protocol 0x7000 + 112 carried a CRC-32 `id` u32
+  instead of the hash: 9 and 10 bytes.)
 - The host checks the sender's rate (below), plays the taunt itself and
   relays it; a refused request gets no answer (the client's own check has
   already told its player).
-- **`TAUNT` (0x51, host → all but the sender, 10 bytes):** `pid` u8 (0–7),
-  then `kind`, `id`, `size` as above. The host sends it for its own taunts
+- **`TAUNT` (0x51, host → all but the sender, 38 bytes):** `pid` u8 (0–7),
+  then `kind`, `size`, `hash` as above. The host sends it for its own taunts
   and for its bots' (to everyone) and for an allowed request (to all but
   the requester, who played its taunt when it pressed the key). A client
   drops a `TAUNT` for itself or for a slot beyond `N_players`.
@@ -1465,11 +1466,19 @@ little-endian.
   10 s, same lockout), as the network may bunch taunts the host allowed.
   The sender checks its own presses with the host's limits and tells its
   player "Horn cooling down".
-- **Sample transfer:** a peer that lacks a player's own sample plays Horn
-  1 instead. The samples are to travel with the custom ships' generic
-  asset transfer (`ASSET_REQUEST`/`ASSET_DATA`/`ASSET_UNAVAILABLE`, kind 2
-  = taunt; Documentation/taunts.md, "Phase 2"); protocol 28784 (0x7000 + 112) has no
-  transfer.
+- **Sample transfer (0x7000 + 114):** a player's own sample travels with
+  the custom ships' asset transfer (`ASSET_REQUEST`/`ASSET_DATA`/
+  `ASSET_UNAVAILABLE`, kind 2 = taunt, at most 128 KiB; `net_v2_ships.h`).
+  A `TAUNT_REQUEST` for an own sample tells the host that the sender owns
+  it (`note_owner`); the host fetches it from the owner for itself
+  (`host_want`) unless it does not play that player's taunts. A client
+  that receives a `TAUNT` for a sample it lacks asks the host for it
+  (`request`; not for a muted player or with "Hear other players' horns"
+  off) and plays Horn 1 until it arrives; the host serves it from its copy
+  or fetches it from the owner. A received sample must match its SHA-256
+  and pass the format's checks; it is kept in `taunts/cache/<sha256>.dxt`
+  (at most 64 files, the oldest removed). The pilot's "Accept ships from
+  the host" covers ships only.
 - **Transfer format** of an own sample ("DXT1", `taunt_sample.h`): magic
   `DXT1`, rate u16 (22050), flags u16 (0), count u32 (1 102 to 44 100),
   `count` int16 samples, mono. A receiver checks every field and the exact
