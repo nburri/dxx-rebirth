@@ -62,12 +62,14 @@ constexpr std::size_t MAX_DESCRIPTION{160};
 constexpr std::size_t MAX_MANIFEST{1024};
 
 /* The Pyro-GX's bounding radius (polymodel `rad` of model 108 in
- * descent2.ham, 0x4bc3a / 65536).  Every ship is scaled to it (decision
- * D3); the reader rejects geometry farther than RADIUS_TOLERANCE times
- * it from the origin.
+ * descent2.ham, 0x4bc3a / 65536), every ship's collision radius.  The
+ * converter sizes a ship by its silhouette (decision D3,
+ * ship_silhouette.h), so a long, thin ship reaches beyond it; the reader
+ * rejects geometry farther than RADIUS_TOLERANCE times it from the
+ * origin.
  */
 constexpr float PYRO_RADIUS{4.73518372f};
-constexpr float RADIUS_TOLERANCE{1.25f};
+constexpr float RADIUS_TOLERANCE{1.5f};
 
 constexpr std::uint32_t fourcc(const char a, const char b, const char c, const char d)
 {

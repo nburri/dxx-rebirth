@@ -179,7 +179,7 @@ values by the converter, so nothing of the retail data is redistributed):
 |---|---|
 | Orientation | +Z forward (Descent `fvec`), +Y up; the converter converts from glTF's +Y-up/−Z-forward convention. |
 | Origin | The ship's centre of mass; the converter re-centres on the bounding-sphere centre and warns if that moves it more than 10 % of the radius. |
-| Size | Scaled so that the bounding radius equals the Pyro's `rad` (Decision D3). |
+| Size | Scaled so that the mean silhouette equals the Pyro's, the outermost point at most 1.3 × the Pyro's `rad` (Decision D3). |
 | Triangles | ≤ 10000 (the free ships of §9.2 have up to 4500; 8 ships ≈ 80 k triangles per frame, trivial for any GPU from the last 15 years). |
 | Vertices | ≤ 16000 (16-bit indices). |
 | Textures | One albedo PNG, optional mask PNG; power of two, ≤ 512 × 512 (Decision D4); RGBA8. |
@@ -272,8 +272,10 @@ fail if it rejects the result. `--reference` writes a glTF of the Pyro's
 bounding sphere, box and gun points (numbers only, no retail geometry) for
 the Blender template.
 
-Silhouette area from the three axis views compared with the Pyro's (D3:
-error outside 0.7–1.4 ×, warning outside 0.8–1.25 ×). Error: colour-mask zone under 5 % of the
+Size (D3): the converter scales the ship itself and prints one `size:` line
+(silhouette before and after, scale, outermost point); warnings when the
+result is outside 0.9–1.1 ×, beyond the 1.3 × radius cap, or below 0.85 ×.
+`--check` prints the same silhouette ratio for any file. Error: colour-mask zone under 5 % of the
 visible texel area (§8). Warnings: gun markers far from the Pyro points,
 an emissive area larger than 25 % of the texture.
 
@@ -488,8 +490,7 @@ Decision D6:
 
 The ship is cosmetic, but *visibility* is gameplay: a much smaller or
 thinner model is harder to see and to aim at, a larger one easier. Hence
-the normalisation to the Pyro's bounding radius and the silhouette check
-(D3). Dark albedo, near-invisible textures or huge emissive areas are
+the normalisation of every ship to the Pyro's mean silhouette (D3). Dark albedo, near-invisible textures or huge emissive areas are
 discouraged by converter warnings; the colour zone is mandatory (≥ 5 % of
 the visible texel area) so team colours always show.
 
@@ -539,7 +540,7 @@ Each stage is a PR into `exp-visuals` with its own review.
 |---|---|---|
 | D1 | Runtime format | **B**: own `.dxship` file and a new OpenGL mesh draw path. |
 | D2 | Player identification | **Mandatory colour zone**, tinted with the player's colour (the team colour in team games). |
-| D3 | Size | **Scaled to the Pyro's collision radius** (4.735 units); the silhouette may be at most slightly larger than the Pyro's (converter error above 1.15 × in any axis view, warning below 0.6 ×). |
+| D3 | Size | **Changed: scaled to the Pyro's silhouette.** The converter scales each ship so that its mean silhouette (the outline's area averaged over 64 view directions all round, `common/include/ship_silhouette.h`) is 1.0 × the Pyro's (23.55 square units, measured from model 108; band 0.9–1.1 ×), with its outermost point at most 1.3 × the Pyro's collision radius (4.735 units, which stays every ship's collision sphere). A long, thin ship that would stay below 0.85 × at 1.3 × grows on to 0.85 × (at most 1.47 ×; the reader accepts geometry up to 1.5 ×) and is reported. Before this change ships were scaled to the collision radius, which left long, thin ships at 0.46–0.83 × the Pyro's silhouette. |
 | D4 | Budgets | **512 × 512** textures, **1 MiB** per ship file. |
 | D5 | Hash | **SHA-256** (full 32 bytes on the wire). |
 | D6 | Debris | **A with B as fallback**: author-marked parts (`debris_*` nodes), else an automatic split. |
@@ -560,10 +561,24 @@ Consequences for the text above: the converter is `shipconv`
 `dxship_format.h` (§3.2), `sha256.h`, `common/tools/shipconv.cpp`
 (`Documentation/custom-ships-authoring.md`). The converter greys the
 colour zone's texels (keeping their relative brightness) so that the game
-only multiplies them with the player's colour. Long, thin ships come out
-smaller than a Pyro seen from the front or the side (the free ships of
-`data/ships` have 0.4–1.1 × the Pyro's silhouette); D3 only limits the
-upper end.
+only multiplies them with the player's colour. Ships were first scaled to the
+Pyro's collision radius, which left the long, thin free ships of
+`data/ships` at 0.46–0.83 × the Pyro's mean silhouette; the revised D3
+(silhouette normalisation, §10) brings them to 0.85–1.00 ×:
+
+| Ship | Before | After | Outermost point |
+|---|---|---|---|
+| Striker | 0.54 × | 0.92 × | 1.30 × radius |
+| Dispatcher | 0.46 × | 0.85 × | 1.36 × radius |
+| Zenith | 0.69 × | 1.00 × | 1.20 × radius |
+| Pancake | 0.83 × | 1.00 × | 1.10 × radius |
+| Spitfire | 0.76 × | 1.00 × | 1.15 × radius |
+| Executioner | 0.49 × | 0.85 × | 1.32 × radius |
+| Rae | 0.52 × | 0.89 × | 1.30 × radius |
+
+Files made by older converters still load; ships made by this one can
+reach beyond 1.25 × the Pyro's radius, which readers before this change
+reject (such a client sees a Pyro).
 
 ### 11.2 S2: drawing
 
