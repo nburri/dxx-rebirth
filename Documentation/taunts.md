@@ -1,6 +1,6 @@
 # Taunts (horn)
 
-Status: phase 1 on the side branch `exp-visuals` (protocol 112). Phase 2,
+Status: phase 1 on the side branch `exp-visuals` (protocol 28784 (0x7000 + 112)). Phase 2,
 the transfer of the players' own samples, rides on the custom ships' asset
 transfer (Documentation/custom-ships.md §5.3) once that is merged.
 
@@ -13,7 +13,7 @@ transfer (Documentation/custom-ships.md §5.3) once that is merged.
 - **Sound:** *Options → Sound Effects & Music*, "Your horn":
   - *Own file (taunt.wav/mp3/ogg/flac)* (the default): a file called
     `taunt.wav`, `taunt.mp3`, `taunt.ogg` or `taunt.flac` (tried in this
-    order) in the game's user folder, the one with the pilot files and
+    order; an unusable one is skipped) in the game's user folder, the one with the pilot files and
     `descent.cfg`. The line below says what was found ("taunt.mp3, 1.8 s",
     or why the file is not used). Without a usable file, Horn 1 sounds.
   - *Horn 1* to *Horn 4*: car horn, bike bell, air horn, beep beep.
@@ -71,9 +71,12 @@ transfer (Documentation/custom-ships.md §5.3) once that is merged.
   plays it and relays `TAUNT` (pid, kind, id, size) to all others. The
   host's own and its bots' taunts go out as `TAUNT` directly.
 - **Spam protection:** sliding windows over the last taunt times
-  (`rate_limiter`): 3 in 2 s, 4 in 10 s, 5 s lockout on the host and the
-  sender; receivers allow one more in each window, since the network may
-  bunch what the host allowed.
+  (`rate_limiter`): 3 in 2 s, 4 in 10 s, 5 s lockout at the sender; the
+  host counts the same over windows 300 ms shorter (1.7 s, 9.7 s), so the
+  jitter between sender and host does not make it refuse what the sender
+  played; receivers allow one more in each window, since the network may
+  bunch what the host allowed. The limits start afresh at every level, and
+  the samples are prepared then (no hitch at the first horn).
 - **Recording:** a `level_event` of kind 6 (movement recording minor 7,
   Documentation/movement-recording.md) for every taunt a machine accepts:
   pid, sample kind, flags 1 if not played here.
@@ -84,12 +87,16 @@ transfer (Documentation/custom-ships.md §5.3) once that is merged.
 
 ## 3. Phase 2: the own samples to the other players
 
-The custom ships (stage S3) bring a host-relayed, chunked, hash-checked
-transfer with a cache. The taunt samples become a second kind of asset
-in it, with the same rules (the host fetches from the owner, verifies,
-caches, serves; size cap here 88 212 bytes; cache directory by hash). A
+The custom ships (stage S3) bring a generic host-relayed, chunked,
+SHA-256-checked asset transfer with a cache: `ASSET_REQUEST` 0x4C,
+`ASSET_DATA` 0x4D, `ASSET_UNAVAILABLE` 0x4E, each with a kind u8 and the
+32-byte SHA-256 (`common/main/net_v2_ships.h`). Kind 2 is reserved for
+taunt samples (at most 128 KiB; a DXT1 sample is at most 88 212 bytes).
+Phase 2 names a player's own sample by its SHA-256 instead of the CRC-32
+and fetches missing samples with kind 2, under the same caching rules; a
 peer that lacks a sample plays Horn 1 until it arrives. The protocol
-version is bumped again for it.
+version is bumped again for it (exp-visuals numbers its protocols
+0x7000 + n).
 
 ## 4. Tests
 

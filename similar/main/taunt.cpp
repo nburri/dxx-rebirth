@@ -116,11 +116,20 @@ std::uint64_t now_ms()
 	return t > 0 ? static_cast<std::uint64_t>(t) * 1000 / F1_0 : 0;
 }
 
+/* The first usable one of the own files; an unusable one is reported
+ * and the next one tried.
+ */
 void read_own_sample()
 {
 	auto &o{T.own};
 	o = {};
 	o.read = true;
+	std::string problems;
+	const auto refuse{[&problems](const char *const name, const std::string &why) {
+		con_printf(CON_URGENT, "taunt: %s: %s", name, why.c_str());
+		if (problems.empty())
+			problems = std::string{name} + ": " + why;
+	}};
 	for (const char *const name : tt::OWN_FILE_NAMES)
 	{
 		auto f{PHYSFSX_openReadBuffered(name).first};
@@ -129,24 +138,21 @@ void read_own_sample()
 		const auto length{PHYSFS_fileLength(f)};
 		if (length < 0 || static_cast<std::uint64_t>(length) > tt::MAX_SOURCE_FILE)
 		{
-			o.status = std::string{name} + ": larger than 16 MiB";
-			con_printf(CON_URGENT, "taunt: %s", o.status.c_str());
-			return;
+			refuse(name, "larger than 16 MiB");
+			continue;
 		}
 		std::vector<std::uint8_t> bytes(static_cast<std::size_t>(length));
 		if (PHYSFSX_readBytes(f, bytes.data(), bytes.size()) != static_cast<PHYSFS_sint64>(bytes.size()))
 		{
-			o.status = std::string{name} + ": cannot be read";
-			con_printf(CON_URGENT, "taunt: %s", o.status.c_str());
-			return;
+			refuse(name, "cannot be read");
+			continue;
 		}
 		std::string error;
 		const auto pcm{tt::prepare_file(bytes, error)};
 		if (!pcm)
 		{
-			o.status = std::string{name} + ": " + error;
-			con_printf(CON_URGENT, "taunt: %s; Horn 1 instead", o.status.c_str());
-			return;
+			refuse(name, error);
+			continue;
 		}
 		o.wire = tt::encode_wire(*pcm);
 		o.id = tt::wire_id(o.wire);
@@ -158,7 +164,7 @@ void read_own_sample()
 		con_printf(CON_NORMAL, "taunt: own sample %s (%zu bytes to send, id %08" PRIx32 ")", text, o.wire.size(), o.id);
 		return;
 	}
-	o.status = "no taunt.wav/.ogg/.mp3/.flac found";
+	o.status = problems.empty() ? std::string{"no taunt.wav/.mp3/.ogg/.flac found"} : problems + "; Horn 1";
 }
 
 const own_sample &own()
@@ -328,7 +334,7 @@ void taunt_key_pressed()
 		return;
 	}
 	const auto now{now_ms()};
-	if (T.local.check(now, tt::HOST_LIMITS) != tt::verdict::allowed)
+	if (T.local.check(now, tt::SENDER_LIMITS) != tt::verdict::allowed)
 	{
 		const auto left{T.local.lockout_left(now)};
 		HUD_init_message(HM_DEFAULT, "Horn cooling down (%u s)", static_cast<unsigned>((left + 999) / 1000));
@@ -388,6 +394,16 @@ void taunt_preview()
 		return;
 	}
 	::dcx::digi_play_custom(PREVIEW_SLOT, samples_of(Player_num, own_ref()), F1_0, sound_pan{F1_0 / 2});
+}
+
+void taunt_level_start()
+{
+	for (auto &r : T.received)
+		r.reset();
+	T.local.reset();
+	(void)own();
+	for (unsigned n{1}; n <= tt::STARTER_HORNS; ++n)
+		(void)horn_samples(tt::horn_kind(n));
 }
 
 void taunt_bot_kill(const playernum_t pnum)

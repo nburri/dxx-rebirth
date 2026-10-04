@@ -31,6 +31,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 
 #include "digi.h"
 #include "taunt.h"
+#include "taunt_sample.h"
 #include "menu.h"
 #include "inferno.h"
 #include "game.h"
@@ -2718,16 +2719,17 @@ namespace {
 
 #if DXX_BUILD_DESCENT == 2
 /* Documentation/taunts.md */
+#define DXX_TAUNT_CHOICE(C)	static_cast<uint8_t>(::dcx::taunt::choice::C)
 #define DXX_SOUND_TAUNT_MENU_ITEMS(VERB)	\
 	DXX_MENUITEM(VERB, TEXT, "", opt_label_blank_taunt)	\
 	DXX_MENUITEM(VERB, TEXT, "Your horn (key \"Taunt / Horn\"):", opt_label_taunt)	\
-	DXX_MENUITEM(VERB, RADIO, "Own file (taunt.wav/mp3/ogg/flac)", opt_sm_taunt_own, CGameCfg.TauntChoice == 1, optgrp_taunt)	\
+	DXX_MENUITEM(VERB, RADIO, "Own file (taunt.wav/mp3/ogg/flac)", opt_sm_taunt_own, CGameCfg.TauntChoice == DXX_TAUNT_CHOICE(own), optgrp_taunt)	\
 	DXX_MENUITEM(VERB, TEXT, taunt_status.data(), opt_label_taunt_status)	\
-	DXX_MENUITEM(VERB, RADIO, "Horn 1: car horn", opt_sm_taunt_horn1, CGameCfg.TauntChoice == 2, optgrp_taunt)	\
-	DXX_MENUITEM(VERB, RADIO, "Horn 2: bike bell", opt_sm_taunt_horn2, CGameCfg.TauntChoice == 3, optgrp_taunt)	\
-	DXX_MENUITEM(VERB, RADIO, "Horn 3: air horn", opt_sm_taunt_horn3, CGameCfg.TauntChoice == 4, optgrp_taunt)	\
-	DXX_MENUITEM(VERB, RADIO, "Horn 4: beep beep", opt_sm_taunt_horn4, CGameCfg.TauntChoice == 5, optgrp_taunt)	\
-	DXX_MENUITEM(VERB, RADIO, "Off", opt_sm_taunt_off, CGameCfg.TauntChoice == 0, optgrp_taunt)	\
+	DXX_MENUITEM(VERB, RADIO, "Horn 1: car horn", opt_sm_taunt_horn1, CGameCfg.TauntChoice == DXX_TAUNT_CHOICE(horn1), optgrp_taunt)	\
+	DXX_MENUITEM(VERB, RADIO, "Horn 2: bike bell", opt_sm_taunt_horn2, CGameCfg.TauntChoice == DXX_TAUNT_CHOICE(horn2), optgrp_taunt)	\
+	DXX_MENUITEM(VERB, RADIO, "Horn 3: air horn", opt_sm_taunt_horn3, CGameCfg.TauntChoice == DXX_TAUNT_CHOICE(horn3), optgrp_taunt)	\
+	DXX_MENUITEM(VERB, RADIO, "Horn 4: beep beep", opt_sm_taunt_horn4, CGameCfg.TauntChoice == DXX_TAUNT_CHOICE(horn4), optgrp_taunt)	\
+	DXX_MENUITEM(VERB, RADIO, "Off", opt_sm_taunt_off, CGameCfg.TauntChoice == DXX_TAUNT_CHOICE(off), optgrp_taunt)	\
 	DXX_MENUITEM(VERB, CHECK, "Hear other players' horns", opt_sm_taunts_heard, CGameCfg.TauntsHeard)	\
 
 #else
@@ -2837,7 +2839,7 @@ window_event_result sound_menu::event_handler(const d_event &event)
 				CGameCfg.TauntsHeard = items[citem].value;
 			else if (citem == opt_sm_taunt_own || citem == opt_sm_taunt_horn1 || citem == opt_sm_taunt_horn2 || citem == opt_sm_taunt_horn3 || citem == opt_sm_taunt_horn4 || citem == opt_sm_taunt_off)
 			{
-				CGameCfg.TauntChoice = citem == opt_sm_taunt_own ? 1 : citem == opt_sm_taunt_horn1 ? 2 : citem == opt_sm_taunt_horn2 ? 3 : citem == opt_sm_taunt_horn3 ? 4 : citem == opt_sm_taunt_horn4 ? 5 : 0;
+				CGameCfg.TauntChoice = citem == opt_sm_taunt_own ? DXX_TAUNT_CHOICE(own) : citem == opt_sm_taunt_horn1 ? DXX_TAUNT_CHOICE(horn1) : citem == opt_sm_taunt_horn2 ? DXX_TAUNT_CHOICE(horn2) : citem == opt_sm_taunt_horn3 ? DXX_TAUNT_CHOICE(horn3) : citem == opt_sm_taunt_horn4 ? DXX_TAUNT_CHOICE(horn4) : DXX_TAUNT_CHOICE(off);
 				/* The own file may have been added or changed since. */
 				update_taunt_status(citem == opt_sm_taunt_own);
 				taunt_preview();

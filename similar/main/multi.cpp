@@ -3276,6 +3276,8 @@ void multi_prep_level_objects(const d_powerup_info_array &Powerup_info, const d_
 	net_objects_level_start();
 	/* Captures and flag counts belong to the old level. */
 	net_modes_level_start();
+	/* Documentation/taunts.md */
+	taunt_level_start();
 	/* Spawn assignments and reservations belong to the old level. */
 	net_spawn_level_start();
 	/* Shots, ids and the host's histories too (stage 4). */

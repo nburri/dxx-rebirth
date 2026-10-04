@@ -202,7 +202,23 @@ void test_rate_limiter()
 		last_arrival = std::max(last_arrival, t + delay(rng));
 		CHECK(receiver.check(last_arrival, RECEIVER_LIMITS) == verdict::allowed);
 	}
-	/* The clock starting at 0 works. */
+	/* What the sender allowed and played, delayed by up to 300 ms on
+	 * its way, passes the host.
+	 */
+	{
+		rate_limiter sender, at_host;
+		std::mt19937 jitter{11};
+		std::uint64_t ts{}, arrival{};
+		for (unsigned i{}; i != 3000; ++i)
+		{
+			ts += gap(jitter);
+			if (sender.check(ts, SENDER_LIMITS) != verdict::allowed)
+				continue;
+			arrival = std::max(arrival, ts + delay(jitter));
+			CHECK(at_host.check(arrival, HOST_LIMITS) == verdict::allowed);
+		}
+	}
+		/* The clock starting at 0 works. */
 	rate_limiter z;
 	CHECK(z.check(0, HOST_LIMITS) == verdict::allowed);
 	z.reset();

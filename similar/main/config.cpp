@@ -31,6 +31,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include <ctype.h>
 
 #include "config.h"
+#include "taunt_sample.h"
 #include "pstypes.h"
 #include "game.h"
 #include "songs.h"
@@ -264,7 +265,7 @@ void ReadConfigFile(CCfg &CGameCfg, Cfg &GameCfg)
 	CGameCfg.DigiVolume = 8;
 	CGameCfg.MusicVolume = 8;
 	CGameCfg.ReverseStereo = false;
-	CGameCfg.TauntChoice = 1;	/* taunt::choice::own: the own file, else Horn 1 */
+	CGameCfg.TauntChoice = static_cast<uint8_t>(::dcx::taunt::choice::own);	/* the own file, else Horn 1 */
 	CGameCfg.TauntsHeard = true;
 	CGameCfg.OrigTrackOrder = false;
 #if DXX_USE_SDL_REDBOOK_AUDIO && defined(__APPLE__) && defined(__MACH__)
@@ -357,7 +358,7 @@ void ReadConfigFile(CCfg &CGameCfg, Cfg &GameCfg)
 		else if (compare_nonterminated_name(name, TauntChoiceStr))
 		{
 			if (const auto r = convert_integer<uint8_t>(value))
-				if (const auto v = *r; v <= 5)
+				if (const auto v = *r; v <= static_cast<uint8_t>(::dcx::taunt::choice::horn4))
 					CGameCfg.TauntChoice = v;
 		}
 		else if (compare_nonterminated_name(name, TauntsHeardStr))

@@ -545,7 +545,8 @@ namespace {
 
 static void PostProcessGameArg()
 {
-	if (CGameArg.DbgBotArenaSound)
+	/* Only the arena's own "no sound" is undone. */
+	if (CGameArg.DbgBotArenaSound && !CGameArg.DbgBotArenaMission.empty() && CGameArg.DbgVisShotMission.empty())
 		CGameArg.SndNoSound = false;
 	if (CGameArg.SysMaxFPS < MINIMUM_FPS)
 		CGameArg.SysMaxFPS = MINIMUM_FPS;

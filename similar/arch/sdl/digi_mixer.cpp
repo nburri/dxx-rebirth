@@ -666,7 +666,9 @@ sound_channel digi_mixer_play_custom(const unsigned slot, const std::span<const 
 	if (channel >= max_channels)
 		return sound_channel::None;
 	auto &cs{custom_sounds[slot]};
-	cs.samples.assign(samples.begin(), samples.end());
+	/* The mixer was opened as AUDIO_S16, which is little-endian. */
+	cs.samples.resize(samples.size());
+	std::ranges::transform(samples, cs.samples.begin(), [](const int16_t v) { return static_cast<int16_t>(SDL_SwapLE16(static_cast<Uint16>(v))); });
 	cs.chunk = {};
 	cs.chunk.allocated = 0;
 	cs.chunk.abuf = reinterpret_cast<Uint8 *>(cs.samples.data());

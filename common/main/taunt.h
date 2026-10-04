@@ -34,6 +34,10 @@ void taunt_frame();
 std::string taunt_own_status(bool reload);
 /* The sound options: what the own horn sounds like now. */
 void taunt_preview();
+/* A level starts: the samples are made now (not at the first horn in the
+ * fight), and the spam limits start afresh (a slot may have a new player).
+ */
+void taunt_level_start();
 /* The host: bot `pnum` (flown here) killed a player. */
 void taunt_bot_kill(playernum_t pnum);
 /* TAUNT_REQUEST and TAUNT (Documentation/network-protocol-v2.md,
@@ -46,6 +50,9 @@ void net_taunt_receive(playernum_t from, std::uint8_t type, std::span<const std:
 bool taunt_chat_command(const char *text);
 #else
 static inline void taunt_frame()
+{
+}
+static inline void taunt_level_start()
 {
 }
 static inline bool taunt_chat_command(const char *)

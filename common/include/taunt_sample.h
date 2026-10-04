@@ -64,7 +64,7 @@ constexpr std::size_t MAX_WIRE_SIZE{WIRE_HEADER_SIZE + 2 * MAX_SAMPLES};
 static_assert(MAX_WIRE_SIZE <= 100 * 1024);
 
 /* The file names tried for the own sample, in this order. */
-constexpr std::array<const char *, 4> OWN_FILE_NAMES{{"taunt.wav", "taunt.ogg", "taunt.mp3", "taunt.flac"}};
+constexpr std::array<const char *, 4> OWN_FILE_NAMES{{"taunt.wav", "taunt.mp3", "taunt.ogg", "taunt.flac"}};
 
 /* The player's setting (descent.cfg TauntChoice). */
 enum class choice : std::uint8_t
@@ -189,8 +189,13 @@ struct rate_limits
 	std::uint32_t window_ms;
 	std::uint32_t lockout_ms;
 };
-/* The host (and the sender, to tell its player at once). */
-constexpr rate_limits HOST_LIMITS{3, 2000, 4, 10000, 5000};
+/* The sender, to tell its player at once. */
+constexpr rate_limits SENDER_LIMITS{3, 2000, 4, 10000, 5000};
+/* The host: the sender's limits with windows shorter by the jitter the
+ * network may add between the sender and the host (300 ms), so that the
+ * host does not refuse what the sender allowed and played.
+ */
+constexpr rate_limits HOST_LIMITS{3, 1700, 4, 9700, 5000};
 /* Every receiver again, one taunt more in each window: the network may
  * bunch taunts the host allowed.
  */

@@ -51,10 +51,17 @@ constexpr net_clock net_milliseconds(const net_clock ms)
  * 106: stage 4, 107: the shared controls in INPUT, -sharemoves, 108:
  * ADDRESS_SEEN, 109: CAPTURE, 110: ORB_BONUS, 111: CTF Classic,
  * CTF_NOTICE);
- * named differently so that the two never shadow each other in a
+ * the side branch exp-visuals adds 0x7000 to its own protocols, so that
+ * they never collide with those of experimental-netcode, while the low
+ * byte keeps counting (0x7000 + 112: taunts, Documentation/taunts.md).
+ * Named differently so that the two never shadow each other in a
  * translation unit that sees both.
  */
-constexpr std::uint16_t NET_V2_PROTO_VERSION{111};
+constexpr std::uint16_t NET_V2_PROTO_VERSION{0x7000 + 112};
+/* The protocol's low byte is the first byte of a datagram: a v1 build
+ * reads it as the packet type, and 100 and up are no v1 packet type.
+ */
+static_assert((NET_V2_PROTO_VERSION & 0xff) >= 100);
 constexpr std::size_t NET_V2_HEADER_SIZE{34};
 constexpr std::size_t NET_V2_MAX_PACKET{1200};
 constexpr std::size_t NET_V2_ACK_BITS{64};

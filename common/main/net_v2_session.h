@@ -98,7 +98,7 @@ enum class session_msg : std::uint8_t
 	 */
 	spawn_request = 0x48,
 	spawn_site = 0x49,
-	/* Taunts (Documentation/taunts.md, protocol 112): a client's horn,
+	/* Taunts (Documentation/taunts.md, protocol 28784 (0x7000 + 112)): a client's horn,
 	 * client to host; the host's relay of an allowed one, host to all.
 	 */
 	taunt_request = 0x50,
