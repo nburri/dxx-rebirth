@@ -485,7 +485,7 @@ void take_size_pictures(object &console, object &camera)
 	const std::string dir{CGameArg.DbgVisShotDir};
 	const unsigned w{grd_curscreen->get_screen_width()}, h{grd_curscreen->get_screen_height()};
 	const double distance = CGameArg.DbgShipShotSize;
-	const double side_offset{6};
+	const double side_offset{8};
 	/* Room for two ships of up to RADIUS_TOLERANCE Pyro radii side by
 	 * side, and for the camera.
 	 */

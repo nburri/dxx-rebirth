@@ -1373,7 +1373,7 @@ int convert(options opt)
 		const auto areas{ss::axis_areas(pts, tris)};
 		const auto after{areas.weighted() / ss::PYRO_VIEW_AREA};
 		const auto rel{areas.relative()};
-		std::fprintf(stderr, "shipconv: size: front/rear %.2f x the Pyro's at the Pyro's radius; scaled by %.3f to %.2f x (front %.2f, side %.2f, top %.2f), outermost point %.2f x the Pyro's radius%s\n", before, fair.scale, after, rel.front, rel.side, rel.top, static_cast<double>(outer / ds::PYRO_RADIUS), fair.radius_capped ? " (radius limit)" : "");
+		std::fprintf(stderr, "shipconv: size: outline (weighted) %.2f x the Pyro's at the Pyro's radius; scaled by %.3f to %.2f x (front %.2f, side %.2f, top %.2f), outermost point %.2f x the Pyro's radius%s\n", before, fair.scale, after, rel.front, rel.side, rel.top, static_cast<double>(outer / ds::PYRO_RADIUS), fair.radius_capped ? " (radius limit)" : "");
 		if (fair.too_thin)
 			warn("too thin: the outline from the front and rear is only %.2f x the Pyro's even at %.2f x its radius (below %.2f); the ship is harder to see and hit than a Pyro and should not be bundled", after, ss::RADIUS_LIMIT, ss::BAND_LOW);
 		else if (after < ss::BAND_LOW - 0.005 || after > ss::BAND_HIGH + 0.005)

@@ -314,8 +314,12 @@ void draw(mesh &m, const draw_params &p)
 				const float shade{0.25f + 0.75f * facing};
 				const float w{mat.tint ? 1.0f : m.tint[i]};
 				const auto &vc{m.colour[i]};
+				/* The light at most 1, as for the polygon models (whose
+				 * textures it multiplies): in a bright room an untextured
+				 * material keeps its base colour instead of turning white.
+				 */
 				for (unsigned k = 0; k < 3; ++k)
-					c[k] = p.light[k] * shade * mat.base[k] * vc[k] * (1 - w + w * p.tint[k]);
+					c[k] = std::min(p.light[k] * shade, 1.0f) * mat.base[k] * vc[k] * (1 - w + w * p.tint[k]);
 				c[3] = p.alpha;
 			}
 			glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(idx.size()), GL_UNSIGNED_SHORT, idx.data());
