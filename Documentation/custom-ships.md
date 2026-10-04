@@ -1,9 +1,9 @@
 # Custom player ships (design)
 
-Status: design only, nothing implemented. Target branch:
-`experimental-netcode` (protocol v2, `Documentation/network-protocol-v2.md`,
-cited as "v2 §n"). D2X-Rebirth with OpenGL only. Line numbers are omitted;
-function and type names are the anchors.
+Status: design with the user's decisions (§10); implemented in stages on
+the side branch `exp-visuals` (protocol v2, `Documentation/network-protocol-v2.md`,
+cited as "v2 §n"), never on `experimental-netcode`. D2X-Rebirth with OpenGL
+only. Line numbers are omitted; function and type names are the anchors.
 
 Every player may fly a ship model of their own: new geometry and new
 textures, not a repaint of the Pyro-GX. Other players see it and recognise
@@ -11,8 +11,9 @@ the pilot by it. The feature is purely cosmetic. Collision size, gun
 positions, physics, hit detection and everything the host checks stay
 exactly those of the Pyro-GX, for everyone, whichever model is drawn.
 
-Decisions that need the user are marked **Decision Dn** with options and a
-recommendation. They are collected in §10.
+Decisions are marked **Decision Dn**. The options are kept for the record;
+what the user decided (2026-10-04) is in §10 and overrides the
+recommendations in the text.
 
 ## 1. What the engine does today
 
@@ -179,8 +180,8 @@ values by the converter, so nothing of the retail data is redistributed):
 | Orientation | +Z forward (Descent `fvec`), +Y up; the converter converts from glTF's +Y-up/−Z-forward convention. |
 | Origin | The ship's centre of mass; the converter re-centres on the bounding-sphere centre and warns if that moves it more than 10 % of the radius. |
 | Size | Scaled so that the bounding radius equals the Pyro's `rad` (Decision D3). |
-| Triangles | ≤ 4000 (Pyro-class budget with headroom; 8 ships ≈ 32 k triangles per frame, trivial for any GPU but bounded for weak PCs). |
-| Vertices | ≤ 8000 (16-bit indices). |
+| Triangles | ≤ 10000 (the free ships of §9.2 have up to 4500; 8 ships ≈ 80 k triangles per frame, trivial for any GPU from the last 15 years). |
+| Vertices | ≤ 16000 (16-bit indices). |
 | Textures | One albedo PNG, optional mask PNG; power of two, ≤ 512 × 512 (Decision D4); RGBA8. |
 | Mask channels | R = player-colour amount (tinted with the player's or team colour), G = emissive (engine glow, scaled with thrust like `OP_GLOW`), B = reserved (0), A = unused. |
 | Gun markers | Optional empties `gun0`…`gun7`. They never move the guns: the converter compares them with `Player_ship->gun_points` and warns when a marker is more than 1 unit away (muzzle flashes and shots appear at the Pyro's points). |
@@ -238,7 +239,7 @@ The content hash is SHA-256 over the whole file, truncated to 128 bits
 for the wire (Decision D5). The manifest is inside the file, so the
 author/licence travel with the model.
 
-### 3.3 Converter `dxship-convert`
+### 3.3 Converter `shipconv` (first named `dxship-convert`)
 
 `common/tools/dxship_convert.cpp`, built like the `movrec-*` tools
 (`RuntimeTest` in `SConstruct`) and shipped in the release package so a
@@ -363,11 +364,11 @@ Messages (reliable, protocol 113):
 - Joining mid-level: the transfer runs at the in-level rate; the player is
   drawn as a Pyro until the next level.
 
-**Recommendation: staged.** Stage 2 = Option A plus `SHIP_INFO` with Pyro
-fallback (no transfer code, nothing untrusted from the network). Stage 3 =
-Option B once the group wants ships that are not in a release. Option B is
-the only part with real risk (untrusted files, bandwidth), so it comes last
-and behind a host setting.
+**Decided (D8, D9): both, in one stage.** The free ships are bundled in
+the release packages, and the host sends any ship a client lacks
+automatically, with no prompt; the only consent is the pilot option to
+refuse ships from the host. The safety rules of §7 are what makes the
+automatic transfer acceptable.
 
 ## 6. Rendering
 
@@ -487,16 +488,14 @@ the visible texel area) so team colours always show.
 
 ## 9. Staged plan
 
-| Stage | PR content | Effort |
-|---|---|---|
-| S1 | `common/main/dxship_format.h` parser + writer, `dxship-convert` (cgltf), `--check`, `--reference`, unit tests incl. fuzz cases, authoring guide and Blender template. No game change. | 3–4 days |
-| S2 | Game: load `ships/`, RGBA texture upload, `draw_custom_ship` (lighting, tint, emissive, cloak, LOD), debris side table, pilot setting + ship menu with preview. No protocol change: you see your own ship (preview, death camera, end-level fly-out), and a debug option `-shipfor <pid>:<name>` assigns ships to other players or bots locally for screenshots and tests. | 4–5 days |
-| S3 | Protocol 112: `SHIP_INFO`, `CustomShips` game setting, per-player table, apply at `LEVEL_START`, bots with ships, demo side file, movement-recording header. Bundled ships in the release packages (Option A). | 2–3 days |
-| S4 | Protocol 113: transfer (Option B): `SHIP_REQUEST/DATA/UNAVAILABLE`, pacing, cache, consent UI, lobby display of who is missing which ship. | 3–4 days |
-| S5 (optional) | exp-visuals integration (per-pixel lighting, bloom from the mask), VBOs, a part that rotates (flag on a part). | 2 days |
+| Stage | PR content |
+|---|---|
+| S1 | `.dxship` reader and writer (`dxship_format.h`), SHA-256, the converter `shipconv` (glTF 2.0 / `.glb` and OBJ input, validation, scaling, colour zone, textures, debris parts, manifest), unit tests incl. a fuzz test of the reader. No game change. |
+| S2 | Game: load `ships/`, RGBA texture upload, the mesh draw path (lighting, tint, cloak), debris, rear view and external camera, pilot setting "Ship" with a rotating preview; the CC0 ships bundled in `data/ships/` and the release packages. |
+| S3 | Network (protocol bump, exp-visuals only): `SHIP_INFO`, the automatic transfer through the host (`SHIP_REQUEST/DATA/UNAVAILABLE`), the cache, the refuse option, bots with ships, the demo side record. |
+| later | Emissive mask, LOD, VBOs, rotating parts. |
 
-Each stage is a PR into `experimental-netcode` with its own review; S1 and
-S2 do not touch the protocol and can merge before the group has a model.
+Each stage is a PR into `exp-visuals` with its own review.
 
 ### 9.1 Tests
 
@@ -527,17 +526,22 @@ S2 do not touch the protocol and can merge before the group has a model.
 - For each ship: the name players will choose it by, and whether it may be
   bundled in public releases.
 
-## 10. Decisions for the user
+## 10. Decisions (user, 2026-10-04)
 
-| Id | Question | Options | Recommendation |
-|---|---|---|---|
-| D1 | Runtime format | A extended POF (palettised, limits, software renderer) / B own `.dxship` + OpenGL mesh path | B |
-| D2 | Player identification beyond the model | colour mask tinted with player/team colour mandatory / author's fixed colours | Mandatory mask zone, team colour in team games |
-| D3 | Size normalisation | strict: bounding radius = Pyro, silhouette 0.8–1.25 enforced / radius only, silhouette warning | Radius enforced, silhouette as error outside 0.7–1.4, warning outside 0.8–1.25 |
-| D4 | Budgets | textures 512² and file 1 MiB / 1024² and 2 MiB | 512² and 1 MiB (transfer ≈ 16 s worst case) |
-| D5 | Hash | SHA-256 (vendored public-domain implementation, ~200 lines) / existing CRC32 | SHA-256, 128 bits on the wire |
-| D6 | Debris | A authored parts / B automatic split / C none | A with B as fallback |
-| D7 | Two players with the same ship | allowed (colour distinguishes) / host enforces unique | Allowed |
-| D8 | Downloads from the host | ask / always / never as pilot option, default | Default "ask" |
-| D9 | Distribution | A bundled only / B host relay / staged | Staged: A in S3, B in S4 |
-| D10 | Converter | C++ tool with cgltf in `common/tools` / Blender add-on (Python) | C++ tool first; an add-on that calls it can follow |
+| Id | Question | Decision |
+|---|---|---|
+| D1 | Runtime format | **B**: own `.dxship` file and a new OpenGL mesh draw path. |
+| D2 | Player identification | **Mandatory colour zone**, tinted with the player's colour (the team colour in team games). |
+| D3 | Size | **Scaled to the Pyro's collision radius** (4.735 units); the silhouette may be at most slightly larger than the Pyro's (converter error above 1.15 × in any axis view, warning below 0.6 ×). |
+| D4 | Budgets | **512 × 512** textures, **1 MiB** per ship file. |
+| D5 | Hash | **SHA-256** (full 32 bytes on the wire). |
+| D6 | Debris | **A with B as fallback**: author-marked parts (`debris_*` nodes), else an automatic split. |
+| D7 | Same ship for several players | **Allowed**; the colour zone tells them apart. |
+| D8 | Consent to downloads | **Changed:** no prompt. Ships come automatically; a pilot option "Accept ships from the host" (default on) lets a player refuse. |
+| D9 | Distribution | **Changed:** the host sends missing ships to the clients automatically, in the lobby and on a join, already in the first networked version (the group must not install anything by hand). Free ships are also bundled in the release packages. |
+| D10 | Converter | **C++ tool** `shipconv` in `common/tools`. |
+
+Consequences for the text above: the converter is `shipconv`
+(`common/tools/shipconv.cpp`), debris parts are glTF nodes named
+`debris_*` (not `partN`), §5.1 and §5.3 are one stage (S3), and
+"ask" in §5.3 is replaced by the refuse option of D8.
