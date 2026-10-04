@@ -67,8 +67,8 @@ the samples travel with the custom ships' asset transfer.
   decoder). A receiver checks every field and the length, then cuts, fades
   and normalises again. The id of a sample is the SHA-256 of these bytes.
 - **Network** (Documentation/network-protocol-v2.md §6.9a): a client sends
-  `TAUNT_REQUEST` (sample kind, id, size); the host checks the rate,
-  plays it and relays `TAUNT` (pid, kind, id, size) to all others. The
+  `TAUNT_REQUEST` (sample kind, size, SHA-256); the host checks the rate,
+  plays it and relays `TAUNT` (pid, kind, size, SHA-256) to all others. The
   host's own and its bots' taunts go out as `TAUNT` directly.
 - **Spam protection:** sliding windows over the last taunt times
   (`rate_limiter`): 3 in 2 s, 4 in 10 s, 5 s lockout at the sender; the
@@ -104,7 +104,10 @@ are kind 2 (at most 128 KiB; a DXT1 sample is at most 88 212 bytes):
   a sample of 2 s takes about 5 s.
 - A received sample is checked (SHA-256, every field of the format, the
   limits applied again) and kept in `taunts/cache/<sha256>.dxt` in the
-  user folder; at most 64 are kept, the oldest go.
+  user folder; at most 64 are kept, the oldest go (16 are kept decoded
+  in memory). A player who uses the same file as you is heard with it at
+  once. A failed transfer is tried again at the player's next taunt (from
+  another owner, if one is known).
 - Muted players' samples and, with "Hear other players' horns" off, all
   samples are not fetched. "Accept ships from the host" does not apply
   to taunts.

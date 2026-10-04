@@ -17,6 +17,7 @@
 #include <cstring>
 #include <map>
 #include <memory>
+#include <set>
 #include <optional>
 #include <span>
 #include <string>
@@ -78,11 +79,16 @@ struct sample_ref
  */
 constexpr const char *CACHE_DIR{"taunts/cache"};
 constexpr unsigned CACHE_FILES{64};
+/* Samples kept in memory (up to about 440 KB each); the least recently
+ * used go first.
+ */
+constexpr std::size_t MEMORY_SAMPLES{16};
 
 struct cached_sample
 {
 	std::shared_ptr<const std::vector<std::uint8_t>> wire;
 	std::vector<std::int16_t> mixer;
+	std::uint64_t used{};
 };
 
 /* The own sample, read once from the user's directory (again after a
@@ -120,6 +126,11 @@ struct taunt_state
 	std::vector<callsign_t> muted;
 	/* Other players' samples, by hash (loaded from the cache or received). */
 	std::map<tt::sample_hash, cached_sample> samples;
+	std::uint64_t use_counter{};
+	/* Hashes not in the cache directory (not looked for again until one
+	 * is stored).
+	 */
+	std::set<tt::sample_hash> missing;
 };
 
 taunt_state T;
@@ -269,8 +280,8 @@ const cached_sample *find_sample(const tt::sample_hash &h)
 	return c;
 }
 
-/* At most CACHE_FILES samples on disk: the oldest go. */
-void trim_cache()
+/* At most CACHE_FILES samples on disk: the oldest go, never `keep`. */
+void trim_cache(const std::string &keep)
 {
 	const auto names{PHYSFS_enumerateFiles(CACHE_DIR)};
 	if (!names)
@@ -280,14 +291,14 @@ void trim_cache()
 	{
 		const std::string path{std::string{CACHE_DIR} + "/" + *n};
 		PHYSFS_Stat st;
-		if (PHYSFS_stat(path.c_str(), &st) && st.filetype == PHYSFS_FILETYPE_REGULAR)
+		if (path != keep && PHYSFS_stat(path.c_str(), &st) && st.filetype == PHYSFS_FILETYPE_REGULAR)
 			files.emplace_back(st.modtime, path);
 	}
 	PHYSFS_freeList(names);
-	if (files.size() <= CACHE_FILES)
+	if (files.size() < CACHE_FILES)
 		return;
 	std::ranges::sort(files);
-	for (std::size_t i{}; i != files.size() - CACHE_FILES; ++i)
+	for (std::size_t i{}; i != files.size() + 1 - CACHE_FILES; ++i)
 		PHYSFS_delete(files[i].second.c_str());
 }
 
@@ -298,9 +309,10 @@ const std::vector<std::int16_t> &samples_of(const playernum_t pnum, const sample
 {
 	if (r.kind == tt::sample_kind::custom)
 	{
-		if (pnum == Player_num)
-			if (const auto &o{own()}; !o.mixer.empty() && o.hash == r.hash)
-				return o.mixer;
+		/* The own sample, also when another player uses the same file. */
+		if (const auto &o{own()}; !o.mixer.empty() && o.hash == r.hash)
+			return o.mixer;
+		(void)pnum;
 		if (const auto c{find_sample(r.hash)})
 			return c->mixer;
 		return horn_samples(tt::sample_kind::horn1);
@@ -602,7 +614,7 @@ bool taunt_asset_store(const std::span<const std::uint8_t, 32> hash, const std::
 	const auto path{cache_path(h)};
 	if (auto f{PHYSFSX_openWriteBuffered(path.c_str()).first}; !f || PHYSFS_writeBytes(f, bytes.data(), bytes.size()) != static_cast<PHYSFS_sint64>(bytes.size()))
 		con_printf(CON_URGENT, "taunt: cannot write %s (the sample is kept for this session)", path.c_str());
-	trim_cache();
+	trim_cache(path);
 	return true;
 }
 

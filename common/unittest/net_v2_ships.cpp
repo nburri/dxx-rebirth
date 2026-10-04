@@ -748,6 +748,39 @@ static void test_taunt_kind()
 	c2.ex.request(big, 200u << 10);
 	host.ex.host_want(big, 1, 200u << 10);
 	CHECK(all_quiet(w));
+	/* A stale owner (it no longer has the sound) fails the fetch and is
+	 * forgotten; the client asks again at the next taunt and gets it from
+	 * the other owner.
+	 */
+	{
+		auto other{make_ship(32, 30000)};
+		asset_key k2{hash_of(other)};
+		k2.kind = static_cast<std::uint8_t>(asset_kind::taunt);
+		world w2;
+		machine h{w2, 0}, a{w2, 1}, b{w2, 2}, c{w2, 3};
+		w2.m = {&h, &a, &b, &c};
+		h.clients[1] = h.clients[2] = h.clients[3] = true;
+		c.files[k2] = std::make_shared<const std::vector<std::uint8_t>>(other);
+		const auto size{static_cast<std::uint32_t>(other.size())};
+		h.ex.note_owner(k2, 1, size);
+		h.ex.note_owner(k2, 3, size);
+		b.ex.request(k2, size);
+		CHECK(run(w2, 2000) < 2000);
+		CHECK(!b.has_asset(k2));
+		b.ex.request(k2, size);
+		CHECK(run(w2, 2000) < 2000);
+		CHECK(b.has_asset(k2) && h.has_asset(k2));
+		/* A new ship of the owner does not cancel a taunt fetch. */
+		auto third{make_ship(33, 40000)};
+		asset_key k3{hash_of(third)};
+		k3.kind = static_cast<std::uint8_t>(asset_kind::taunt);
+		a.files[k3] = std::make_shared<const std::vector<std::uint8_t>>(third);
+		h.ex.note_owner(k3, 1, static_cast<std::uint32_t>(third.size()));
+		h.ex.host_want(k3, 1, static_cast<std::uint32_t>(third.size()));
+		a.ex.set_local(1, info_of(make_ship(34, 2000), "new"));
+		CHECK(run(w2, 2000) < 2000);
+		CHECK(h.has_asset(k3));
+	}
 }
 
 int main()

@@ -57,7 +57,7 @@ using ship_hash = std::array<std::uint8_t, SHIP_HASH_SIZE>;
 enum class asset_kind : std::uint8_t
 {
 	ship = 1,
-	/* Reserved for the taunts' sounds. */
+	/* The taunts' sounds (Documentation/taunts.md). */
 	taunt = 2,
 };
 
@@ -434,7 +434,7 @@ private:
 			last_change[from] = clock;
 			/* What the host fetched of its old ship is not needed. */
 			for (auto i{fetches.begin()}; i != fetches.end();)
-				if (i->second.owner == from && !(i->first == ship_key(m.hash) && !m.pyro))
+				if (i->second.owner == from && i->first.kind == static_cast<std::uint8_t>(asset_kind::ship) && !(i->first == ship_key(m.hash) && !m.pyro))
 					fetch_failed(i++, ship_unavailable_reason::owner_left);
 				else
 					++i;
@@ -508,6 +508,17 @@ private:
 	{
 		for (const auto w : i->second.waiters)
 			unavailable(w, i->first, r);
+		/* Another kind's owner that failed is forgotten, so that the next
+		 * request goes to another owner (it registers again when it
+		 * announces the asset again).  Ships keep theirs: SHIP_INFO.
+		 */
+		if (i->first.kind != static_cast<std::uint8_t>(asset_kind::ship))
+		{
+			const auto owner{i->second.owner};
+			const auto [b, e]{owners.equal_range(i->first)};
+			for (auto o{b}; o != e;)
+				o = o->second.slot == owner ? owners.erase(o) : std::next(o);
+		}
 		env.note("could not fetch", i->first, i->second.owner);
 		fetches.erase(i);
 	}
@@ -621,8 +632,17 @@ public:
 	 */
 	void request(const asset_key &k, const std::uint32_t size)
 	{
-		if (host || (!accept && k.kind == static_cast<std::uint8_t>(asset_kind::ship)) || !asset_max_size(k.kind) || size > asset_max_size(k.kind) || env.has_asset(k) || wants.contains(k))
+		if (host || (!accept && k.kind == static_cast<std::uint8_t>(asset_kind::ship)) || !asset_max_size(k.kind) || size > asset_max_size(k.kind) || env.has_asset(k))
 			return;
+		/* Another kind asks again after a failure (its owner may be back);
+		 * the caller paces its asking (the taunts' rate limits).
+		 */
+		if (const auto i{wants.find(k)}; i != wants.end())
+		{
+			if (i->second.state != want_state::failed || k.kind == static_cast<std::uint8_t>(asset_kind::ship))
+				return;
+			wants.erase(i);
+		}
 		wants[k].size = size;
 		env.note("asking the host for", k, 0);
 		send_msg(0, SHIP_MSG_REQUEST, ship_request_msg{k});
