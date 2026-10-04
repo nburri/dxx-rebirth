@@ -607,3 +607,53 @@ upper end.
   this machine only; `-shipshot <mission> <level> <dir>` writes pictures
   of every ship (poses, a second colour, fading, cloaked, debris, the
   menu) for review (like `-visshot`).
+
+### 11.3 S3: network
+
+`common/main/net_v2_ships.h` (the protocol and the whole exchange as a
+state machine, tested by `test-net-v2-ships`, also over the real
+transport with loss) and `similar/main/net_ships.cpp` (the game's side).
+Protocol 0x7070 (28784): the exp-visuals line counts 0x7000 plus a
+counter in the low byte, so it never shares a number with
+experimental-netcode, and the low byte that a v1 build reads as its
+packet type stays an unknown one.
+
+| Id | Message | Layout |
+|---|---|---|
+| 0x4b | `SHIP_INFO` | pid u8, flags u8 (1 = Pyro), size u32, SHA-256 32, name 25 (NUL padded); client → host for itself, host → all for every player and its bots |
+| 0x4c | `ASSET_REQUEST` | kind u8, SHA-256 32; client → host, host → the owner |
+| 0x4d | `ASSET_DATA` | kind u8, SHA-256 32, total u32, offset u32, ≤ 896 bytes, in order |
+| 0x4e | `ASSET_UNAVAILABLE` | kind u8, SHA-256 32, reason u8 (unknown, refused, owner left, invalid) |
+
+Asset kinds: 1 ship (≤ 1 MiB), 2 reserved for the taunts' sounds
+(≤ 128 KiB); a kind announces its assets its own way and transfers
+through `ship_exchange::request` / `note_owner`.
+
+- A player announces its ship on joining (and again when the pilot picks
+  another between levels); the host checks that a client speaks only for
+  itself, relays to everyone and tells a joining client every player's
+  ship. Bots: the host gives each one of its own ships, chosen by the
+  bot's name (the same ship for the whole session); none → Pyro.
+- A client that lacks an announced ship asks the host (no prompt, D8/D9)
+  unless the pilot switched "Accept ships from the host" off. The host
+  sends its copy, or first fetches it from the client who flies it (and
+  keeps it), then serves everyone who waits. Data only from the peer
+  that was asked, in order, of the announced size; the whole file must
+  have its SHA-256 and pass the reader before it is stored in
+  `ships/cache/<sha256>.dxship` and drawn. Peers never talk to each
+  other.
+- Pacing: 96 KiB/s in the lobby, 16 KiB/s during a level, and never more
+  than 12 KiB of ship data waiting in a connection's reliable queue, so
+  gameplay messages do not wait behind a transfer (a 600 KB ship relayed
+  through the host takes about 15 s in the lobby).
+- A ship that arrives during a level is drawn from then on.
+- Demos: `<demo>.ships` next to the demo (`pid sha256 name` per line),
+  written when recording starts and whenever a player's ship changes,
+  renamed or deleted with the demo, read at playback; older builds
+  ignore it.
+- `-botarena-shots <dir>`: pictures from behind the arena's bots, every
+  10 game seconds, for review.
+
+Not done: a two-instance network test (the game has no unattended host
+and join), the movement-recording header, a per-bot ship setting (bots
+get one of the host's ships).

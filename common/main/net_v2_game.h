@@ -283,6 +283,12 @@ void host_send_player_list();
 void game_broadcast(uint8_t type, std::span<const uint8_t> payload, playernum_t exclude = MAX_PLAYERS);
 /* On the host, to player `slot` (if connected). */
 void game_send_to(playernum_t slot, uint8_t type, std::span<const uint8_t> payload);
+/* Bytes of reliable messages waiting for player `slot` (on a client,
+ * slot 0: the host): in the connection's queue and its backlog.
+ */
+std::size_t game_queued_bytes(playernum_t slot);
+/* Host: player `slot` is a connected client (joining or in the game). */
+bool host_slot_is_client(playernum_t slot);
 
 /* Log the sizes of the session's queues (for the -verbose frame
  * probe's session report).

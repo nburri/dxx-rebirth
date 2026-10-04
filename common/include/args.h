@@ -157,6 +157,10 @@ struct CArg : prohibit_void_ptr<>
 	 */
 	std::string DbgShipFor;
 	bool DbgShipShot;
+	/* -botarena-shots <dir>: every 10 game seconds a picture from behind
+	 * one of the bots, in turn (vis_shot.cpp).
+	 */
+	std::string DbgArenaShotDir;
 	/* -visshot (vis_shot.h) */
 	std::string DbgVisShotMission;
 	std::string DbgVisShotDir;

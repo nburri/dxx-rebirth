@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "net_v2_ships.h"
+#include "net_v2_transport.h"
 #include "sha256.h"
 
 namespace {
@@ -37,9 +38,14 @@ void check_failed(const char *const what, const char *const file, const unsigned
 
 #define CHECK(cond)	do { if (!(cond)) check_failed(#cond, __FILE__, __LINE__); } while (0)
 
-ship_hash hash_of(const std::vector<std::uint8_t> &b)
+ship_hash sha_of(const std::vector<std::uint8_t> &b)
 {
 	return dcx::sha256_of(b);
+}
+
+asset_key hash_of(const std::vector<std::uint8_t> &b)
+{
+	return {static_cast<std::uint8_t>(asset_kind::ship), sha_of(b)};
 }
 
 std::vector<std::uint8_t> make_ship(const unsigned seed, const std::size_t size)
@@ -58,7 +64,7 @@ void test_messages()
 	i.pid = 3;
 	i.pyro = false;
 	i.size = 5000;
-	i.hash = hash_of(ship);
+	i.hash = sha_of(ship);
 	i.name = "striker";
 	std::array<std::uint8_t, ship_info_msg::SIZE> buf;
 	i.write(buf.data());
@@ -108,17 +114,17 @@ void test_messages()
 	}
 	/* SHIP_DATA */
 	{
-		const ship_data_msg d{i.hash, 5000, 896, std::span(ship).subspan(896, 896)};
+		const ship_data_msg d{hash_of(ship), 5000, 896, std::span(ship).subspan(896, 896)};
 		std::array<std::uint8_t, SHIP_DATA_HEADER + SHIP_DATA_CHUNK> b;
 		d.write(b.data());
 		const auto r2{ship_data_msg::read(std::span(b).first(d.size()))};
 		CHECK(r2 && r2->offset == 896 && r2->total == 5000 && r2->data.size() == 896 && std::equal(r2->data.begin(), r2->data.end(), ship.begin() + 896));
 		CHECK(!ship_data_msg::read(std::span(b).first(SHIP_DATA_HEADER)));
 		/* Past the total. */
-		const ship_data_msg late{i.hash, 1000, 500, std::span(ship).first(600)};
+		const ship_data_msg late{hash_of(ship), 1000, 500, std::span(ship).first(600)};
 		late.write(b.data());
 		CHECK(!ship_data_msg::read(std::span(b).first(late.size())));
-		const ship_data_msg big{i.hash, SHIP_MAX_SIZE + 1, 0, std::span(ship).first(10)};
+		const ship_data_msg big{hash_of(ship), SHIP_MAX_SIZE + 1, 0, std::span(ship).first(10)};
 		big.write(b.data());
 		CHECK(!ship_data_msg::read(std::span(b).first(big.size())));
 		std::vector<std::uint8_t> too_long(SHIP_DATA_HEADER + SHIP_DATA_CHUNK + 1);
@@ -126,11 +132,27 @@ void test_messages()
 	}
 	{
 		std::array<std::uint8_t, ship_unavailable_msg::SIZE> b{};
-		b[SHIP_HASH_SIZE] = 9;
+		b[1 + SHIP_HASH_SIZE] = 2;
+		/* Kind 0 is none. */
 		CHECK(!ship_unavailable_msg::read(b));
-		b[SHIP_HASH_SIZE] = 2;
+		b[0] = 1;
+		b[1 + SHIP_HASH_SIZE] = 9;
+		CHECK(!ship_unavailable_msg::read(b));
+		b[1 + SHIP_HASH_SIZE] = 2;
 		CHECK(ship_unavailable_msg::read(b) && ship_unavailable_msg::read(b)->reason == ship_unavailable_reason::owner_left);
 		CHECK(!ship_request_msg::read(std::span(b).first(5)));
+		/* Per-kind limits: a taunt over 128 KiB is refused, a ship is not. */
+		const auto ship{make_ship(3, 2000)};
+		std::array<std::uint8_t, SHIP_DATA_HEADER + SHIP_DATA_CHUNK> db;
+		ship_data_msg t{{static_cast<std::uint8_t>(asset_kind::taunt), sha_of(ship)}, 200000, 0, std::span(ship).first(100)};
+		t.write(db.data());
+		CHECK(!ship_data_msg::read(std::span(db).first(t.size())));
+		t.key.kind = static_cast<std::uint8_t>(asset_kind::ship);
+		t.write(db.data());
+		CHECK(ship_data_msg::read(std::span(db).first(t.size())));
+		t.key.kind = 7;
+		t.write(db.data());
+		CHECK(!ship_data_msg::read(std::span(db).first(t.size())));
 	}
 }
 
@@ -152,8 +174,8 @@ void test_assembler()
 	{
 		ship_assembler a{h, 2000};
 		CHECK(a.add({h, 1999, 0, std::span(ship).first(896)}) == ship_assembler::result::error);
-		ship_hash other{h};
-		other[0] ^= 1;
+		asset_key other{h};
+		other.hash[0] ^= 1;
 		ship_assembler b{h};
 		CHECK(b.add({other, 2000, 0, std::span(ship).first(896)}) == ship_assembler::result::error);
 	}
@@ -184,8 +206,8 @@ struct machine final : ship_exchange_env
 {
 	world &w;
 	unsigned id;
-	std::map<ship_hash, std::shared_ptr<const std::vector<std::uint8_t>>> files;
-	std::array<std::optional<ship_hash>, 8> shown{};
+	std::map<asset_key, std::shared_ptr<const std::vector<std::uint8_t>>> files;
+	std::array<std::optional<asset_key>, 8> shown{};
 	std::array<bool, 8> clients{};
 	ship_exchange ex;
 	std::vector<std::string> log;
@@ -197,16 +219,16 @@ struct machine final : ship_exchange_env
 	{
 		files[hash_of(b)] = std::make_shared<const std::vector<std::uint8_t>>(b);
 	}
-	bool has_ship(const ship_hash &h) override
+	bool has_asset(const asset_key &h) override
 	{
 		return files.contains(h);
 	}
-	std::shared_ptr<const std::vector<std::uint8_t>> ship_file(const ship_hash &h) override
+	std::shared_ptr<const std::vector<std::uint8_t>> asset_file(const asset_key &h) override
 	{
 		const auto f{files.find(h)};
 		return f == files.end() ? nullptr : f->second;
 	}
-	bool store_ship(const ship_hash &h, const std::span<const std::uint8_t> b) override
+	bool store_asset(const asset_key &h, const std::span<const std::uint8_t> b) override
 	{
 		if (hash_of(std::vector<std::uint8_t>(b.begin(), b.end())) != h)
 			return false;
@@ -215,8 +237,8 @@ struct machine final : ship_exchange_env
 	}
 	void player_ship(const std::uint8_t pid, const ship_info_msg *const m) override
 	{
-		if (m && has_ship(m->hash))
-			shown[pid] = m->hash;
+		if (const asset_key k{static_cast<std::uint8_t>(asset_kind::ship), m ? m->hash : ship_hash{}}; m && has_asset(k))
+			shown[pid] = k;
 		else
 			shown[pid].reset();
 	}
@@ -250,7 +272,7 @@ struct machine final : ship_exchange_env
 	{
 		return slot < clients.size() && clients[slot];
 	}
-	void note(const std::string_view what, const ship_hash &, const std::uint8_t slot) override
+	void note(const std::string_view what, const asset_key &, const std::uint8_t slot) override
 	{
 		log.push_back(std::string(what) + " " + std::to_string(slot));
 	}
@@ -303,7 +325,7 @@ ship_info_msg info_of(const std::vector<std::uint8_t> &b, const char *const name
 	ship_info_msg m;
 	m.pyro = false;
 	m.size = static_cast<std::uint32_t>(b.size());
-	m.hash = hash_of(b);
+	m.hash = sha_of(b);
 	m.name = name;
 	return m;
 }
@@ -337,9 +359,9 @@ void test_exchange()
 	/* Everyone who accepts has everything and shows it. */
 	for (const auto m : {&host, &c1, &c2})
 	{
-		CHECK(m->has_ship(hash_of(ship_a)));
-		CHECK(m->has_ship(hash_of(ship_b)));
-		CHECK(m->has_ship(hash_of(ship_d)));
+		CHECK(m->has_asset(hash_of(ship_a)));
+		CHECK(m->has_asset(hash_of(ship_b)));
+		CHECK(m->has_asset(hash_of(ship_d)));
 		CHECK(m->shown[0] == hash_of(ship_a));
 		CHECK(m->shown[1] == hash_of(ship_b));
 		CHECK(m->shown[5] == hash_of(ship_d));
@@ -391,8 +413,8 @@ void test_failures()
 		c1.ex.set_local(1, info_of(ship_b, "bbb"));
 		c2.ex.set_local(2, ship_info_msg{});
 		CHECK(run(w, 2000) < 2000);
-		CHECK(!host.has_ship(hash_of(ship_b)));
-		CHECK(!c2.has_ship(hash_of(ship_b)));
+		CHECK(!host.has_asset(hash_of(ship_b)));
+		CHECK(!c2.has_asset(hash_of(ship_b)));
 		CHECK(!c2.shown[1]);
 		CHECK(std::ranges::find(c2.log, "not available 0") != c2.log.end());
 	}
@@ -416,7 +438,7 @@ void test_failures()
 		w.links[{1, 0}].clear();
 		w.link_rate = 8192;
 		CHECK(run(w, 2000) < 2000);
-		CHECK(!c2.has_ship(hash_of(ship_b)));
+		CHECK(!c2.has_asset(hash_of(ship_b)));
 		CHECK(!host.ex.busy());
 	}
 	/* Data from someone the host did not ask is ignored; so is a client
@@ -501,7 +523,160 @@ void test_pacing()
 	CHECK(sent >= SHIP_RATE_LEVEL * seconds * 0.5);
 	/* In the lobby it is faster, and it completes. */
 	CHECK(run(w, 4000, false) < 4000);
-	CHECK(c1.has_ship(hash_of(ship)) && c1.shown[0] == hash_of(ship));
+	CHECK(c1.has_asset(hash_of(ship)) && c1.shown[0] == hash_of(ship));
+}
+
+/* The same exchange over the real reliable transport (net_v2_transport.h)
+ * with 10 % loss and 40 ms one-way delay: a host whose client lacks a
+ * 600 KB ship that another client flies.
+ */
+struct net_machine;
+
+struct net_world
+{
+	std::vector<net_machine *> m;
+	struct packet
+	{
+		net_clock at;
+		unsigned from, to;
+		std::vector<std::uint8_t> bytes;
+	};
+	std::deque<packet> wire;
+	std::mt19937 rng{7};
+	net_clock now{};
+	unsigned dropped{}, sent{};
+};
+
+struct net_machine final : ship_exchange_env
+{
+	net_world &w;
+	unsigned id;
+	std::map<unsigned, connection> conns;
+	std::map<asset_key, std::shared_ptr<const std::vector<std::uint8_t>>> files;
+	std::array<std::optional<asset_key>, 8> shown{};
+	ship_exchange ex;
+	net_machine(net_world &wd, const unsigned i) :
+		w{wd}, id{i}, ex{*this, i == 0, static_cast<std::uint8_t>(i)}
+	{
+	}
+	void connect(const unsigned peer)
+	{
+		conns.emplace(std::piecewise_construct, std::forward_as_tuple(peer), std::forward_as_tuple(connection_config{.session_id = 0x1234, .peer_token = 0x5000 + (id ? id : peer), .local_player_id = static_cast<std::uint8_t>(id), .remote_player_id = static_cast<std::uint8_t>(peer)}, w.now));
+	}
+	bool has_asset(const asset_key &k) override
+	{
+		return files.contains(k);
+	}
+	std::shared_ptr<const std::vector<std::uint8_t>> asset_file(const asset_key &k) override
+	{
+		const auto f{files.find(k)};
+		return f == files.end() ? nullptr : f->second;
+	}
+	bool store_asset(const asset_key &k, const std::span<const std::uint8_t> b) override
+	{
+		if (sha_of(std::vector<std::uint8_t>(b.begin(), b.end())) != k.hash)
+			return false;
+		files[k] = std::make_shared<const std::vector<std::uint8_t>>(b.begin(), b.end());
+		return true;
+	}
+	void player_ship(const std::uint8_t pid, const ship_info_msg *const m) override
+	{
+		if (const asset_key k{static_cast<std::uint8_t>(asset_kind::ship), m ? m->hash : ship_hash{}}; m && has_asset(k))
+			shown[pid] = k;
+		else
+			shown[pid].reset();
+	}
+	void send(const std::uint8_t slot, const std::uint8_t type, const std::span<const std::uint8_t> payload) override
+	{
+		const auto c{conns.find(id ? 0u : slot)};
+		if (c == conns.end() || c->second.enqueue_reliable(type, payload) != enqueue_result::ok)
+		{
+			++failures;
+			std::fprintf(stderr, "net_machine %u: cannot queue type %u (%zu bytes)\n", id, type, payload.size());
+		}
+	}
+	std::size_t queued_bytes(const std::uint8_t slot) override
+	{
+		const auto c{conns.find(id ? 0u : slot)};
+		return c == conns.end() ? 0 : c->second.stats().queue_bytes;
+	}
+	bool is_client(const std::uint8_t slot) override
+	{
+		return id == 0 && conns.contains(slot);
+	}
+	void note(std::string_view, const asset_key &, std::uint8_t) override
+	{
+	}
+	void pump()
+	{
+		ex.pump(net_milliseconds(10) / 65536.0, false);
+		for (auto &[peer, c] : conns)
+		{
+			c.begin_tick(w.now);
+			for (;;)
+			{
+				const auto p{c.build_outgoing(w.now)};
+				if (p.empty())
+					break;
+				++w.sent;
+				if (std::uniform_int_distribution<unsigned>(0, 9)(w.rng) == 0)
+				{
+					++w.dropped;
+					continue;
+				}
+				w.wire.push_back({w.now + net_milliseconds(40), id, peer, std::vector<std::uint8_t>(p.begin(), p.end())});
+			}
+		}
+	}
+	void receive(const unsigned from, const std::vector<std::uint8_t> &d)
+	{
+		const auto c{conns.find(from)};
+		if (c == conns.end())
+			return;
+		const auto r{c->second.on_receive(d, w.now)};
+		for (const auto &m : r.reliable)
+			ex.receive(static_cast<std::uint8_t>(from), m.type, m.payload);
+	}
+};
+
+void test_transport()
+{
+	const auto ship_b{make_ship(41, 600000)};
+	net_world w;
+	net_machine host{w, 0}, c1{w, 1}, c2{w, 2};
+	w.m = {&host, &c1, &c2};
+	for (const unsigned c : {1u, 2u})
+	{
+		host.connect(c);
+		w.m[c]->connect(0);
+	}
+	c1.files[hash_of(ship_b)] = std::make_shared<const std::vector<std::uint8_t>>(ship_b);
+	host.ex.set_local(0, ship_info_msg{});
+	host.ex.client_joined(1);
+	host.ex.client_joined(2);
+	c1.ex.set_local(1, info_of(ship_b, "bbb"));
+	c2.ex.set_local(2, ship_info_msg{});
+	unsigned steps{};
+	for (; steps < 6000; ++steps)
+	{
+		w.now += net_milliseconds(10);
+		for (const auto m : w.m)
+			m->pump();
+		while (!w.wire.empty() && w.wire.front().at <= w.now)
+		{
+			const auto pk{std::move(w.wire.front())};
+			w.wire.pop_front();
+			w.m[pk.to]->receive(pk.from, pk.bytes);
+		}
+		if (c2.shown[1] && host.shown[1] && !host.ex.busy() && !c2.ex.busy())
+			break;
+	}
+	CHECK(c2.has_asset(hash_of(ship_b)) && c2.shown[1] == hash_of(ship_b));
+	CHECK(host.has_asset(hash_of(ship_b)) && host.shown[1] == hash_of(ship_b));
+	CHECK(w.dropped > 0);
+	/* Two hops at the lobby's 96 KiB/s: about 13 s; loss adds a little. */
+	CHECK(steps < 3000);
+	std::printf("test-net-v2-ships: 600 KB relayed over the transport in %.1f s, %u of %u packets dropped\n", steps * 0.01, w.dropped, w.sent);
 }
 
 }
@@ -513,6 +688,7 @@ int main()
 	test_exchange();
 	test_failures();
 	test_pacing();
+	test_transport();
 	if (failures)
 	{
 		std::fprintf(stderr, "test-net-v2-ships: %u failures\n", failures);

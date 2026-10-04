@@ -34,6 +34,7 @@
 #include "robot.h"
 #include "timer.h"
 #include "d_levelstate.h"
+#include "newdemo.h"
 #include "d_enumerate.h"
 #if DXX_USE_MULTIPLAYER
 #include "multi.h"
@@ -386,10 +387,12 @@ void custom_ship_set_player(const playernum_t pnum, const sha256_digest *const h
 {
 	if (pnum >= Player_ships.size())
 		return;
-	if (hash)
-		Player_ships[pnum] = *hash;
-	else
-		Player_ships[pnum].reset();
+	const std::optional<sha256_digest> next{hash ? std::optional<sha256_digest>{*hash} : std::nullopt};
+	if (Player_ships[pnum] == next)
+		return;
+	Player_ships[pnum] = next;
+	/* A demo being recorded keeps the ships in its side file. */
+	newdemo_record_ships();
 }
 
 std::optional<sha256_digest> custom_ship_of_player(const playernum_t pnum)

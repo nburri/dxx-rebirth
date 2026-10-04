@@ -288,15 +288,15 @@ class ship_exchange_env
 {
 public:
 	virtual ~ship_exchange_env() = default;
-	/* This machine has the ship with this hash. */
-	virtual bool has_ship(const ship_hash &) = 0;
-	/* The local ship file with this hash, if this machine has it. */
-	virtual std::shared_ptr<const std::vector<std::uint8_t>> ship_file(const ship_hash &) = 0;
-	/* A received ship: check it (SHA-256, the reader's rules) and keep
+	/* This machine has the asset. */
+	virtual bool has_asset(const asset_key &) = 0;
+	/* The local file of the asset, if this machine has it. */
+	virtual std::shared_ptr<const std::vector<std::uint8_t>> asset_file(const asset_key &) = 0;
+	/* A received asset: check it (SHA-256, the kind's own rules) and keep
 	 * it; false if it does not check out.
 	 */
-	virtual bool store_ship(const ship_hash &, std::span<const std::uint8_t>) = 0;
-	/* A player's ship (nullptr: the Pyro). */
+	virtual bool store_asset(const asset_key &, std::span<const std::uint8_t>) = 0;
+	/* A player's ship (nullptr: the Pyro); called again when it arrives. */
 	virtual void player_ship(std::uint8_t pid, const ship_info_msg *) = 0;
 	virtual void send(std::uint8_t slot, std::uint8_t type, std::span<const std::uint8_t> payload) = 0;
 	/* Bytes waiting in the reliable queue to that slot. */
@@ -304,7 +304,7 @@ public:
 	/* Host: the slot has a connected client (not a bot, not empty). */
 	virtual bool is_client(std::uint8_t slot) = 0;
 	/* A transfer started, finished or failed (for the log). */
-	virtual void note(std::string_view what, const ship_hash &, std::uint8_t slot) = 0;
+	virtual void note(std::string_view what, const asset_key &, std::uint8_t slot) = 0;
 };
 
 class ship_exchange
@@ -314,18 +314,18 @@ public:
 private:
 	struct outgoing
 	{
-		ship_hash hash{};
+		asset_key key;
 		std::shared_ptr<const std::vector<std::uint8_t>> bytes;
 		std::uint32_t offset{};
 	};
-	/* Host: a ship it fetches from its owner, and who waits for it. */
+	/* Host: an asset it fetches from its owner, and who waits for it. */
 	struct fetch
 	{
 		std::uint8_t owner{};
 		ship_assembler assembly;
 		std::set<std::uint8_t> waiters;
 	};
-	/* Client: a ship it asked the host for. */
+	/* Client: an asset it asked the host for. */
 	enum class want_state
 	{
 		pending,
@@ -338,13 +338,20 @@ private:
 		std::optional<ship_assembler> assembly;
 		std::uint32_t size{};
 	};
+	/* Host: who has which asset (announced by a player), and its size. */
+	struct owner_entry
+	{
+		std::uint8_t slot;
+		std::uint32_t size;
+	};
 	ship_exchange_env &env;
 	bool host;
 	std::uint8_t self;
 	std::array<std::optional<ship_info_msg>, MAX_SLOTS> table{};
 	std::array<std::deque<outgoing>, MAX_SLOTS> out{};
-	std::map<ship_hash, fetch> fetches;
-	std::map<ship_hash, want> wants;
+	std::map<asset_key, fetch> fetches;
+	std::map<asset_key, want> wants;
+	std::multimap<asset_key, owner_entry> owners;
 	/* Pacing: bytes the transfers may still send, refilled per second. */
 	double allowance{};
 	template <typename M>
@@ -354,49 +361,54 @@ private:
 		m.write(buf.data());
 		env.send(slot, type, buf);
 	}
-	void unavailable(const std::uint8_t slot, const ship_hash &h, const ship_unavailable_reason r)
+	void unavailable(const std::uint8_t slot, const asset_key &k, const ship_unavailable_reason r)
 	{
-		send_msg(slot, SHIP_MSG_UNAVAILABLE, ship_unavailable_msg{h, r});
+		send_msg(slot, SHIP_MSG_UNAVAILABLE, ship_unavailable_msg{k, r});
 	}
-	void queue_send(const std::uint8_t slot, const ship_hash &h, std::shared_ptr<const std::vector<std::uint8_t>> bytes)
+	void queue_send(const std::uint8_t slot, const asset_key &k, std::shared_ptr<const std::vector<std::uint8_t>> bytes)
 	{
 		if (slot >= MAX_SLOTS || !bytes)
 			return;
 		auto &q{out[slot]};
 		/* Asked again while on its way: once is enough. */
-		if (std::ranges::any_of(q, [&h](const outgoing &o) { return o.hash == h; }))
+		if (std::ranges::any_of(q, [&k](const outgoing &o) { return o.key == k; }))
 			return;
-		env.note("sending", h, slot);
-		q.push_back({h, std::move(bytes), 0});
+		env.note("sending", k, slot);
+		q.push_back({k, std::move(bytes), 0});
 	}
-	/* Host: whose ship is this (a connected client other than `not_slot`). */
 	[[nodiscard]]
-	std::optional<std::uint8_t> owner_of(const ship_hash &h, const std::uint8_t not_slot) const
+	static asset_key ship_key(const ship_hash &h)
 	{
-		for (std::uint8_t i = 1; i < MAX_SLOTS; ++i)
-			if (i != not_slot && table[i] && !table[i]->pyro && table[i]->hash == h && env.is_client(i))
-				return i;
+		return {static_cast<std::uint8_t>(asset_kind::ship), h};
+	}
+	/* Host: a connected client other than `not_slot` that has it. */
+	[[nodiscard]]
+	std::optional<owner_entry> owner_of(const asset_key &k, const std::uint8_t not_slot) const
+	{
+		const auto [b, e]{owners.equal_range(k)};
+		for (auto i{b}; i != e; ++i)
+			if (i->second.slot != not_slot && env.is_client(i->second.slot))
+				return i->second;
 		return std::nullopt;
 	}
-	void host_fetch(const ship_hash &h, const std::uint8_t owner, const std::optional<std::uint8_t> waiter, const std::uint32_t size)
+	void host_fetch(const asset_key &k, const std::uint8_t owner, const std::optional<std::uint8_t> waiter, const std::uint32_t size)
 	{
-		auto [i, inserted]{fetches.try_emplace(h, fetch{owner, ship_assembler{h, size}, {}})};
+		auto [i, inserted]{fetches.try_emplace(k, fetch{owner, ship_assembler{k, size}, {}})};
 		if (waiter)
 			i->second.waiters.insert(*waiter);
 		if (inserted)
 		{
-			env.note("fetching from its owner", h, owner);
-			send_msg(owner, SHIP_MSG_REQUEST, ship_request_msg{h});
+			env.note("fetching from its owner", k, owner);
+			send_msg(owner, SHIP_MSG_REQUEST, ship_request_msg{k});
 		}
 	}
-	void client_want(const ship_info_msg &m)
+	void show_everyone_with(const asset_key &k)
 	{
-		if (m.pyro || !accept || env.has_ship(m.hash) || wants.contains(m.hash))
+		if (k.kind != static_cast<std::uint8_t>(asset_kind::ship))
 			return;
-		auto &w{wants[m.hash]};
-		w.size = m.size;
-		env.note("asking the host for", m.hash, 0);
-		send_msg(0, SHIP_MSG_REQUEST, ship_request_msg{m.hash});
+		for (std::uint8_t p = 0; p < MAX_SLOTS; ++p)
+			if (table[p] && !table[p]->pyro && table[p]->hash == k.hash)
+				env.player_ship(p, &*table[p]);
 	}
 	void receive_info(const std::uint8_t from, const ship_info_msg &m)
 	{
@@ -408,11 +420,14 @@ private:
 			if (m.pid != from || from == self)
 				return;
 			table[from] = m;
+			std::erase_if(owners, [from](const auto &o) { return o.second.slot == from && o.first.kind == static_cast<std::uint8_t>(asset_kind::ship); });
+			if (!m.pyro)
+				owners.insert({ship_key(m.hash), {from, m.size}});
 			env.player_ship(from, m.pyro ? nullptr : &m);
 			broadcast_info(from);
 			/* The host draws it too: fetch it if it lacks it. */
-			if (!m.pyro && accept && !env.has_ship(m.hash))
-				host_fetch(m.hash, from, std::nullopt, m.size);
+			if (!m.pyro && accept && !env.has_asset(ship_key(m.hash)))
+				host_fetch(ship_key(m.hash), from, std::nullopt, m.size);
 		}
 		else
 		{
@@ -420,50 +435,52 @@ private:
 				return;
 			table[m.pid] = m;
 			env.player_ship(m.pid, m.pyro ? nullptr : &m);
-			client_want(m);
+			if (!m.pyro)
+				request(ship_key(m.hash), m.size);
 		}
 	}
 	void receive_request(const std::uint8_t from, const ship_request_msg &m)
 	{
+		const auto &k{m.key};
 		if (host)
 		{
 			if (from == self || !env.is_client(from))
 				return;
-			if (auto f{env.ship_file(m.hash)})
+			if (auto f{env.asset_file(k)})
 			{
-				queue_send(from, m.hash, std::move(f));
+				queue_send(from, k, std::move(f));
 				return;
 			}
-			if (const auto i{fetches.find(m.hash)}; i != fetches.end())
+			if (const auto i{fetches.find(k)}; i != fetches.end())
 			{
 				i->second.waiters.insert(from);
 				return;
 			}
-			const auto owner{owner_of(m.hash, from)};
+			const auto owner{owner_of(k, from)};
 			if (!owner)
 			{
-				unavailable(from, m.hash, ship_unavailable_reason::unknown);
+				unavailable(from, k, ship_unavailable_reason::unknown);
 				return;
 			}
-			host_fetch(m.hash, *owner, from, table[*owner]->size);
+			host_fetch(k, owner->slot, from, owner->size);
 		}
 		else
 		{
-			/* The host fetches this player's ship. */
+			/* The host fetches this player's asset. */
 			if (from != 0)
 				return;
 			if (!accept_sending)
 			{
-				unavailable(0, m.hash, ship_unavailable_reason::refused);
+				unavailable(0, k, ship_unavailable_reason::refused);
 				return;
 			}
-			if (auto f{env.ship_file(m.hash)})
-				queue_send(0, m.hash, std::move(f));
+			if (auto f{env.asset_file(k)})
+				queue_send(0, k, std::move(f));
 			else
-				unavailable(0, m.hash, ship_unavailable_reason::unknown);
+				unavailable(0, k, ship_unavailable_reason::unknown);
 		}
 	}
-	void fetch_failed(const std::map<ship_hash, fetch>::iterator i, const ship_unavailable_reason r)
+	void fetch_failed(const std::map<asset_key, fetch>::iterator i, const ship_unavailable_reason r)
 	{
 		for (const auto w : i->second.waiters)
 			unavailable(w, i->first, r);
@@ -472,9 +489,10 @@ private:
 	}
 	void receive_data(const std::uint8_t from, const ship_data_msg &m)
 	{
+		const auto &k{m.key};
 		if (host)
 		{
-			const auto i{fetches.find(m.hash)};
+			const auto i{fetches.find(k)};
 			if (i == fetches.end() || i->second.owner != from)
 				return;
 			const auto r{i->second.assembly.add(m)};
@@ -486,45 +504,40 @@ private:
 				return;
 			}
 			const auto bytes{i->second.assembly.take()};
-			if (!env.store_ship(m.hash, bytes))
+			if (!env.store_asset(k, bytes))
 			{
 				fetch_failed(i, ship_unavailable_reason::invalid);
 				return;
 			}
-			env.note("received", m.hash, from);
-			auto file{env.ship_file(m.hash)};
+			env.note("received", k, from);
+			auto file{env.asset_file(k)};
 			for (const auto w : i->second.waiters)
-				queue_send(w, m.hash, file);
+				queue_send(w, k, file);
 			fetches.erase(i);
-			/* Whoever flies it is drawn with it now. */
-			for (std::uint8_t p = 0; p < MAX_SLOTS; ++p)
-				if (table[p] && !table[p]->pyro && table[p]->hash == m.hash)
-					env.player_ship(p, &*table[p]);
+			show_everyone_with(k);
 		}
 		else
 		{
 			if (from != 0)
 				return;
-			const auto i{wants.find(m.hash)};
+			const auto i{wants.find(k)};
 			if (i == wants.end() || i->second.state != want_state::pending)
 				return;
 			auto &w{i->second};
 			if (!w.assembly)
-				w.assembly.emplace(m.hash, w.size);
+				w.assembly.emplace(k, w.size);
 			const auto r{w.assembly->add(m)};
 			if (r == ship_assembler::result::more)
 				return;
 			w.state = want_state::failed;
-			if (r == ship_assembler::result::complete && env.store_ship(m.hash, w.assembly->take()))
+			if (r == ship_assembler::result::complete && env.store_asset(k, w.assembly->take()))
 			{
 				w.state = want_state::done;
-				env.note("received", m.hash, from);
-				for (std::uint8_t p = 0; p < MAX_SLOTS; ++p)
-					if (table[p] && !table[p]->pyro && table[p]->hash == m.hash)
-						env.player_ship(p, &*table[p]);
+				env.note("received", k, from);
+				show_everyone_with(k);
 			}
 			else
-				env.note("rejected", m.hash, from);
+				env.note("rejected", k, from);
 			w.assembly.reset();
 		}
 	}
@@ -532,16 +545,16 @@ private:
 	{
 		if (host)
 		{
-			const auto i{fetches.find(m.hash)};
+			const auto i{fetches.find(m.key)};
 			if (i != fetches.end() && i->second.owner == from)
 				fetch_failed(i, m.reason);
 		}
 		else if (from == 0)
 		{
-			if (const auto i{wants.find(m.hash)}; i != wants.end() && i->second.state == want_state::pending)
+			if (const auto i{wants.find(m.key)}; i != wants.end() && i->second.state == want_state::pending)
 			{
 				i->second.state = want_state::failed;
-				env.note("not available", m.hash, 0);
+				env.note("not available", m.key, 0);
 			}
 		}
 	}
@@ -549,7 +562,6 @@ private:
 	void broadcast_info(const std::uint8_t pid)
 	{
 		ship_info_msg m{};
-		m.pid = pid;
 		if (table[pid])
 			m = *table[pid];
 		m.pid = pid;
@@ -558,9 +570,9 @@ private:
 				send_msg(s, SHIP_MSG_INFO, m);
 	}
 public:
-	/* This machine accepts ships (the pilot option of D8). */
+	/* This machine accepts ships and other assets (the pilot option of D8). */
 	bool accept{true};
-	/* This machine sends its own ship to the host when asked. */
+	/* This machine sends its own assets to the host when asked. */
 	bool accept_sending{true};
 	ship_exchange(ship_exchange_env &e, const bool is_host, const std::uint8_t self_slot) :
 		env{e}, host{is_host}, self{self_slot}
@@ -576,6 +588,26 @@ public:
 	{
 		static const std::optional<ship_info_msg> none;
 		return pid < MAX_SLOTS ? table[pid] : none;
+	}
+	/* Client: get an asset this machine lacks from the host (ships ask by
+	 * themselves; another kind announces its assets its own way and asks
+	 * through here).
+	 */
+	void request(const asset_key &k, const std::uint32_t size)
+	{
+		if (host || !accept || !asset_max_size(k.kind) || size > asset_max_size(k.kind) || env.has_asset(k) || wants.contains(k))
+			return;
+		wants[k].size = size;
+		env.note("asking the host for", k, 0);
+		send_msg(0, SHIP_MSG_REQUEST, ship_request_msg{k});
+	}
+	/* Host: player `slot` has the asset (for another kind's
+	 * announcements; ships register through SHIP_INFO).
+	 */
+	void note_owner(const asset_key &k, const std::uint8_t slot, const std::uint32_t size)
+	{
+		if (host && slot < MAX_SLOTS && size <= asset_max_size(k.kind))
+			owners.insert({k, {slot, size}});
 	}
 	/* This machine's own ship (and, on the host, a bot's): announce it.
 	 * A client sends it to the host; the host tells everyone.
@@ -601,6 +633,7 @@ public:
 		table[pid].reset();
 		env.player_ship(pid, nullptr);
 		out[pid].clear();
+		std::erase_if(owners, [pid](const auto &o) { return o.second.slot == pid; });
 		for (auto i{fetches.begin()}; i != fetches.end();)
 		{
 			i->second.waiters.erase(pid);
@@ -661,7 +694,7 @@ public:
 				auto &o{q.front()};
 				const auto total{static_cast<std::uint32_t>(o.bytes->size())};
 				const auto n{std::min<std::size_t>(SHIP_DATA_CHUNK, total - o.offset)};
-				const ship_data_msg m{o.hash, total, o.offset, std::span(*o.bytes).subspan(o.offset, n)};
+				const ship_data_msg m{o.key, total, o.offset, std::span(*o.bytes).subspan(o.offset, n)};
 				std::array<std::uint8_t, SHIP_DATA_HEADER + SHIP_DATA_CHUNK> buf;
 				m.write(buf.data());
 				env.send(slot, SHIP_MSG_DATA, std::span(buf).first(m.size()));
@@ -669,7 +702,7 @@ public:
 				allowance -= static_cast<double>(m.size());
 				if (o.offset >= total)
 				{
-					env.note("sent", o.hash, slot);
+					env.note("sent", o.key, slot);
 					q.pop_front();
 				}
 			}

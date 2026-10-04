@@ -67,7 +67,7 @@ void test_unconnected_framing()
 	/* The first two bytes are the protocol, so a v1 build reads upid 100
 	 * and up (an unknown packet type).
 	 */
-	CHECK(dg[0] == NET_V2_PROTO_VERSION && dg[1] == 0);
+	CHECK(dg[0] == (NET_V2_PROTO_VERSION & 0xff) && dg[1] == (NET_V2_PROTO_VERSION >> 8) && dg[0] >= 100);
 
 	{
 		const auto m{parse_unconnected(dg, 0xaabbccdd)};
@@ -102,7 +102,7 @@ void test_unconnected_framing()
 		CHECK(parse_unconnected(big, 0).status == unconnected_status::bad_length);
 		d[0] = 16;
 		CHECK(parse_unconnected(d, 0xaabbccdd).status == unconnected_status::bad_proto);
-		d[0] = NET_V2_PROTO_VERSION;
+		d[0] = NET_V2_PROTO_VERSION & 0xff;
 		d[11] |= 0x80;
 		CHECK(parse_unconnected(d, 0xaabbccdd).status == unconnected_status::bad_flags);
 		d[11] = 0;
