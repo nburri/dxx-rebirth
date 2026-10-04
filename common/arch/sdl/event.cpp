@@ -29,6 +29,7 @@
 #include "partial_range.h"
 #include "frame_probe.h"
 #include "accessibility_keys.h"
+#include "texture_download.h"
 
 namespace dcx {
 
@@ -374,6 +375,8 @@ window_event_result event_process(void)
 	}
 
 	cmd_queue_process();
+	/* Messages of the texture pack download thread to the console. */
+	texture_download::poll();
 
 	// Doing this prevents problems when a draw event can create a newmenu,
 	// such as some network menus when they report a problem

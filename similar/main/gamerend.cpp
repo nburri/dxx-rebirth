@@ -66,6 +66,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #if DXX_USE_OGL
 #include "ogl_init.h"
 #endif
+#include "texture_download.h"
 
 namespace dcx {
 int netplayerinfo_on;
@@ -490,6 +491,16 @@ static void game_draw_hud_stuff(const d_robot_info_array &Robot_info, grs_canvas
 
 	if (CGameCfg.FPSIndicator && PlayerCfg.CockpitMode[1] != cockpit_mode_t::rear_view)
 		show_framerate(canvas);
+
+	/* A texture pack download in the background (texture_download.h):
+	 * one dim line near the bottom, while it runs.
+	 */
+	if (const auto text{texture_download::hud_text()}; !text.empty())
+	{
+		auto &game_font = *GAME_FONT;
+		gr_set_fontcolor(canvas, BM_XRGB(14, 14, 14), -1);
+		gr_string(canvas, game_font, FSPACX(2), canvas.cv_bitmap.bm_h - LINE_SPACING(game_font, game_font) * 3, text.c_str());
+	}
 
 	auto previous_game_mode = Game_mode;
 	if (Newdemo_state == ND_STATE_PLAYBACK)

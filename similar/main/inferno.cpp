@@ -108,6 +108,7 @@ char copyright[] = "DESCENT II  COPYRIGHT (C) 1994-1996 PARALLAX SOFTWARE CORPOR
 #endif
 #include "bot_arena.h"
 #include "vis_shot.h"
+#include "texture_download.h"
 #include "dsx-ns.h"
 
 #if DXX_USE_SDLIMAGE
@@ -234,6 +235,7 @@ static void print_commandline_help()
 		VERB("  -gl_darkedges                 Re-enable dark edges around filtered textures (as present in earlier versions of the engine)\n")	\
 		VERB("  -gl_noeffects                 Disable the shader effects (smooth lighting, sharp\n\t\t\t\tpixels, anti-aliasing, render scale, bloom, gamma)\n")	\
 		VERB("  -notexturepack                Do not load replacement textures from textures/\n")	\
+		VERB("  -notexturedownload            Do not download texture packs (offline)\n")	\
 		DXX_if_defined_01(DXX_USE_STEREOSCOPIC_RENDER, (	\
 		VERB("  -gl_stereo                    Enable OpenGL stereo quad buffering, if available\n")	\
 		VERB("  -gl_stereoview <n>            Select OpenGL stereo viewport mode (experimental; incomplete)\n")	\
@@ -643,6 +645,13 @@ static int main(int argc, char *argv[])
 
 	PHYSFSX_addArchiveContent();
 
+#if DXX_USE_OGL && DXX_BUILD_DESCENT == 2
+	/* Texture packs (texture_download.h): fetch the list of packs in the
+	 * background.  Not for -botarena (nobody watches).
+	 */
+	texture_download::start(CGameCfg.TexturePack && !CGameArg.OglNoTexturePack && !bot_arena_active(), CGameArg.NoTextureDownload);
+#endif
+
 	const auto &&arch_atexit_result = arch_init();
 	/* This variable exists for the side effects that occur when it is
 	 * destroyed.  clang-9 fails to recognize those side effects as a
@@ -813,6 +822,8 @@ static int main(int argc, char *argv[])
 		while ((wind = window_get_front()))
 			window_close(wind);
 	}
+	texture_download::shutdown();
+	texture_download::poll();
 
 	if (bot_arena_active())
 		return bot_arena_exit_status();

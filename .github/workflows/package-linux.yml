@@ -34,6 +34,7 @@ jobs:
           libsdl2-mixer-dev
           libphysfs-dev
           libpng-dev
+          libcurl4-openssl-dev
           libgl-dev
           libglu1-mesa-dev
 
