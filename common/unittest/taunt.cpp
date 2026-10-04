@@ -412,10 +412,11 @@ void test_wire()
 		CHECK(l);
 		check_limits(*l);
 	}
-	/* The id: CRC-32. */
-	const std::uint8_t check[]{'1', '2', '3', '4', '5', '6', '7', '8', '9'};
-	CHECK(wire_id(check) == 0xcbf43926u);
-	CHECK(wire_id(w) != wire_id(encode_wire(starter_horn(1))));
+	/* The id: SHA-256 ("abc" of FIPS 180-2). */
+	const std::uint8_t abc[]{'a', 'b', 'c'};
+	const auto h{wire_hash(abc)};
+	CHECK(h[0] == 0xba && h[1] == 0x78 && h[31] == 0xad);
+	CHECK(wire_hash(w) != wire_hash(encode_wire(starter_horn(1))));
 }
 
 void test_horns()
@@ -452,38 +453,43 @@ void test_mixer_format()
 
 void test_messages()
 {
+	sample_hash hash;
+	for (std::size_t i{}; i != hash.size(); ++i)
+		hash[i] = static_cast<std::uint8_t>(i * 7 + 1);
 	{
-		const taunt_request_msg m{sample_kind::custom, 0x12345678u, 50000};
+		const taunt_request_msg m{sample_kind::custom, 50000, hash};
 		std::array<std::uint8_t, taunt_request_msg::SIZE> buf;
 		m.write(buf);
 		const auto r{taunt_request_msg::read(buf)};
-		CHECK(r && r->kind == sample_kind::custom && r->id == 0x12345678u && r->size == 50000);
-		const taunt_request_msg h{sample_kind::horn3, 0, 0};
+		CHECK(r && r->kind == sample_kind::custom && r->hash == hash && r->size == 50000);
+		const taunt_request_msg h{sample_kind::horn3, 0, {}};
 		h.write(buf);
 		CHECK(taunt_request_msg::read(buf)->kind == sample_kind::horn3);
 		/* A horn names no sample; an own sample has a possible size. */
-		buf[1] = 1;
+		buf[10] = 1;
 		CHECK(!taunt_request_msg::read(buf));
-		taunt_request_msg{sample_kind::custom, 1, 11}.write(buf);
+		taunt_request_msg{sample_kind::horn3, 2, {}}.write(buf);
 		CHECK(!taunt_request_msg::read(buf));
-		taunt_request_msg{sample_kind::custom, 1, MAX_WIRE_SIZE + 2}.write(buf);
+		taunt_request_msg{sample_kind::custom, 11, hash}.write(buf);
 		CHECK(!taunt_request_msg::read(buf));
-		taunt_request_msg{sample_kind::custom, 1, WIRE_HEADER_SIZE + 2 * MIN_SAMPLES + 1}.write(buf);
+		taunt_request_msg{sample_kind::custom, MAX_WIRE_SIZE + 2, hash}.write(buf);
+		CHECK(!taunt_request_msg::read(buf));
+		taunt_request_msg{sample_kind::custom, WIRE_HEADER_SIZE + 2 * MIN_SAMPLES + 1, hash}.write(buf);
 		CHECK(!taunt_request_msg::read(buf));
 		for (const std::uint8_t k : {0, 5, 0x0f, 0x11, 0xff})
 		{
 			buf[0] = k;
 			CHECK(!taunt_request_msg::read(buf));
 		}
-		CHECK(!taunt_request_msg::read(std::span<const std::uint8_t>{buf}.first(8)));
+		CHECK(!taunt_request_msg::read(std::span<const std::uint8_t>{buf}.first(taunt_request_msg::SIZE - 1)));
 	}
 	{
-		const taunt_msg m{5, sample_kind::custom, 0xdeadbeefu, MAX_WIRE_SIZE};
+		const taunt_msg m{5, sample_kind::custom, MAX_WIRE_SIZE, hash};
 		std::array<std::uint8_t, taunt_msg::SIZE> buf;
 		m.write(buf);
 		const auto r{taunt_msg::read(buf)};
-		CHECK(r && r->pid == 5 && r->kind == sample_kind::custom && r->id == 0xdeadbeefu && r->size == MAX_WIRE_SIZE);
-		taunt_msg{7, sample_kind::horn1, 0, 0}.write(buf);
+		CHECK(r && r->pid == 5 && r->kind == sample_kind::custom && r->hash == hash && r->size == MAX_WIRE_SIZE);
+		taunt_msg{7, sample_kind::horn1, 0, {}}.write(buf);
 		CHECK(taunt_msg::read(buf));
 		buf[0] = 8;
 		CHECK(!taunt_msg::read(buf));

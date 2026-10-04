@@ -163,9 +163,12 @@ std::vector<std::uint8_t> encode_wire(std::span<const std::int16_t> s);
  */
 [[nodiscard]]
 std::optional<pcm> decode_wire(std::span<const std::uint8_t> bytes);
-/* The id of a sample in the transfer format: CRC-32 of its bytes. */
+/* The id of a sample in the transfer format: the SHA-256 of its bytes
+ * (the asset key of the transfer, net_v2_ships.h kind 2).
+ */
+using sample_hash = std::array<std::uint8_t, 32>;
 [[nodiscard]]
-std::uint32_t wire_id(std::span<const std::uint8_t> bytes);
+sample_hash wire_hash(std::span<const std::uint8_t> bytes);
 
 /* The starter horns (our own, synthesised, CC0): `n` 1 to 4. */
 [[nodiscard]]
@@ -238,10 +241,10 @@ constexpr std::uint8_t MAX_PLAYER_ID{7};
 /* TAUNT_REQUEST, client to host: the client's player taunts. */
 struct taunt_request_msg
 {
-	static constexpr std::size_t SIZE{9};
+	static constexpr std::size_t SIZE{1 + 4 + 32};
 	sample_kind kind{sample_kind::horn1};
-	std::uint32_t id{};		/* custom: wire_id of the sample */
 	std::uint32_t size{};	/* custom: its size in the transfer format */
+	sample_hash hash{};		/* custom: wire_hash of the sample */
 	void write(std::span<std::uint8_t, SIZE> buf) const;
 	[[nodiscard]]
 	static std::optional<taunt_request_msg> read(std::span<const std::uint8_t> buf);
@@ -250,11 +253,11 @@ struct taunt_request_msg
 /* TAUNT, host to all: player `pid` taunts. */
 struct taunt_msg
 {
-	static constexpr std::size_t SIZE{10};
+	static constexpr std::size_t SIZE{1 + 1 + 4 + 32};
 	std::uint8_t pid{};
 	sample_kind kind{sample_kind::horn1};
-	std::uint32_t id{};
 	std::uint32_t size{};
+	sample_hash hash{};
 	void write(std::span<std::uint8_t, SIZE> buf) const;
 	[[nodiscard]]
 	static std::optional<taunt_msg> read(std::span<const std::uint8_t> buf);

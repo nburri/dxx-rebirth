@@ -1,8 +1,8 @@
 # Taunts (horn)
 
-Status: phase 1 on the side branch `exp-visuals` (protocol 28784 (0x7000 + 112)). Phase 2,
-the transfer of the players' own samples, rides on the custom ships' asset
-transfer (Documentation/custom-ships.md §5.3) once that is merged.
+Status: on the side branch `exp-visuals`. Phase 1 (protocol 0x7000 + 112):
+everything but sending the players' own samples; phase 2 (0x7000 + 114):
+the samples travel with the custom ships' asset transfer.
 
 ## 1. For players
 
@@ -65,7 +65,7 @@ transfer (Documentation/custom-ships.md §5.3) once that is merged.
   count u32 (1 102 to 44 100), then mono int16 samples, little-endian:
   at most 88 212 bytes (≤ 100 KB, uncompressed so that it needs no
   decoder). A receiver checks every field and the length, then cuts, fades
-  and normalises again. The id of a sample is the CRC-32 of these bytes.
+  and normalises again. The id of a sample is the SHA-256 of these bytes.
 - **Network** (Documentation/network-protocol-v2.md §6.9a): a client sends
   `TAUNT_REQUEST` (sample kind, id, size); the host checks the rate,
   plays it and relays `TAUNT` (pid, kind, id, size) to all others. The
@@ -87,16 +87,27 @@ transfer (Documentation/custom-ships.md §5.3) once that is merged.
 
 ## 3. Phase 2: the own samples to the other players
 
-The custom ships (stage S3) bring a generic host-relayed, chunked,
-SHA-256-checked asset transfer with a cache: `ASSET_REQUEST` 0x4C,
-`ASSET_DATA` 0x4D, `ASSET_UNAVAILABLE` 0x4E, each with a kind u8 and the
-32-byte SHA-256 (`common/main/net_v2_ships.h`). Kind 2 is reserved for
-taunt samples (at most 128 KiB; a DXT1 sample is at most 88 212 bytes).
-Phase 2 names a player's own sample by its SHA-256 instead of the CRC-32
-and fetches missing samples with kind 2, under the same caching rules; a
-peer that lacks a sample plays Horn 1 until it arrives. The protocol
-version is bumped again for it (exp-visuals numbers its protocols
-0x7000 + n).
+The custom ships (stage S3) brought a generic host-relayed, chunked,
+SHA-256-checked asset transfer: `ASSET_REQUEST` 0x4C, `ASSET_DATA` 0x4D,
+`ASSET_UNAVAILABLE` 0x4E, each with a kind u8 and the 32-byte SHA-256
+(`common/main/net_v2_ships.h`, `similar/main/net_ships.cpp`). The taunts
+are kind 2 (at most 128 KiB; a DXT1 sample is at most 88 212 bytes):
+
+- `TAUNT_REQUEST` and `TAUNT` name an own sample by its SHA-256 and size.
+- The host learns from a `TAUNT_REQUEST` that the sender owns the sample
+  and fetches it for itself (unless it does not play that player's
+  taunts); a client that hears a `TAUNT` for a sample it lacks asks the
+  host, which serves its copy or fetches it from the owner. Players never
+  talk to each other.
+- Until it arrives, the horn sounds as Horn 1; the next taunt plays the
+  own sample. A transfer is paced like the ships' (16 KiB/s in a level):
+  a sample of 2 s takes about 5 s.
+- A received sample is checked (SHA-256, every field of the format, the
+  limits applied again) and kept in `taunts/cache/<sha256>.dxt` in the
+  user folder; at most 64 are kept, the oldest go.
+- Muted players' samples and, with "Hear other players' horns" off, all
+  samples are not fetched. "Accept ships from the host" does not apply
+  to taunts.
 
 ## 4. Tests
 
@@ -111,5 +122,10 @@ version is bumped again for it (exp-visuals numbers its protocols
   messages, `/mute`.
 - `test-movement-record`, `test-bot-presets`: the new event kind, the
   `BotTaunt` profile line.
+- `test-net-v2-ships`: a taunt sample (kind 2) fetched by the host from
+  its owner once and served to a client that refuses ships; an oversized
+  one never asked for.
+- Not done: a two-instance network test (the game has no unattended
+  client join).
 - Arena: `tools/botarena-run.sh -x -botarena-taunt ...` records the bots'
   taunts (`movrec-dump` lists them as level events).

@@ -55,11 +55,11 @@ constexpr net_clock net_milliseconds(const net_clock ms)
  * they never collide with those of experimental-netcode, while the low
  * byte keeps counting (0x7000 + 112: taunts, Documentation/taunts.md;
  * 0x7000 + 113: custom ships, SHIP_INFO and the ASSET_* transfer,
- * net_v2_ships.h).
+ * net_v2_ships.h; 0x7000 + 114: the taunts' samples as asset kind 2).
  * Named differently so that the two never shadow each other in a
  * translation unit that sees both.
  */
-constexpr std::uint16_t NET_V2_PROTO_VERSION{0x7000 + 113};
+constexpr std::uint16_t NET_V2_PROTO_VERSION{0x7000 + 114};
 /* The protocol's low byte is the first byte of a datagram: a v1 build
  * reads it as the packet type, and 100 and up are no v1 packet type.
  */

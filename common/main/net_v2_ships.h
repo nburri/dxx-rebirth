@@ -43,7 +43,8 @@ namespace net_v2 {
 
 /* Message ids (session_msg, net_v2_session.h; 0x50/0x51 are the
  * taunts').  REQUEST, DATA and UNAVAILABLE move any kind of asset, named
- * by kind and SHA-256: ships now, the taunts' sounds later.
+ * by kind and SHA-256: ships (kind 1) and the taunts' sounds (kind 2,
+ * Documentation/taunts.md).
  */
 constexpr std::uint8_t SHIP_MSG_INFO{0x4b};
 constexpr std::uint8_t SHIP_MSG_REQUEST{0x4c};
@@ -614,11 +615,13 @@ public:
 	}
 	/* Client: get an asset this machine lacks from the host (ships ask by
 	 * themselves; another kind announces its assets its own way and asks
-	 * through here).
+	 * through here).  `accept` is the pilot's option for ships; another
+	 * kind's caller decides for itself (the taunts: "Hear other players'
+	 * horns").
 	 */
 	void request(const asset_key &k, const std::uint32_t size)
 	{
-		if (host || !accept || !asset_max_size(k.kind) || size > asset_max_size(k.kind) || env.has_asset(k) || wants.contains(k))
+		if (host || (!accept && k.kind == static_cast<std::uint8_t>(asset_kind::ship)) || !asset_max_size(k.kind) || size > asset_max_size(k.kind) || env.has_asset(k) || wants.contains(k))
 			return;
 		wants[k].size = size;
 		env.note("asking the host for", k, 0);
@@ -629,8 +632,23 @@ public:
 	 */
 	void note_owner(const asset_key &k, const std::uint8_t slot, const std::uint32_t size)
 	{
-		if (host && slot < MAX_SLOTS && size <= asset_max_size(k.kind))
-			owners.insert({k, {slot, size}});
+		if (!host || slot >= MAX_SLOTS || !size || size > asset_max_size(k.kind))
+			return;
+		const auto [b, e]{owners.equal_range(k)};
+		for (auto i{b}; i != e; ++i)
+			if (i->second.slot == slot)
+				return;
+		owners.insert({k, {slot, size}});
+	}
+	/* Host: get an asset of another kind (a taunt's sound) from its owner
+	 * `slot` for this machine itself; clients that ask later wait for the
+	 * same fetch.
+	 */
+	void host_want(const asset_key &k, const std::uint8_t slot, const std::uint32_t size)
+	{
+		if (!host || slot >= MAX_SLOTS || slot == self || !size || size > asset_max_size(k.kind) || !env.is_client(slot) || env.has_asset(k) || fetches.contains(k))
+			return;
+		host_fetch(k, slot, std::nullopt, size);
 	}
 	/* This machine's own ship (and, on the host, a bot's): announce it.
 	 * A client sends it to the host; the host tells everyone.

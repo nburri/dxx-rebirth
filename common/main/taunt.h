@@ -15,8 +15,10 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <string>
+#include <vector>
 
 #ifdef DXX_BUILD_DESCENT
 #include "fwd-player.h"
@@ -48,6 +50,15 @@ void net_taunt_receive(playernum_t from, std::uint8_t type, std::span<const std:
  * then not sent as a message).
  */
 bool taunt_chat_command(const char *text);
+/* Phase 2, the samples as asset kind 2 of the ships' transfer
+ * (net_ships.cpp): this machine has the sample with this SHA-256 (its
+ * own, or received); its bytes in the transfer format; a received one,
+ * checked (SHA-256, every field of the format) and kept in
+ * taunts/cache/.
+ */
+bool taunt_asset_has(std::span<const std::uint8_t, 32> hash);
+std::shared_ptr<const std::vector<std::uint8_t>> taunt_asset_file(std::span<const std::uint8_t, 32> hash);
+bool taunt_asset_store(std::span<const std::uint8_t, 32> hash, std::span<const std::uint8_t> bytes);
 #else
 static inline void taunt_frame()
 {

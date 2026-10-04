@@ -13,6 +13,7 @@
 #include <cmath>
 #include <numbers>
 #include "taunt_sample.h"
+#include "sha256.h"
 
 namespace dcx {
 
@@ -47,10 +48,10 @@ std::uint32_t get_u32(const std::uint8_t *p)
 /* Whether `id` and `size` suit `kind`: zero for a horn, a possible
  * transfer size for an own sample.
  */
-bool valid_sample_ref(const sample_kind kind, const std::uint32_t id, const std::uint32_t size)
+bool valid_sample_ref(const sample_kind kind, const sample_hash &hash, const std::uint32_t size)
 {
 	if (kind != sample_kind::custom)
-		return id == 0 && size == 0;
+		return size == 0 && hash == sample_hash{};
 	return size >= WIRE_HEADER_SIZE + 2 * MIN_SAMPLES && size <= MAX_WIRE_SIZE && !((size - WIRE_HEADER_SIZE) & 1);
 }
 
@@ -361,16 +362,9 @@ std::optional<pcm> decode_wire(const std::span<const std::uint8_t> bytes)
 	return to_pcm(s);
 }
 
-std::uint32_t wire_id(const std::span<const std::uint8_t> bytes)
+sample_hash wire_hash(const std::span<const std::uint8_t> bytes)
 {
-	std::uint32_t crc{0xffffffffu};
-	for (const auto b : bytes)
-	{
-		crc ^= b;
-		for (unsigned k{}; k != 8; ++k)
-			crc = (crc >> 1) ^ (0xedb88320u & (0u - (crc & 1u)));
-	}
-	return ~crc;
+	return ::dcx::sha256_of(bytes);
 }
 
 pcm starter_horn(const unsigned n)
@@ -434,8 +428,8 @@ verdict rate_limiter::check(const std::uint64_t now_ms, const rate_limits &limit
 void taunt_request_msg::write(const std::span<std::uint8_t, SIZE> buf) const
 {
 	buf[0] = static_cast<std::uint8_t>(kind);
-	put_u32(&buf[1], id);
-	put_u32(&buf[5], size);
+	put_u32(&buf[1], size);
+	std::ranges::copy(hash, &buf[5]);
 }
 
 std::optional<taunt_request_msg> taunt_request_msg::read(const std::span<const std::uint8_t> buf)
@@ -444,9 +438,9 @@ std::optional<taunt_request_msg> taunt_request_msg::read(const std::span<const s
 		return std::nullopt;
 	taunt_request_msg m;
 	m.kind = static_cast<sample_kind>(buf[0]);
-	m.id = get_u32(&buf[1]);
-	m.size = get_u32(&buf[5]);
-	if (!valid_sample_ref(m.kind, m.id, m.size))
+	m.size = get_u32(&buf[1]);
+	std::ranges::copy(buf.subspan(5, 32), m.hash.begin());
+	if (!valid_sample_ref(m.kind, m.hash, m.size))
 		return std::nullopt;
 	return m;
 }
@@ -455,8 +449,8 @@ void taunt_msg::write(const std::span<std::uint8_t, SIZE> buf) const
 {
 	buf[0] = pid;
 	buf[1] = static_cast<std::uint8_t>(kind);
-	put_u32(&buf[2], id);
-	put_u32(&buf[6], size);
+	put_u32(&buf[2], size);
+	std::ranges::copy(hash, &buf[6]);
 }
 
 std::optional<taunt_msg> taunt_msg::read(const std::span<const std::uint8_t> buf)
@@ -466,9 +460,9 @@ std::optional<taunt_msg> taunt_msg::read(const std::span<const std::uint8_t> buf
 	taunt_msg m;
 	m.pid = buf[0];
 	m.kind = static_cast<sample_kind>(buf[1]);
-	m.id = get_u32(&buf[2]);
-	m.size = get_u32(&buf[6]);
-	if (!valid_sample_ref(m.kind, m.id, m.size))
+	m.size = get_u32(&buf[2]);
+	std::ranges::copy(buf.subspan(6, 32), m.hash.begin());
+	if (!valid_sample_ref(m.kind, m.hash, m.size))
 		return std::nullopt;
 	return m;
 }
