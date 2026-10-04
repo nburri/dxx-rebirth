@@ -1,0 +1,689 @@
+/*
+ * This file is part of the DXX-Rebirth project <https://github.com/dxx-rebirth/dxx-rebirth/>.
+ * It is copyright by its individual contributors, as recorded in the
+ * project's Git history.  See COPYING.txt at the top level for license
+ * terms and a link to the Git history.
+ */
+/*
+ * Custom ships over the network (Documentation/custom-ships.md section
+ * 5, exp-visuals protocol): every player announces its ship (SHIP_INFO),
+ * the host tells everyone every player's, and a machine that lacks a
+ * ship gets it from the host (SHIP_REQUEST, SHIP_DATA), the host first
+ * fetching it from the player who flies it if it lacks it too.  No
+ * prompt (decisions D8, D9): a pilot option refuses ships from the host.
+ *
+ * Message layouts, the assembly of a received ship and the whole
+ * exchange as a state machine over an interface to the game and the
+ * transport, so that common/unittest/net_v2_ships.cpp can run a host and
+ * clients without the game.  Depends on the standard library and
+ * net_v2.h only.
+ */
+
+#pragma once
+
+#include <algorithm>
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <deque>
+#include <map>
+#include <memory>
+#include <optional>
+#include <set>
+#include <span>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include "net_v2.h"
+
+namespace dcx {
+
+namespace net_v2 {
+
+/* Message ids (session_msg, net_v2_session.h; 0x50/0x51 are the
+ * taunts').  REQUEST, DATA and UNAVAILABLE move any kind of asset, named
+ * by kind and SHA-256: ships now, the taunts' sounds later.
+ */
+constexpr std::uint8_t SHIP_MSG_INFO{0x4b};
+constexpr std::uint8_t SHIP_MSG_REQUEST{0x4c};
+constexpr std::uint8_t SHIP_MSG_DATA{0x4d};
+constexpr std::uint8_t SHIP_MSG_UNAVAILABLE{0x4e};
+
+constexpr std::size_t SHIP_HASH_SIZE{32};
+using ship_hash = std::array<std::uint8_t, SHIP_HASH_SIZE>;
+
+enum class asset_kind : std::uint8_t
+{
+	ship = 1,
+	/* Reserved for the taunts' sounds. */
+	taunt = 2,
+};
+
+/* The largest asset of a kind; 0: not a kind this version knows. */
+[[nodiscard]]
+constexpr std::uint32_t asset_max_size(const std::uint8_t kind)
+{
+	switch (kind)
+	{
+		case static_cast<std::uint8_t>(asset_kind::ship):
+			return 1u << 20;
+		case static_cast<std::uint8_t>(asset_kind::taunt):
+			return 128u << 10;
+		default:
+			return 0;
+	}
+}
+
+struct asset_key
+{
+	std::uint8_t kind{static_cast<std::uint8_t>(asset_kind::ship)};
+	ship_hash hash{};
+	constexpr auto operator<=>(const asset_key &) const = default;
+};
+/* The name field: up to 24 characters, NUL padded. */
+constexpr std::size_t SHIP_NAME_FIELD{25};
+constexpr std::uint32_t SHIP_MAX_SIZE{1u << 20};
+/* ASSET_DATA: kind, hash, total size, offset, then the bytes. */
+constexpr std::size_t SHIP_DATA_HEADER{1 + SHIP_HASH_SIZE + 8};
+constexpr std::size_t SHIP_DATA_CHUNK{896};
+static_assert(SHIP_DATA_HEADER + SHIP_DATA_CHUNK <= NET_V2_MAX_MESSAGE);
+/* Pacing: bytes per second in the lobby and during a level, and how
+ * much of the reliable queue the transfers may fill (gameplay messages
+ * never wait behind more than this).
+ */
+constexpr std::size_t SHIP_RATE_LOBBY{96 * 1024};
+constexpr std::size_t SHIP_RATE_LEVEL{16 * 1024};
+constexpr std::size_t SHIP_QUEUE_LIMIT{12 * 1024};
+
+/* SHIP_INFO (pid, flags, size, hash, name): any player to the host for
+ * itself, the host to everyone for every player (its bots too).
+ */
+struct ship_info_msg
+{
+	static constexpr std::size_t SIZE{1 + 1 + 4 + SHIP_HASH_SIZE + SHIP_NAME_FIELD};
+	static constexpr std::uint8_t FLAG_PYRO{1};
+	std::uint8_t pid{};
+	bool pyro{true};
+	std::uint32_t size{};
+	ship_hash hash{};
+	std::string name;
+	void write(std::uint8_t *const p) const
+	{
+		p[0] = pid;
+		p[1] = pyro ? FLAG_PYRO : 0;
+		net_put_le32(p + 2, size);
+		std::ranges::copy(hash, p + 6);
+		std::fill_n(p + 6 + SHIP_HASH_SIZE, SHIP_NAME_FIELD, 0);
+		std::copy_n(name.data(), std::min(name.size(), SHIP_NAME_FIELD - 1), p + 6 + SHIP_HASH_SIZE);
+	}
+	[[nodiscard]]
+	static std::optional<ship_info_msg> read(const std::span<const std::uint8_t> b)
+	{
+		if (b.size() != SIZE || (b[1] & ~FLAG_PYRO))
+			return std::nullopt;
+		ship_info_msg m;
+		m.pid = b[0];
+		m.pyro = b[1] & FLAG_PYRO;
+		m.size = net_get_le32(&b[2]);
+		std::copy_n(&b[6], SHIP_HASH_SIZE, m.hash.begin());
+		const auto name{b.subspan(6 + SHIP_HASH_SIZE, SHIP_NAME_FIELD)};
+		const auto nul{std::ranges::find(name, std::uint8_t{0})};
+		if (nul == name.end())
+			return std::nullopt;
+		for (auto i{name.begin()}; i != nul; ++i)
+		{
+			const auto c{*i};
+			if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-'))
+				return std::nullopt;
+			m.name.push_back(static_cast<char>(c));
+		}
+		/* A Pyro carries no ship; a ship is named, of an allowed size. */
+		if (m.pyro ? m.size || m.hash != ship_hash{} || !m.name.empty() : !m.size || m.size > SHIP_MAX_SIZE || m.name.empty())
+			return std::nullopt;
+		return m;
+	}
+};
+
+/* SHIP_REQUEST (hash): a client to the host, or the host to the player
+ * whose ship it fetches.
+ */
+struct ship_request_msg
+{
+	static constexpr std::size_t SIZE{1 + SHIP_HASH_SIZE};
+	asset_key key;
+	void write(std::uint8_t *const p) const
+	{
+		p[0] = key.kind;
+		std::ranges::copy(key.hash, p + 1);
+	}
+	[[nodiscard]]
+	static std::optional<ship_request_msg> read(const std::span<const std::uint8_t> b)
+	{
+		if (b.size() != SIZE || !asset_max_size(b[0]))
+			return std::nullopt;
+		ship_request_msg m;
+		m.key.kind = b[0];
+		std::copy_n(&b[1], SHIP_HASH_SIZE, m.key.hash.begin());
+		return m;
+	}
+};
+
+/* SHIP_DATA (hash, total, offset, bytes): in order, as the reliable
+ * stream keeps it.
+ */
+struct ship_data_msg
+{
+	asset_key key;
+	std::uint32_t total{}, offset{};
+	std::span<const std::uint8_t> data;
+	[[nodiscard]]
+	std::size_t size() const
+	{
+		return SHIP_DATA_HEADER + data.size();
+	}
+	void write(std::uint8_t *const p) const
+	{
+		p[0] = key.kind;
+		std::ranges::copy(key.hash, p + 1);
+		net_put_le32(p + 1 + SHIP_HASH_SIZE, total);
+		net_put_le32(p + 1 + SHIP_HASH_SIZE + 4, offset);
+		std::ranges::copy(data, p + SHIP_DATA_HEADER);
+	}
+	[[nodiscard]]
+	static std::optional<ship_data_msg> read(const std::span<const std::uint8_t> b)
+	{
+		if (b.size() <= SHIP_DATA_HEADER || b.size() > SHIP_DATA_HEADER + SHIP_DATA_CHUNK)
+			return std::nullopt;
+		ship_data_msg m;
+		m.key.kind = b[0];
+		std::copy_n(&b[1], SHIP_HASH_SIZE, m.key.hash.begin());
+		m.total = net_get_le32(&b[1 + SHIP_HASH_SIZE]);
+		m.offset = net_get_le32(&b[1 + SHIP_HASH_SIZE + 4]);
+		m.data = b.subspan(SHIP_DATA_HEADER);
+		if (!m.total || m.total > asset_max_size(m.key.kind) || m.offset >= m.total || m.data.size() > m.total - m.offset)
+			return std::nullopt;
+		return m;
+	}
+};
+
+enum class ship_unavailable_reason : std::uint8_t
+{
+	unknown = 0,	/* nobody here has it */
+	refused = 1,	/* its owner sends no ships */
+	owner_left = 2,
+	invalid = 3,	/* the data did not check out */
+};
+
+struct ship_unavailable_msg
+{
+	static constexpr std::size_t SIZE{1 + SHIP_HASH_SIZE + 1};
+	asset_key key;
+	ship_unavailable_reason reason{};
+	void write(std::uint8_t *const p) const
+	{
+		p[0] = key.kind;
+		std::ranges::copy(key.hash, p + 1);
+		p[1 + SHIP_HASH_SIZE] = static_cast<std::uint8_t>(reason);
+	}
+	[[nodiscard]]
+	static std::optional<ship_unavailable_msg> read(const std::span<const std::uint8_t> b)
+	{
+		if (b.size() != SIZE || !asset_max_size(b[0]) || b[1 + SHIP_HASH_SIZE] > static_cast<std::uint8_t>(ship_unavailable_reason::invalid))
+			return std::nullopt;
+		ship_unavailable_msg m;
+		m.key.kind = b[0];
+		std::copy_n(&b[1], SHIP_HASH_SIZE, m.key.hash.begin());
+		m.reason = static_cast<ship_unavailable_reason>(b[1 + SHIP_HASH_SIZE]);
+		return m;
+	}
+};
+
+/* A ship being received: parts must come in order, of one size, never
+ * past it.
+ */
+class ship_assembler
+{
+	asset_key expected;
+	std::uint32_t total{};
+	std::vector<std::uint8_t> bytes;
+public:
+	enum class result
+	{
+		more,
+		complete,
+		error,
+	};
+	explicit ship_assembler(const asset_key &k, const std::uint32_t expected_size = 0) :
+		expected{k}, total{expected_size}
+	{
+	}
+	[[nodiscard]]
+	result add(const ship_data_msg &m)
+	{
+		if (m.key != expected || (total && m.total != total) || m.offset != bytes.size())
+			return result::error;
+		total = m.total;
+		if (bytes.empty())
+			bytes.reserve(total);
+		bytes.insert(bytes.end(), m.data.begin(), m.data.end());
+		return bytes.size() == total ? result::complete : result::more;
+	}
+	[[nodiscard]]
+	std::vector<std::uint8_t> take()
+	{
+		return std::move(bytes);
+	}
+	[[nodiscard]]
+	std::size_t received() const
+	{
+		return bytes.size();
+	}
+};
+
+/* What the exchange needs from the game and the transport.  Slots are
+ * player numbers; a client talks only to slot 0, the host.
+ */
+class ship_exchange_env
+{
+public:
+	virtual ~ship_exchange_env() = default;
+	/* This machine has the ship with this hash. */
+	virtual bool has_ship(const ship_hash &) = 0;
+	/* The local ship file with this hash, if this machine has it. */
+	virtual std::shared_ptr<const std::vector<std::uint8_t>> ship_file(const ship_hash &) = 0;
+	/* A received ship: check it (SHA-256, the reader's rules) and keep
+	 * it; false if it does not check out.
+	 */
+	virtual bool store_ship(const ship_hash &, std::span<const std::uint8_t>) = 0;
+	/* A player's ship (nullptr: the Pyro). */
+	virtual void player_ship(std::uint8_t pid, const ship_info_msg *) = 0;
+	virtual void send(std::uint8_t slot, std::uint8_t type, std::span<const std::uint8_t> payload) = 0;
+	/* Bytes waiting in the reliable queue to that slot. */
+	virtual std::size_t queued_bytes(std::uint8_t slot) = 0;
+	/* Host: the slot has a connected client (not a bot, not empty). */
+	virtual bool is_client(std::uint8_t slot) = 0;
+	/* A transfer started, finished or failed (for the log). */
+	virtual void note(std::string_view what, const ship_hash &, std::uint8_t slot) = 0;
+};
+
+class ship_exchange
+{
+public:
+	static constexpr unsigned MAX_SLOTS{8};
+private:
+	struct outgoing
+	{
+		ship_hash hash{};
+		std::shared_ptr<const std::vector<std::uint8_t>> bytes;
+		std::uint32_t offset{};
+	};
+	/* Host: a ship it fetches from its owner, and who waits for it. */
+	struct fetch
+	{
+		std::uint8_t owner{};
+		ship_assembler assembly;
+		std::set<std::uint8_t> waiters;
+	};
+	/* Client: a ship it asked the host for. */
+	enum class want_state
+	{
+		pending,
+		done,
+		failed,
+	};
+	struct want
+	{
+		want_state state{want_state::pending};
+		std::optional<ship_assembler> assembly;
+		std::uint32_t size{};
+	};
+	ship_exchange_env &env;
+	bool host;
+	std::uint8_t self;
+	std::array<std::optional<ship_info_msg>, MAX_SLOTS> table{};
+	std::array<std::deque<outgoing>, MAX_SLOTS> out{};
+	std::map<ship_hash, fetch> fetches;
+	std::map<ship_hash, want> wants;
+	/* Pacing: bytes the transfers may still send, refilled per second. */
+	double allowance{};
+	template <typename M>
+	void send_msg(const std::uint8_t slot, const std::uint8_t type, const M &m)
+	{
+		std::array<std::uint8_t, M::SIZE> buf;
+		m.write(buf.data());
+		env.send(slot, type, buf);
+	}
+	void unavailable(const std::uint8_t slot, const ship_hash &h, const ship_unavailable_reason r)
+	{
+		send_msg(slot, SHIP_MSG_UNAVAILABLE, ship_unavailable_msg{h, r});
+	}
+	void queue_send(const std::uint8_t slot, const ship_hash &h, std::shared_ptr<const std::vector<std::uint8_t>> bytes)
+	{
+		if (slot >= MAX_SLOTS || !bytes)
+			return;
+		auto &q{out[slot]};
+		/* Asked again while on its way: once is enough. */
+		if (std::ranges::any_of(q, [&h](const outgoing &o) { return o.hash == h; }))
+			return;
+		env.note("sending", h, slot);
+		q.push_back({h, std::move(bytes), 0});
+	}
+	/* Host: whose ship is this (a connected client other than `not_slot`). */
+	[[nodiscard]]
+	std::optional<std::uint8_t> owner_of(const ship_hash &h, const std::uint8_t not_slot) const
+	{
+		for (std::uint8_t i = 1; i < MAX_SLOTS; ++i)
+			if (i != not_slot && table[i] && !table[i]->pyro && table[i]->hash == h && env.is_client(i))
+				return i;
+		return std::nullopt;
+	}
+	void host_fetch(const ship_hash &h, const std::uint8_t owner, const std::optional<std::uint8_t> waiter, const std::uint32_t size)
+	{
+		auto [i, inserted]{fetches.try_emplace(h, fetch{owner, ship_assembler{h, size}, {}})};
+		if (waiter)
+			i->second.waiters.insert(*waiter);
+		if (inserted)
+		{
+			env.note("fetching from its owner", h, owner);
+			send_msg(owner, SHIP_MSG_REQUEST, ship_request_msg{h});
+		}
+	}
+	void client_want(const ship_info_msg &m)
+	{
+		if (m.pyro || !accept || env.has_ship(m.hash) || wants.contains(m.hash))
+			return;
+		auto &w{wants[m.hash]};
+		w.size = m.size;
+		env.note("asking the host for", m.hash, 0);
+		send_msg(0, SHIP_MSG_REQUEST, ship_request_msg{m.hash});
+	}
+	void receive_info(const std::uint8_t from, const ship_info_msg &m)
+	{
+		if (m.pid >= MAX_SLOTS)
+			return;
+		if (host)
+		{
+			/* A player speaks for itself only. */
+			if (m.pid != from || from == self)
+				return;
+			table[from] = m;
+			env.player_ship(from, m.pyro ? nullptr : &m);
+			broadcast_info(from);
+			/* The host draws it too: fetch it if it lacks it. */
+			if (!m.pyro && accept && !env.has_ship(m.hash))
+				host_fetch(m.hash, from, std::nullopt, m.size);
+		}
+		else
+		{
+			if (from != 0 || m.pid == self)
+				return;
+			table[m.pid] = m;
+			env.player_ship(m.pid, m.pyro ? nullptr : &m);
+			client_want(m);
+		}
+	}
+	void receive_request(const std::uint8_t from, const ship_request_msg &m)
+	{
+		if (host)
+		{
+			if (from == self || !env.is_client(from))
+				return;
+			if (auto f{env.ship_file(m.hash)})
+			{
+				queue_send(from, m.hash, std::move(f));
+				return;
+			}
+			if (const auto i{fetches.find(m.hash)}; i != fetches.end())
+			{
+				i->second.waiters.insert(from);
+				return;
+			}
+			const auto owner{owner_of(m.hash, from)};
+			if (!owner)
+			{
+				unavailable(from, m.hash, ship_unavailable_reason::unknown);
+				return;
+			}
+			host_fetch(m.hash, *owner, from, table[*owner]->size);
+		}
+		else
+		{
+			/* The host fetches this player's ship. */
+			if (from != 0)
+				return;
+			if (!accept_sending)
+			{
+				unavailable(0, m.hash, ship_unavailable_reason::refused);
+				return;
+			}
+			if (auto f{env.ship_file(m.hash)})
+				queue_send(0, m.hash, std::move(f));
+			else
+				unavailable(0, m.hash, ship_unavailable_reason::unknown);
+		}
+	}
+	void fetch_failed(const std::map<ship_hash, fetch>::iterator i, const ship_unavailable_reason r)
+	{
+		for (const auto w : i->second.waiters)
+			unavailable(w, i->first, r);
+		env.note("could not fetch", i->first, i->second.owner);
+		fetches.erase(i);
+	}
+	void receive_data(const std::uint8_t from, const ship_data_msg &m)
+	{
+		if (host)
+		{
+			const auto i{fetches.find(m.hash)};
+			if (i == fetches.end() || i->second.owner != from)
+				return;
+			const auto r{i->second.assembly.add(m)};
+			if (r == ship_assembler::result::more)
+				return;
+			if (r == ship_assembler::result::error)
+			{
+				fetch_failed(i, ship_unavailable_reason::invalid);
+				return;
+			}
+			const auto bytes{i->second.assembly.take()};
+			if (!env.store_ship(m.hash, bytes))
+			{
+				fetch_failed(i, ship_unavailable_reason::invalid);
+				return;
+			}
+			env.note("received", m.hash, from);
+			auto file{env.ship_file(m.hash)};
+			for (const auto w : i->second.waiters)
+				queue_send(w, m.hash, file);
+			fetches.erase(i);
+			/* Whoever flies it is drawn with it now. */
+			for (std::uint8_t p = 0; p < MAX_SLOTS; ++p)
+				if (table[p] && !table[p]->pyro && table[p]->hash == m.hash)
+					env.player_ship(p, &*table[p]);
+		}
+		else
+		{
+			if (from != 0)
+				return;
+			const auto i{wants.find(m.hash)};
+			if (i == wants.end() || i->second.state != want_state::pending)
+				return;
+			auto &w{i->second};
+			if (!w.assembly)
+				w.assembly.emplace(m.hash, w.size);
+			const auto r{w.assembly->add(m)};
+			if (r == ship_assembler::result::more)
+				return;
+			w.state = want_state::failed;
+			if (r == ship_assembler::result::complete && env.store_ship(m.hash, w.assembly->take()))
+			{
+				w.state = want_state::done;
+				env.note("received", m.hash, from);
+				for (std::uint8_t p = 0; p < MAX_SLOTS; ++p)
+					if (table[p] && !table[p]->pyro && table[p]->hash == m.hash)
+						env.player_ship(p, &*table[p]);
+			}
+			else
+				env.note("rejected", m.hash, from);
+			w.assembly.reset();
+		}
+	}
+	void receive_unavailable(const std::uint8_t from, const ship_unavailable_msg &m)
+	{
+		if (host)
+		{
+			const auto i{fetches.find(m.hash)};
+			if (i != fetches.end() && i->second.owner == from)
+				fetch_failed(i, m.reason);
+		}
+		else if (from == 0)
+		{
+			if (const auto i{wants.find(m.hash)}; i != wants.end() && i->second.state == want_state::pending)
+			{
+				i->second.state = want_state::failed;
+				env.note("not available", m.hash, 0);
+			}
+		}
+	}
+	/* Host: tell every client a player's ship. */
+	void broadcast_info(const std::uint8_t pid)
+	{
+		ship_info_msg m{};
+		m.pid = pid;
+		if (table[pid])
+			m = *table[pid];
+		m.pid = pid;
+		for (std::uint8_t s = 1; s < MAX_SLOTS; ++s)
+			if (env.is_client(s))
+				send_msg(s, SHIP_MSG_INFO, m);
+	}
+public:
+	/* This machine accepts ships (the pilot option of D8). */
+	bool accept{true};
+	/* This machine sends its own ship to the host when asked. */
+	bool accept_sending{true};
+	ship_exchange(ship_exchange_env &e, const bool is_host, const std::uint8_t self_slot) :
+		env{e}, host{is_host}, self{self_slot}
+	{
+	}
+	[[nodiscard]]
+	bool is_host() const
+	{
+		return host;
+	}
+	[[nodiscard]]
+	const std::optional<ship_info_msg> &info(const std::uint8_t pid) const
+	{
+		static const std::optional<ship_info_msg> none;
+		return pid < MAX_SLOTS ? table[pid] : none;
+	}
+	/* This machine's own ship (and, on the host, a bot's): announce it.
+	 * A client sends it to the host; the host tells everyone.
+	 */
+	void set_local(const std::uint8_t pid, const ship_info_msg &m)
+	{
+		if (pid >= MAX_SLOTS)
+			return;
+		auto copy{m};
+		copy.pid = pid;
+		table[pid] = copy;
+		env.player_ship(pid, copy.pyro ? nullptr : &copy);
+		if (host)
+			broadcast_info(pid);
+		else
+			send_msg(0, SHIP_MSG_INFO, copy);
+	}
+	/* Host: a slot was emptied (a player or bot left). */
+	void slot_cleared(const std::uint8_t pid)
+	{
+		if (pid >= MAX_SLOTS)
+			return;
+		table[pid].reset();
+		env.player_ship(pid, nullptr);
+		out[pid].clear();
+		for (auto i{fetches.begin()}; i != fetches.end();)
+		{
+			i->second.waiters.erase(pid);
+			if (i->second.owner == pid)
+				fetch_failed(i++, ship_unavailable_reason::owner_left);
+			else
+				++i;
+		}
+	}
+	/* Host: a client connected to `slot`; it learns everyone's ship. */
+	void client_joined(const std::uint8_t slot)
+	{
+		if (!host || slot >= MAX_SLOTS)
+			return;
+		table[slot].reset();
+		for (std::uint8_t p = 0; p < MAX_SLOTS; ++p)
+			if (p != slot && table[p])
+				send_msg(slot, SHIP_MSG_INFO, *table[p]);
+	}
+	void receive(const std::uint8_t from, const std::uint8_t type, const std::span<const std::uint8_t> payload)
+	{
+		if (from >= MAX_SLOTS)
+			return;
+		switch (type)
+		{
+			case SHIP_MSG_INFO:
+				if (const auto m{ship_info_msg::read(payload)})
+					receive_info(from, *m);
+				break;
+			case SHIP_MSG_REQUEST:
+				if (const auto m{ship_request_msg::read(payload)})
+					receive_request(from, *m);
+				break;
+			case SHIP_MSG_DATA:
+				if (const auto m{ship_data_msg::read(payload)})
+					receive_data(from, *m);
+				break;
+			case SHIP_MSG_UNAVAILABLE:
+				if (const auto m{ship_unavailable_msg::read(payload)})
+					receive_unavailable(from, *m);
+				break;
+			default:
+				break;
+		}
+	}
+	/* Send what the pacing allows: `seconds` since the last call, at the
+	 * lobby's or the level's rate.
+	 */
+	void pump(const double seconds, const bool in_level)
+	{
+		const double rate{static_cast<double>(in_level ? SHIP_RATE_LEVEL : SHIP_RATE_LOBBY)};
+		allowance = std::min(allowance + rate * std::max(seconds, 0.0), rate / 4);
+		for (std::uint8_t slot = 0; slot < MAX_SLOTS && allowance > 0; ++slot)
+		{
+			auto &q{out[slot]};
+			while (!q.empty() && allowance > 0 && env.queued_bytes(slot) < SHIP_QUEUE_LIMIT)
+			{
+				auto &o{q.front()};
+				const auto total{static_cast<std::uint32_t>(o.bytes->size())};
+				const auto n{std::min<std::size_t>(SHIP_DATA_CHUNK, total - o.offset)};
+				const ship_data_msg m{o.hash, total, o.offset, std::span(*o.bytes).subspan(o.offset, n)};
+				std::array<std::uint8_t, SHIP_DATA_HEADER + SHIP_DATA_CHUNK> buf;
+				m.write(buf.data());
+				env.send(slot, SHIP_MSG_DATA, std::span(buf).first(m.size()));
+				o.offset += static_cast<std::uint32_t>(n);
+				allowance -= static_cast<double>(m.size());
+				if (o.offset >= total)
+				{
+					env.note("sent", o.hash, slot);
+					q.pop_front();
+				}
+			}
+		}
+	}
+	/* Anything still to send or to receive. */
+	[[nodiscard]]
+	bool busy() const
+	{
+		return !fetches.empty() || std::ranges::any_of(out, [](const auto &q) { return !q.empty(); }) ||
+			std::ranges::any_of(wants, [](const auto &w) { return w.second.state == want_state::pending; });
+	}
+};
+
+}
+
+}
