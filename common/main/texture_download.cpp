@@ -180,8 +180,9 @@ bool http_get(const std::string &url, const std::function<bool(std::span<const s
 	curl_easy_setopt(c, CURLOPT_PROTOCOLS_STR, "https");
 	curl_easy_setopt(c, CURLOPT_REDIR_PROTOCOLS_STR, "https");
 #else
-	curl_easy_setopt(c, CURLOPT_PROTOCOLS, static_cast<long>(CURLPROTO_HTTPS));
-	curl_easy_setopt(c, CURLOPT_REDIR_PROTOCOLS, static_cast<long>(CURLPROTO_HTTPS));
+	const long protocols{CURLPROTO_HTTPS};
+	curl_easy_setopt(c, CURLOPT_PROTOCOLS, protocols);
+	curl_easy_setopt(c, CURLOPT_REDIR_PROTOCOLS, protocols);
 #endif
 	curl_easy_setopt(c, CURLOPT_FAILONERROR, 1L);
 	curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 30L);
@@ -193,7 +194,8 @@ bool http_get(const std::string &url, const std::function<bool(std::span<const s
 	/* The certificate store of Windows: the packaged game has no CA
 	 * bundle file.
 	 */
-	curl_easy_setopt(c, CURLOPT_SSL_OPTIONS, static_cast<long>(CURLSSLOPT_NATIVE_CA));
+	const long ssl_options{CURLSSLOPT_NATIVE_CA};
+	curl_easy_setopt(c, CURLOPT_SSL_OPTIONS, ssl_options);
 #elif !defined(_WIN32) && !defined(__APPLE__)
 	/* A libcurl bundled with the AppImage looks for the CA file where
 	 * the build system had it; other distributions keep it elsewhere.
@@ -366,7 +368,8 @@ bool unpack(const pack_info &p, const fs::path &zip_path, const fs::path &stagin
 		std::uint32_t crc{};
 		for (std::uint64_t done = 0; done < z.size;)
 		{
-			const std::size_t n{static_cast<std::size_t>(std::min<std::uint64_t>(buf.size(), z.size - done))};
+			/* At most the buffer size. */
+			const std::size_t n = std::min<std::uint64_t>(buf.size(), z.size - done);
 			const std::span chunk{buf.data(), n};
 			if (!read_at(*data + done, chunk))
 			{
@@ -564,7 +567,9 @@ void ensure(const std::string &mission, const bool forced)
 	}
 	else
 	{
-		state.failed[mission] = clock_type::now();
+		/* Not after a cancel: the next level load tries again. */
+		if (!abort_transfer)
+			state.failed[mission] = clock_type::now();
 		log_line(mission + ": " + error + "; the original textures stay");
 		set_status(mission + ": " + error.substr(0, 40));
 	}
@@ -612,8 +617,11 @@ void worker_main()
 			j = std::move(state.jobs.front());
 			state.jobs.pop_front();
 			state.busy = true;
+			/* Under the lock: a cancel (set_enabled, shutdown,
+			 * delete_downloaded) after this point stays set.
+			 */
+			abort_transfer = false;
 		}
-		abort_transfer = false;
 		try {
 			switch (j.kind)
 			{

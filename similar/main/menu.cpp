@@ -2267,7 +2267,7 @@ struct visual_quality_menu : visual_quality_menu_items, newmenu
 				switch (static_cast<const d_select_event &>(event).citem)
 				{
 					case opt_vq_download_all:
-						if (!CGameCfg.TexturePack || CGameArg.OglNoTexturePack)
+						if (!m[opt_vq_texpack].value || CGameArg.OglNoTexturePack)
 							nm_messagebox_str(menu_title{nullptr}, nm_messagebox_tie(TXT_OK), menu_subtitle{"Switch on \"HD texture packs (AI)\" first."});
 						else if (CGameArg.NoTextureDownload || !texture_download::available())
 							nm_messagebox_str(menu_title{nullptr}, nm_messagebox_tie(TXT_OK), menu_subtitle{texture_download::available() ? "Downloads are off (-notexturedownload)." : "This build cannot download\n(no libcurl)."});

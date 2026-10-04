@@ -442,8 +442,9 @@ std::optional<std::vector<zip_entry>> read_zip_directory(const std::uint64_t fil
 		error = "zip: file too small";
 		return std::nullopt;
 	}
-	const std::uint64_t tail_size{std::min<std::uint64_t>(file_size, eocd_size + 65535)};
-	std::vector<std::uint8_t> tail(static_cast<std::size_t>(tail_size));
+	/* At most 64 KiB: fits size_t everywhere. */
+	const std::size_t tail_size = std::min<std::uint64_t>(file_size, eocd_size + 65535);
+	std::vector<std::uint8_t> tail(tail_size);
 	if (!read_at(file_size - tail_size, tail))
 	{
 		error = "zip: read error";
