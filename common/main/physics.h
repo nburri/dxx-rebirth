@@ -63,6 +63,11 @@ window_event_result do_physics_sim(const d_robot_info_array &Robot_info, vmobjpt
  */
 void phys_sweep_objects(const d_robot_info_array &Robot_info, vmobjptridx_t obj, const vms_vector &from, segnum_t from_seg);
 void phys_apply_rot(object &obj, const vms_vector &force_vec);
+/* Whether a ship can fly from segment `from` into `to` within a few
+ * sides, through sides open to flying (doors and walls as they are now).
+ */
+[[nodiscard]]
+bool phys_segment_reachable_by_flying(segnum_t from, segnum_t to);
 }
 
 // this routine will set the thrust for an object to a value that will

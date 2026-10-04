@@ -171,6 +171,14 @@ bool write_pose(const vmobjptridx_t obj, const pose &p)
 		seg = find_segment_near(pos, segnum_t{p.other_segment});
 	if (seg == segment_none && obj->segnum != segnum_t{p.segment} && obj->segnum != segnum_t{p.other_segment})
 		seg = find_segment_near(pos, obj->segnum);
+	/* Step 3: find_segment_near follows the segments' links whatever
+	 * their walls, so an extrapolation would also carry a ship through a
+	 * closed door or wall into the segment behind it (a bot pressing
+	 * against a door that does not open from its side, while its
+	 * snapshots are late): it stops there too.
+	 */
+	if (seg != segment_none && (p.kind == pose_kind::extrapolated || p.kind == pose_kind::stale) && !phys_segment_reachable_by_flying(segnum_t{p.segment}, seg))
+		seg = segment_none;
 	if (seg == segment_none)
 	{
 		/* Step 3: an extrapolation never goes where no segment is
