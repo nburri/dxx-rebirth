@@ -116,6 +116,11 @@ void piggy_new_pigfile(std::span<char, FILENAME_LEN> pigname);
 
 //loads custom bitmaps for current level
 void load_bitmap_replacements(std::span<const char, FILENAME_LEN> level_name);
+/* Whether the level's .POG file or the Descent 1 textures replaced the
+ * bitmap.
+ */
+[[nodiscard]]
+bool piggy_bitmap_replaced_by_level(bitmap_index bi);
 //if descent.pig exists, loads descent 1 texture bitmaps
 void load_d1_bitmap_replacements();
 /*

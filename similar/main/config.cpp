@@ -115,6 +115,7 @@ Cfg GameCfg;
 #define GammaCurveStr "GammaCurve"
 #define ContrastStr "Contrast"
 #define SmoothLightingStr "SmoothLighting"
+#define TexturePackStr "TexturePack"
 #define FPSIndicatorStr "FPSIndicator"
 #define GrabinputStr "GrabInput"
 
@@ -164,6 +165,7 @@ namespace {
 	VERB_d(GammaCurveStr, CGameCfg.GammaCurve)	\
 	VERB_d(ContrastStr, CGameCfg.Contrast)	\
 	VERB_d(SmoothLightingStr, CGameCfg.SmoothLighting)	\
+	VERB_d(TexturePackStr, CGameCfg.TexturePack)	\
 	VERB_d(FPSIndicatorStr, CGameCfg.FPSIndicator)	\
 	VERB_d(GrabinputStr, CGameCfg.Grabinput)	\
 
@@ -309,6 +311,7 @@ void ReadConfigFile(CCfg &CGameCfg, Cfg &GameCfg)
 	CGameCfg.GammaCurve = 100;
 	CGameCfg.Contrast = 100;
 	CGameCfg.SmoothLighting = true;
+	CGameCfg.TexturePack = true;
 	CGameCfg.FPSIndicator = 0;
 	CGameCfg.Grabinput = true;
 
@@ -478,6 +481,8 @@ void ReadConfigFile(CCfg &CGameCfg, Cfg &GameCfg)
 		}
 		else if (compare_nonterminated_name(name, SmoothLightingStr))
 			convert_integer(CGameCfg.SmoothLighting, value);
+		else if (compare_nonterminated_name(name, TexturePackStr))
+			convert_integer(CGameCfg.TexturePack, value);
 		else if (compare_nonterminated_name(name, FPSIndicatorStr))
 			convert_integer(CGameCfg.FPSIndicator, value);
 		else if (compare_nonterminated_name(name, GrabinputStr))

@@ -243,6 +243,22 @@ void texmerge_flush()
 	cache_use_counter = 0;
 }
 
+bool texmerge_find_sources(const grs_bitmap &bm, bitmap_index &bottom, bitmap_index &top, unsigned &orient)
+{
+	for (const auto &i : Cache)
+	{
+		if (static_cast<const grs_bitmap *>(i.bitmap.get()) != &bm || i.key == TEXTURE_CACHE::cache_key{})
+			continue;
+		/* The fields of TEXTURE_CACHE::build_cache_key. */
+		const uint32_t k{underlying_value(i.key)};
+		bottom = bitmap_index{static_cast<uint16_t>(k & 0xfffu)};
+		top = bitmap_index{static_cast<uint16_t>((k >> 12) & 0xfffu)};
+		orient = (k >> 24) & 3u;
+		return true;
+	}
+	return false;
+}
+
 }
 
 namespace dsx {
