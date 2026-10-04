@@ -15,8 +15,9 @@
  *
  * Steps: load, convert the axes to Descent's (x right, y up, z forward),
  * find the player colour zone, the debris parts and the gun markers,
- * re-centre on the bounding sphere and scale it so that its mean
- * silhouette equals the Pyro's (decision D3), scale the textures to powers of two of at most
+ * re-centre on the bounding sphere and scale it so that its outline
+ * from the front and rear equals the Pyro's (decision D3), scale the
+ * textures to powers of two of at most
  * 512, write, and read the result back with the game's reader.
  */
 
@@ -1267,7 +1268,9 @@ void print_summary(const ds::model &m, const std::span<const std::uint8_t> file)
 		pos.push_back(v.pos);
 		outer = std::max(outer, length(v.pos));
 	}
-	std::printf("silhouette  %.2f x the Pyro's (mean over all view directions); outermost point %.2f x the Pyro's radius\n", ss::mean_area(pos, tris) / ss::PYRO_MEAN_AREA, static_cast<double>(outer / ds::PYRO_RADIUS));
+	const auto areas{ss::axis_areas(pos, tris)};
+	const auto rel{areas.relative()};
+	std::printf("outline     %.2f x the Pyro's from the front and rear, weighted (front %.2f, side %.2f, top %.2f; all round %.2f); outermost point %.2f x the Pyro's radius\n", areas.weighted() / ss::PYRO_VIEW_AREA, rel.front, rel.side, rel.top, ss::mean_area(pos, tris) / ss::PYRO_MEAN_AREA, static_cast<double>(outer / ds::PYRO_RADIUS));
 }
 
 int check(const options &opt)
@@ -1341,8 +1344,9 @@ int convert(options opt)
 	for (auto &g : s.guns)
 		if (g)
 			g = (*g - bs.centre) * scale;
-	/* Size (decision D3): the mean silhouette equal to the Pyro's, the
-	 * outermost point at most ss::RADIUS_CAP Pyro radii out.
+	/* Size (decision D3): the outline seen from the front and the rear
+	 * (with a little of the side and top views) equal to the Pyro's, the
+	 * outermost point at most ss::RADIUS_LIMIT Pyro radii out.
 	 */
 	{
 		std::vector<ss::triangle> tris;
@@ -1351,7 +1355,7 @@ int convert(options opt)
 		pts.clear();
 		for (const auto &v : s.vertices)
 			pts.push_back(v.pos);
-		const auto before{ss::mean_area(pts, tris) / ss::PYRO_MEAN_AREA};
+		const auto before{ss::view_ratio(pts, tris)};
 		const auto fair{ss::fair_scale(before)};
 		const auto grow{static_cast<float>(fair.scale)};
 		for (auto &v : s.vertices)
@@ -1366,14 +1370,14 @@ int convert(options opt)
 			pts.push_back(v.pos);
 			outer = std::max(outer, length(v.pos));
 		}
-		const auto after{ss::mean_area(pts, tris) / ss::PYRO_MEAN_AREA};
-		std::fprintf(stderr, "shipconv: size: silhouette %.2f x the Pyro's at the Pyro's radius; scaled by %.3f to %.2f x, outermost point %.2f x the Pyro's radius%s\n", before, fair.scale, after, static_cast<double>(outer / ds::PYRO_RADIUS), fair.beyond_cap ? " (beyond the radius cap)" : fair.radius_capped ? " (radius cap)" : "");
-		if (after < ss::FLOOR - 0.005)
-			warn("the silhouette is only %.2f x the Pyro's even at %.2f x its radius (below %.2f); the ship is harder to see than a Pyro", after, ss::RADIUS_LIMIT, ss::FLOOR);
-		else if (fair.beyond_cap)
-			warn("the ship is long and thin: %.2f x the Pyro's radius for a silhouette of %.2f x the Pyro's (cap %.2f x, band %.2f..%.2f)", static_cast<double>(outer / ds::PYRO_RADIUS), after, ss::RADIUS_CAP, ss::BAND_LOW, ss::BAND_HIGH);
+		const auto areas{ss::axis_areas(pts, tris)};
+		const auto after{areas.weighted() / ss::PYRO_VIEW_AREA};
+		const auto rel{areas.relative()};
+		std::fprintf(stderr, "shipconv: size: front/rear %.2f x the Pyro's at the Pyro's radius; scaled by %.3f to %.2f x (front %.2f, side %.2f, top %.2f), outermost point %.2f x the Pyro's radius%s\n", before, fair.scale, after, rel.front, rel.side, rel.top, static_cast<double>(outer / ds::PYRO_RADIUS), fair.radius_capped ? " (radius limit)" : "");
+		if (fair.too_thin)
+			warn("too thin: the outline from the front and rear is only %.2f x the Pyro's even at %.2f x its radius (below %.2f); the ship is harder to see and hit than a Pyro and should not be bundled", after, ss::RADIUS_LIMIT, ss::BAND_LOW);
 		else if (after < ss::BAND_LOW - 0.005 || after > ss::BAND_HIGH + 0.005)
-			warn("the silhouette is %.2f x the Pyro's, outside %.2f..%.2f", after, ss::BAND_LOW, ss::BAND_HIGH);
+			warn("the outline from the front and rear is %.2f x the Pyro's, outside %.2f..%.2f", after, ss::BAND_LOW, ss::BAND_HIGH);
 	}
 	for (unsigned i = 0; i < 8; ++i)
 		if (const auto &g{s.guns[i]})

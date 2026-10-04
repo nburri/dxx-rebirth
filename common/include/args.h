@@ -163,6 +163,11 @@ struct CArg : prohibit_void_ptr<>
 	 */
 	std::string DbgShipFor;
 	bool DbgShipShot;
+	/* -shipshot-size <distance>: -shipshot measures every ship's area on
+	 * the screen against the Pyro's from the front, rear, side and top at
+	 * <distance> units, and takes pictures of each ship next to a Pyro.
+	 */
+	uint16_t DbgShipShotSize;
 	/* -botarena-shots <dir>: every 10 game seconds a picture from behind
 	 * one of the bots, in turn (vis_shot.cpp).
 	 */

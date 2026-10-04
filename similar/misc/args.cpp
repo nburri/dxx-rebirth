@@ -470,6 +470,8 @@ static void ReadCmdArgs(Inilist &ini, Arglist &&Args)
 			CGameArg.SndNoSound = true;
 			CGameArg.SndNoMusic = true;
 		}
+		else if (!d_stricmp(p, "-shipshot-size"))
+			CGameArg.DbgShipShotSize = static_cast<uint16_t>(std::clamp<long>(arg_integer(pp, end), 5, 200));
 		else if (!d_stricmp(p, "-visshot-presets"))
 			CGameArg.DbgVisShotPresets = arg_string(pp, end);
 		else if (!d_stricmp(p, "-visshot-frames"))

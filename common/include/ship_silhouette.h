@@ -6,11 +6,12 @@
  */
 /*
  * The size rule of custom ships (decision D3 of
- * Documentation/custom-ships.md): a ship's mean silhouette, the area of
- * its outline averaged over view directions all round, is made equal to
- * the Pyro-GX's, while its outermost point stays within the radius the
- * game's reader accepts.  Used by the converter (common/tools/shipconv.cpp)
- * and its test.
+ * Documentation/custom-ships.md): players see each other mostly head-on
+ * or from behind, so a ship's outline seen from the front and from the
+ * rear (40 % each) and from the side and from above (10 % each) is made
+ * equal to the Pyro-GX's, while its outermost point stays within the
+ * radius the game's reader accepts.  Used by the converter
+ * (common/tools/shipconv.cpp) and its test.
  */
 
 #pragma once
@@ -27,25 +28,34 @@
 
 namespace dcx::ship_silhouette {
 
-/* The Pyro-GX's mean silhouette in square units, measured with
- * `mean_area` below from model 108 of descent2.ham.  Numbers only; no
- * retail geometry is used.
+/* The Pyro-GX's outline in square units, measured with `projected_area`
+ * and `mean_area` below from model 108 of descent2.ham: seen along its
+ * axis (front and rear are mirror images, the same area), from the side,
+ * from above, and averaged over all directions.  Numbers only; no retail
+ * geometry is used.
  */
+constexpr double PYRO_FRONT_AREA{8.557};
+constexpr double PYRO_SIDE_AREA{13.712};
+constexpr double PYRO_TOP_AREA{35.817};
 constexpr double PYRO_MEAN_AREA{23.548};
 
-/* The band the converter aims for, and the floor below which a ship is
- * reported as too small to be fair.
+/* How much each view counts. */
+constexpr double WEIGHT_FRONT{0.4};
+constexpr double WEIGHT_REAR{0.4};
+constexpr double WEIGHT_SIDE{0.1};
+constexpr double WEIGHT_TOP{0.1};
+
+/* The band the converter aims for.  A ship that stays below BAND_LOW
+ * even with its outermost point at RADIUS_LIMIT is "too thin": it is
+ * converted, with a warning, but not bundled.
  */
 constexpr double BAND_LOW{0.9};
 constexpr double BAND_HIGH{1.1};
-constexpr double FLOOR{0.85};
 
-/* The outermost point should be at most RADIUS_CAP Pyro radii from the
- * centre (the collision sphere stays the Pyro's).  A ship that is still
- * below FLOOR there grows further, up to RADIUS_LIMIT, just inside the
- * reader's limit (RADIUS_TOLERANCE).
+/* The outermost point at most RADIUS_LIMIT Pyro radii from the centre,
+ * just inside the reader's limit (RADIUS_TOLERANCE); the collision sphere
+ * stays the Pyro's.
  */
-constexpr double RADIUS_CAP{1.3};
 constexpr double RADIUS_LIMIT{::dcx::dxship::RADIUS_TOLERANCE * 0.98};
 
 /* View directions: a Fibonacci spiral over a hemisphere (a silhouette
@@ -126,18 +136,56 @@ inline double mean_area(const std::span<const vec3> pos, const std::span<const t
 	return sum / DIRECTIONS;
 }
 
+/* The outline of a model centred on the origin, seen from the front (or
+ * the rear), the side and above.
+ */
+struct view_areas
+{
+	double front, side, top;
+	/* The weighted area the size rule compares. */
+	constexpr double weighted() const
+	{
+		return (WEIGHT_FRONT + WEIGHT_REAR) * front + WEIGHT_SIDE * side + WEIGHT_TOP * top;
+	}
+	/* Each relative to the Pyro's. */
+	constexpr view_areas relative() const
+	{
+		return {front / PYRO_FRONT_AREA, side / PYRO_SIDE_AREA, top / PYRO_TOP_AREA};
+	}
+};
+
+constexpr double PYRO_VIEW_AREA{view_areas{PYRO_FRONT_AREA, PYRO_SIDE_AREA, PYRO_TOP_AREA}.weighted()};
+
+inline view_areas axis_areas(const std::span<const vec3> pos, const std::span<const triangle> tris)
+{
+	float extent{};
+	for (const auto &t : tris)
+		for (const auto i : t)
+			extent = std::max(extent, std::sqrt(pos[i].x * pos[i].x + pos[i].y * pos[i].y + pos[i].z * pos[i].z));
+	if (!(extent > 0))
+		return {};
+	extent *= 1.001f;
+	return {projected_area(pos, tris, {0, 0, 1}, extent), projected_area(pos, tris, {1, 0, 0}, extent), projected_area(pos, tris, {0, 1, 0}, extent)};
+}
+
+/* The weighted outline relative to the Pyro's. */
+inline double view_ratio(const std::span<const vec3> pos, const std::span<const triangle> tris)
+{
+	return axis_areas(pos, tris).weighted() / PYRO_VIEW_AREA;
+}
+
 struct fair_size
 {
 	/* The factor to apply to a ship whose outermost point is at the
 	 * Pyro's radius.
 	 */
 	double scale;
-	/* The resulting mean silhouette relative to the Pyro's. */
+	/* The resulting weighted outline relative to the Pyro's. */
 	double ratio;
-	/* RADIUS_CAP stopped the ship short of the Pyro's silhouette. */
+	/* RADIUS_LIMIT stopped the ship short of the Pyro's outline. */
 	bool radius_capped;
-	/* The ship grows beyond RADIUS_CAP to reach FLOOR (or RADIUS_LIMIT). */
-	bool beyond_cap;
+	/* ... and below BAND_LOW: too thin to be fair. */
+	bool too_thin;
 };
 
 /* The square root, without std::sqrt being constexpr. */
@@ -149,27 +197,20 @@ constexpr double newton_sqrt(const double x)
 	return s;
 }
 
-/* The size rule.  `ratio` is the ship's mean silhouette relative to the
- * Pyro's when its outermost point is at the Pyro's radius.  The
- * silhouette grows with the square of the scale.
- *  1. Scale so that the ratio becomes 1, but with the outermost point at
- *     most RADIUS_CAP Pyro radii out.
- *  2. A long, thin ship that ends below FLOOR there grows on until it
- *     reaches FLOOR, but at most to RADIUS_LIMIT: being seen matters
- *     more than the fit of the collision sphere.
+/* The size rule.  `ratio` is the ship's weighted outline relative to the
+ * Pyro's when its outermost point is at the Pyro's radius; it grows with
+ * the square of the (uniform) scale.  Scale so that the ratio becomes 1,
+ * but with the outermost point at most RADIUS_LIMIT Pyro radii out.
  */
 constexpr fair_size fair_scale(const double ratio)
 {
 	if (!(ratio > 0))
-		return {1, 0, false, false};
+		return {1, 0, false, true};
 	const auto s{newton_sqrt(1 / ratio)};
-	if (s <= RADIUS_CAP)
+	if (s <= RADIUS_LIMIT)
 		return {s, ratio * s * s, false, false};
-	if (ratio * RADIUS_CAP * RADIUS_CAP >= FLOOR)
-		return {RADIUS_CAP, ratio * RADIUS_CAP * RADIUS_CAP, true, false};
-	const auto floor_scale{newton_sqrt(FLOOR / ratio)};
-	const auto g{floor_scale < RADIUS_LIMIT ? floor_scale : RADIUS_LIMIT};
-	return {g, ratio * g * g, true, true};
+	const auto r{ratio * RADIUS_LIMIT * RADIUS_LIMIT};
+	return {RADIUS_LIMIT, r, true, r < BAND_LOW};
 }
 
 }
