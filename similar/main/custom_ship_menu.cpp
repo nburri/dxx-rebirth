@@ -63,21 +63,38 @@ struct ship_menu_window : window
 	{
 		return i ? &ships[i - 1] : nullptr;
 	}
-	/* The list's layout, shared by drawing and the mouse. */
+	/* The layout, shared by drawing and the mouse: the list on the
+	 * left, the preview with the selected ship's credits on the right,
+	 * two help lines at the bottom.  Every height comes from the scaled
+	 * font, so nothing overlaps at any resolution.
+	 */
 	struct layout
 	{
 		int list_x, list_y, row_h, rows, list_w;
+		int preview_x, preview_y, preview_w, preview_h;
+		int info_y, help_y, line_h;
 	};
 	[[nodiscard]]
-	layout get_layout(const grs_canvas &canvas, const grs_font &font) const
+	static layout get_layout(const grs_canvas &canvas, const grs_font &font, const grs_font &title_font)
 	{
 		const int w{canvas.cv_bitmap.bm_w}, h{canvas.cv_bitmap.bm_h};
 		layout l;
-		l.list_x = w / 20;
-		l.list_y = h / 6;
-		l.row_h = std::max<int>(font.ft_h + font.ft_h / 3, 1);
-		l.rows = std::max(1, (h * 3 / 4 - l.list_y) / l.row_h);
-		l.list_w = w * 7 / 20;
+		/* The scaled height of a line of text and its spacing. */
+		const int text_h{std::max(static_cast<int>(gr_get_string_size(font, "Ag").height), 1)};
+		l.line_h = std::max(static_cast<int>(LINE_SPACING(font, font) + 0.5f), text_h + 1);
+		l.row_h = l.line_h + std::max(text_h / 3, 2);
+		const int margin{w / 20};
+		l.list_x = margin + 2 * static_cast<int>(gr_get_string_size(font, "> ").width);
+		l.list_y = h / 20 + static_cast<int>(gr_get_string_size(title_font, "Ship").height) + l.line_h;
+		l.help_y = h - h / 30 - 2 * l.line_h;
+		l.list_w = w * 2 / 5 - l.list_x;
+		l.rows = std::max(1, (l.help_y - l.line_h - l.list_y) / l.row_h);
+		l.preview_x = w * 9 / 20;
+		l.preview_w = w - margin - l.preview_x;
+		l.preview_y = l.list_y;
+		/* Three lines of credits below the preview. */
+		l.preview_h = std::max(1, l.help_y - l.line_h - 3 * l.line_h - l.preview_y);
+		l.info_y = l.preview_y + l.preview_h + l.line_h / 2;
 		return l;
 	}
 	void choose()
@@ -97,55 +114,83 @@ struct ship_menu_window : window
 	virtual window_event_result event_handler(const d_event &) override;
 };
 
+/* `text`, shortened with "..." to at most `width` pixels. */
+std::string fit(const grs_font &font, std::string text, const int width)
+{
+	if (static_cast<int>(gr_get_string_size(font, text.c_str()).width) <= width)
+		return text;
+	while (!text.empty())
+	{
+		text.pop_back();
+		const auto shortened{text + "..."};
+		if (static_cast<int>(gr_get_string_size(font, shortened.c_str()).width) <= width)
+			return shortened;
+	}
+	return {};
+}
+
 void ship_menu_window::draw(grs_canvas &canvas)
 {
 	gr_clear_canvas(canvas, BM_XRGB(0, 0, 0));
-	const int w{canvas.cv_bitmap.bm_w}, h{canvas.cv_bitmap.bm_h};
+	const int w{canvas.cv_bitmap.bm_w};
 	auto &title_font{*MEDIUM1_FONT};
 	auto &font{*GAME_FONT};
+	const int margin{w / 20};
 	gr_set_fontcolor(canvas, BM_XRGB(28, 28, 28), -1);
-	gr_string(canvas, title_font, w / 20, h / 20, "Ship");
-	const auto l{get_layout(canvas, font)};
+	gr_string(canvas, title_font, margin, canvas.cv_bitmap.bm_h / 20, "Ship");
+	const auto l{get_layout(canvas, font, title_font)};
 	if (selected < first_visible)
 		first_visible = selected;
 	if (selected >= first_visible + static_cast<unsigned>(l.rows))
 		first_visible = selected - static_cast<unsigned>(l.rows) + 1;
+	const int text_pad{(l.row_h - static_cast<int>(gr_get_string_size(font, "Ag").height)) / 2};
 	for (unsigned i = first_visible; i < count() && i < first_visible + static_cast<unsigned>(l.rows); ++i)
 	{
 		const auto e{entry_of(i)};
 		const int y{l.list_y + static_cast<int>(i - first_visible) * l.row_h};
 		if (i == selected)
 		{
+			/* A bar behind the selected row. */
+			gr_urect(canvas, l.list_x - 3, y, l.list_x + l.list_w, y + l.row_h - 2, BM_XRGB(6, 8, 18));
 			gr_set_fontcolor(canvas, BM_XRGB(31, 31, 10), -1);
-			gr_string(canvas, font, l.list_x - font.ft_w * 2, y, ">");
+			gr_string(canvas, font, margin, y + text_pad, ">");
 		}
 		else
 			gr_set_fontcolor(canvas, e && e->cached ? BM_XRGB(16, 20, 26) : BM_XRGB(22, 22, 22), -1);
-		gr_string(canvas, font, l.list_x, y, e ? e->title.c_str() : "Pyro-GX (standard)");
+		gr_string(canvas, font, l.list_x, y + text_pad, fit(font, e ? e->title : std::string{"Pyro-GX (standard)"}, l.list_w - 4).c_str());
 	}
-	/* The preview, turning. */
+	/* More rows above or below. */
+	gr_set_fontcolor(canvas, BM_XRGB(16, 16, 16), -1);
+	if (first_visible)
+		gr_string(canvas, font, l.list_x, l.list_y - l.line_h, "...");
+	if (first_visible + static_cast<unsigned>(l.rows) < count())
+		gr_string(canvas, font, l.list_x, l.list_y + l.rows * l.row_h, "...");
+	/* The preview, turning, in its own area. */
 	{
-		const int px{w * 2 / 5}, py{h / 8}, pw{w * 11 / 20}, ph{h * 3 / 5};
-		auto sub{gr_create_sub_canvas(canvas, static_cast<uint16_t>(px), static_cast<uint16_t>(py), static_cast<uint16_t>(pw), static_cast<uint16_t>(ph))};
+		auto sub{gr_create_sub_canvas(canvas, static_cast<uint16_t>(l.preview_x), static_cast<uint16_t>(l.preview_y), static_cast<uint16_t>(l.preview_w), static_cast<uint16_t>(l.preview_h))};
 		const fix64 t{timer_query()};
 		const vms_angvec angles{static_cast<fixang>(-0x1400), static_cast<fixang>(0), static_cast<fixang>((t / 3) & 0xffff)};
 		custom_ship_draw_preview(*sub, entry_of(selected), angles, colour);
 	}
-	/* Who made it, and how to use the menu. */
-	const int ty{h * 3 / 4 + font.ft_h};
-	const auto line{LINE_SPACING(font, font)};
+	/* Who made the selected ship, below the preview. */
 	gr_set_fontcolor(canvas, BM_XRGB(24, 24, 24), -1);
 	if (const auto e{entry_of(selected)})
 	{
-		gr_printf(canvas, font, w / 20, ty, "%s by %s, licence %s%s", e->title.c_str(), e->author.empty() ? "unknown" : e->author.c_str(), e->licence.c_str(), e->cached ? " (received from a host)" : "");
+		gr_string(canvas, font, l.preview_x, l.info_y, fit(font, e->title + " by " + (e->author.empty() ? std::string{"unknown"} : e->author), l.preview_w).c_str());
+		gr_string(canvas, font, l.preview_x, l.info_y + l.line_h, fit(font, "Licence " + e->licence + (e->cached ? " (received from a host)" : ""), l.preview_w).c_str());
 		if (!e->source.empty())
-			gr_printf(canvas, font, w / 20, static_cast<int>(ty + line), "%s", e->source.c_str());
+			gr_string(canvas, font, l.preview_x, l.info_y + 2 * l.line_h, fit(font, e->source, l.preview_w).c_str());
 	}
 	else
-		gr_string(canvas, font, w / 20, ty, "The original ship. Others see your ship; it is only its look.");
+	{
+		gr_string(canvas, font, l.preview_x, l.info_y, fit(font, "The original ship.", l.preview_w).c_str());
+		gr_string(canvas, font, l.preview_x, l.info_y + l.line_h, fit(font, "Others see your ship; it is only its look.", l.preview_w).c_str());
+	}
+	/* How to use the menu. */
+	const int help_w{w - 2 * margin};
 	gr_set_fontcolor(canvas, BM_XRGB(18, 18, 18), -1);
-	gr_printf(canvas, font, w / 20, static_cast<int>(ty + 2 * line), "Accept ships from the host: %s (A)", PlayerCfg.AcceptShips ? "yes" : "no");
-	gr_string(canvas, font, w / 20, static_cast<int>(ty + 3 * line), "Up/Down: choose, C: colour, Enter: fly it, Esc: back");
+	gr_string(canvas, font, margin, l.help_y, fit(font, std::string{"Accept ships from the host: "} + (PlayerCfg.AcceptShips ? "yes" : "no") + " (A)", help_w).c_str());
+	gr_string(canvas, font, margin, l.help_y + l.line_h, fit(font, "Up/Down: choose, C: colour, Enter: fly it, Esc: back", help_w).c_str());
 }
 
 window_event_result ship_menu_window::event_handler(const d_event &event)
@@ -222,7 +267,7 @@ window_event_result ship_menu_window::event_handler(const d_event &event)
 					break;
 				const auto [mx, my, mz]{mouse_get_pos()};
 				(void)mz;
-				const auto l{get_layout(grd_curscreen->sc_canvas, *GAME_FONT)};
+				const auto l{get_layout(grd_curscreen->sc_canvas, *GAME_FONT, *MEDIUM1_FONT)};
 				if (mx >= l.list_x && mx < l.list_x + l.list_w && my >= l.list_y)
 				{
 					const unsigned row{static_cast<unsigned>((my - l.list_y) / l.row_h)};
