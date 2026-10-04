@@ -1140,6 +1140,10 @@ void render_preview(const ds::model &m, const std::vector<image> &albedo, const 
 		out.rgba[i + 3] = 255;
 	}
 	constexpr std::array<float, 3> zone_colour{{0.95f, 0.25f, 0.2f}};
+	/* The whole ship in view: it may reach beyond the Pyro's radius (D3). */
+	float extent{ds::PYRO_RADIUS};
+	for (const auto &v : m.vertices)
+		extent = std::max(extent, length(v.pos));
 	/* View directions: from front-right-above, from the side, from above. */
 	const std::array<std::array<vec3, 3>, 3> views{{
 		{{normalised({-0.8f, 0, 0.6f}), normalised({-0.15f, 0.9f, -0.2f}), normalised({-0.55f, -0.45f, -0.7f})}},
@@ -1152,7 +1156,7 @@ void render_preview(const ds::model &m, const std::vector<image> &albedo, const 
 		up = normalised(up - right * dot(up, right));
 		const auto fwd{cross(right, up)};
 		std::vector<float> depth(S * S, 1e30f);
-		const float scale{static_cast<float>(S) * 0.45f / ds::PYRO_RADIUS};
+		const float scale{static_cast<float>(S) * 0.45f / extent};
 		struct pv
 		{
 			float x, y, z;
