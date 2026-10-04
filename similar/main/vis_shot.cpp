@@ -27,6 +27,7 @@
 #include "gameseg.h"
 #include "gameseq.h"
 #include "hudmsg.h"
+#include "gauges.h"
 #include "kconfig.h"
 #include "laser.h"
 #include "mission.h"
@@ -403,10 +404,13 @@ void take_ship_pictures()
 	/* Back the camera off from the start, so the ship sits where the
 	 * player starts (which is inside the level).
 	 */
-	const double distance{17};
+	const double distance{12.5};
 	place_object(*camera, offset(start_pos, start_orient.fvec, -distance), start_orient, start_seg);
 	Viewer = camera;
 	PlayerCfg.CockpitMode[1] = cockpit_mode_t::full_screen;
+	/* Nothing in front of the ship. */
+	PlayerCfg.ReticleType = reticle_type::none;
+	PlayerCfg.HudMode = HudType::Hidden;
 	struct pose
 	{
 		const char *name;
@@ -465,7 +469,6 @@ void take_ship_pictures()
 		/* Debris: the explosion as a remote player's death shows it. */
 		console.mtype.phys_info.velocity = {};
 		custom_ship_player_exploded(console);
-		object_create_explosion_without_damage(Vclip, Segments.vmptridx(console.segnum), console.pos, i2f(10), vclip_index::small_explosion);
 		const auto render_type_save{console.render_type};
 		console.render_type = render_type::RT_NONE;
 		step += F1_0 / 4;
@@ -475,6 +478,15 @@ void take_ship_pictures()
 		con_printf(CON_URGENT, "shipshot: %s", s.name.c_str());
 	}
 	custom_ship_debug_colour.reset();
+	/* The ship menu with its preview, for every ship. */
+	for (std::size_t i = 0; i < ships.size(); ++i)
+	{
+		gr_set_current_canvas(grd_curscreen->sc_canvas);
+		custom_ship_menu_picture(grd_curscreen->sc_canvas, static_cast<unsigned>(i));
+		glFinish();
+		write_ppm(dir + "/menu-" + ships[i].name + ".ppm", w, h);
+		gr_flip();
+	}
 	exit_status = 0;
 }
 #endif

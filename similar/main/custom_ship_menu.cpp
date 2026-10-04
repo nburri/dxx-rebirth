@@ -253,6 +253,14 @@ window_event_result ship_menu_window::event_handler(const d_event &event)
 
 }
 
+void custom_ship_menu_picture(grs_canvas &canvas, const unsigned selected)
+{
+	const auto w{window_create<ship_menu_window>(grd_curscreen->sc_canvas, 0, 0, SWIDTH, SHEIGHT)};
+	w->selected = std::min(selected, w->count() - 1);
+	w->draw(canvas);
+	window_close(w);
+}
+
 void custom_ship_menu()
 {
 	auto w{window_create<ship_menu_window>(grd_curscreen->sc_canvas, 0, 0, SWIDTH, SHEIGHT)};
