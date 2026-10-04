@@ -4936,10 +4936,17 @@ class DXXCommon(LazyObjectConstructor):
 			env.Library(builddir.File(f'{env["LIBPREFIX"]}{self.srcdir}{env["LIBSUFFIX"]}'), self.get_library_objects()),
 		] if boost else []
 		env_LIBS = env.get('LIBS')
+		# The tests and tools are console programs: on Windows, not the
+		# game's GUI subsystem (-mwindows), whose programs print nothing
+		# to the console they are started from.
+		env_LINKFLAGS = env.get('LINKFLAGS')
+		link_flags = {} if env_LINKFLAGS is None or '-mwindows' not in env_LINKFLAGS else {
+			'LINKFLAGS': [f for f in env_LINKFLAGS if f != '-mwindows'] + ['-mconsole'],
+		}
 		for test in tests:
 			LIBS = [] if (env_LIBS is None or not test.use_default_libs) else env_LIBS.copy()
 			LIBS.extend(extra_libs)
-			program = env.Program(target=builddir.File(test.target), source=test.source(self), LIBS=LIBS)
+			program = env.Program(target=builddir.File(test.target), source=test.source(self), LIBS=LIBS, **link_flags)
 			env.Alias(test.target, program)
 
 	runtime_test_boost_tests: collections.abc.Sequence[RuntimeTest] = None
@@ -5185,6 +5192,29 @@ class DXXArchive(DXXCommon):
 		# (Documentation/movement-recording.md section 8).
 		RuntimeTest('movrec-analyse', (
 			'common/tools/movrec_analyse.cpp',
+			)),
+		# Test of the custom ship file (dxship_format.h, sha256.h): round
+		# trips, the reader's checks, and a fuzz test of the reader with
+		# truncated, bit-flipped and mutated files
+		# (Documentation/custom-ships.md section 7).
+		RuntimeTest('test-dxship', (
+			'common/unittest/dxship_format.cpp',
+			'common/misc/dxship_format.cpp',
+			'common/misc/sha256.cpp',
+			)),
+		# Not a test: the converter of ship models into custom ship files
+		# (Documentation/custom-ships-authoring.md).
+		RuntimeTest('shipconv', (
+			'common/tools/shipconv.cpp',
+			'common/misc/dxship_format.cpp',
+			'common/misc/sha256.cpp',
+			)),
+		# Test of the converter: synthetic models through `shipconv`
+		# (its path is the argument).
+		RuntimeTest('test-shipconv', (
+			'common/unittest/shipconv.cpp',
+			'common/misc/dxship_format.cpp',
+			'common/misc/sha256.cpp',
 			)),
 			)
 	del RuntimeTest

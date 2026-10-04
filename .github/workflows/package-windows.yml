@@ -77,6 +77,20 @@ jobs:
           d1x=0
           d2x=1
 
+      - name: Build the ship converter
+        # shipconv (Documentation/custom-ships-authoring.md) goes into the
+        # package, so that ship makers on Windows can run it.
+        working-directory: src
+        run: >-
+          scons -j`nproc`
+          CHOST=x86_64-w64-mingw32
+          RC=windres
+          sdl2=1
+          d1x=0
+          d2x=1
+          register_runtime_test_plain_link_targets=1
+          shipconv
+
       - name: Upload SConf log
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
