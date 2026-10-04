@@ -62,6 +62,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "d_zip.h"
 #include "partial_range.h"
 #include "frame_probe.h"
+#include <bitset>
 #include <memory>
 
 #if DXX_BUILD_DESCENT == 1
@@ -128,6 +129,11 @@ hashtable AllDigiSndNames;
 per_bitmap_index_array<pig_bitmap_offset> GameBitmapOffset;
 #if DXX_BUILD_DESCENT == 2
 static std::unique_ptr<uint8_t[]> Bitmap_replacement_data;
+/* The bitmaps that Bitmap_replacement_data replaced (a level's .POG file
+ * or the Descent 1 textures); a texture pack replaces them only from
+ * the mission's directory (texture_pack.h).
+ */
+static std::bitset<MAX_BITMAP_FILES> Bitmap_replaced;
 static std::array<char, FILENAME_LEN> Current_pigfile;
 }
 #endif
@@ -1574,6 +1580,7 @@ static void write_int(int i, PHYSFS_File *file)
 static void free_bitmap_replacements()
 {
 	Bitmap_replacement_data.reset();
+	Bitmap_replaced.reset();
 }
 #endif
 }
@@ -1706,6 +1713,12 @@ int d1_tmap_num_unique(uint16_t d1_tmap_num)
 
 }
 
+bool piggy_bitmap_replaced_by_level(const bitmap_index bi)
+{
+	const std::size_t i{underlying_value(bi)};
+	return i < Bitmap_replaced.size() && Bitmap_replaced.test(i);
+}
+
 void load_bitmap_replacements(const std::span<const char, FILENAME_LEN> level_name)
 {
 	//first, free up data allocated for old bitmaps
@@ -1754,6 +1767,8 @@ void load_bitmap_replacements(const std::span<const char, FILENAME_LEN> level_na
 
 			gr_set_bitmap_flags(*bm, bmh.flags & BM_FLAGS_TO_COPY);
 			GameBitmapOffset[bi] = pig_bitmap_offset::None; // don't try to read bitmap from current pigfile
+			if (i < Bitmap_replaced.size())
+				Bitmap_replaced.set(i);
 		}
 
 		PHYSFSX_readBytes(ifile, Bitmap_replacement_data, bitmap_data_size);
@@ -2138,6 +2153,7 @@ void load_d1_bitmap_replacements()
 			next_bitmap = bitmap_read_d1(&GameBitmaps[d2_index], d1_Piggy_fp, bitmap_data_start, &bmh, next_bitmap, d1_colormap);
 			GameBitmapOffset[d2_index] = pig_bitmap_offset::None; // don't try to read bitmap from current d2 pigfile
 			GameBitmapFlags[d2_index] = bmh.flags;
+			Bitmap_replaced.set(underlying_value(d2_index));
 
 			auto &abname = AllBitmaps[d2_index].name;
 			if ((p = strchr(abname.data(), '#')) /* d2 BM is animated */
@@ -2153,6 +2169,7 @@ void load_d1_bitmap_replacements()
 						GameBitmaps[bi] = GameBitmaps[d2_index];
 						GameBitmapOffset[bi] = pig_bitmap_offset::None;
 						GameBitmapFlags[bi] = bmh.flags;
+						Bitmap_replaced.set(i);
 					}
 				}
 			}

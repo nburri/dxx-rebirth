@@ -2083,9 +2083,10 @@ void hud_config()
 }
 
 #if DXX_USE_OGL
-/* Options -> Graphics -> Visual Quality: the settings of ogl_effects.h
- * and the anisotropic filtering level.  Changes apply at once (the
- * anisotropic level when the graphics menu reloads the textures).
+/* Options -> Graphics -> Visual Quality: the settings of ogl_effects.h,
+ * the anisotropic filtering level and the texture pack.  Changes apply
+ * at once (the anisotropic level and the texture pack when the graphics
+ * menu reloads the textures).
  */
 struct visual_quality_menu_items
 {
@@ -2098,6 +2099,7 @@ struct visual_quality_menu_items
 		opt_vq_bloom,
 		opt_vq_gamma,
 		opt_vq_contrast,
+		opt_vq_texpack,
 		opt_vq_blank,
 		opt_vq_info,
 		opt_vq_count
@@ -2132,6 +2134,7 @@ struct visual_quality_menu_items
 		nm_set_item_slider(m[opt_vq_bloom], label[opt_vq_bloom].data(), std::min<unsigned>(CGameCfg.Bloom, 8), 0, 8, saved_text[opt_vq_bloom]);
 		nm_set_item_slider(m[opt_vq_gamma], label[opt_vq_gamma].data(), percent_index(CGameCfg.GammaCurve), 0, 12, saved_text[opt_vq_gamma]);
 		nm_set_item_slider(m[opt_vq_contrast], label[opt_vq_contrast].data(), percent_index(CGameCfg.Contrast), 0, 12, saved_text[opt_vq_contrast]);
+		nm_set_item_checkbox(m[opt_vq_texpack], "Texture Pack (textures folder)", CGameCfg.TexturePack);
 		nm_set_item_text(m[opt_vq_blank], "");
 		std::snprintf(info.data(), info.size(), "Shaders: %s  Framebuffers: %s  Max. MSAA: %ix",
 			c.shaders ? "yes" : "no", c.fbo ? "yes" : "no", c.fbo_multisample ? c.max_samples : 0);
@@ -2167,6 +2170,8 @@ struct visual_quality_menu_items
 		CGameCfg.Bloom = m[opt_vq_bloom].value;
 		CGameCfg.GammaCurve = 70 + 5 * m[opt_vq_gamma].value;
 		CGameCfg.Contrast = 70 + 5 * m[opt_vq_contrast].value;
+		/* The textures load again when the graphics menu closes. */
+		CGameCfg.TexturePack = m[opt_vq_texpack].value;
 	}
 };
 

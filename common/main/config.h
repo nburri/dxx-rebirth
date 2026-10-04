@@ -83,6 +83,8 @@ struct CCfg : prohibit_void_ptr<>
 	uint8_t GammaCurve;	/* percent, 100 = unchanged */
 	uint8_t Contrast;	/* percent, 100 = unchanged */
 	bool SmoothLighting;
+	/* Load replacement textures from textures/ (texture_pack.h). */
+	bool TexturePack;
 	bool FPSIndicator;
 	uint8_t GammaLevel;
 	bool ReverseStereo;
