@@ -274,6 +274,10 @@ imsegptridx_t find_object_seg(const d_level_shared_segment_state &, d_level_uniq
 void fix_object_segs();
 
 void dead_player_end();
+/* Drop a running death sequence without deleting its camera (the game
+ * ended or the object state is reset).
+ */
+void dead_player_forget();
 
 #if DXX_USE_MULTIPLAYER
 #if DXX_BUILD_DESCENT == 2
