@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <bitset>
 #include <span>
+#include <vector>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -611,6 +612,75 @@ void digi_mixer_set_digi_volume( int dvolume )
 int digi_mixer_is_channel_playing(const sound_channel c)
 {
 	return channels[c];
+}
+
+namespace {
+
+/* The custom sounds (the taunts): the samples, owned here, and the
+ * channel each plays on.
+ */
+struct custom_sound
+{
+	std::vector<int16_t> samples;
+	Mix_Chunk chunk{};
+	sound_channel channel{sound_channel::None};
+};
+
+std::array<custom_sound, DIGI_CUSTOM_SLOTS> custom_sounds;
+
+}
+
+sound_channel digi_mixer_custom_channel(const unsigned slot)
+{
+	if (!digi_initialised || slot >= custom_sounds.size())
+		return sound_channel::None;
+	auto &c{custom_sounds[slot]};
+	if (c.channel == sound_channel::None)
+		return c.channel;
+	const auto ch{underlying_value(c.channel)};
+	/* Finished, or the channel went to another sound since. */
+	const frame_probe::mixer_scope probe;
+	if (!channels[c.channel] || !Mix_Playing(ch) || Mix_GetChunk(ch) != &c.chunk)
+		c.channel = sound_channel::None;
+	return c.channel;
+}
+
+void digi_mixer_stop_custom(const unsigned slot)
+{
+	if (const auto ch{digi_mixer_custom_channel(slot)}; ch != sound_channel::None)
+		digi_mixer_stop_sound(ch);
+	if (slot < custom_sounds.size())
+		custom_sounds[slot].channel = sound_channel::None;
+}
+
+sound_channel digi_mixer_play_custom(const unsigned slot, const std::span<const int16_t> samples, const fix volume, const sound_pan pan)
+{
+	if (!digi_initialised || slot >= custom_sounds.size() || samples.empty())
+		return sound_channel::None;
+	digi_mixer_stop_custom(slot);
+	const unsigned max_channels = digi_mixer_max_channels;
+	if (max_channels > channels.size())
+		return sound_channel::None;
+	const auto c = digi_mixer_find_channel(channels, max_channels);
+	const auto channel = underlying_value(c);
+	if (channel >= max_channels)
+		return sound_channel::None;
+	auto &cs{custom_sounds[slot]};
+	cs.samples.assign(samples.begin(), samples.end());
+	cs.chunk = {};
+	cs.chunk.allocated = 0;
+	cs.chunk.abuf = reinterpret_cast<Uint8 *>(cs.samples.data());
+	cs.chunk.alen = static_cast<Uint32>(cs.samples.size() * sizeof(int16_t));
+	cs.chunk.volume = MIX_MAX_VOLUME;
+	const int mix_pan = fix2byte(static_cast<fix>(pan));
+	const frame_probe::mixer_scope probe;
+	if (Mix_PlayChannel(channel, &cs.chunk, 0) < 0)
+		return sound_channel::None;
+	Mix_SetPanning(channel, 255 - mix_pan, mix_pan);
+	Mix_SetDistance(channel, UINT8_MAX - fix2byte(volume));
+	channels.set(c);
+	cs.channel = c;
+	return c;
 }
 
 void digi_mixer_stop_all_channels()

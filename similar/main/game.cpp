@@ -66,6 +66,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "ai.h"
 #include "fuelcen.h"
 #include "digi.h"
+#include "taunt.h"
 #include "u_mem.h"
 #include "palette.h"
 #include "morph.h"
@@ -2068,6 +2069,7 @@ window_event_result GameProcessFrame(const d_level_shared_robot_info_state &Leve
 	{
 		const frame_probe::scope probe{frame_probe::phase::sound};
 		digi_sync_sounds();
+		taunt_frame();
 	}
 
 	if (Endlevel_sequence) {

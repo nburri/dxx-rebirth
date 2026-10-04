@@ -44,6 +44,7 @@
 #include "net_v2_game.h"
 #include "net_interp.h"
 #include "multi.h"
+#include "taunt.h"
 #include "multibot.h"
 #include "bot.h"
 #include "bot_arena.h"
@@ -595,7 +596,14 @@ void host_kill(const playernum_t victim, const nv::kill_attribution killer, cons
 	send_msg(session_msg::player_killed, m);
 	con_printf(CON_VERBOSE, "net: P#%u killed (by kind %u, P#%u, weapon %u)", victim, static_cast<unsigned>(killer.kind), killer.pid, weapon_id);
 	if (killer.kind == nv::attacker_kind::player)
+	{
 		bot_arena_note_kill(victim, killer.pid, weapon_id);
+#if DXX_BUILD_DESCENT == 2
+		/* Documentation/taunts.md: a bot may sound its horn. */
+		if (killer.pid != victim)
+			taunt_bot_kill(killer.pid);
+#endif
+	}
 	if (victim == Player_num)
 		kill_local_ship(killer);
 	/* A bot: bot_take_damage marked its death; it starts with its next

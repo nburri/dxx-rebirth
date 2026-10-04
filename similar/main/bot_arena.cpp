@@ -402,6 +402,8 @@ bool setup_bots(const unsigned count)
 		}
 		p.count = count;
 	}
+	if (CGameArg.DbgBotArenaTaunt)
+		p.taunt = true;
 	bots_setup_load(p);
 	return true;
 }

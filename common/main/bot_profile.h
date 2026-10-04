@@ -71,6 +71,8 @@ struct bot_profile
 	bot_skill default_skill{BOT_DEFAULT_SKILL};
 	bot_style default_style{bot_style::balanced};
 	bool replace{true};
+	/* Bots sound their horn after some kills (Documentation/taunts.md). */
+	bool taunt{false};
 	std::array<profile_entry, BOT_PROFILE_MAX_BOTS> bots{};
 	/* Section 9.13: the default's style profile (empty: default_style). */
 	style_name default_profile{};
@@ -78,7 +80,7 @@ struct bot_profile
 };
 
 /* The most lines format_profile writes. */
-constexpr std::size_t BOT_PROFILE_MAX_LINES{4 + 2 * BOT_PROFILE_MAX_BOTS};
+constexpr std::size_t BOT_PROFILE_MAX_LINES{5 + 2 * BOT_PROFILE_MAX_BOTS};
 
 using profile_line = std::array<char, BOT_PROFILE_LINE_SIZE>;
 
@@ -89,7 +91,7 @@ using profile_line = std::array<char, BOT_PROFILE_LINE_SIZE>;
 inline std::size_t format_profile(const bot_profile &p, const std::span<profile_line> out)
 {
 	const unsigned count{std::min<unsigned>(p.count, BOT_PROFILE_MAX_BOTS)};
-	std::size_t need{3 + count + (p.default_profile[0] ? 1u : 0u)};
+	std::size_t need{3 + count + (p.default_profile[0] ? 1u : 0u) + (p.taunt ? 1u : 0u)};
 	for (unsigned i = 0; i < count; ++i)
 		need += p.bots[i].profile[0] ? 1 : 0;
 	if (out.size() < need)
@@ -100,6 +102,9 @@ inline std::size_t format_profile(const bot_profile &p, const std::span<profile_
 	if (p.default_profile[0])
 		std::snprintf(out[n++].data(), BOT_PROFILE_LINE_SIZE, "BotDefaultStyle=%.31s", p.default_profile.data());
 	std::snprintf(out[n++].data(), BOT_PROFILE_LINE_SIZE, "BotReplace=%u", p.replace ? 1u : 0u);
+	/* Written only when on: a profile without it reads as off. */
+	if (p.taunt)
+		std::snprintf(out[n++].data(), BOT_PROFILE_LINE_SIZE, "BotTaunt=1");
 	for (unsigned i = 0; i < count; ++i)
 	{
 		const auto &b{p.bots[i]};
@@ -207,6 +212,13 @@ public:
 			m_seen = true;
 			if (*i < BOT_PROFILE_MAX_BOTS)
 				m_profiles[*i] = make_style_name(value);
+			return true;
+		}
+		if (rest == "Taunt")
+		{
+			m_seen = true;
+			if (const auto u{detail::parse_unsigned(value)})
+				m_profile.taunt = *u != 0;
 			return true;
 		}
 		if (rest == "Replace")

@@ -161,11 +161,38 @@ void digi_start_sound_queued(sound_effect soundnum, fix volume);
 extern int Dont_start_sound_objects;
 void digi_select_system();
 
+/* Volume (0 to F1_0) and pan of what an object at `pos` in `segnum`
+ * sounds like to the viewer, heard up to `max_distance` (as the sounds
+ * linked to objects).
+ */
+std::pair<int, sound_pan> digi_sound_location(const vms_vector &pos, vcsegptridx_t segnum, fix max_volume, vm_distance max_distance);
+
 void digi_end_soundobj(sound_object &);
 void SoundQ_end();
 #ifndef NDEBUG
 void verify_sound_channel_free(sound_channel channel);
 #endif
+
+}
+
+namespace dcx {
+
+/* Sounds that are no game sound (the taunts, Documentation/taunts.md):
+ * `slot` 0 to DIGI_CUSTOM_SLOTS - 1 plays `samples` (44100 Hz, stereo,
+ * int16, interleaved; copied), stopping what the slot played.  Only with
+ * SDL_mixer; otherwise nothing plays.
+ */
+constexpr unsigned DIGI_CUSTOM_SLOTS{9};
+sound_channel digi_play_custom(unsigned slot, std::span<const int16_t> samples, fix volume, sound_pan pan);
+/* The channel of what the slot plays, or sound_channel::None if it
+ * finished or was stopped (also by another sound taking the channel).
+ */
+sound_channel digi_custom_channel(unsigned slot);
+void digi_stop_custom(unsigned slot);
+
+}
+
+namespace dsx {
 
 class RAIIdigi_sound
 {

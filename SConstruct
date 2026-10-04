@@ -5036,6 +5036,15 @@ class DXXArchive(DXXCommon):
 		RuntimeTest('test-net-v2-modes', (
 			'common/unittest/net_v2_modes.cpp',
 			)),
+		# Test of the taunts (taunt_sample.h): the rate limiter, the
+		# decoding of the own file, the limits, hostile input, the
+		# transfer format, the starter horns, the messages
+		# (Documentation/taunts.md).  Run from the top of the tree.
+		RuntimeTest('test-taunt', (
+			'common/unittest/taunt.cpp',
+			'common/misc/taunt_sample.cpp',
+			'common/misc/taunt_decode.cpp',
+			)),
 		# Test of the deathmatch spawn site choice (spawn_site.h) against
 		# the code it was extracted from.
 		RuntimeTest('test-spawn-site', (
@@ -5236,6 +5245,8 @@ class DXXArchive(DXXCommon):
 'common/misc/physfsrwops.cpp',
 'common/misc/physfsx.cpp',
 'common/misc/strutil.cpp',
+'common/misc/taunt_decode.cpp',
+'common/misc/taunt_sample.cpp',
 'common/misc/vgrphys.cpp',
 'common/misc/vgwphys.cpp',
 )), \
@@ -5577,6 +5588,7 @@ class DXXProgram(DXXCommon):
 'similar/main/songs.cpp',
 'similar/main/state.cpp',
 'similar/main/switch.cpp',
+'similar/main/taunt.cpp',
 'similar/main/terrain.cpp',
 'similar/main/texmerge.cpp',
 'similar/main/text.cpp',

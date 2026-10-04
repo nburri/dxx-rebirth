@@ -56,6 +56,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "ai.h"
 #include "rbaudio.h"
 #include "digi.h"
+#include "taunt.h"
 #include "u_mem.h"
 #include "palette.h"
 #include "morph.h"
@@ -2307,6 +2308,11 @@ window_event_result ReadControls(const d_level_shared_robot_info_state &LevelSha
 			return window_event_result::handled;
 
 		check_rear_view(Controls);
+#if DXX_BUILD_DESCENT == 2
+		/* Documentation/taunts.md: the horn sounds from a living ship. */
+		if (std::exchange(Controls.state.taunt, 0) && Player_is_dead == player_dead_state::no)
+			taunt_key_pressed();
+#endif
 
 		// If automap key pressed, enable automap unless you are in network mode, control center destroyed and < 10 seconds left
 		if ( Controls.state.automap )

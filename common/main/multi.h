@@ -190,8 +190,9 @@ static inline player_ship_color get_team_color(const team_number tnum)
  * 110: ORB_BONUS, the host decides scored orbs and a death's extra orb in
  * hoard.
  * 111: capture the flag (Classic): its rules in GAME_SETTINGS, CTF_NOTICE.
+ * 112: taunts (TAUNT_REQUEST, TAUNT; Documentation/taunts.md).
  */
-constexpr std::uint16_t MULTI_PROTO_VERSION{111};
+constexpr std::uint16_t MULTI_PROTO_VERSION{112};
 // PROTOCOL VARIABLES AND DEFINES - END
 
 /* The network tick rate (positions per second, and the pacing of every

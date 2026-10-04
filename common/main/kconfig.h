@@ -128,7 +128,9 @@ struct state_control_info
 	struct state_controls_t : ::dcx::control_info::state_controls_t
 	{
 		uint8_t toggle_bomb,
-			afterburner, headlight, energy_to_shield;
+			afterburner, headlight, energy_to_shield,
+			/* Documentation/taunts.md */
+			taunt;
 	};
 #endif
 	state_controls_t state; // to scale movement for keys only we need them to be separate from joystick/mouse buttons
@@ -192,6 +194,12 @@ enum class kconfig_type
 void kconfig(kconfig_type n);
 
 extern void kc_set_controls();
+#if defined(DXX_BUILD_DESCENT) && DXX_BUILD_DESCENT == 2
+/* A pilot from before the taunt key: its taunt bindings become the
+ * defaults (V if no other control uses it, nothing else).
+ */
+void kconfig_default_taunt_bindings();
+#endif
 
 //set the cruise speed to zero
 extern void reset_cruise(void);

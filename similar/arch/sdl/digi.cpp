@@ -253,3 +253,41 @@ void digi_stop_all_channels() { fptr->stop_all_channels(); }
 void digi_set_digi_volume(int dvolume) { fptr->set_digi_volume(dvolume); }
 
 }
+
+namespace dcx {
+sound_channel digi_play_custom(const unsigned slot, const std::span<const int16_t> samples, const fix volume, const sound_pan pan)
+{
+#if DXX_USE_SDLMIXER
+	if (!CGameArg.SndDisableSdlMixer)
+		return digi_mixer_play_custom(slot, samples, volume, pan);
+#else
+	(void)slot;
+	(void)samples;
+	(void)volume;
+	(void)pan;
+#endif
+	return sound_channel::None;
+}
+
+sound_channel digi_custom_channel(const unsigned slot)
+{
+#if DXX_USE_SDLMIXER
+	if (!CGameArg.SndDisableSdlMixer)
+		return digi_mixer_custom_channel(slot);
+#else
+	(void)slot;
+#endif
+	return sound_channel::None;
+}
+
+void digi_stop_custom(const unsigned slot)
+{
+#if DXX_USE_SDLMIXER
+	if (!CGameArg.SndDisableSdlMixer)
+		digi_mixer_stop_custom(slot);
+#else
+	(void)slot;
+#endif
+}
+
+}
