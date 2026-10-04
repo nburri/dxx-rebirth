@@ -498,7 +498,7 @@ parse_result parse(const std::span<const std::uint8_t> file)
 		if (padded - size > file.size() - pos)
 			return fail("section padding past the end");
 		pos += padded - size;
-		const auto once = [&fail](bool &flag) -> bool {
+		const auto once = [](bool &flag) -> bool {
 			if (flag)
 				return false;
 			flag = true;

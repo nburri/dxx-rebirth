@@ -170,7 +170,7 @@ std::string obj_box(const float lx, const float ly, const float lz, const float 
 		std::snprintf(line, sizeof(line), "v %g %g %g\n", i & 1 ? hx : lx, i & 2 ? hy : ly, i & 4 ? hz : lz);
 		s += line;
 	}
-	static constexpr std::array<std::array<unsigned, 4>, 6> faces{{{{2, 3, 7, 6}}, {{0, 4, 5, 1}}, {{1, 5, 7, 3}}, {{0, 2, 6, 4}}, {{4, 6, 7, 5}}, {{0, 1, 3, 2}}}};
+	static constexpr std::array<std::array<unsigned, 4>, 6> faces{{{{6, 7, 3, 2}}, {{1, 5, 4, 0}}, {{3, 7, 5, 1}}, {{4, 6, 2, 0}}, {{5, 7, 6, 4}}, {{2, 3, 1, 0}}}};
 	for (unsigned f = 0; f < 6; ++f)
 	{
 		s += "usemtl " + (f == 0 ? top_material : other_material) + "\n";
@@ -209,6 +209,21 @@ void test_obj()
 		CHECK(m->textures.size() == 1);
 		/* The long axis is z (forward). */
 		CHECK(m->maxs.z - m->mins.z > m->maxs.x - m->mins.x);
+		/* Computed normals and the winding point out of the box. */
+		bool outward{true};
+		for (const auto &v : m->vertices)
+			if (v.normal[0] * v.pos.x + v.normal[1] * v.pos.y + v.normal[2] * v.pos.z <= 0)
+				outward = false;
+		for (std::size_t i = 0; i + 2 < m->indices.size(); i += 3)
+		{
+			const auto &a{m->vertices[m->indices[i]].pos}, &b{m->vertices[m->indices[i + 1]].pos}, &c{m->vertices[m->indices[i + 2]].pos};
+			const float ux{b.x - a.x}, uy{b.y - a.y}, uz{b.z - a.z}, vx{c.x - a.x}, vy{c.y - a.y}, vz{c.z - a.z};
+			const float nx{uy * vz - uz * vy}, ny{uz * vx - ux * vz}, nz{ux * vy - uy * vx};
+			const float cx{a.x + b.x + c.x}, cy{a.y + b.y + c.y}, cz{a.z + b.z + c.z};
+			if (nx * cx + ny * cy + nz * cz <= 0)
+				outward = false;
+		}
+		CHECK(outward);
 		/* No debris_* parts: the automatic split (left, body, right). */
 		CHECK(m->parts.size() == 3);
 	}

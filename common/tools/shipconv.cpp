@@ -52,6 +52,13 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "contrib/stb/stb_image_write.h"
 
+/* MinGW checks plain `printf` formats as Microsoft's (no %zu). */
+#if defined(__MINGW32__) && !defined(__clang__)
+#define SHIPCONV_FORMAT_PRINTF(A, B)	__attribute__((format(gnu_printf, A, B)))
+#else
+#define SHIPCONV_FORMAT_PRINTF(A, B)	__attribute__((format(printf, A, B)))
+#endif
+
 namespace {
 
 namespace ds = dcx::dxship;
@@ -128,7 +135,7 @@ vec3 normalised(const vec3 &a)
 
 unsigned Warnings;
 
-[[gnu::format(printf, 1, 2)]]
+SHIPCONV_FORMAT_PRINTF(1, 2)
 void warn(const char *const fmt, ...)
 {
 	++Warnings;
@@ -140,7 +147,7 @@ void warn(const char *const fmt, ...)
 	std::fputc('\n', stderr);
 }
 
-[[gnu::format(printf, 1, 2), noreturn]]
+[[noreturn]] SHIPCONV_FORMAT_PRINTF(1, 2)
 void fatal(const char *const fmt, ...)
 {
 	std::fputs("shipconv: error: ", stderr);
@@ -653,7 +660,7 @@ scene load_obj(const std::string &path)
 	std::map<std::string, unsigned> material_index;
 	unsigned current_material{};
 	bool have_material{};
-	std::uint8_t part{};
+	std::uint8_t part{}, object_part{};
 	std::optional<unsigned> gun;
 	std::map<std::array<long, 4>, std::uint32_t> corner_cache;
 	const auto use_material = [&](const std::string &name) {
@@ -716,10 +723,16 @@ scene load_obj(const std::string &path)
 		}
 		else if (k == "o" || k == "g")
 		{
+			/* An object's debris part holds for its groups, unless a
+			 * group names a part of its own.
+			 */
 			std::string n;
 			std::getline(ls >> std::ws, n);
 			gun = gun_marker_index(n);
-			part = part_for_name(s, n, 0);
+			if (k == "o")
+				part = object_part = part_for_name(s, n, 0);
+			else
+				part = part_for_name(s, n, object_part);
 		}
 		else if (k == "f" && !gun)
 		{
@@ -834,6 +847,14 @@ void convert_axes(scene &s, const options &opt)
 	for (auto &g : s.guns)
 		if (g)
 			g = map(*g);
+	/* The format's winding: cross(b - a, c - a) points out of the ship.
+	 * The source's does in its own axes; a mapping that mirrors (always,
+	 * from a right-handed source to Descent's left-handed axes) reverses
+	 * it.
+	 */
+	if (dot(cross(r, u), f) < 0)
+		for (auto &t : s.triangles)
+			std::swap(t.v[1], t.v[2]);
 }
 
 void compute_normals(scene &s)
@@ -1323,13 +1344,36 @@ int convert(options opt)
 	std::fprintf(stderr, "shipconv: %s: %zu triangles, %zu vertices, %zu materials, %zu textures\n", opt.input.c_str(), s.triangles.size(), s.vertices.size(), s.materials.size(), s.images.size());
 	if (s.triangles.size() > ds::MAX_TRIANGLES)
 		fatal("%zu triangles; at most %u are allowed", s.triangles.size(), ds::MAX_TRIANGLES);
+	{
+		/* Texture coordinates the format cannot hold (dxship_format.h). */
+		unsigned bad{};
+		for (auto &v : s.vertices)
+			if (!std::isfinite(v.u) || !std::isfinite(v.v) || std::fabs(v.u) > 1024 || std::fabs(v.v) > 1024 || !std::isfinite(v.pos.x) || !std::isfinite(v.pos.y) || !std::isfinite(v.pos.z))
+			{
+				++bad;
+				v.u = v.v = 0;
+				if (!std::isfinite(v.pos.x) || !std::isfinite(v.pos.y) || !std::isfinite(v.pos.z))
+					fatal("the model has a vertex that is not a finite number");
+			}
+		if (bad)
+			warn("%u vertices had texture coordinates beyond +-1024 or not finite; set to 0", bad);
+	}
 	convert_axes(s, opt);
 	if (!s.has_normals)
 		compute_normals(s);
-	/* Bounding sphere, re-centred and scaled to the Pyro's radius. */
+	/* Bounding sphere (of the vertices that triangles use), re-centred and
+	 * scaled to the Pyro's radius.
+	 */
 	std::vector<vec3> pts;
-	for (const auto &v : s.vertices)
-		pts.push_back(v.pos);
+	{
+		std::vector<bool> used(s.vertices.size());
+		for (const auto &t : s.triangles)
+			for (const auto i : t.v)
+				used[i] = true;
+		for (std::size_t i = 0; i < s.vertices.size(); ++i)
+			if (used[i])
+				pts.push_back(s.vertices[i].pos);
+	}
 	const auto bs{bounding_sphere(pts)};
 	if (bs.radius <= 0)
 		fatal("the model has no extent");
@@ -1596,7 +1640,12 @@ int convert(options opt)
 	}
 	for (unsigned i = 0; i < 8; ++i)
 		if (const auto &g{s.guns[i]})
-			m.guns[i] = {true, *g};
+		{
+			if (length(*g) > 2 * ds::PYRO_RADIUS * ds::RADIUS_TOLERANCE)
+				warn("gun marker gun%u is far outside the ship and is left out", i);
+			else
+				m.guns[i] = {true, *g};
+		}
 	m.info = opt.info;
 	m.info.converter = CONVERTER_VERSION;
 	m.radius = ds::PYRO_RADIUS;
