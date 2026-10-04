@@ -190,8 +190,12 @@ static inline player_ship_color get_team_color(const team_number tnum)
  * 110: ORB_BONUS, the host decides scored orbs and a death's extra orb in
  * hoard.
  * 111: capture the flag (Classic): its rules in GAME_SETTINGS, CTF_NOTICE.
+ * The side branch exp-visuals numbers its protocols 0x7000 + n, so that
+ * they never collide with those of experimental-netcode (the low byte, a
+ * v1 build's packet type, stays 100 and up):
+ * 0x7000 + 112 = 28784: taunts (TAUNT_REQUEST, TAUNT; Documentation/taunts.md).
  */
-constexpr std::uint16_t MULTI_PROTO_VERSION{111};
+constexpr std::uint16_t MULTI_PROTO_VERSION{0x7000 + 112};
 // PROTOCOL VARIABLES AND DEFINES - END
 
 /* The network tick rate (positions per second, and the pacing of every

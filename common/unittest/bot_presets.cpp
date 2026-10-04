@@ -502,6 +502,25 @@ void test_profile()
 		std::array<profile_line, 3> lines;
 		CHECK(format_profile(sample_profile(), lines) == 0);
 	}
+	/* Bots that taunt (Documentation/taunts.md): one more line, read
+	 * back; a profile without it reads as off.
+	 */
+	{
+		auto p{sample_profile()};
+		p.taunt = true;
+		std::array<profile_line, BOT_PROFILE_MAX_LINES> lines;
+		const auto n{format_profile(p, lines)};
+		CHECK(n == 4 + p.count);
+		profile_reader r;
+		for (std::size_t i = 0; i < n; ++i)
+		{
+			const std::string_view line{lines[i].data()};
+			const auto eq{line.find('=')};
+			CHECK(r.parse(line.substr(0, eq), line.substr(eq + 1)));
+		}
+		CHECK(r.result() == p);
+		CHECK(!sample_profile().taunt);
+	}
 }
 
 /* Section 6.4: "Save as default setup" during a game replaces the bot
