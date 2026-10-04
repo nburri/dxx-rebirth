@@ -73,6 +73,7 @@
 #include "frame_probe.h"
 #include "ogl_effects.h"
 #include "texture_pack.h"
+#include "texture_download.h"
 #include "ogl_ship.h"
 #include "mission.h"
 #include "bm.h"
@@ -524,6 +525,8 @@ std::string current_mission_directory()
 
 /* The mission whose textures are loaded. */
 std::string texture_pack_mission;
+/* texture_download::installed_generation() when they were loaded. */
+unsigned texture_pack_generation;
 
 /* Per level: the bitmaps without a replacement, and the decoded
  * replacements of the bitmaps merged by texmerge.cpp, whose merged
@@ -727,12 +730,13 @@ void ogl_cache_level_textures(void)
 	texture_pack_stats = {};
 	texture_pack_missing.reset();
 	texture_pack_merge_sources.clear();
-	if (auto mission{current_mission_directory()}; mission != texture_pack_mission)
+	if (auto mission{current_mission_directory()}; mission != texture_pack_mission || texture_pack_generation != texture_download::installed_generation())
 	{
-		/* Textures of the previous mission's pack directory: load
-		 * them all again.
+		/* Textures of the previous mission's pack directory, or a
+		 * pack was downloaded or deleted since: load them all again.
 		 */
 		texture_pack_mission = std::move(mission);
+		texture_pack_generation = texture_download::installed_generation();
 		if (texture_pack_enabled())
 		{
 			for (auto &bm : GameBitmaps)
@@ -740,6 +744,11 @@ void ogl_cache_level_textures(void)
 			texmerge_flush();
 		}
 	}
+	/* Download this mission's pack if there is a newer one: used from
+	 * the next level load on.
+	 */
+	if (texture_pack_enabled())
+		texture_download::level_loaded(texture_pack_mission);
 #endif
 	
 	range_for (auto &ec, partial_const_range(Effects, Num_effects))

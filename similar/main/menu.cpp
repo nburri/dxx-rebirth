@@ -97,6 +97,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "d_range.h"
 #include "d_zip.h"
 #include "partial_range.h"
+#include "texture_download.h"
 #include <memory>
 #include <utility>
 
@@ -2108,6 +2109,9 @@ struct visual_quality_menu_items
 		opt_vq_contrast,
 		opt_vq_texpack,
 		opt_vq_texpack_info,
+		opt_vq_texpack_download,
+		opt_vq_download_all,
+		opt_vq_delete_downloads,
 		opt_vq_blank,
 		opt_vq_info,
 		opt_vq_count
@@ -2120,6 +2124,21 @@ struct visual_quality_menu_items
 	std::array<std::array<char, 48>, opt_vq_count> label;
 	std::array<char, 80> info;
 	std::array<char, 80> texpack_info;
+	/* The download state (texture_download.h), updated while the menu
+	 * is open.
+	 */
+	std::array<char, 80> download_info;
+	unsigned download_generation{};
+	void describe_download()
+	{
+		const auto status{texture_download::status_text()};
+		std::snprintf(download_info.data(), download_info.size(), "  %s", status.c_str());
+		if (const auto g{texture_download::installed_generation()}; g != download_generation)
+		{
+			download_generation = g;
+			describe_texture_packs();
+		}
+	}
 	/* Which missions have a texture pack (texture_pack.h): the
 	 * subdirectories of textures/, and "all" for files directly in it.
 	 */
@@ -2173,6 +2192,11 @@ struct visual_quality_menu_items
 		nm_set_item_checkbox(m[opt_vq_texpack], "HD texture packs (AI)", CGameCfg.TexturePack);
 		describe_texture_packs();
 		nm_set_item_text(m[opt_vq_texpack_info], texpack_info.data());
+		download_generation = texture_download::installed_generation();
+		describe_download();
+		nm_set_item_text(m[opt_vq_texpack_download], download_info.data());
+		nm_set_item_menu(m[opt_vq_download_all], "  Download all packs now");
+		nm_set_item_menu(m[opt_vq_delete_downloads], "  Delete downloaded packs");
 		nm_set_item_text(m[opt_vq_blank], "");
 		std::snprintf(info.data(), info.size(), "Shaders: %s  Framebuffers: %s  Max. MSAA: %ix",
 			c.shaders ? "yes" : "no", c.fbo ? "yes" : "no", c.fbo_multisample ? c.max_samples : 0);
@@ -2211,7 +2235,11 @@ struct visual_quality_menu_items
 		/* The textures load again when the graphics menu closes;
 		 * saved in descent.cfg (TexturePack).
 		 */
-		CGameCfg.TexturePack = m[opt_vq_texpack].value;
+		if (CGameCfg.TexturePack != m[opt_vq_texpack].value)
+		{
+			CGameCfg.TexturePack = m[opt_vq_texpack].value;
+			texture_download::set_enabled(CGameCfg.TexturePack && !CGameArg.OglNoTexturePack);
+		}
 	}
 };
 
@@ -2231,6 +2259,27 @@ struct visual_quality_menu : visual_quality_menu_items, newmenu
 				break;
 			case event_type::window_close:
 				apply();
+				break;
+			case event_type::window_draw:
+				describe_download();
+				break;
+			case event_type::newmenu_selected:
+				switch (static_cast<const d_select_event &>(event).citem)
+				{
+					case opt_vq_download_all:
+						if (!m[opt_vq_texpack].value || CGameArg.OglNoTexturePack)
+							nm_messagebox_str(menu_title{nullptr}, nm_messagebox_tie(TXT_OK), menu_subtitle{"Switch on \"HD texture packs (AI)\" first."});
+						else if (CGameArg.NoTextureDownload || !texture_download::available())
+							nm_messagebox_str(menu_title{nullptr}, nm_messagebox_tie(TXT_OK), menu_subtitle{texture_download::available() ? "Downloads are off (-notexturedownload)." : "This build cannot download\n(no libcurl)."});
+						else
+							texture_download::download_all();
+						return window_event_result::handled;
+					case opt_vq_delete_downloads:
+						texture_download::delete_downloaded();
+						return window_event_result::handled;
+					default:
+						break;
+				}
 				break;
 			default:
 				break;

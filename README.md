@@ -44,6 +44,7 @@ See [INSTALL.markdown](INSTALL.markdown).
 Texture packs replace the game's 64x64 wall textures with high-resolution pictures, for every mission or for one mission (a `textures/<mission>/` folder in the game or user folder).
 
 - **On/off:** *Options → Graphics → Visual Quality → HD texture packs (AI)*. On by default (it does nothing while no pack is installed); the line below it lists the installed packs. The change applies when you leave the Graphics menu (the textures load again) and is saved in `descent.cfg` (`TexturePack`). `-notexturepack` turns packs off for one run.
+- **Download:** while the toggle is on, the game fetches the packs from [nburri/d2xx-ai-textures](https://github.com/nburri/d2xx-ai-textures) (CC0) in the background: when a level of a mission with a pack loads (Corona so far), the pack downloads (progress in a small line at the bottom of the screen) and is used from the next level on. The Visual Quality menu shows the state and has *Download all packs now* and *Delete downloaded packs*. `-notexturedownload` turns downloading off. Firewalls: HTTPS to `github.com` and `release-assets.githubusercontent.com` (older links: `objects.githubusercontent.com`).
 - File layout and making your own: [Documentation/texture-packs.md](Documentation/texture-packs.md).
 
 

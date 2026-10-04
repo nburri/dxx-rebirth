@@ -104,6 +104,7 @@ struct CArg : prohibit_void_ptr<>
 	bool OglDarkEdges;
 	bool OglNoEffects;
 	bool OglNoTexturePack;
+	bool NoTextureDownload;
 	bool DbgUseOldTextureMerge;
 	bool DbgGlIntensity4Ok;
 	bool DbgGlReadPixelsOk;

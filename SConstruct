@@ -1523,6 +1523,27 @@ int main(int argc,char**argv)
 		self._result_check_user_setting(context, use_tracker, 'UDP game tracker', cpp_defines_with_condition_value=_CPPDEFINES)
 
 	@_implicit_test
+	def check_libcurl(self,context):
+		successflags = self.pkgconfig.merge(context, self.msgprefix, self.user_settings, 'libcurl', 'libcurl', {'LIBS' : ['curl']})
+		return self._soft_check_system_library(context, header=('curl/curl.h',), main='''
+	CURL *c = curl_easy_init();
+	curl_easy_setopt(c, CURLOPT_URL, "https://example.invalid/");
+	curl_easy_cleanup(c);
+''', lib='curl', successflags=successflags)
+
+	@_custom_test
+	def _check_user_settings_curl(self,context,_CPPDEFINES=('DXX_USE_CURL',)):
+		# libcurl downloads the texture packs (common/main/texture_download.cpp).
+		# Optional: without it the game builds and packs are installed by hand.
+		use_curl = self.user_settings.use_curl
+		if use_curl:
+			e = self.check_libcurl(context)
+			if e:
+				context.Display(f'{self.msgprefix}: libcurl not usable ({e[1]}); building without texture pack download\n')
+				use_curl = False
+		self._result_check_user_setting(context, use_curl, 'texture pack download (libcurl)', cpp_defines_with_condition_value=_CPPDEFINES)
+
+	@_implicit_test
 	def check_libpng(self,context,
 		_header=(
 			'cstdint',
@@ -3996,6 +4017,7 @@ class DXXCommon(LazyObjectConstructor):
 					('ipv6', True, 'enable UDP/IPv6 for multiplayer'),
 					('use_udp', True, 'enable UDP support'),
 					('use_tracker', True, 'enable Tracker support (requires UDP)'),
+					('use_curl', True, 'download texture packs with libcurl (optional; off if libcurl is missing)'),
 					('verbosebuild', self.default_verbosebuild, 'print out all compiler/linker messages during building'),
 					# This is only examined for Mac OS X targets.
 					#
@@ -4999,6 +5021,11 @@ class DXXArchive(DXXCommon):
 			'common/unittest/texture_pack.cpp',
 			'common/main/texture_pack.cpp',
 			)),
+		RuntimeTest('test-texture-download', (
+			'common/unittest/texture_download.cpp',
+			'common/main/texture_download_format.cpp',
+			'common/misc/sha256.cpp',
+			)),
 		RuntimeTest('test-xrange', (
 			'common/unittest/xrange.cpp',
 			)),
@@ -5274,6 +5301,8 @@ class DXXArchive(DXXCommon):
 'common/main/frame_probe.cpp',
 'common/main/net_v2_transport.cpp',
 'common/main/piggy.cpp',
+'common/main/texture_download.cpp',
+'common/main/texture_download_format.cpp',
 'common/main/texture_pack.cpp',
 'common/maths/rand.cpp',
 'common/mem/mem.cpp',

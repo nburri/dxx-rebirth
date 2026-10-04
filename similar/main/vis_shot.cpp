@@ -43,6 +43,8 @@
 #if DXX_USE_OGL
 #include "ogl_init.h"
 #include "ogl_effects.h"
+#include "texture_download.h"
+#include "texture_pack.h"
 #endif
 
 namespace dsx {
@@ -782,6 +784,16 @@ bool vis_shot_start()
 		con_printf(CON_URGENT, "visshot: mission \"%s\" has %u levels, not %u", Current_mission->mission_name.data(), static_cast<unsigned>(Current_mission->last_level), level);
 		return false;
 	}
+#if DXX_USE_OGL
+	/* The pictures show the mission's texture pack: wait for its
+	 * download (texture_download.h), which a game does not do.
+	 */
+	if (CGameCfg.TexturePack && !CGameArg.OglNoTexturePack)
+	{
+		texture_download::level_loaded(texture_pack::mission_directory(&*Current_mission->filename));
+		texture_download::wait_idle(600000);
+	}
+#endif
 	GameUniqueState.Difficulty_level = Difficulty_level_type::_0;
 	/* The same game every run: a simulated clock (the level's random
 	 * seed comes from it) at 100 frames per second.
