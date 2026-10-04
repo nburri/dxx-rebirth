@@ -15,8 +15,8 @@
  *
  * Steps: load, convert the axes to Descent's (x right, y up, z forward),
  * find the player colour zone, the debris parts and the gun markers,
- * re-centre on the bounding sphere and scale it to the Pyro's radius,
- * check the silhouette, scale the textures to powers of two of at most
+ * re-centre on the bounding sphere and scale it so that its mean
+ * silhouette equals the Pyro's (decision D3), scale the textures to powers of two of at most
  * 512, write, and read the result back with the game's reader.
  */
 
@@ -39,6 +39,7 @@
 
 #include "dxship_format.h"
 #include "sha256.h"
+#include "ship_silhouette.h"
 
 #define CGLTF_IMPLEMENTATION
 #include "contrib/cgltf/cgltf.h"
@@ -66,16 +67,7 @@ using ds::vec3;
 
 constexpr const char *CONVERTER_VERSION{"shipconv 1"};
 
-/* The Pyro-GX's silhouette in three axis views, as a fraction of the
- * square of side 2 * radius (front: x/y, top: x/z, side: z/y), measured
- * with the same 200 x 200 sampling as `silhouette` below from model 108
- * of descent2.ham.  Numbers only; no retail geometry is used.
- */
-constexpr std::array<double, 3> PYRO_SILHOUETTE{{0.0958, 0.3973, 0.1525}};
-constexpr std::array<const char *, 3> VIEW_NAMES{{"front", "top", "side"}};
-/* Decision D3: at most slightly larger than the Pyro. */
-constexpr double SILHOUETTE_MAX{1.15};
-constexpr double SILHOUETTE_WARN_SMALL{0.6};
+namespace ss = dcx::ship_silhouette;
 /* The Pyro's gun points (Player_ship->gun_points), for the warnings on
  * gun markers only; the game always fires from its own table.
  */
@@ -912,57 +904,6 @@ sphere bounding_sphere(const std::vector<vec3> &pts)
 	return b.radius < s.radius ? b : s;
 }
 
-/* Silhouette in the three axis views as a fraction of (2 * radius)^2,
- * sampled at the centres of a 200 x 200 grid.
- */
-std::array<double, 3> silhouette(const std::vector<vec3> &pos, const std::vector<std::array<std::uint32_t, 3>> &tris, const float radius)
-{
-	constexpr unsigned N{200};
-	std::array<double, 3> out{};
-	for (unsigned view = 0; view < 3; ++view)
-	{
-		std::vector<std::uint8_t> grid(N * N);
-		const auto project = [view](const vec3 &p) -> std::array<float, 2> {
-			switch (view)
-			{
-				case 0:
-					return {{p.x, p.y}};
-				case 1:
-					return {{p.x, p.z}};
-				default:
-					return {{p.z, p.y}};
-			}
-		};
-		const float cell{2 * radius / N};
-		for (const auto &t : tris)
-		{
-			const auto a{project(pos[t[0]])}, b{project(pos[t[1]])}, c{project(pos[t[2]])};
-			const auto d{(b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])};
-			if (std::fabs(d) < 1e-12f)
-				continue;
-			const auto lo_x{std::min({a[0], b[0], c[0]})}, hi_x{std::max({a[0], b[0], c[0]})};
-			const auto lo_y{std::min({a[1], b[1], c[1]})}, hi_y{std::max({a[1], b[1], c[1]})};
-			const auto to_cell = [&](const float v) {
-				return static_cast<int>(std::floor((v + radius) / cell));
-			};
-			const int x0{std::max(0, to_cell(lo_x))}, x1{std::min(static_cast<int>(N) - 1, to_cell(hi_x))};
-			const int y0{std::max(0, to_cell(lo_y))}, y1{std::min(static_cast<int>(N) - 1, to_cell(hi_y))};
-			for (int gy = y0; gy <= y1; ++gy)
-				for (int gx = x0; gx <= x1; ++gx)
-				{
-					const float px{(static_cast<float>(gx) + 0.5f) * cell - radius}, py{(static_cast<float>(gy) + 0.5f) * cell - radius};
-					const auto w0{((b[0] - px) * (c[1] - py) - (c[0] - px) * (b[1] - py)) / d};
-					const auto w1{((c[0] - px) * (a[1] - py) - (a[0] - px) * (c[1] - py)) / d};
-					const auto w2{1 - w0 - w1};
-					if (w0 >= 0 && w1 >= 0 && w2 >= 0)
-						grid[static_cast<std::size_t>(gy) * N + static_cast<std::size_t>(gx)] = 1;
-				}
-		}
-		out[view] = static_cast<double>(std::ranges::count(grid, 1)) / (N * N);
-	}
-	return out;
-}
-
 /* Colour zone masks: one float plane per image, at the image's size. */
 using mask_plane = std::vector<float>;
 
@@ -1312,6 +1253,17 @@ void print_summary(const ds::model &m, const std::span<const std::uint8_t> file)
 		std::printf("texture     %ux%u, %zu bytes\n", t.info.width, t.info.height, t.png.size());
 	std::printf("parts       %zu\n", m.parts.empty() ? std::size_t{1} : m.parts.size());
 	std::printf("bounds      %.2f..%.2f x %.2f..%.2f x %.2f..%.2f (radius %.3f)\n", m.mins.x, m.maxs.x, m.mins.y, m.maxs.y, m.mins.z, m.maxs.z, m.radius);
+	std::vector<ss::triangle> tris;
+	for (std::size_t i = 0; i + 2 < m.indices.size(); i += 3)
+		tris.push_back({{m.indices[i], m.indices[i + 1], m.indices[i + 2]}});
+	std::vector<vec3> pos;
+	float outer{};
+	for (const auto &v : m.vertices)
+	{
+		pos.push_back(v.pos);
+		outer = std::max(outer, length(v.pos));
+	}
+	std::printf("silhouette  %.2f x the Pyro's (mean over all view directions); outermost point %.2f x the Pyro's radius\n", ss::mean_area(pos, tris) / ss::PYRO_MEAN_AREA, static_cast<double>(outer / ds::PYRO_RADIUS));
 }
 
 int check(const options &opt)
@@ -1385,41 +1337,39 @@ int convert(options opt)
 	for (auto &g : s.guns)
 		if (g)
 			g = (*g - bs.centre) * scale;
-	/* Silhouette (decision D3): shrink if it is more than slightly larger
-	 * than the Pyro's.
+	/* Size (decision D3): the mean silhouette equal to the Pyro's, the
+	 * outermost point at most ss::RADIUS_CAP Pyro radii out.
 	 */
 	{
-		std::vector<std::array<std::uint32_t, 3>> tris;
+		std::vector<ss::triangle> tris;
 		for (const auto &t : s.triangles)
 			tris.push_back(t.v);
 		pts.clear();
 		for (const auto &v : s.vertices)
 			pts.push_back(v.pos);
-		auto sil{silhouette(pts, tris, ds::PYRO_RADIUS)};
-		double worst{};
-		for (unsigned i = 0; i < 3; ++i)
-			worst = std::max(worst, sil[i] / PYRO_SILHOUETTE[i]);
-		if (worst > SILHOUETTE_MAX)
+		const auto before{ss::mean_area(pts, tris) / ss::PYRO_MEAN_AREA};
+		const auto fair{ss::fair_scale(before)};
+		const auto grow{static_cast<float>(fair.scale)};
+		for (auto &v : s.vertices)
+			v.pos = v.pos * grow;
+		for (auto &g : s.guns)
+			if (g)
+				g = *g * grow;
+		pts.clear();
+		float outer{};
+		for (const auto &v : s.vertices)
 		{
-			const auto shrink{static_cast<float>(std::sqrt(SILHOUETTE_MAX / worst) * 0.995)};
-			warn("silhouette %.2f x the Pyro's; the ship is shrunk to %.0f %% so that it is at most %.2f x", worst, 100.0 * shrink, SILHOUETTE_MAX);
-			for (auto &v : s.vertices)
-				v.pos = v.pos * shrink;
-			for (auto &g : s.guns)
-				if (g)
-					g = *g * shrink;
-			pts.clear();
-			for (const auto &v : s.vertices)
-				pts.push_back(v.pos);
-			sil = silhouette(pts, tris, ds::PYRO_RADIUS);
+			pts.push_back(v.pos);
+			outer = std::max(outer, length(v.pos));
 		}
-		for (unsigned i = 0; i < 3; ++i)
-		{
-			const auto ratio{sil[i] / PYRO_SILHOUETTE[i]};
-			std::fprintf(stderr, "shipconv: silhouette %-5s %.2f x the Pyro's\n", VIEW_NAMES[i], ratio);
-			if (ratio < SILHOUETTE_WARN_SMALL)
-				warn("the %s silhouette is only %.2f x the Pyro's; the ship is harder to see and to hit than a Pyro", VIEW_NAMES[i], ratio);
-		}
+		const auto after{ss::mean_area(pts, tris) / ss::PYRO_MEAN_AREA};
+		std::fprintf(stderr, "shipconv: size: silhouette %.2f x the Pyro's at the Pyro's radius; scaled by %.3f to %.2f x, outermost point %.2f x the Pyro's radius%s\n", before, fair.scale, after, static_cast<double>(outer / ds::PYRO_RADIUS), fair.beyond_cap ? " (beyond the radius cap)" : fair.radius_capped ? " (radius cap)" : "");
+		if (after < ss::FLOOR - 0.005)
+			warn("the silhouette is only %.2f x the Pyro's even at %.2f x its radius (below %.2f); the ship is harder to see than a Pyro", after, ss::RADIUS_LIMIT, ss::FLOOR);
+		else if (fair.beyond_cap)
+			warn("the ship is long and thin: %.2f x the Pyro's radius for a silhouette of %.2f x the Pyro's (cap %.2f x, band %.2f..%.2f)", static_cast<double>(outer / ds::PYRO_RADIUS), after, ss::RADIUS_CAP, ss::BAND_LOW, ss::BAND_HIGH);
+		else if (after < ss::BAND_LOW - 0.005 || after > ss::BAND_HIGH + 0.005)
+			warn("the silhouette is %.2f x the Pyro's, outside %.2f..%.2f", after, ss::BAND_LOW, ss::BAND_HIGH);
 	}
 	for (unsigned i = 0; i < 8; ++i)
 		if (const auto &g{s.guns[i]})

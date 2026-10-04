@@ -13,7 +13,7 @@ File → Export → glTF 2.0) or **Wavefront OBJ** (with its `.mtl`).
 | Item | Rule |
 |---|---|
 | Orientation | glTF convention: +Y up, the ship's nose towards +Z. Other tools: `--forward` and `--up`. |
-| Size | Any; the converter centres the ship on its bounding sphere and scales that sphere to the Pyro's (radius 4.735 units). A long, thin ship therefore looks smaller than a Pyro; a ship whose silhouette would be more than 1.15 × the Pyro's in any axis view is shrunk until it is not. |
+| Size | Any; the converter centres the ship on its bounding sphere and scales it so that its mean silhouette (averaged over view directions all round) equals the Pyro's, with its outermost point at most 1.3 × the Pyro's radius (4.735 units, the collision sphere of every ship). A very long, thin ship grows beyond 1.3 × to reach 0.85 × the Pyro's silhouette, and the converter warns; a compact ship is shrunk. |
 | Triangles | At most 10000; vertices at most 16000 (after splitting at UV and normal seams). |
 | Textures | PNG or JPEG, any size; scaled to powers of two of at most 512 × 512 (`--texture-size` for less). At most 4 textures in the file, colour masks included. |
 | Materials | At most 8 different ones after conversion (texture, colour zone, double-sided). Base colour factors and vertex colours are kept. Transparency is not: ships are opaque. |

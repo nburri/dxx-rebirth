@@ -27,10 +27,12 @@
 #include <vector>
 
 #include "dxship_format.h"
+#include "ship_silhouette.h"
 
 namespace {
 
 namespace ds = dcx::dxship;
+namespace ss = dcx::ship_silhouette;
 namespace fs = std::filesystem;
 
 unsigned failures;
@@ -204,7 +206,7 @@ void test_obj()
 		CHECK(m->info.title == "box");
 		CHECK(m->info.licence == "CC0-1.0");
 		CHECK(m->indices.size() == 36);
-		CHECK(std::fabs(max_radius(*m) - ds::PYRO_RADIUS) < 0.02f);
+		CHECK(max_radius(*m) <= ds::PYRO_RADIUS * ds::RADIUS_TOLERANCE);
 		CHECK(std::ranges::any_of(m->materials, [](const ds::material &mat) { return mat.has_flag(ds::material_flag::tint); }));
 		CHECK(m->textures.size() == 1);
 		/* The long axis is z (forward). */
@@ -280,16 +282,90 @@ void test_limits()
 	write_text(Dir / "many.obj", s);
 	CHECK(run("\"" + (Dir / "many.obj").string() + "\" -o \"" + (Dir / "many.dxship").string() + "\" --name many" + Common) != 0);
 	CHECK(read_text(Dir / "log.txt").find("triangles") != std::string::npos);
-	/* A flat plate much wider than the Pyro seen from above: shrunk. */
-	write_text(Dir / "plate.obj", "mtllib box.mtl\nvt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\n" + obj_box(-4, -0.05f, -4, 4, 0.05f, 4, 1, "Accent", "Accent"));
-	CHECK(run("\"" + (Dir / "plate.obj").string() + "\" -o \"" + (Dir / "plate.dxship").string() + "\" --name plate" + Common) == 0);
-	CHECK(read_text(Dir / "log.txt").find("shrunk") != std::string::npos);
-	if (const auto m{load(Dir / "plate.dxship")})
+}
+
+double mean_ratio(const ds::model &m)
+{
+	std::vector<ss::vec3> pos;
+	for (const auto &v : m.vertices)
+		pos.push_back(v.pos);
+	std::vector<ss::triangle> tris;
+	for (std::size_t i = 0; i + 2 < m.indices.size(); i += 3)
+		tris.push_back({{m.indices[i], m.indices[i + 1], m.indices[i + 2]}});
+	return ss::mean_area(pos, tris) / ss::PYRO_MEAN_AREA;
+}
+
+/* Decision D3: the size rule, the measure, and both through the converter. */
+void test_size()
+{
+	/* The rule: the silhouette grows with the square of the scale. */
 	{
-		/* Top view: a square of side a covers a^2 / (2R)^2 <= 1.15 * 0.3973. */
-		const auto side{m->maxs.x - m->mins.x};
-		CHECK(side * side / (4 * ds::PYRO_RADIUS * ds::PYRO_RADIUS) <= 1.15 * 0.3973 + 0.01);
+		constexpr auto same{ss::fair_scale(1)};
+		static_assert(same.scale > 0.999 && same.scale < 1.001 && !same.radius_capped);
+		constexpr auto big{ss::fair_scale(4)};
+		static_assert(big.scale > 0.4999 && big.scale < 0.5001 && big.ratio > 0.999 && big.ratio < 1.001);
+		const auto slim{ss::fair_scale(0.7)};
+		CHECK(!slim.radius_capped && std::fabs(slim.scale - std::sqrt(1 / 0.7)) < 1e-9 && std::fabs(slim.ratio - 1) < 1e-9);
+		/* Stopped by the radius cap, still in the band's reach of FLOOR. */
+		const auto capped{ss::fair_scale(0.55)};
+		CHECK(capped.radius_capped && !capped.beyond_cap && capped.scale == ss::RADIUS_CAP && std::fabs(capped.ratio - 0.55 * ss::RADIUS_CAP * ss::RADIUS_CAP) < 1e-9);
+		/* Below FLOOR at the cap: grown beyond it to FLOOR. */
+		const auto thin{ss::fair_scale(0.45)};
+		CHECK(thin.beyond_cap && thin.scale > ss::RADIUS_CAP && thin.scale < ss::RADIUS_LIMIT && std::fabs(thin.ratio - ss::FLOOR) < 1e-9);
+		/* Too thin even for that: stopped at the reader's limit. */
+		const auto needle{ss::fair_scale(0.2)};
+		CHECK(needle.beyond_cap && needle.scale == ss::RADIUS_LIMIT && needle.ratio < ss::FLOOR);
+		CHECK(ss::RADIUS_CAP < ss::RADIUS_LIMIT && ss::RADIUS_LIMIT < ds::RADIUS_TOLERANCE);
+	}
+	/* The measure: a convex body's mean silhouette is a quarter of its
+	 * surface (Cauchy), 1.5 a^2 for a cube of side a.
+	 */
+	{
+		const std::vector<ss::vec3> pos{{-1, -1, -1}, {1, -1, -1}, {-1, 1, -1}, {1, 1, -1}, {-1, -1, 1}, {1, -1, 1}, {-1, 1, 1}, {1, 1, 1}};
+		const std::vector<ss::triangle> tris{{{2, 3, 7}}, {{2, 7, 6}}, {{0, 4, 5}}, {{0, 5, 1}}, {{1, 5, 7}}, {{1, 7, 3}}, {{0, 2, 6}}, {{0, 6, 4}}, {{4, 6, 7}}, {{4, 7, 5}}, {{0, 1, 3}}, {{0, 3, 2}}};
+		CHECK(std::fabs(ss::mean_area(pos, tris) / 6.0 - 1) < 0.02);
+		CHECK(std::fabs(ss::projected_area(pos, tris, {0, 0, 1}, 2) / 4.0 - 1) < 0.02);
+	}
+	/* A cube: shrunk until its silhouette is the Pyro's. */
+	write_text(Dir / "cube.obj", "mtllib box.mtl\nvt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\n" + obj_box(-1, -1, -1, 1, 1, 1, 1, "Accent", "Hull"));
+	CHECK(run("\"" + (Dir / "cube.obj").string() + "\" -o \"" + (Dir / "cube.dxship").string() + "\" --name cube" + Common) == 0);
+	CHECK(read_text(Dir / "log.txt").find("shipconv: size:") != std::string::npos);
+	if (const auto m{load(Dir / "cube.dxship")})
+	{
+		CHECK(std::fabs(mean_ratio(*m) - 1) < 0.03);
 		CHECK(max_radius(*m) < ds::PYRO_RADIUS);
+	}
+	/* A needle: grown to the reader's limit, still below FLOOR, and
+	 * reported.
+	 */
+	write_text(Dir / "needle.obj", "mtllib box.mtl\nvt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\n" + obj_box(-0.3f, -0.2f, -4, 0.3f, 0.2f, 4, 1, "Accent", "Hull"));
+	CHECK(run("\"" + (Dir / "needle.obj").string() + "\" -o \"" + (Dir / "needle.dxship").string() + "\" --name needle" + Common) == 0);
+	{
+		const auto log{read_text(Dir / "log.txt")};
+		CHECK(log.find("beyond the radius cap") != std::string::npos);
+		CHECK(log.find("harder to see") != std::string::npos);
+	}
+	if (const auto m{load(Dir / "needle.dxship")})
+	{
+		CHECK(std::fabs(max_radius(*m) / ds::PYRO_RADIUS - ss::RADIUS_LIMIT) < 0.01);
+		CHECK(mean_ratio(*m) < ss::FLOOR);
+	}
+	/* Long and thin, but FLOOR is reachable beyond the cap. */
+	write_text(Dir / "lance.obj", "mtllib box.mtl\nvt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\n" + obj_box(-0.45f, -0.4f, -4, 0.45f, 0.4f, 4, 1, "Accent", "Hull"));
+	CHECK(run("\"" + (Dir / "lance.obj").string() + "\" -o \"" + (Dir / "lance.dxship").string() + "\" --name lance" + Common) == 0);
+	CHECK(read_text(Dir / "log.txt").find("long and thin") != std::string::npos);
+	if (const auto m{load(Dir / "lance.dxship")})
+	{
+		CHECK(max_radius(*m) > ds::PYRO_RADIUS * ss::RADIUS_CAP);
+		CHECK(std::fabs(mean_ratio(*m) - ss::FLOOR) < 0.03);
+	}
+	/* A slim ship that the cap does not stop: grown into the band. */
+	write_text(Dir / "slim.obj", "mtllib box.mtl\nvt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\n" + obj_box(-1.2f, -0.4f, -4, 1.2f, 0.4f, 4, 1, "Accent", "Hull"));
+	CHECK(run("\"" + (Dir / "slim.obj").string() + "\" -o \"" + (Dir / "slim.dxship").string() + "\" --name slim" + Common) == 0);
+	if (const auto m{load(Dir / "slim.dxship")})
+	{
+		CHECK(max_radius(*m) > ds::PYRO_RADIUS);
+		CHECK(std::fabs(mean_ratio(*m) - 1) < 0.03);
 	}
 }
 
@@ -391,6 +467,7 @@ int main(const int argc, char **const argv)
 	fs::create_directories(Dir);
 	test_obj();
 	test_limits();
+	test_size();
 	test_gltf();
 	if (failures)
 	{
