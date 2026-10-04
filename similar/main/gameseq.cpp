@@ -57,6 +57,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "effects.h"
 #include "menu.h"
 #include "gameseg.h"
+#include "custom_ship.h"
 #include "wall.h"
 #include "ai.h"
 #include "fuelcen.h"
@@ -2084,6 +2085,9 @@ window_event_result StartNewLevelSub(const d_robot_info_array &Robot_info, const
 	}
 
 	HUD_clear_messages();
+	/* Player_num is known: the local pilot's ship (custom_ship.h). */
+	custom_ship_level_start();
+	custom_ship_apply_local_choice();
 
 	automap_clear_visited(LevelUniqueAutomapState);
 

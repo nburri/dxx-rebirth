@@ -19,6 +19,7 @@
 #include <string_view>
 #include <vector>
 #include "vis_shot.h"
+#include "custom_ship.h"
 #include "config.h"
 #include "console.h"
 #include "fireball.h"
@@ -359,6 +360,123 @@ void take_pictures()
 			std::fprintf(timing.get(), "%s %.3f %.0f | %s\n", p.name, ms, 1000 / ms, p.description);
 	}
 }
+
+/* -shipshot (custom_ship.h): every custom ship (and the Pyro) in front of
+ * the camera at the player start: three poses in the player's colour,
+ * one in another colour, its debris flying apart, and cloaked.
+ */
+vms_vector offset(const vms_vector &p, const vms_vector &dir, const double f)
+{
+	return vm_vec_build_add(p, scaled(dir, f));
+}
+
+void place_object(object &o, const vms_vector &pos, const vms_matrix &orient, const segnum_t near)
+{
+	auto &Objects = LevelUniqueObjectState.Objects;
+	o.pos = pos;
+	o.orient = orient;
+	const auto s{find_point_seg(LevelSharedSegmentState, LevelUniqueSegmentState, pos, Segments.vmptridx(near) DXX_lighting_hack_pass_parameter)};
+	if (s != segment_none)
+		obj_relink(Objects.vmptr, Segments.vmptr, Objects.vmptridx(&o), s);
+	else
+		obj_relink(Objects.vmptr, Segments.vmptr, Objects.vmptridx(&o), Segments.vmptridx(near));
+}
+
+void take_ship_pictures()
+{
+	const std::string dir{CGameArg.DbgVisShotDir};
+	const unsigned w{grd_curscreen->get_screen_width()}, h{grd_curscreen->get_screen_height()};
+	auto &Objects = LevelUniqueObjectState.Objects;
+	auto &console{*Objects.vmptr(ConsoleObject)};
+	const auto start_pos{console.pos};
+	const auto start_orient{console.orient};
+	const auto start_seg{console.segnum};
+	/* A camera object views the player's ship, which is drawn because it
+	 * is no longer the viewer.
+	 */
+	const auto camera{obj_create(LevelUniqueObjectState, LevelSharedSegmentState, LevelUniqueSegmentState, object_type::OBJ_CAMERA, 0, Segments.vmptridx(start_seg), start_pos, &start_orient, F1_0, object::control_type::None, object::movement_type::None, render_type::RT_NONE)};
+	if (!camera)
+	{
+		con_puts(CON_URGENT, "shipshot: no camera object");
+		return;
+	}
+	/* Back the camera off from the start, so the ship sits where the
+	 * player starts (which is inside the level).
+	 */
+	const double distance{17};
+	place_object(*camera, offset(start_pos, start_orient.fvec, -distance), start_orient, start_seg);
+	Viewer = camera;
+	PlayerCfg.CockpitMode[1] = cockpit_mode_t::full_screen;
+	struct pose
+	{
+		const char *name;
+		vms_angvec turn;	/* the ship's heading relative to the camera's */
+		unsigned colour;
+	};
+	static constexpr std::array<pose, 4> poses{{
+		{"front", {static_cast<fixang>(-0x0a00), 0, static_cast<fixang>(0x6000)}, 0},
+		{"side", {0, 0, static_cast<fixang>(0x4000)}, 0},
+		{"rear", {static_cast<fixang>(0x0800), 0, static_cast<fixang>(-0x1800)}, 0},
+		{"red", {static_cast<fixang>(-0x0a00), 0, static_cast<fixang>(-0x6000)}, 1},
+	}};
+	struct ship
+	{
+		std::string name;
+		const ::dcx::custom_ship::entry *entry;
+	};
+	std::vector<ship> ships{{"pyro", nullptr}};
+	for (const auto &e : ::dcx::custom_ship::list())
+		ships.push_back({e.name, &e});
+	picture_time = GameTime64;
+	unsigned step{};
+	const auto shoot = [&](const std::string &file) {
+		/* Two frames before the picture: textures and light settle. */
+		for (unsigned i = 0; i < 2; ++i)
+		{
+			render_one(++step);
+			gr_flip();
+		}
+		render_one(++step);
+		glFinish();
+		write_ppm(dir + "/" + file + ".ppm", w, h);
+		gr_flip();
+	};
+	auto &pi{console.ctype.player_info};
+	for (const auto &s : ships)
+	{
+		custom_ship_set_player(Player_num, s.entry ? &s.entry->hash : nullptr);
+		for (const auto &p : poses)
+		{
+			custom_ship_debug_colour = p.colour;
+			const auto turn{vm_angles_2_matrix(p.turn)};
+			place_object(console, start_pos, vm_matrix_x_matrix(start_orient, turn), start_seg);
+			shoot("ship-" + s.name + "-" + p.name);
+		}
+		custom_ship_debug_colour = 0;
+		/* Cloaked: fading in, then fully cloaked. */
+		const auto pose0{vm_angles_2_matrix(poses[0].turn)};
+		place_object(console, start_pos, vm_matrix_x_matrix(start_orient, pose0), start_seg);
+		pi.powerup_flags |= player_flag::cloaked;
+		pi.cloak_time = picture_time + step + 3 - F1_0 / 2;
+		shoot("ship-" + s.name + "-cloakfade");
+		pi.cloak_time = picture_time + step + 3 - F1_0 * 3;
+		shoot("ship-" + s.name + "-cloaked");
+		pi.powerup_flags &= ~player_flag::cloaked;
+		/* Debris: the explosion as a remote player's death shows it. */
+		console.mtype.phys_info.velocity = {};
+		custom_ship_player_exploded(console);
+		object_create_explosion_without_damage(Vclip, Segments.vmptridx(console.segnum), console.pos, i2f(10), vclip_index::small_explosion);
+		const auto render_type_save{console.render_type};
+		console.render_type = render_type::RT_NONE;
+		step += F1_0 / 4;
+		shoot("ship-" + s.name + "-debris");
+		console.render_type = render_type_save;
+		custom_ship_level_start();
+		con_printf(CON_URGENT, "shipshot: %s", s.name.c_str());
+	}
+	custom_ship_debug_colour.reset();
+	exit_status = 0;
+}
 #endif
 
 }
@@ -398,8 +516,13 @@ window_event_result vis_shot_frame()
 #if DXX_USE_OGL
 	if (++frames_seen < 4)
 		return window_event_result::ignored;
-	take_pictures();
-	exit_status = 0;
+	if (CGameArg.DbgShipShot)
+		take_ship_pictures();
+	else
+	{
+		take_pictures();
+		exit_status = 0;
+	}
 #else
 	con_puts(CON_URGENT, "visshot: needs an OpenGL build");
 #endif

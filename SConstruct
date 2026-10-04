@@ -5252,12 +5252,14 @@ class DXXArchive(DXXCommon):
 'common/main/texture_pack.cpp',
 'common/maths/rand.cpp',
 'common/mem/mem.cpp',
+'common/misc/dxship_format.cpp',
 'common/misc/error.cpp',
 'common/misc/hash.cpp',
 'common/misc/hmp.cpp',
 'common/misc/ignorecase.cpp',
 'common/misc/physfsrwops.cpp',
 'common/misc/physfsx.cpp',
+'common/misc/sha256.cpp',
 'common/misc/strutil.cpp',
 'common/misc/vgrphys.cpp',
 'common/misc/vgwphys.cpp',
@@ -5324,6 +5326,7 @@ class DXXArchive(DXXCommon):
 	get_objects_arch_ogl = DXXCommon.create_lazy_object_getter((
 'common/arch/ogl/ogl_effects.cpp',
 'common/arch/ogl/ogl_extensions.cpp',
+'common/arch/ogl/ogl_ship.cpp',
 'common/arch/ogl/ogl_sync.cpp',
 ))
 	get_objects_arch_sdlmixer = DXXCommon.create_lazy_object_getter((
@@ -5606,6 +5609,8 @@ class DXXProgram(DXXCommon):
 'similar/main/titles.cpp',
 'similar/main/vclip.cpp',
 'similar/main/vis_shot.cpp',
+'similar/main/custom_ship.cpp',
+'similar/main/custom_ship_menu.cpp',
 'similar/main/wall.cpp',
 'similar/main/weapon.cpp',
 'similar/misc/args.cpp',

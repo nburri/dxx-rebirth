@@ -73,6 +73,7 @@
 #include "frame_probe.h"
 #include "ogl_effects.h"
 #include "texture_pack.h"
+#include "ogl_ship.h"
 #include "mission.h"
 #include "bm.h"
 #include "physfsx.h"
@@ -290,6 +291,8 @@ void ogl_init_texture_list_internal(void){
 }
 
 void ogl_smash_texture_list_internal(void){
+	/* The custom ships' textures too (ogl_ship.h). */
+	ship_gl::textures_lost();
 	sphere_va.reset();
 	circle_va.reset();
 	disk_va.reset();

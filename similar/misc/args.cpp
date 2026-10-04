@@ -452,6 +452,20 @@ static void ReadCmdArgs(Inilist &ini, Arglist &&Args)
 			CGameArg.SndNoSound = true;
 			CGameArg.SndNoMusic = true;
 		}
+		else if (!d_stricmp(p, "-shipfor"))
+			CGameArg.DbgShipFor = arg_string(pp, end);
+		else if (!d_stricmp(p, "-shipshot"))
+		{
+			/* -visshot's start and pictures, of the ships (vis_shot.cpp). */
+			CGameArg.DbgShipShot = true;
+			CGameArg.DbgVisShotMission = arg_string(pp, end);
+			CGameArg.DbgVisShotLevel = static_cast<uint8_t>(std::clamp<long>(arg_integer(pp, end), 1, 255));
+			CGameArg.DbgVisShotDir = arg_string(pp, end);
+			GameArg.SysNoMovies = true;
+			CGameArg.SysNoTitles = true;
+			CGameArg.SndNoSound = true;
+			CGameArg.SndNoMusic = true;
+		}
 		else if (!d_stricmp(p, "-visshot-presets"))
 			CGameArg.DbgVisShotPresets = arg_string(pp, end);
 		else if (!d_stricmp(p, "-visshot-frames"))

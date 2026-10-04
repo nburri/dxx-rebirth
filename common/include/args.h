@@ -151,6 +151,12 @@ struct CArg : prohibit_void_ptr<>
 	 */
 	uint32_t DbgBotArenaTimeout;
 	std::string DbgBotArenaMission;
+	/* -shipfor "pid:name,..." (custom_ship.h): ships for other players
+	 * or bots, on this machine only (a test aid).  -shipshot <mission>
+	 * <level> <dir>: pictures of every custom ship in the level.
+	 */
+	std::string DbgShipFor;
+	bool DbgShipShot;
 	/* -visshot (vis_shot.h) */
 	std::string DbgVisShotMission;
 	std::string DbgVisShotDir;
