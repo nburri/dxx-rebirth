@@ -13,9 +13,20 @@ game's `ships` folder.
 | `spitfire.dxship` | Spitfire | Quaternius | CC0 1.0 | [Ultimate Spaceships](https://quaternius.com/packs/ultimatespaceships.html) |
 | `executioner.dxship` | Executioner | Quaternius | CC0 1.0 | [Ultimate Spaceships](https://quaternius.com/packs/ultimatespaceships.html) |
 | `rae.dxship` | Rae | Quaternius | CC0 1.0 | [Ultimate Space Kit](https://quaternius.com/packs/ultimatespacekit.html) |
+| `speeder-c.dxship` | Speeder C | Kenney | CC0 1.0 | [Space Kit](https://kenney.nl/assets/space-kit) |
+| `speeder-d.dxship` | Speeder D | Kenney | CC0 1.0 | [Space Kit](https://kenney.nl/assets/space-kit) |
+| `anvil.dxship` | Anvil | this fork (procedural) | CC0 1.0 | `src/anvil.glb` |
+| `manta.dxship` | Manta | this fork (procedural) | CC0 1.0 | `src/manta.glb` |
+| `locust.dxship` | Locust | this fork (procedural) | CC0 1.0 | `src/locust.glb` |
+| `bulwark.dxship` | Bulwark | this fork (procedural) | CC0 1.0 | `src/bulwark.glb` |
 
 The models are public domain (CC0 1.0 Universal); credit to Quaternius
-(https://quaternius.com) all the same, and the same credit is in each
-file's manifest. `convert.sh` shows how each was converted with
+(https://quaternius.com) and Kenney (https://kenney.nl) all the same, and the same credit is in each
+file's manifest. `convert.sh` and `convert-kenney.sh` show how each was converted with
 `shipconv` from the packs' glTF files (the packs themselves are not in
 this repository).
+
+Anvil, Manta, Locust and Bulwark are the fork's own designs: compact,
+wide ships of roughly the Pyro-GX's proportions, generated procedurally
+(no third-party content), dedicated to the public domain (CC0 1.0). Their
+glTF sources are in `src/`; `convert-own.sh` converts them.

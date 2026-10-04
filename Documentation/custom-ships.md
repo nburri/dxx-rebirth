@@ -601,7 +601,9 @@ reject (such a client sees a Pyro).
   multiplies the 3D library's instance matrix into the modelview, turns
   culling off (both sides, lit by |n·view|), computes the vertex colours
   as the polygon models do (`get_noglow_light`: object light ×
-  (1/4 + 3/4 facing)) times vertex colour, base colour and the tint of
+  (1/4 + 3/4 facing), at most 1 like the light that multiplies a polygon
+  model's texture, so that an untextured ship keeps its colours in a
+  bright room) times vertex colour, base colour and the tint of
   untextured zones, and calls `glDrawElements` per material and part.
   The world shader is switched off for it; bloom and the other
   post-process effects of exp-visuals apply to it like to everything.
