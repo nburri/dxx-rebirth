@@ -244,14 +244,18 @@ std::string cache_path(const tt::sample_hash &h)
  */
 const cached_sample *keep_sample(const tt::sample_hash &h, const std::span<const std::uint8_t> bytes)
 {
-	if (bytes.size() > tt::MAX_WIRE_SIZE || tt::wire_hash(bytes) != h)
+	if (tt::wire_hash(bytes) != h)
 		return nullptr;
 	const auto pcm{tt::decode_wire(bytes)};
 	if (!pcm)
 		return nullptr;
+	if (T.samples.size() >= MEMORY_SAMPLES && !T.samples.contains(h))
+		T.samples.erase(std::ranges::min_element(T.samples, {}, [](const auto &e) { return e.second.used; }));
 	auto &c{T.samples[h]};
 	c.wire = std::make_shared<const std::vector<std::uint8_t>>(bytes.begin(), bytes.end());
 	c.mixer = tt::to_mixer_format(*pcm);
+	c.used = ++T.use_counter;
+	T.missing.erase(h);
 	return &c;
 }
 
@@ -259,24 +263,36 @@ const cached_sample *keep_sample(const tt::sample_hash &h, const std::span<const
 const cached_sample *find_sample(const tt::sample_hash &h)
 {
 	if (const auto i{T.samples.find(h)}; i != T.samples.end())
-		return &i->second;
-	const auto path{cache_path(h)};
-	auto f{PHYSFSX_openReadBuffered(path.c_str()).first};
-	if (!f)
-		return nullptr;
-	const auto length{PHYSFS_fileLength(f)};
-	if (length <= 0 || static_cast<std::uint64_t>(length) > tt::MAX_WIRE_SIZE)
-		return nullptr;
-	std::vector<std::uint8_t> bytes(static_cast<std::size_t>(length));
-	if (PHYSFSX_readBytes(f, bytes.data(), bytes.size()) != static_cast<PHYSFS_sint64>(bytes.size()))
-		return nullptr;
-	f.reset();
-	const auto c{keep_sample(h, bytes)};
-	if (!c)
 	{
-		con_printf(CON_URGENT, "taunt: %s does not check out; removed", path.c_str());
-		PHYSFS_delete(path.c_str());
+		i->second.used = ++T.use_counter;
+		return &i->second;
 	}
+	if (T.missing.contains(h))
+		return nullptr;
+	const auto path{cache_path(h)};
+	const cached_sample *c{};
+	if (auto f{PHYSFSX_openReadBuffered(path.c_str()).first})
+	{
+		const auto length{PHYSFS_fileLength(f)};
+		std::vector<std::uint8_t> bytes;
+		if (length > 0 && static_cast<std::uint64_t>(length) <= tt::MAX_WIRE_SIZE)
+		{
+			bytes.resize(static_cast<std::size_t>(length));
+			if (PHYSFSX_readBytes(f, bytes.data(), bytes.size()) != static_cast<PHYSFS_sint64>(bytes.size()))
+				bytes.clear();
+		}
+		f.reset();
+		if (!bytes.empty())
+			c = keep_sample(h, bytes);
+		if (!c)
+		{
+			/* Empty, too large, cut short or not this sample. */
+			con_printf(CON_URGENT, "taunt: %s does not check out; removed", path.c_str());
+			PHYSFS_delete(path.c_str());
+		}
+	}
+	if (!c)
+		T.missing.insert(h);
 	return c;
 }
 
