@@ -284,88 +284,104 @@ void test_limits()
 	CHECK(read_text(Dir / "log.txt").find("triangles") != std::string::npos);
 }
 
-double mean_ratio(const ds::model &m)
+std::vector<ss::vec3> positions(const ds::model &m)
 {
 	std::vector<ss::vec3> pos;
 	for (const auto &v : m.vertices)
 		pos.push_back(v.pos);
+	return pos;
+}
+
+std::vector<ss::triangle> triangles(const ds::model &m)
+{
 	std::vector<ss::triangle> tris;
 	for (std::size_t i = 0; i + 2 < m.indices.size(); i += 3)
 		tris.push_back({{m.indices[i], m.indices[i + 1], m.indices[i + 2]}});
-	return ss::mean_area(pos, tris) / ss::PYRO_MEAN_AREA;
+	return tris;
+}
+
+double view_ratio(const ds::model &m)
+{
+	return ss::view_ratio(positions(m), triangles(m));
 }
 
 /* Decision D3: the size rule, the measure, and both through the converter. */
 void test_size()
 {
-	/* The rule: the silhouette grows with the square of the scale. */
+	/* The rule: the outline grows with the square of the scale. */
 	{
 		constexpr auto same{ss::fair_scale(1)};
-		static_assert(same.scale > 0.999 && same.scale < 1.001 && !same.radius_capped);
+		static_assert(same.scale > 0.999 && same.scale < 1.001 && !same.radius_capped && !same.too_thin);
 		constexpr auto big{ss::fair_scale(4)};
 		static_assert(big.scale > 0.4999 && big.scale < 0.5001 && big.ratio > 0.999 && big.ratio < 1.001);
-		const auto slim{ss::fair_scale(0.7)};
-		CHECK(!slim.radius_capped && std::fabs(slim.scale - std::sqrt(1 / 0.7)) < 1e-9 && std::fabs(slim.ratio - 1) < 1e-9);
-		/* Stopped by the radius cap, still in the band's reach of FLOOR. */
-		const auto capped{ss::fair_scale(0.55)};
-		CHECK(capped.radius_capped && !capped.beyond_cap && capped.scale == ss::RADIUS_CAP && std::fabs(capped.ratio - 0.55 * ss::RADIUS_CAP * ss::RADIUS_CAP) < 1e-9);
-		/* Below FLOOR at the cap: grown beyond it to FLOOR. */
-		const auto thin{ss::fair_scale(0.45)};
-		CHECK(thin.beyond_cap && thin.scale > ss::RADIUS_CAP && thin.scale < ss::RADIUS_LIMIT && std::fabs(thin.ratio - ss::FLOOR) < 1e-9);
-		/* Too thin even for that: stopped at the reader's limit. */
+		const auto slim{ss::fair_scale(0.6)};
+		CHECK(!slim.radius_capped && std::fabs(slim.scale - std::sqrt(1 / 0.6)) < 1e-9 && std::fabs(slim.ratio - 1) < 1e-9);
+		/* Stopped by the radius limit, still in the band. */
+		const auto capped{ss::fair_scale(0.44)};
+		CHECK(capped.radius_capped && !capped.too_thin && capped.scale == ss::RADIUS_LIMIT && std::fabs(capped.ratio - 0.44 * ss::RADIUS_LIMIT * ss::RADIUS_LIMIT) < 1e-9);
+		/* Below the band at the limit: too thin. */
 		const auto needle{ss::fair_scale(0.2)};
-		CHECK(needle.beyond_cap && needle.scale == ss::RADIUS_LIMIT && needle.ratio < ss::FLOOR);
-		CHECK(ss::RADIUS_CAP < ss::RADIUS_LIMIT && ss::RADIUS_LIMIT < ds::RADIUS_TOLERANCE);
+		CHECK(needle.radius_capped && needle.too_thin && needle.scale == ss::RADIUS_LIMIT && needle.ratio < ss::BAND_LOW);
+		CHECK(ss::RADIUS_LIMIT < ds::RADIUS_TOLERANCE && ss::RADIUS_LIMIT > 1.45);
+		static_assert(ss::WEIGHT_FRONT + ss::WEIGHT_REAR + ss::WEIGHT_SIDE + ss::WEIGHT_TOP > 0.999 && ss::WEIGHT_FRONT + ss::WEIGHT_REAR + ss::WEIGHT_SIDE + ss::WEIGHT_TOP < 1.001);
 	}
-	/* The measure: a convex body's mean silhouette is a quarter of its
-	 * surface (Cauchy), 1.5 a^2 for a cube of side a.
+	/* The measure: a box of 2 x 1 x 4 is 2, 4 and 8 square units seen
+	 * from the front, side and top; a cube's mean silhouette is a quarter
+	 * of its surface (Cauchy), 1.5 a^2 for side a.
 	 */
 	{
-		const std::vector<ss::vec3> pos{{-1, -1, -1}, {1, -1, -1}, {-1, 1, -1}, {1, 1, -1}, {-1, -1, 1}, {1, -1, 1}, {-1, 1, 1}, {1, 1, 1}};
 		const std::vector<ss::triangle> tris{{{2, 3, 7}}, {{2, 7, 6}}, {{0, 4, 5}}, {{0, 5, 1}}, {{1, 5, 7}}, {{1, 7, 3}}, {{0, 2, 6}}, {{0, 6, 4}}, {{4, 6, 7}}, {{4, 7, 5}}, {{0, 1, 3}}, {{0, 3, 2}}};
-		CHECK(std::fabs(ss::mean_area(pos, tris) / 6.0 - 1) < 0.02);
-		CHECK(std::fabs(ss::projected_area(pos, tris, {0, 0, 1}, 2) / 4.0 - 1) < 0.02);
+		const std::vector<ss::vec3> cube{{-1, -1, -1}, {1, -1, -1}, {-1, 1, -1}, {1, 1, -1}, {-1, -1, 1}, {1, -1, 1}, {-1, 1, 1}, {1, 1, 1}};
+		CHECK(std::fabs(ss::mean_area(cube, tris) / 6.0 - 1) < 0.02);
+		CHECK(std::fabs(ss::projected_area(cube, tris, {0, 0, 1}, 2) / 4.0 - 1) < 0.02);
+		const std::vector<ss::vec3> box{{-1, -0.5f, -2}, {1, -0.5f, -2}, {-1, 0.5f, -2}, {1, 0.5f, -2}, {-1, -0.5f, 2}, {1, -0.5f, 2}, {-1, 0.5f, 2}, {1, 0.5f, 2}};
+		const auto a{ss::axis_areas(box, tris)};
+		CHECK(std::fabs(a.front / 2 - 1) < 0.03 && std::fabs(a.side / 4 - 1) < 0.03 && std::fabs(a.top / 8 - 1) < 0.03);
+		CHECK(std::fabs(a.weighted() / (0.8 * 2 + 0.1 * 4 + 0.1 * 8) - 1) < 0.03);
 	}
-	/* A cube: shrunk until its silhouette is the Pyro's. */
+	/* A cube: shrunk until its outline is the Pyro's. */
 	write_text(Dir / "cube.obj", "mtllib box.mtl\nvt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\n" + obj_box(-1, -1, -1, 1, 1, 1, 1, "Accent", "Hull"));
 	CHECK(run("\"" + (Dir / "cube.obj").string() + "\" -o \"" + (Dir / "cube.dxship").string() + "\" --name cube" + Common) == 0);
 	CHECK(read_text(Dir / "log.txt").find("shipconv: size:") != std::string::npos);
 	if (const auto m{load(Dir / "cube.dxship")})
 	{
-		CHECK(std::fabs(mean_ratio(*m) - 1) < 0.03);
+		CHECK(std::fabs(view_ratio(*m) - 1) < 0.03);
 		CHECK(max_radius(*m) < ds::PYRO_RADIUS);
 	}
-	/* A needle: grown to the reader's limit, still below FLOOR, and
-	 * reported.
+	/* A needle seen nose-on: grown to the reader's limit, still too thin,
+	 * and reported.
 	 */
 	write_text(Dir / "needle.obj", "mtllib box.mtl\nvt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\n" + obj_box(-0.3f, -0.2f, -4, 0.3f, 0.2f, 4, 1, "Accent", "Hull"));
 	CHECK(run("\"" + (Dir / "needle.obj").string() + "\" -o \"" + (Dir / "needle.dxship").string() + "\" --name needle" + Common) == 0);
 	{
 		const auto log{read_text(Dir / "log.txt")};
-		CHECK(log.find("beyond the radius cap") != std::string::npos);
-		CHECK(log.find("harder to see") != std::string::npos);
+		CHECK(log.find("radius limit") != std::string::npos);
+		CHECK(log.find("too thin") != std::string::npos);
 	}
 	if (const auto m{load(Dir / "needle.dxship")})
 	{
 		CHECK(std::fabs(max_radius(*m) / ds::PYRO_RADIUS - ss::RADIUS_LIMIT) < 0.01);
-		CHECK(mean_ratio(*m) < ss::FLOOR);
+		CHECK(view_ratio(*m) < ss::BAND_LOW);
 	}
-	/* Long and thin, but FLOOR is reachable beyond the cap. */
-	write_text(Dir / "lance.obj", "mtllib box.mtl\nvt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\n" + obj_box(-0.45f, -0.4f, -4, 0.45f, 0.4f, 4, 1, "Accent", "Hull"));
-	CHECK(run("\"" + (Dir / "lance.obj").string() + "\" -o \"" + (Dir / "lance.dxship").string() + "\" --name lance" + Common) == 0);
-	CHECK(read_text(Dir / "log.txt").find("long and thin") != std::string::npos);
-	if (const auto m{load(Dir / "lance.dxship")})
-	{
-		CHECK(max_radius(*m) > ds::PYRO_RADIUS * ss::RADIUS_CAP);
-		CHECK(std::fabs(mean_ratio(*m) - ss::FLOOR) < 0.03);
-	}
-	/* A slim ship that the cap does not stop: grown into the band. */
+	/* Long, but wide enough from the front: grown beyond the Pyro's
+	 * radius into the band.
+	 */
 	write_text(Dir / "slim.obj", "mtllib box.mtl\nvt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\n" + obj_box(-1.2f, -0.4f, -4, 1.2f, 0.4f, 4, 1, "Accent", "Hull"));
 	CHECK(run("\"" + (Dir / "slim.obj").string() + "\" -o \"" + (Dir / "slim.dxship").string() + "\" --name slim" + Common) == 0);
+	CHECK(read_text(Dir / "log.txt").find("too thin") == std::string::npos);
 	if (const auto m{load(Dir / "slim.dxship")})
 	{
 		CHECK(max_radius(*m) > ds::PYRO_RADIUS);
-		CHECK(std::fabs(mean_ratio(*m) - 1) < 0.03);
+		CHECK(max_radius(*m) <= ds::PYRO_RADIUS * ss::RADIUS_LIMIT * 1.001f);
+		CHECK(std::fabs(view_ratio(*m) - 1) < 0.03);
+	}
+	/* A flat panel ship, wide from the front: shrunk. */
+	write_text(Dir / "panel.obj", "mtllib box.mtl\nvt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\n" + obj_box(-4, -3, -0.5f, 4, 3, 0.5f, 1, "Accent", "Hull"));
+	CHECK(run("\"" + (Dir / "panel.obj").string() + "\" -o \"" + (Dir / "panel.dxship").string() + "\" --name panel" + Common) == 0);
+	if (const auto m{load(Dir / "panel.dxship")})
+	{
+		CHECK(max_radius(*m) < ds::PYRO_RADIUS);
+		CHECK(std::fabs(view_ratio(*m) - 1) < 0.03);
 	}
 }
 

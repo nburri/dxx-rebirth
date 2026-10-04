@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstdio>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -383,6 +384,218 @@ void place_object(object &o, const vms_vector &pos, const vms_matrix &orient, co
 		obj_relink(Objects.vmptr, Segments.vmptr, Objects.vmptridx(&o), Segments.vmptridx(hint_seg));
 }
 
+/* -shipshot-size: the area every ship covers on the screen compared with
+ * the Pyro's, at the same place and distance, seen straight from the
+ * front, the rear, the side and above (the size rule of
+ * Documentation/custom-ships.md, D3), and pictures of each ship next to a
+ * Pyro.  A ship's pixels are those that differ from the same picture
+ * without it.
+ */
+std::vector<unsigned char> read_pixels(const unsigned w, const unsigned h)
+{
+	std::vector<unsigned char> buf(static_cast<std::size_t>(w) * h * 3);
+	glPixelStorei(GL_PACK_ALIGNMENT, 1);
+	glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, buf.data());
+	glPixelStorei(GL_PACK_ALIGNMENT, 4);
+	return buf;
+}
+
+void write_pixels(const std::string &path, const std::vector<unsigned char> &pixels, const unsigned w, const unsigned h)
+{
+	const std::unique_ptr<FILE, int (*)(FILE *)> f{std::fopen(path.c_str(), "wb"), &std::fclose};
+	if (!f)
+	{
+		con_printf(CON_URGENT, "shipshot: cannot write %s", path.c_str());
+		return;
+	}
+	std::fprintf(f.get(), "P6\n%u %u\n255\n", w, h);
+	for (unsigned y = h; y-- > 0;)
+		std::fwrite(&pixels[static_cast<std::size_t>(y) * w * 3], 1, static_cast<std::size_t>(w) * 3, f.get());
+}
+
+std::size_t count_changed(const std::vector<unsigned char> &a, const std::vector<unsigned char> &b)
+{
+	std::size_t n{};
+	for (std::size_t i = 0; i + 2 < a.size() && i + 2 < b.size(); i += 3)
+		if (std::abs(a[i] - b[i]) > 3 || std::abs(a[i + 1] - b[i + 1]) > 3 || std::abs(a[i + 2] - b[i + 2]) > 3)
+			++n;
+	return n;
+}
+
+/* An open space for the pictures in pairs: a box of +-`half_width` x
+ * +-`half_height` across the view, from `back` behind the ships (the
+ * camera) to `front` beyond them, inside the mine.  Each segment's centre
+ * is tried looking along its four horizontal axes; the place nearest to
+ * `start` wins.
+ */
+struct open_place
+{
+	vms_vector pos;
+	vms_matrix orient;
+	segnum_t segnum;
+};
+
+std::optional<open_place> find_open_place(const vms_vector &start, const double half_width, const double half_height, const double back, const double front)
+{
+	auto &LevelSharedVertexState = LevelSharedSegmentState.get_vertex_state();
+	auto &Vertices = LevelSharedVertexState.get_vertices();
+	auto &vcvertptr = Vertices.vcptr;
+	std::optional<open_place> best;
+	fix best_distance{};
+	for (const auto &&segp : vcsegptridx)
+	{
+		const auto centre{compute_segment_center(vcvertptr, segp)};
+		const auto distance{vm_vec_dist(centre, start)};
+		if (best && distance >= best_distance)
+			continue;
+		const auto m{extract_orient_from_segment(vcvertptr, segp)};
+		const auto negated = [](const vms_vector &v) {
+			return vms_vector{-v.x, -v.y, -v.z};
+		};
+		const std::array<vms_matrix, 4> frames{{
+			{m.rvec, m.uvec, m.fvec},
+			{negated(m.rvec), m.uvec, negated(m.fvec)},
+			{negated(m.fvec), m.uvec, m.rvec},
+			{m.fvec, m.uvec, negated(m.rvec)},
+		}};
+		for (const auto &f : frames)
+		{
+			bool open{true};
+			for (int ix = -2; open && ix <= 2; ++ix)
+				for (int iy = -1; open && iy <= 1; ++iy)
+					for (int iz = 0; open && iz <= 4; ++iz)
+					{
+						const auto p{offset(offset(offset(centre, f.rvec, half_width * ix / 2), f.uvec, half_height * iy), f.fvec, -back + (back + front) * iz / 4)};
+						if (find_point_seg(LevelSharedSegmentState, p, segp DXX_lighting_hack_pass_parameter) == segment_none)
+							open = false;
+					}
+			if (open)
+			{
+				best = open_place{centre, f, segp};
+				best_distance = distance;
+				break;
+			}
+		}
+	}
+	return best;
+}
+
+void take_size_pictures(object &console, object &camera)
+{
+	const std::string dir{CGameArg.DbgVisShotDir};
+	const unsigned w{grd_curscreen->get_screen_width()}, h{grd_curscreen->get_screen_height()};
+	const double distance = CGameArg.DbgShipShotSize;
+	const double side_offset{6};
+	/* Room for two ships of up to RADIUS_TOLERANCE Pyro radii side by
+	 * side, and for the camera.
+	 */
+	const auto place{find_open_place(console.pos, side_offset + 7.5, 6, distance + 1, 8)};
+	if (!place)
+		con_puts(CON_URGENT, "shipshot: no open space for the pictures in pairs; at the player start");
+	const auto start_pos{place ? place->pos : console.pos};
+	const auto start_orient{place ? place->orient : console.orient};
+	const auto start_seg{place ? place->segnum : console.segnum};
+	place_object(camera, offset(start_pos, start_orient.fvec, -distance), start_orient, start_seg);
+	/* The Pyro of the pictures in pairs: another player's object, which
+	 * flies no custom ship.
+	 */
+	/* Bloom's glow around bright parts is not the ship's size. */
+	CGameCfg.Bloom = 0;
+	const auto pyro{obj_create(LevelUniqueObjectState, LevelSharedSegmentState, LevelUniqueSegmentState, object_type::OBJ_PLAYER, 1, Segments.vmptridx(start_seg), start_pos, &start_orient, console.size, object::control_type::None, object::movement_type::None, render_type::RT_POLYOBJ)};
+	if (!pyro)
+	{
+		con_puts(CON_URGENT, "shipshot: no object for the Pyro");
+		return;
+	}
+	pyro->rtype = console.rtype;
+	pyro->mtype = console.mtype;
+	custom_ship_set_player(1, nullptr);
+	struct view
+	{
+		const char *name;
+		vms_angvec turn;
+	};
+	static constexpr std::array<view, 4> views{{
+		{"front", {0, 0, static_cast<fixang>(0x8000)}},
+		{"rear", {0, 0, 0}},
+		{"side", {0, 0, static_cast<fixang>(0x4000)}},
+		{"top", {static_cast<fixang>(0x4000), 0, 0}},
+	}};
+	struct ship
+	{
+		std::string name;
+		const ::dcx::custom_ship::entry *entry;
+	};
+	std::vector<ship> ships{{"pyro", nullptr}};
+	for (const auto &e : ::dcx::custom_ship::list())
+		ships.push_back({e.name, &e});
+	picture_time = GameTime64;
+	/* The same game time for every picture: the same flicker. */
+	const auto grab = [&]() {
+		for (unsigned i = 0; i < 3; ++i)
+		{
+			render_one(1);
+			if (i < 2)
+				gr_flip();
+		}
+		glFinish();
+		auto pixels{read_pixels(w, h)};
+		gr_flip();
+		return pixels;
+	};
+	const auto save_render_type{console.render_type};
+	const auto hide_pyro = [&](const bool hide) {
+		pyro->render_type = hide ? render_type::RT_NONE : render_type::RT_POLYOBJ;
+	};
+	const std::unique_ptr<FILE, int (*)(FILE *)> table{std::fopen((dir + "/size.txt").c_str(), "w"), &std::fclose};
+	if (table)
+		std::fprintf(table.get(), "# -shipshot-size: pixels covered at %.0f units, %ux%u, and the ratio to the Pyro's\n# ship front rear side top weighted(40/40/10/10)\n", distance, w, h);
+	std::array<double, views.size()> pyro_pixels{};
+	for (const auto &s : ships)
+	{
+		custom_ship_set_player(Player_num, s.entry ? &s.entry->hash : nullptr);
+		std::array<double, views.size()> pixels{};
+		for (std::size_t v = 0; v < views.size(); ++v)
+		{
+			const auto orient{vm_matrix_x_matrix(start_orient, vm_angles_2_matrix(views[v].turn))};
+			/* Alone in the middle, then without it. */
+			hide_pyro(true);
+			place_object(console, start_pos, orient, start_seg);
+			console.render_type = save_render_type;
+			const auto with{grab()};
+			console.render_type = render_type::RT_NONE;
+			const auto without{grab()};
+			console.render_type = save_render_type;
+			pixels[v] = static_cast<double>(count_changed(with, without));
+			write_pixels(dir + "/size-" + s.name + "-" + views[v].name + ".ppm", with, w, h);
+			if (!s.entry)
+				pyro_pixels[v] = pixels[v];
+			/* Next to a Pyro: the ship on the left, the Pyro on the right. */
+			if (s.entry)
+			{
+				place_object(console, offset(start_pos, start_orient.rvec, -side_offset), orient, start_seg);
+				place_object(*pyro, offset(start_pos, start_orient.rvec, side_offset), orient, start_seg);
+				hide_pyro(false);
+				const auto pair{grab()};
+				hide_pyro(true);
+				write_pixels(dir + "/pair-" + s.name + "-" + views[v].name + ".ppm", pair, w, h);
+			}
+		}
+		const auto weighted = [](const std::array<double, views.size()> &a) {
+			return 0.4 * a[0] + 0.4 * a[1] + 0.1 * a[2] + 0.1 * a[3];
+		};
+		const auto ratio = [&](const std::size_t v) {
+			return pyro_pixels[v] > 0 ? pixels[v] / pyro_pixels[v] : 0.0;
+		};
+		const auto wr{weighted(pyro_pixels) > 0 ? weighted(pixels) / weighted(pyro_pixels) : 0.0};
+		con_printf(CON_URGENT, "shipshot-size: %-12s front %.2f rear %.2f side %.2f top %.2f weighted %.2f", s.name.c_str(), ratio(0), ratio(1), ratio(2), ratio(3), wr);
+		if (table)
+			std::fprintf(table.get(), "%s %.0f %.0f %.0f %.0f | %.3f %.3f %.3f %.3f %.3f\n", s.name.c_str(), pixels[0], pixels[1], pixels[2], pixels[3], ratio(0), ratio(1), ratio(2), ratio(3), wr);
+	}
+	obj_delete(LevelUniqueObjectState, Segments, pyro);
+	exit_status = 0;
+}
+
 void take_ship_pictures()
 {
 	const std::string dir{CGameArg.DbgVisShotDir};
@@ -411,6 +624,11 @@ void take_ship_pictures()
 	/* Nothing in front of the ship. */
 	PlayerCfg.ReticleType = reticle_type::none;
 	PlayerCfg.HudMode = HudType::Hidden;
+	if (CGameArg.DbgShipShotSize)
+	{
+		take_size_pictures(console, *camera);
+		return;
+	}
 	struct pose
 	{
 		const char *name;
