@@ -193,6 +193,9 @@ struct gun_marker
 	constexpr bool operator==(const gun_marker &) const = default;
 };
 
+/* Triangles are wound so that cross(b - a, c - a) points out of the
+ * ship (vertices a, b, c in index order).
+ */
 struct model
 {
 	manifest info;

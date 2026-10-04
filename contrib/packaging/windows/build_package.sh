@@ -52,8 +52,8 @@ build_app() {
 
     # The ship converter, if it was built (Documentation/custom-ships-authoring.md)
     if [ -f "build/common/shipconv.exe" ]; then
+        # It needs no library the game does not (copied above).
         cp --link "build/common/shipconv.exe" "${outdir}/${prettyname}/"
-        copy_lib "${outdir}/${prettyname}/shipconv.exe"
     fi
 }
 
