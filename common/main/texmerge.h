@@ -37,6 +37,12 @@ struct grs_bitmap;
 
 void texmerge_flush();
 
+/* If bm is a merged texture of the cache, its two bitmaps and the
+ * overlay's rotation (0-3); for the texture pack (texture_pack.h).
+ */
+[[nodiscard]]
+bool texmerge_find_sources(const grs_bitmap &bm, bitmap_index &bottom, bitmap_index &top, unsigned &orient);
+
 }
 
 #ifdef DXX_BUILD_DESCENT

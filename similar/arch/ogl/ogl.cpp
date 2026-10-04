@@ -72,6 +72,28 @@
 #include <utility>
 #include "frame_probe.h"
 #include "ogl_effects.h"
+#include "texture_pack.h"
+#include "mission.h"
+#include "bm.h"
+#include "physfsx.h"
+#include <bitset>
+#include <chrono>
+#include <functional>
+#include <unordered_map>
+#include <string>
+#include <vector>
+#if DXX_USE_SCREENSHOT_FORMAT_PNG
+#include <png.h>
+#endif
+
+/* Texture packs need the PNG reader of libpng 1.6 and the bitmap names of
+ * Descent 2.
+ */
+#if defined(DXX_BUILD_DESCENT) && DXX_BUILD_DESCENT == 2 && DXX_USE_SCREENSHOT_FORMAT_PNG && defined(PNG_SIMPLIFIED_READ_SUPPORTED)
+#define DXX_TEXTURE_PACK 1
+#else
+#define DXX_TEXTURE_PACK 0
+#endif
 using std::max;
 
 //change to 1 for lots of spew.
@@ -376,6 +398,260 @@ static void ogl_texwrap(ogl_texture *const gltexture, const int state)
 	}
 }
 
+/* Texture packs (texture_pack.h): the picture that replaces a bitmap. */
+#if DXX_TEXTURE_PACK
+namespace dcx {
+
+namespace {
+
+/* Set by the game's code below: ogl_loadbmtexture_f is game independent. */
+texture_pack::rgba_image (*texture_pack_hook)(const grs_bitmap &);
+
+}
+
+}
+#endif
+
+namespace dsx {
+
+namespace {
+
+#if DXX_TEXTURE_PACK
+struct texture_pack_counters
+{
+	unsigned replaced;
+	std::size_t bytes;
+	std::chrono::steady_clock::duration time;
+};
+
+texture_pack_counters texture_pack_stats;
+
+bool texture_pack_enabled()
+{
+	return CGameCfg.TexturePack && !CGameArg.OglNoTexturePack;
+}
+
+/* The index of a bitmap of GameBitmaps, or bitmap_index::None. */
+bitmap_index game_bitmap_index(const grs_bitmap &bm)
+{
+	const std::less<const grs_bitmap *> before;
+	const grs_bitmap *const first{GameBitmaps.data()};
+	if (before(&bm, first) || !before(&bm, first + GameBitmaps.size()))
+		return bitmap_index::None;
+	return bitmap_index{static_cast<uint16_t>(&bm - first)};
+}
+
+/* Wall textures (with the frames of their animations) and the textures
+ * of robots and other models; not sprites, the cockpit or the HUD.
+ */
+bool is_world_bitmap(const bitmap_index bi)
+{
+	const std::size_t textures{std::min<std::size_t>(NumTextures, Textures.size())};
+	for (std::size_t i = 0; i < textures; ++i)
+		if (Textures[i] == bi)
+			return true;
+	auto &Effects = LevelUniqueEffectsClipState.Effects;
+	for (auto &ec : partial_const_range(Effects, Num_effects))
+	{
+		/* Unused clips have num_frames -1. */
+		const std::size_t frames{static_cast<std::size_t>(ec.vc.num_frames) <= ec.vc.frames.size() ? static_cast<std::size_t>(ec.vc.num_frames) : 0};
+		for (std::size_t i = 0; i < frames; ++i)
+			if (ec.vc.frames[i] == bi)
+				return true;
+	}
+	const std::size_t objbitmaps{std::min<std::size_t>(N_ObjBitmaps, ObjBitmaps.size())};
+	for (std::size_t i = 0; i < objbitmaps; ++i)
+		if (ObjBitmaps[static_cast<object_bitmap_index>(i)] == bi)
+			return true;
+	return false;
+}
+
+texture_pack::rgba_image load_png(const char *const path)
+{
+	auto file{PHYSFSX_openReadBuffered(path).first};
+	if (!file)
+		return {};
+	const auto length{PHYSFS_fileLength(file)};
+	if (length <= 0 || length > (64 << 20))
+		return {};
+	std::vector<uint8_t> data(static_cast<std::size_t>(length));
+	if (PHYSFS_readBytes(file, data.data(), data.size()) != length)
+		return {};
+	png_image image{};
+	image.version = PNG_IMAGE_VERSION;
+	if (!png_image_begin_read_from_memory(&image, data.data(), data.size()))
+	{
+		con_printf(CON_URGENT, "texture pack: %s: %s", path, image.message);
+		return {};
+	}
+	if (image.width > 8192 || image.height > 8192)
+	{
+		con_printf(CON_URGENT, "texture pack: %s: %ux%u is too large", path, image.width, image.height);
+		png_image_free(&image);
+		return {};
+	}
+	image.format = PNG_FORMAT_RGBA;
+	texture_pack::rgba_image img;
+	img.px.resize(PNG_IMAGE_SIZE(image));
+	if (!png_image_finish_read(&image, nullptr, img.px.data(), 0, nullptr))
+	{
+		con_printf(CON_URGENT, "texture pack: %s: %s", path, image.message);
+		return {};
+	}
+	img.w = image.width;
+	img.h = image.height;
+	return img;
+}
+
+unsigned texture_size_limit()
+{
+	static GLint limit;
+	if (!limit)
+	{
+		glGetIntegerv(GL_MAX_TEXTURE_SIZE, &limit);
+		limit = std::clamp<GLint>(limit, 64, 2048);
+	}
+	return limit;
+}
+
+std::string current_mission_directory()
+{
+	return Current_mission ? texture_pack::mission_directory(&*Current_mission->filename) : std::string{};
+}
+
+/* The mission whose textures are loaded. */
+std::string texture_pack_mission;
+
+/* Per level: the bitmaps without a replacement, and the decoded
+ * replacements of the bitmaps merged by texmerge.cpp, whose merged
+ * textures can leave its cache and be merged again during the game.
+ */
+std::bitset<MAX_BITMAP_FILES> texture_pack_missing;
+std::unordered_map<uint16_t, texture_pack::rgba_image> texture_pack_merge_sources;
+
+/* The replacement of a bitmap of GameBitmaps, if the pack has one. */
+texture_pack::rgba_image find_replacement(const bitmap_index bi)
+{
+	if (!GameBitmaps.valid_index(bi) || texture_pack_missing.test(underlying_value(bi)) || !is_world_bitmap(bi))
+		return {};
+	const auto &name{AllBitmaps[bi].name};
+	const std::string mission{current_mission_directory()};
+	for (const auto &path : texture_pack::candidate_paths(std::string_view{name.data(), strnlen(name.data(), name.size())}, mission, piggy_bitmap_replaced_by_level(bi)))
+	{
+		if (!PHYSFS_exists(path.c_str()))
+			continue;
+		if (auto img{load_png(path.c_str())}; !img.empty())
+		{
+			con_printf(CON_VERBOSE, "texture pack: %s for bitmap %u", path.c_str(), underlying_value(bi));
+			return texture_pack::to_power_of_two(img, texture_size_limit());
+		}
+	}
+	texture_pack_missing.set(underlying_value(bi));
+	return {};
+}
+
+const texture_pack::rgba_image &find_merge_source(const bitmap_index bi)
+{
+	const auto [i, inserted]{texture_pack_merge_sources.try_emplace(underlying_value(bi))};
+	if (inserted)
+		i->second = find_replacement(bi);
+	return i->second;
+}
+
+/* An original bitmap as RGBA, for a merge with a replacement. */
+texture_pack::rgba_image original_rgba(const bitmap_index bi)
+{
+	if (!GameBitmaps.valid_index(bi))
+		return {};
+	PIGGY_PAGE_IN(bi);
+	auto &bm{GameBitmaps[bi]};
+	if (!bm.bm_data || !bm.bm_w || !bm.bm_h)
+		return {};
+	const unsigned w{bm.bm_w}, h{bm.bm_h};
+	std::vector<uint8_t> pixels(static_cast<std::size_t>(w) * h);
+	if (bm.get_flag_mask(BM_FLAG_RLE))
+		bm_rle_expand{bm}.loop(w, bm_rle_expand_range{pixels.data(), pixels.data() + pixels.size()});
+	else
+		for (unsigned y = 0; y < h; ++y)
+			std::copy_n(&bm.bm_data[static_cast<std::size_t>(y) * bm.bm_rowsize], w, &pixels[static_cast<std::size_t>(y) * w]);
+	const bool transparent{bm.get_flag_mask(BM_FLAG_TRANSPARENT) != 0};
+	const bool super{bm.get_flag_mask(BM_FLAG_SUPER_TRANSPARENT) != 0};
+	texture_pack::rgba_image img;
+	img.w = w;
+	img.h = h;
+	img.px.resize(pixels.size() * 4);
+	for (std::size_t i = 0; i < pixels.size(); ++i)
+	{
+		const uint8_t c{pixels[i]};
+		uint8_t *const o{&img.px[i * 4]};
+		if (super && c == 254)
+			o[0] = 255, o[1] = 0, o[2] = 255, o[3] = 0;
+		else
+		{
+			const auto &rgb{gr_palette[c]};
+			o[0] = rgb.r * 4, o[1] = rgb.g * 4, o[2] = rgb.b * 4;
+			o[3] = (transparent && c == TRANSPARENCY_COLOR) ? 0 : 255;
+		}
+	}
+	return img;
+}
+#endif
+
+}
+
+#if DXX_TEXTURE_PACK
+namespace {
+
+/* The picture to load instead of bm, or an empty image. */
+texture_pack::rgba_image texture_pack_image(const grs_bitmap &bm)
+{
+	if (!texture_pack_enabled())
+		return {};
+	const auto t0{std::chrono::steady_clock::now()};
+	texture_pack::rgba_image img;
+	bitmap_index bottom{}, top{};
+	unsigned orient{};
+	if (const auto bi{game_bitmap_index(bm)}; bi != bitmap_index::None)
+		img = find_replacement(bi);
+	else if (texmerge_find_sources(bm, bottom, top, orient))
+	{
+		/* A wall texture with a supertransparent overlay, merged by
+		 * texmerge.cpp: merge again from the replacements.
+		 */
+		auto base{find_merge_source(bottom)};
+		auto overlay{find_merge_source(top)};
+		if (!base.empty() || !overlay.empty())
+		{
+			if (base.empty())
+				base = original_rgba(bottom);
+			if (overlay.empty())
+				overlay = original_rgba(top);
+			img = texture_pack::composite(base, overlay, orient, GameBitmaps.valid_index(top) && GameBitmaps[top].get_flag_mask(BM_FLAG_SUPER_TRANSPARENT));
+		}
+	}
+	if (!img.empty())
+	{
+		++texture_pack_stats.replaced;
+		/* With mipmaps, a third more. */
+		texture_pack_stats.bytes += img.px.size() * 4 / 3;
+		texture_pack_stats.time += std::chrono::steady_clock::now() - t0;
+	}
+	return img;
+}
+
+struct register_texture_pack_hook
+{
+	register_texture_pack_hook()
+	{
+		texture_pack_hook = texture_pack_image;
+	}
+} texture_pack_hook_registration;
+
+}
+#endif
+
+}
+
 //crude texture precaching
 //handles: powerups, walls, weapons, polymodels, etc.
 //it is done with the horrid do_special_effects kludge so that sides that have to be texmerged and have animated textures will be correctly cached.
@@ -444,6 +720,24 @@ void ogl_cache_level_textures(void)
 	int max_efx{0},ef;
 	
 	ogl_reset_texture_stats_internal();//loading a new lev should reset textures
+#if DXX_TEXTURE_PACK
+	texture_pack_stats = {};
+	texture_pack_missing.reset();
+	texture_pack_merge_sources.clear();
+	if (auto mission{current_mission_directory()}; mission != texture_pack_mission)
+	{
+		/* Textures of the previous mission's pack directory: load
+		 * them all again.
+		 */
+		texture_pack_mission = std::move(mission);
+		if (texture_pack_enabled())
+		{
+			for (auto &bm : GameBitmaps)
+				ogl_freebmtexture(bm);
+			texmerge_flush();
+		}
+	}
+#endif
 	
 	range_for (auto &ec, partial_const_range(Effects, Num_effects))
 	{
@@ -574,6 +868,10 @@ void ogl_cache_level_textures(void)
 	}
 	glmprintf((CON_DEBUG, "finished caching"));
 	r_cachedtexcount = r_texcount;
+#if DXX_TEXTURE_PACK
+	if (texture_pack_stats.replaced)
+		con_printf(CON_NORMAL, "Texture pack: %u textures replaced, %u KB of texture memory, %.0f ms to load", texture_pack_stats.replaced, static_cast<unsigned>(texture_pack_stats.bytes / 1024), std::chrono::duration<double, std::milli>(texture_pack_stats.time).count());
+#endif
 }
 
 }
@@ -1700,6 +1998,78 @@ static void tex_set_size(ogl_texture &tex)
 	tex_set_size1(tex,bi,a,w,h);
 }
 
+/* Creates the OpenGL texture of tex from w x h texels in tex.format with
+ * the filter settings; returns whether it built mipmaps.
+ */
+static bool ogl_upload_texture(ogl_texture &tex, const opengl_texture_filter texfilt, const bool texanis, const GLubyte *const data, const unsigned w, const unsigned h)
+{
+	// Generate OpenGL texture IDs.
+	glGenTextures (1, &tex.handle);
+#if !DXX_USE_OGLES
+	//set priority
+	glPrioritizeTextures (1, &tex.handle, &tex.prio);
+#endif
+	// Give our data to OpenGL.
+	OGL_BINDTEXTURE(tex.handle);
+	glTexEnvi (GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+
+	// should match structue in menu.cpp
+	// organized in switches for better readability
+	bool buildmipmap = false;
+	GLint gl_mag_filter_int, gl_min_filter_int;
+	switch (texfilt)
+	{
+		default:
+		case opengl_texture_filter::classic: // Classic - Nearest
+			gl_mag_filter_int = GL_NEAREST;
+			if (texanis && ogl_maxanisotropy > 1.0f)
+			{
+				// looks nicer if anisotropy is applied.
+				gl_min_filter_int = GL_NEAREST_MIPMAP_LINEAR;
+				buildmipmap = true;
+			}
+			else
+			{
+				gl_min_filter_int = GL_NEAREST;
+				buildmipmap = false;
+			}
+			break;
+		case opengl_texture_filter::upscale: // Upscaled - i.e. Blocky Filtered (Bilinear)
+		case opengl_texture_filter::trilinear: // Smooth - Trilinear
+			gl_mag_filter_int = GL_LINEAR;
+			gl_min_filter_int = GL_LINEAR_MIPMAP_LINEAR;
+			buildmipmap = true;
+			break;
+	}
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, gl_mag_filter_int);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, gl_min_filter_int);
+	if (texanis && ogl_maxanisotropy > 1.0f)
+		glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, std::min(ogl_maxanisotropy, std::max(2.0f, static_cast<float>(CGameCfg.TexAnisotropy))));
+
+#if DXX_USE_OGLES // in OpenGL ES 1.1 the mipmaps are automatically generated by a parameter
+	glTexParameteri (GL_TEXTURE_2D, GL_GENERATE_MIPMAP, buildmipmap ? GL_TRUE : GL_FALSE);
+#else
+	if (buildmipmap)
+	{
+		gluBuild2DMipmaps (
+				GL_TEXTURE_2D, tex.internalformat, 
+				w, h, tex.format,
+				GL_UNSIGNED_BYTE, 
+				data);
+	}
+	else
+#endif
+	{
+		glTexImage2D (
+			GL_TEXTURE_2D, 0, tex.internalformat,
+			w, h, 0, tex.format, // RGBA textures.
+			GL_UNSIGNED_BYTE, // imageData is a GLubyte pointer.
+			data);
+	}
+
+	return buildmipmap;
+}
+
 //loads a palettized bitmap into a ogl RGBA texture.
 //Sizes and pads dimensions to multiples of 2 if necessary.
 //In theory this could be a problem for repeating textures, but all real
@@ -1881,70 +2251,7 @@ static int ogl_loadtexture(const palette_array_t &pal, const uint8_t *data, cons
 		outP = buftemp.get();
 	}
 
-	// Generate OpenGL texture IDs.
-	glGenTextures (1, &tex.handle);
-#if !DXX_USE_OGLES
-	//set priority
-	glPrioritizeTextures (1, &tex.handle, &tex.prio);
-#endif
-	// Give our data to OpenGL.
-	OGL_BINDTEXTURE(tex.handle);
-	glTexEnvi (GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
-
-	// should match structue in menu.cpp
-	// organized in switches for better readability
-	bool buildmipmap = false;
-	GLint gl_mag_filter_int, gl_min_filter_int;
-	switch (texfilt)
-	{
-		default:
-		case opengl_texture_filter::classic: // Classic - Nearest
-			gl_mag_filter_int = GL_NEAREST;
-			if (texanis && ogl_maxanisotropy > 1.0f)
-			{
-				// looks nicer if anisotropy is applied.
-				gl_min_filter_int = GL_NEAREST_MIPMAP_LINEAR;
-				buildmipmap = true;
-			}
-			else
-			{
-				gl_min_filter_int = GL_NEAREST;
-				buildmipmap = false;
-			}
-			break;
-		case opengl_texture_filter::upscale: // Upscaled - i.e. Blocky Filtered (Bilinear)
-		case opengl_texture_filter::trilinear: // Smooth - Trilinear
-			gl_mag_filter_int = GL_LINEAR;
-			gl_min_filter_int = GL_LINEAR_MIPMAP_LINEAR;
-			buildmipmap = true;
-			break;
-	}
-	probe.detail = buildmipmap;
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, gl_mag_filter_int);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, gl_min_filter_int);
-	if (texanis && ogl_maxanisotropy > 1.0f)
-		glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, std::min(ogl_maxanisotropy, std::max(2.0f, static_cast<float>(CGameCfg.TexAnisotropy))));
-
-#if DXX_USE_OGLES // in OpenGL ES 1.1 the mipmaps are automatically generated by a parameter
-	glTexParameteri (GL_TEXTURE_2D, GL_GENERATE_MIPMAP, buildmipmap ? GL_TRUE : GL_FALSE);
-#else
-	if (buildmipmap)
-	{
-		gluBuild2DMipmaps (
-				GL_TEXTURE_2D, tex.internalformat, 
-				tex.tw * rescale, tex.th * rescale, tex.format,
-				GL_UNSIGNED_BYTE, 
-				outP);
-	}
-	else
-#endif
-	{
-		glTexImage2D (
-			GL_TEXTURE_2D, 0, tex.internalformat,
-			tex.tw * rescale, tex.th * rescale, 0, tex.format, // RGBA textures.
-			GL_UNSIGNED_BYTE, // imageData is a GLubyte pointer.
-			outP);
-	}
+	probe.detail = ogl_upload_texture(tex, texfilt, texanis, outP, tex.tw * rescale, tex.th * rescale);
 
 	tex_set_size(tex);
 	r_texcount++;
@@ -1963,6 +2270,27 @@ void ogl_loadbmtexture_f(grs_bitmap &rbm, const opengl_texture_filter texfilt, b
 		bm = bm_parent;
 	if (bm->gltexture && bm->gltexture->handle > 0)
 		return;
+#if DXX_TEXTURE_PACK
+	if (const auto img{texture_pack_hook ? texture_pack_hook(*bm) : texture_pack::rgba_image{}}; !img.empty())
+	{
+		if (!bm->gltexture)
+			bm->gltexture = ogl_get_free_texture();
+		auto &t{*bm->gltexture};
+		ogl_init_texture(t, img.w, img.h, OGL_FLAG_ALPHA);
+		t.tw = img.w;
+		t.th = img.h;
+		t.u = t.v = 1;
+		/* The replacement has its own detail: no CPU upscale ("Blocky
+		 * Filtered"); "Sharp Pixels" filters like "Smooth" and the
+		 * world shader keeps the texels sharp.
+		 */
+		const auto filter{texfilt == opengl_texture_filter::classic ? texfilt : opengl_texture_filter::trilinear};
+		ogl_upload_texture(t, filter, texanis, img.px.data(), img.w, img.h);
+		tex_set_size(t);
+		r_texcount++;
+		return;
+	}
+#endif
 	auto buf=bm->get_bitmap_data();
 	const unsigned bm_w = bm->bm_w;
 	if (bm->gltexture == NULL){
@@ -1971,7 +2299,10 @@ void ogl_loadbmtexture_f(grs_bitmap &rbm, const opengl_texture_filter texfilt, b
 	else {
 		if (bm->gltexture->handle>0)
 			return;
-		if (bm->gltexture->w==0){
+		if (bm->gltexture->w != 0 && (bm->gltexture->w != bm_w || bm->gltexture->h != bm->bm_h))
+			/* Last loaded from a texture pack (which is now off). */
+			ogl_init_texture(*bm->gltexture, bm_w, bm->bm_h, ((bm->get_flag_mask(BM_FLAG_TRANSPARENT | BM_FLAG_SUPER_TRANSPARENT)) ? OGL_FLAG_ALPHA : 0));
+		else if (bm->gltexture->w==0){
 			bm->gltexture->lw = bm_w;
 			bm->gltexture->w = bm_w;
 			bm->gltexture->h=bm->bm_h;

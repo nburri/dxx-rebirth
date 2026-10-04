@@ -345,6 +345,8 @@ static void ReadCmdArgs(Inilist &ini, Arglist &&Args)
 			CGameArg.OglDarkEdges = true;
 		else if (!d_stricmp(p, "-gl_noeffects"))
 			CGameArg.OglNoEffects = true;
+		else if (!d_stricmp(p, "-notexturepack"))
+			CGameArg.OglNoTexturePack = true;
 #if DXX_USE_STEREOSCOPIC_RENDER
 		else if (!d_stricmp(p, "-gl_stereo"))
 			CGameArg.OglStereo = true;

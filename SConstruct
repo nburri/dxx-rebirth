@@ -4988,6 +4988,10 @@ class DXXArchive(DXXCommon):
 		RuntimeTest('test-vecmat', (
 			'common/unittest/vecmat.cpp',
 			)),
+		RuntimeTest('test-texture-pack', (
+			'common/unittest/texture_pack.cpp',
+			'common/main/texture_pack.cpp',
+			)),
 		RuntimeTest('test-xrange', (
 			'common/unittest/xrange.cpp',
 			)),
@@ -5245,6 +5249,7 @@ class DXXArchive(DXXCommon):
 'common/main/frame_probe.cpp',
 'common/main/net_v2_transport.cpp',
 'common/main/piggy.cpp',
+'common/main/texture_pack.cpp',
 'common/maths/rand.cpp',
 'common/mem/mem.cpp',
 'common/misc/error.cpp',
