@@ -161,3 +161,81 @@ BOOST_AUTO_TEST_CASE(composite_scales_to_the_larger_image)
 	BOOST_TEST(r.h == 256u);
 	BOOST_TEST(pixel(r, 255, 255)[0] == 1);
 }
+
+namespace {
+
+/* A pack directory: the bitmaps that have a file, by index. */
+struct fake_pack
+{
+	std::vector<std::string> files;
+	std::vector<std::size_t> changed;
+	void decide(replacement_index &index, const bool enabled)
+	{
+		changed.clear();
+		index.decide(enabled, files.size(), [this](const std::size_t i) { return files[i]; }, [this](const std::size_t i) { changed.push_back(i); });
+	}
+};
+
+}
+
+BOOST_AUTO_TEST_CASE(replacement_index_is_empty_until_decided)
+{
+	const replacement_index index;
+	BOOST_TEST(!index.is_decided());
+	BOOST_TEST(index.find(true, 0) == nullptr);
+}
+
+BOOST_AUTO_TEST_CASE(replacement_index_needs_the_toggle)
+{
+	replacement_index index;
+	fake_pack pack{{"", "textures/corona/door32#0.png", "textures/corona/door32#1.png"}, {}};
+	/* Decided while the toggle is on, looked up after it went off: no
+	 * pack, also for frames first drawn now (a door opening).
+	 */
+	pack.decide(index, true);
+	BOOST_TEST(index.find(true, 1) != nullptr);
+	BOOST_TEST(index.find(false, 1) == nullptr);
+	BOOST_TEST(index.find(false, 2) == nullptr);
+	/* Decided while off: nothing, even if the toggle is on again. */
+	pack.decide(index, false);
+	BOOST_TEST(index.is_decided());
+	BOOST_TEST(index.find(true, 1) == nullptr);
+	BOOST_TEST(index.find(true, 2) == nullptr);
+	BOOST_TEST((pack.changed == std::vector<std::size_t>{1, 2}));
+}
+
+BOOST_AUTO_TEST_CASE(replacement_index_ignores_files_added_after_the_decision)
+{
+	replacement_index index;
+	/* Level load: the pack is not there yet (its download runs). */
+	fake_pack pack{{"", "", ""}, {}};
+	pack.decide(index, true);
+	BOOST_TEST(index.find(true, 1) == nullptr);
+	/* The download finishes during the level: the closed door (drawn
+	 * since the level load) and its opening frames must agree.
+	 */
+	pack.files = {"", "textures/corona/door32#0.png", "textures/corona/door32#1.png"};
+	BOOST_TEST(index.find(true, 1) == nullptr);
+	BOOST_TEST(index.find(true, 2) == nullptr);
+	/* The next level load (or the toggle) decides again; the textures
+	 * of the bitmaps that changed load again.
+	 */
+	pack.decide(index, true);
+	BOOST_TEST(*index.find(true, 2) == "textures/corona/door32#1.png");
+	BOOST_TEST((pack.changed == std::vector<std::size_t>{1, 2}));
+	pack.decide(index, true);
+	BOOST_TEST(pack.changed.empty());
+}
+
+BOOST_AUTO_TEST_CASE(replacement_index_reports_a_changed_file)
+{
+	replacement_index index;
+	fake_pack pack{{"textures/a.png", "textures/b.png"}, {}};
+	pack.decide(index, true);
+	pack.files[1] = "textures/corona/b.png";
+	pack.decide(index, true);
+	BOOST_TEST((pack.changed == std::vector<std::size_t>{1}));
+	index.forget(1);
+	BOOST_TEST(index.find(true, 1) == nullptr);
+	BOOST_TEST(*index.find(true, 0) == "textures/a.png");
+}

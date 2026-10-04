@@ -123,6 +123,10 @@ void _g3_draw_tmap_2(grs_canvas &, std::span<g3_draw_tmap_point *const> pointlis
 #ifdef DXX_BUILD_DESCENT
 namespace dsx {
 void ogl_cache_level_textures();
+/* The "HD texture packs" toggle changed: load all textures again, with
+ * or without the pack (texture_pack.h).
+ */
+void ogl_texture_pack_toggled();
 }
 #endif
 

@@ -2232,13 +2232,14 @@ struct visual_quality_menu_items
 		CGameCfg.Bloom = m[opt_vq_bloom].value;
 		CGameCfg.GammaCurve = 70 + 5 * m[opt_vq_gamma].value;
 		CGameCfg.Contrast = 70 + 5 * m[opt_vq_contrast].value;
-		/* The textures load again when the graphics menu closes;
-		 * saved in descent.cfg (TexturePack).
+		/* The textures load again at once, all with or all without
+		 * the pack; saved in descent.cfg (TexturePack).
 		 */
 		if (CGameCfg.TexturePack != m[opt_vq_texpack].value)
 		{
 			CGameCfg.TexturePack = m[opt_vq_texpack].value;
 			texture_download::set_enabled(CGameCfg.TexturePack && !CGameArg.OglNoTexturePack);
+			ogl_texture_pack_toggled();
 		}
 	}
 };
