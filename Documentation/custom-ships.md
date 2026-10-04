@@ -212,31 +212,38 @@ values by the converter, so nothing of the retail data is redistributed):
 
 `.dxship` is **one file** holding everything: manifest, mesh, textures.
 Hash and transfer then concern a single blob, and there is nothing to
-canonicalise. Little-endian layout:
+canonicalise. Little-endian layout (as implemented, format version 1;
+`common/misc/dxship_format.cpp` is the reference):
 
 ```
-header   magic "DXSH" u32 | format_version u16 | flags u16 | file_size u32
-         | section_count u16 | reserved u16
-section* type u32 (FourCC) | size u32 | payload (4-byte aligned)
+header   magic "DXSH" | version u16 (1) | flags u16 (0) | file_size u32
+         | section_count u16 (<= 24) | reserved u16 (0)
+section* type u32 (FourCC) | size u32 | payload, zero padded to 4 bytes
 
-MANI  manifest: key=value lines, UTF-8 restricted to printable ASCII:
-      name (id, [a-z0-9_-], ≤ 24), title (≤ 32), author (≤ 32),
-      licence (SPDX id, required), version, description (≤ 120),
-      converter version, source hash (of the .glb, informational)
-BNDS  radius f32, centre f32×3, mins f32×3, maxs f32×3
-VERT  count u32, then per vertex: pos f32×3, normal i16×3 (snorm),
-      uv f32×2, part u8, pad u8                                (28 bytes)
-INDX  count u32 (multiple of 3), u16 indices
-MATL  count u8 (≤ 4), per material: first index u32, index count u32,
-      albedo texture id u8, mask texture id u8 (0xFF = none), flags u8
-TEXR  per texture: id u8, PNG bytes (size from the section)
-PART  count u8 (≤ 9), per part: centre f32×3, radius f32
-LOD1  optional second VERT/INDX/MATL set
-GUNS  optional 8 × {present u8, pos f32×3} (informational, §3.1)
+MANI  "key=value\n" lines, printable ASCII: name (id, [a-z0-9_-], <= 24),
+      title (<= 32), author (<= 48), licence (required, <= 32),
+      source (<= 160), description (<= 160), converter
+BNDS  radius f32 (the Pyro's), centre f32x3, mins f32x3, maxs f32x3
+VERT  count u32 (<= 16000), per vertex: pos f32x3, normal snorm16x3,
+      part u8, tint u8 (player colour weight), uv f32x2, colour RGBA8
+      (32 bytes)
+INDX  count u32 (multiple of 3, <= 30000), u16 indices
+MATL  count u8 (<= 8), 3 zero bytes, per material: first index u32,
+      index count u32, base colour RGBA8, texture u8, mask u8 (0xFF =
+      none), flags u8 (1 tint the whole material, 2 double-sided), 0
+TEXR  one PNG per section (<= 4), 8-bit grey/RGB/RGBA, power-of-two
+      sides <= 512; a mask texture's red channel is the colour weight
+PART  optional: count u8 (2..10; part 0 is the body), 3 zero bytes,
+      per part: centre f32x3, radius f32
+GUNS  optional: 8 x {present u8, 3 zero bytes, pos f32x3}
 ```
 
-The content hash is SHA-256 over the whole file, truncated to 128 bits
-for the wire (Decision D5). The manifest is inside the file, so the
+Unknown section types are skipped, so a later version can add sections
+that older readers ignore. The colour zone is a material flag, a vertex
+tint or a mask texture; the reader refuses a file without any (D2).
+
+The content hash is SHA-256 over the whole file, all 32 bytes on the
+wire (Decision D5). The manifest is inside the file, so the
 author/licence travel with the model.
 
 ### 3.3 Converter `shipconv` (first named `dxship-convert`)

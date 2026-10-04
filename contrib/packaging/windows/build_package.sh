@@ -49,6 +49,12 @@ build_app() {
     cp --link "GPL-3.txt" "${outdir}/${prettyname}/"
     cp --link "README.md" "${outdir}/${prettyname}/"
     cp --link "INSTALL.markdown" "${outdir}/${prettyname}/"
+
+    # The ship converter, if it was built (Documentation/custom-ships-authoring.md)
+    if [ -f "build/common/shipconv.exe" ]; then
+        cp --link "build/common/shipconv.exe" "${outdir}/${prettyname}/"
+        copy_lib "${outdir}/${prettyname}/shipconv.exe"
+    fi
 }
 
 # Build each app

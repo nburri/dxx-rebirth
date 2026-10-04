@@ -5182,6 +5182,29 @@ class DXXArchive(DXXCommon):
 		RuntimeTest('movrec-analyse', (
 			'common/tools/movrec_analyse.cpp',
 			)),
+		# Test of the custom ship file (dxship_format.h, sha256.h): round
+		# trips, the reader's checks, and a fuzz test of the reader with
+		# truncated, bit-flipped and mutated files
+		# (Documentation/custom-ships.md section 7).
+		RuntimeTest('test-dxship', (
+			'common/unittest/dxship_format.cpp',
+			'common/misc/dxship_format.cpp',
+			'common/misc/sha256.cpp',
+			)),
+		# Not a test: the converter of ship models into custom ship files
+		# (Documentation/custom-ships-authoring.md).
+		RuntimeTest('shipconv', (
+			'common/tools/shipconv.cpp',
+			'common/misc/dxship_format.cpp',
+			'common/misc/sha256.cpp',
+			)),
+		# Test of the converter: synthetic models through `shipconv`
+		# (its path is the argument).
+		RuntimeTest('test-shipconv', (
+			'common/unittest/shipconv.cpp',
+			'common/misc/dxship_format.cpp',
+			'common/misc/sha256.cpp',
+			)),
 			)
 	del RuntimeTest
 
