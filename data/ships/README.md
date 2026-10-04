@@ -30,3 +30,13 @@ Anvil, Manta, Locust and Bulwark are the fork's own designs: compact,
 wide ships of roughly the Pyro-GX's proportions, generated procedurally
 (no third-party content), dedicated to the public domain (CC0 1.0). Their
 glTF sources are in `src/`; `convert-own.sh` converts them.
+
+Their textures (one 512 × 512 atlas per ship, also CC0 1.0) come from
+`src/texture/texture_ships.py`, which unwraps the glTF sources and paints
+the atlas: tileable hull tiles (`src/texture/tiles/`, made with Scenario's
+"Scenario Texture" model from text prompts only, see `PROMPTS.txt` and
+`LICENSE.txt` there) recoloured per ship, plus procedural detail (edge
+creases and wear, soot, grime, hazard stripes, vents, hull numbers, glass,
+glowing nozzles). The player-colour zone (material `accent`) is a
+near-white painted plate; `shipconv` greys it and the game multiplies it
+with the player's colour. `convert-own.sh` runs both steps.
