@@ -31,6 +31,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include <ctype.h>
 
 #include "config.h"
+#include "taunt_sample.h"
 #include "pstypes.h"
 #include "game.h"
 #include "songs.h"
@@ -71,6 +72,9 @@ Cfg GameCfg;
 #define DigiVolumeStr "DigiVolume"
 #define MusicVolumeStr "MusicVolume"
 #define ReverseStereoStr "ReverseStereo"
+#define TauntChoiceStr "TauntChoice"
+#define TauntsHeardStr "TauntsHeard"
+#define HornVolumeStr "HornVolume"
 #define OrigTrackOrderStr "OrigTrackOrder"
 #define MusicTypeStr "MusicType"
 #define CMLevelMusicPlayOrderStr "CMLevelMusicPlayOrder"
@@ -129,6 +133,9 @@ namespace {
 	VERB_d(DigiVolumeStr, CGameCfg.DigiVolume)	\
 	VERB_d(MusicVolumeStr, CGameCfg.MusicVolume)	\
 	VERB_d(ReverseStereoStr, CGameCfg.ReverseStereo)	\
+	VERB_d(TauntChoiceStr, CGameCfg.TauntChoice)	\
+	VERB_d(TauntsHeardStr, CGameCfg.TauntsHeard)	\
+	VERB_d(HornVolumeStr, CGameCfg.HornVolume)	\
 	VERB_d(OrigTrackOrderStr, CGameCfg.OrigTrackOrder)	\
 	VERB_d(MusicTypeStr, underlying_value(CGameCfg.MusicType))	\
 	VERB_d(CMLevelMusicPlayOrderStr, static_cast<int>(CGameCfg.CMLevelMusicPlayOrder))	\
@@ -248,6 +255,9 @@ void ReadConfigFile(CCfg &CGameCfg, Cfg &GameCfg)
 	CGameCfg.DigiVolume = 8;
 	CGameCfg.MusicVolume = 8;
 	CGameCfg.ReverseStereo = false;
+	CGameCfg.TauntChoice = static_cast<uint8_t>(::dcx::taunt::choice::own);	/* the own file, else Horn 1 */
+	CGameCfg.TauntsHeard = true;
+	CGameCfg.HornVolume = ::dcx::taunt::DEFAULT_HORN_VOLUME;
 	CGameCfg.OrigTrackOrder = false;
 #if DXX_USE_SDL_REDBOOK_AUDIO && defined(__APPLE__) && defined(__MACH__)
 	CGameCfg.MusicType = music_type::Redbook;
@@ -330,6 +340,21 @@ void ReadConfigFile(CCfg &CGameCfg, Cfg &GameCfg)
 		}
 		else if (compare_nonterminated_name(name, ReverseStereoStr))
 			convert_integer(CGameCfg.ReverseStereo, value);
+		else if (compare_nonterminated_name(name, TauntChoiceStr))
+		{
+			if (const auto r = convert_integer<uint8_t>(value))
+				if (const auto v = *r; v <= static_cast<uint8_t>(::dcx::taunt::choice::horn4))
+					CGameCfg.TauntChoice = v;
+		}
+		else if (compare_nonterminated_name(name, TauntsHeardStr))
+			convert_integer(CGameCfg.TauntsHeard, value);
+		else if (compare_nonterminated_name(name, HornVolumeStr))
+		{
+			/* In steps of HORN_VOLUME_STEP, as the menu's slider sets it. */
+			if (const auto r = convert_integer<uint8_t>(value))
+				if (const auto v = *r; v <= ::dcx::taunt::MAX_HORN_VOLUME)
+					CGameCfg.HornVolume = static_cast<uint8_t>(v - v % ::dcx::taunt::HORN_VOLUME_STEP);
+		}
 		else if (compare_nonterminated_name(name, OrigTrackOrderStr))
 			convert_integer(CGameCfg.OrigTrackOrder, value);
 		else if (compare_nonterminated_name(name, MusicTypeStr))

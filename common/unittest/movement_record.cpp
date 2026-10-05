@@ -823,6 +823,8 @@ void test_minor_5()
 	CHECK(std::string_view{record_type_name(record_type::level_event)} == "level_event");
 	CHECK(std::string_view{level_event_name(level_event_kind::reactor_destroyed)} == "reactor destroyed");
 	CHECK(std::string_view{level_event_name(level_event_kind::level_end)} == "level end");
+	static_assert(FORMAT_MINOR >= 7 && level_event_kind::taunt == 6);
+	CHECK(std::string_view{level_event_name(level_event_kind::taunt)} == "taunt");
 	CHECK(std::string_view{level_event_name(200)} == "level event");
 }
 

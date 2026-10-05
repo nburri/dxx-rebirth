@@ -18,6 +18,7 @@
 
 #if DXX_USE_MULTIPLAYER
 
+#include <algorithm>
 #include <map>
 #include <memory>
 #include <optional>
@@ -34,6 +35,7 @@
 #include "console.h"
 #include "timer.h"
 #include "game.h"
+#include "taunt.h"
 
 namespace dsx {
 
@@ -53,10 +55,19 @@ struct game_ship_env final : nv::ship_exchange_env
 	std::map<nv::asset_key, std::shared_ptr<const std::vector<std::uint8_t>>> files;
 	bool has_asset(const nv::asset_key &k) override
 	{
+#if DXX_BUILD_DESCENT == 2
+		/* Documentation/taunts.md, phase 2. */
+		if (k.kind == static_cast<std::uint8_t>(nv::asset_kind::taunt))
+			return taunt_asset_has(k.hash);
+#endif
 		return k.kind == static_cast<std::uint8_t>(nv::asset_kind::ship) && cs::find_hash(k.hash);
 	}
 	std::shared_ptr<const std::vector<std::uint8_t>> asset_file(const nv::asset_key &k) override
 	{
+#if DXX_BUILD_DESCENT == 2
+		if (k.kind == static_cast<std::uint8_t>(nv::asset_kind::taunt))
+			return taunt_asset_file(k.hash);
+#endif
 		if (k.kind != static_cast<std::uint8_t>(nv::asset_kind::ship))
 			return nullptr;
 		if (const auto f{files.find(k)}; f != files.end())
@@ -73,6 +84,10 @@ struct game_ship_env final : nv::ship_exchange_env
 	}
 	bool store_asset(const nv::asset_key &k, const std::span<const std::uint8_t> bytes) override
 	{
+#if DXX_BUILD_DESCENT == 2
+		if (k.kind == static_cast<std::uint8_t>(nv::asset_kind::taunt))
+			return taunt_asset_store(k.hash, bytes);
+#endif
 		if (k.kind != static_cast<std::uint8_t>(nv::asset_kind::ship))
 			return false;
 		std::string error;
@@ -103,8 +118,9 @@ struct game_ship_env final : nv::ship_exchange_env
 	}
 	void note(const std::string_view what, const nv::asset_key &k, const std::uint8_t slot) override
 	{
-		const auto e{cs::find_hash(k.hash)};
-		con_printf(CON_NORMAL, "ships: %.*s %s (%s) %s P#%u", static_cast<int>(what.size()), what.data(), e ? e->name.c_str() : "ship", hash_text(k).c_str(), multi_i_am_master() ? "with" : "via", slot);
+		const bool taunt{k.kind == static_cast<std::uint8_t>(nv::asset_kind::taunt)};
+		const auto e{taunt ? nullptr : cs::find_hash(k.hash)};
+		con_printf(CON_NORMAL, "ships: %.*s %s (%s) %s P#%u", static_cast<int>(what.size()), what.data(), e ? e->name.c_str() : taunt ? "taunt sample" : "ship", hash_text(k).c_str(), multi_i_am_master() ? "with" : "via", slot);
 	}
 };
 
@@ -202,14 +218,40 @@ void net_ships_receive(const playernum_t from, const uint8_t type, const std::sp
 
 void net_ships_client_joined(const playernum_t slot)
 {
+#if DXX_BUILD_DESCENT == 2
+	taunt_slot_reset(slot);
+#endif
 	if (X)
 		X->client_joined(static_cast<uint8_t>(slot));
 }
 
 void net_ships_slot_cleared(const playernum_t slot)
 {
+#if DXX_BUILD_DESCENT == 2
+	taunt_slot_reset(slot);
+#endif
 	if (X && slot)
 		X->slot_cleared(static_cast<uint8_t>(slot));
+}
+
+void net_ships_taunt_request(const std::span<const uint8_t, 32> hash, const uint32_t size)
+{
+	if (!X)
+		return;
+	nv::asset_key k{static_cast<std::uint8_t>(nv::asset_kind::taunt), {}};
+	std::ranges::copy(hash, k.hash.begin());
+	X->request(k, size);
+}
+
+void net_ships_taunt_owner(const playernum_t slot, const std::span<const uint8_t, 32> hash, const uint32_t size, const bool want)
+{
+	if (!X || slot >= MAX_PLAYERS)
+		return;
+	nv::asset_key k{static_cast<std::uint8_t>(nv::asset_kind::taunt), {}};
+	std::ranges::copy(hash, k.hash.begin());
+	X->note_owner(k, static_cast<uint8_t>(slot), size);
+	if (want)
+		X->host_want(k, static_cast<uint8_t>(slot), size);
 }
 
 void net_ships_frame()
@@ -245,6 +287,9 @@ void net_ships_frame()
 			{
 				/* The bot left; a joining human announces its own. */
 				Bot_callsigns[p].clear();
+#if DXX_BUILD_DESCENT == 2
+				taunt_slot_reset(p);
+#endif
 				if (!net_v2::host_slot_is_client(p))
 					X->slot_cleared(static_cast<uint8_t>(p));
 			}

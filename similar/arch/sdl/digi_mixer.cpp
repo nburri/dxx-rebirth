@@ -16,7 +16,10 @@
 
 #include <algorithm>
 #include <bitset>
+#include <cmath>
 #include <span>
+#include <utility>
+#include <vector>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -45,6 +48,7 @@
 #include "d_uspan.h"
 #include "d_zip.h"
 #include "frame_probe.h"
+#include "taunt_sample.h"
 
 #define MIX_DIGI_DEBUG 0
 
@@ -74,10 +78,14 @@ constexpr int MIX_OUTPUT_CHANNELS{2};
 constexpr auto digi_sample_rate{underlying_value(sound_sample_rate::_44k)};
 enumerated_bitset<64, sound_channel> channels;
 
-/* channel management */
+/* channel management: the first DIGI_CUSTOM_SLOTS channels belong to the
+ * custom sounds (one each, digi_mixer_play_custom); game sounds take the
+ * others.
+ */
+static_assert(DIGI_CUSTOM_SLOTS < 64);
 static sound_channel digi_mixer_find_channel(const enumerated_bitset<64, sound_channel> &channels, const unsigned max_channels)
 {
-	uint8_t i{};
+	uint8_t i{DIGI_CUSTOM_SLOTS};
 	for (; i < max_channels; ++i)
 		if (!channels[(sound_channel{i})])
 			break;
@@ -596,6 +604,10 @@ void digi_mixer_end_sound(const sound_channel channel)
 	channels.reset(channel);
 }
 
+namespace {
+void digi_mixer_custom_volumes();
+}
+
 void digi_mixer_set_digi_volume( int dvolume )
 {
 	/*
@@ -606,11 +618,120 @@ void digi_mixer_set_digi_volume( int dvolume )
 	digi_volume = dvolume;
 	if (!digi_initialised) return;
 	Mix_Volume(-1, fix2byte(fixmul(dvolume, dvolume)));
+	digi_mixer_custom_volumes();
 }
 
 int digi_mixer_is_channel_playing(const sound_channel c)
 {
 	return channels[c];
+}
+
+namespace {
+
+/* The custom sounds (the taunts): the samples, owned here, the channel
+ * each plays on (the slot's own) and its gain against a game sound.
+ */
+struct custom_sound
+{
+	std::vector<int16_t> samples;
+	Mix_Chunk chunk{};
+	sound_channel channel{sound_channel::None};
+	float gain{1};
+};
+
+std::array<custom_sound, DIGI_CUSTOM_SLOTS> custom_sounds;
+
+/* The game sounds' channel volume (digi_mixer_set_digi_volume), 0 to
+ * MIX_MAX_VOLUME.
+ */
+int game_channel_volume()
+{
+	return fix2byte(fixmul(digi_volume, digi_volume));
+}
+
+/* A custom sound's channel volume for `gain`, and what remains of the
+ * gain beyond MIX_MAX_VOLUME (applied to the samples).
+ */
+std::pair<int, float> custom_volume(const float gain)
+{
+	const int base{game_channel_volume()};
+	const float wanted{static_cast<float>(base) * gain};
+	if (wanted <= static_cast<float>(MIX_MAX_VOLUME))
+		return {static_cast<int>(std::lround(wanted)), 1.0f};
+	return {MIX_MAX_VOLUME, wanted / static_cast<float>(MIX_MAX_VOLUME)};
+}
+
+/* Mix_Volume(-1) set every channel to the game sounds' volume: the
+ * custom channels get theirs back.
+ */
+void digi_mixer_custom_volumes()
+{
+	for (std::size_t slot{}; slot != custom_sounds.size() && slot < digi_mixer_max_channels; ++slot)
+		Mix_Volume(static_cast<int>(slot), custom_volume(custom_sounds[slot].gain).first);
+}
+
+}
+
+sound_channel digi_mixer_custom_channel(const unsigned slot)
+{
+	if (!digi_initialised || slot >= custom_sounds.size())
+		return sound_channel::None;
+	auto &c{custom_sounds[slot]};
+	if (c.channel == sound_channel::None)
+		return c.channel;
+	const auto ch{underlying_value(c.channel)};
+	/* Finished, or the channel went to another sound since. */
+	const frame_probe::mixer_scope probe;
+	if (!channels[c.channel] || !Mix_Playing(ch) || Mix_GetChunk(ch) != &c.chunk)
+		c.channel = sound_channel::None;
+	return c.channel;
+}
+
+void digi_mixer_stop_custom(const unsigned slot)
+{
+	if (const auto ch{digi_mixer_custom_channel(slot)}; ch != sound_channel::None)
+		digi_mixer_stop_sound(ch);
+	if (slot < custom_sounds.size())
+		custom_sounds[slot].channel = sound_channel::None;
+}
+
+sound_channel digi_mixer_play_custom(const unsigned slot, const std::span<const int16_t> samples, const fix volume, const sound_pan pan, const float gain)
+{
+	if (!digi_initialised || slot >= custom_sounds.size() || samples.empty())
+		return sound_channel::None;
+	digi_mixer_stop_custom(slot);
+	/* The slot's own channel. */
+	const sound_channel c{static_cast<uint8_t>(slot)};
+	const int channel{static_cast<int>(slot)};
+	if (slot >= digi_mixer_max_channels)
+		return sound_channel::None;
+	auto &cs{custom_sounds[slot]};
+	cs.gain = std::isfinite(gain) ? std::clamp(gain, 0.0f, DIGI_CUSTOM_MAX_GAIN) : 1.0f;
+	const auto [mix_volume, rest]{custom_volume(cs.gain)};
+	/* The mixer was opened as AUDIO_S16, which is little-endian. */
+	cs.samples.resize(samples.size());
+	if (rest > 1.0f)
+		std::ranges::transform(samples, cs.samples.begin(), [rest](const int16_t v) {
+			const float f{::dcx::taunt::soft_limit(static_cast<float>(v) / 32768.0f * rest)};
+			return static_cast<int16_t>(SDL_SwapLE16(static_cast<Uint16>(static_cast<int16_t>(std::lround(f * 32767.0f)))));
+		});
+	else
+		std::ranges::transform(samples, cs.samples.begin(), [](const int16_t v) { return static_cast<int16_t>(SDL_SwapLE16(static_cast<Uint16>(v))); });
+	cs.chunk = {};
+	cs.chunk.allocated = 0;
+	cs.chunk.abuf = reinterpret_cast<Uint8 *>(cs.samples.data());
+	cs.chunk.alen = static_cast<Uint32>(cs.samples.size() * sizeof(int16_t));
+	cs.chunk.volume = MIX_MAX_VOLUME;
+	const int mix_pan = fix2byte(static_cast<fix>(pan));
+	const frame_probe::mixer_scope probe;
+	Mix_Volume(channel, mix_volume);
+	if (Mix_PlayChannel(channel, &cs.chunk, 0) < 0)
+		return sound_channel::None;
+	Mix_SetPanning(channel, 255 - mix_pan, mix_pan);
+	Mix_SetDistance(channel, UINT8_MAX - fix2byte(volume));
+	channels.set(c);
+	cs.channel = c;
+	return c;
 }
 
 void digi_mixer_stop_all_channels()

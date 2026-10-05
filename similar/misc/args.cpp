@@ -166,6 +166,8 @@ static void InitGameArg()
 	CGameArg.DbgBotArenaSeed = 1;
 	CGameArg.DbgBotArenaReactor = 0;
 	CGameArg.DbgBotArenaTimeout = 0;
+	CGameArg.DbgBotArenaTaunt = false;
+	CGameArg.DbgBotArenaSound = false;
 	CGameArg.DbgBpp = 32;
 #if DXX_USE_OGL
 	CGameArg.OglSyncMethod = OGL_SYNC_METHOD_DEFAULT;
@@ -452,6 +454,10 @@ static void ReadCmdArgs(Inilist &ini, Arglist &&Args)
 			CGameArg.DbgBotArenaSeed = static_cast<uint32_t>(std::clamp<long>(arg_integer(pp, end), 1, 0x7fffffff));
 		else if (!d_stricmp(p, "-botarena-reactor"))
 			CGameArg.DbgBotArenaReactor = static_cast<uint32_t>(std::clamp<long>(arg_integer(pp, end), 1, 86400));
+		else if (!d_stricmp(p, "-botarena-taunt"))
+			CGameArg.DbgBotArenaTaunt = true;
+		else if (!d_stricmp(p, "-botarena-sound"))
+			CGameArg.DbgBotArenaSound = true;
 		else if (!d_stricmp(p, "-botarena-timeout"))
 			CGameArg.DbgBotArenaTimeout = static_cast<uint32_t>(std::clamp<long>(arg_integer(pp, end), 1, 7 * 86400));
 		else if (!d_stricmp(p, "-norun"))
@@ -518,6 +524,9 @@ namespace {
 
 static void PostProcessGameArg()
 {
+	/* Only the arena's own "no sound" is undone. */
+	if (CGameArg.DbgBotArenaSound && !CGameArg.DbgBotArenaMission.empty())
+		CGameArg.SndNoSound = false;
 	if (CGameArg.SysMaxFPS < MINIMUM_FPS)
 		CGameArg.SysMaxFPS = MINIMUM_FPS;
 	else if (CGameArg.SysMaxFPS > MAXIMUM_FPS)

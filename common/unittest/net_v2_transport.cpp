@@ -3380,7 +3380,7 @@ void test_header_layout()
 	std::array<std::uint8_t, NET_V2_HEADER_SIZE> buf{};
 	h.write(buf.data());
 	const std::array<std::uint8_t, NET_V2_HEADER_SIZE> expected{{
-		NET_V2_PROTO_VERSION, 0,
+		NET_V2_PROTO_VERSION & 0xff, NET_V2_PROTO_VERSION >> 8,
 		1, 2, 3, 4,
 		5, 6, 7, 8,
 		7,
@@ -3401,10 +3401,10 @@ void test_header_layout()
 	 * is not a valid upid.  A v2 build drops anything without its own
 	 * proto.
 	 */
-	buf[1] = 1;
+	buf[1] ^= 1;
 	connection c{host_side, 0};
 	CHECK(c.on_receive(buf, 0).status == receive_status::bad_proto);
-	buf[1] = 0;
+	buf[1] ^= 1;
 	buf[11] = 0x0a;	/* keepalive + reserved bit */
 	CHECK(c.on_receive(buf, 0).status == receive_status::bad_flags);
 	buf[11] = 0x04;

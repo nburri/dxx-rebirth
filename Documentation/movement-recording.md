@@ -216,6 +216,12 @@ the host's (`value` seconds; flags 1 by the host's backstop), 5 this machine
 left the level for the score screen (`value` the countdown then, 65535
 none). `value` is the countdown's seconds left unless said otherwise
 (Documentation/network-protocol-v2.md, "Reactor countdown").
+Minor 7 adds `kind` 6, a taunt (Documentation/taunts.md): `pid` sounded
+its horn, `value` the sample (1 to 4 a starter horn, 16 the player's own
+file), flags 1 if this machine did not play it (muted, taunts off). Every
+machine records the taunts it accepts (the host's spam protection and
+each receiver's, below the network protocol's limits); a refused taunt is
+not recorded.
 
 **Capture the flag and hoard (minor 6).** A `mode_event` record (the
 event layout) marks what happened to the flags and orbs, as this machine
@@ -274,7 +280,7 @@ controls) change.
 
 ## 4. File format
 
-All integers little-endian. Version 1, minor 6. The minor counts additions
+All integers little-endian. Version 1, minor 7. The minor counts additions
 that an older reader skips without harm (new record types, new flag bits,
 fields appended to the header); the version changes only when old fields
 change. Minor 0 is the first release (v0.61-exp-25); minor 1 adds the
@@ -298,7 +304,8 @@ bot's are a later version's. Minor 5 adds the `level_event` record (type
 Minor 6 adds the `mode_event` (type 15, the event layout) and `mode_goal`
 (type 16) records and the bot goal 6 objective; older readers skip both
 records as unknown, and a minor 6 reader reads the files of minor 0 to 5,
-which have none. A minor 0 file reads as
+which have none. Minor 7 adds the `level_event` kind 6, a taunt; an older
+reader names it "level event". A minor 0 file reads as
 before (its header has no `minor` field: 0).
 
 ```

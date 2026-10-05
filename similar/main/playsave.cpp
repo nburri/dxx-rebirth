@@ -182,6 +182,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #define TOGGLES_RESPAWN_ANY_KEY	"respawnkey"
 #define TOGGLES_MOUSELOOK	"mouselook"
 #define TOGGLES_PITCH_LOCK	"pitchlock"
+#define TOGGLES_TAUNT_BINDINGS	"tauntbindings"
 #define TOGGLES_THIEF_ABSENCE_SP	"thiefabsent"
 #define TOGGLES_THIEF_NO_ENERGY_WEAPONS_SP	"thiefnoenergyweapons"
 #define TOGGLES_AUTOSAVE_INTERVAL_SP	"autosaveinterval"
@@ -275,6 +276,9 @@ void new_player_config()
 		PlayerCfg.KeySettings.Joystick = DefaultKeySettingsGameController;
 #endif
 	PlayerCfg.KeySettingsRebirth = DefaultKeySettingsRebirth;
+#if DXX_BUILD_DESCENT == 2
+	PlayerCfg.TauntBindings = true;
+#endif
 	kc_set_controls();
 
 	PlayerCfg.DefaultDifficulty = DEFAULT_DIFFICULTY;
@@ -604,6 +608,10 @@ static void read_player_dxx(const char *filename)
 					PlayerCfg.MouselookFlags = strtoul(value, 0, 10);
 				else if (!strcmp(line, TOGGLES_PITCH_LOCK))
 					PlayerCfg.PitchLockFlags = strtoul(value, 0, 10);
+#if DXX_BUILD_DESCENT == 2
+				else if (!strcmp(line, TOGGLES_TAUNT_BINDINGS))
+					PlayerCfg.TauntBindings = atoi(value);
+#endif
 			}
 		}
 		else if (!strcmp(line,GRAPHICS_HEADER_TEXT))
@@ -939,6 +947,9 @@ static int write_player_dxx(const char *filename)
 		PHYSFSX_printf(fout,TOGGLES_RESPAWN_ANY_KEY "=%i\n",static_cast<unsigned>(PlayerCfg.RespawnMode));
 		PHYSFSX_printf(fout, TOGGLES_MOUSELOOK "=%i\n", PlayerCfg.MouselookFlags);
 		PHYSFSX_printf(fout, TOGGLES_PITCH_LOCK "=%i\n", PlayerCfg.PitchLockFlags);
+#if DXX_BUILD_DESCENT == 2
+		PHYSFSX_printf(fout, TOGGLES_TAUNT_BINDINGS "=%i\n", PlayerCfg.TauntBindings);
+#endif
 		PHYSFSX_puts_literal(fout,
 							END_TEXT "\n"
 							GRAPHICS_HEADER_TEXT "\n"
@@ -1344,8 +1355,18 @@ int read_player_file()
 #endif
 
 	filename[plr_filename_length - 1] = 'x';
+#if DXX_BUILD_DESCENT == 2
+	PlayerCfg.TauntBindings = false;
+#endif
 	read_player_dxx(filename.data());
 	plyr_read_stats(std::span(filename).first(plr_filename_length));
+#if DXX_BUILD_DESCENT == 2
+	/* A pilot from before the taunt key: its file has junk (0, a button)
+	 * where the taunt's bindings are now (Documentation/taunts.md).
+	 */
+	if (!std::exchange(PlayerCfg.TauntBindings, true))
+		kconfig_default_taunt_bindings();
+#endif
 	kc_set_controls();
 
 	return EZERO;

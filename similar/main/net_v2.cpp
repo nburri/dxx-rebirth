@@ -55,6 +55,7 @@
 #include "game.h"
 #include "multi.h"
 #include "bot.h"
+#include "taunt.h"
 #include "multiinternal.h"
 #include "powerup.h"
 #include "gameseg.h"
@@ -4750,6 +4751,17 @@ void handle_reliable(peer &p, const session_msg type, const std::span<const uint
 	if (type == session_msg::ship_info || type == session_msg::asset_request || type == session_msg::asset_data || type == session_msg::asset_unavailable)
 	{
 		net_ships_receive(slot, static_cast<uint8_t>(type), payload);
+		return;
+	}
+	/* Taunts (taunt.cpp): a request to the host, the relay to the
+	 * clients; only in the level.
+	 */
+	if (type == session_msg::taunt_request || type == session_msg::taunt)
+	{
+#if DXX_BUILD_DESCENT == 2
+		if (peer_sends_game_data(p) && event_processing_allowed())
+			net_taunt_receive(slot, static_cast<uint8_t>(type), payload);
+#endif
 		return;
 	}
 	if (type == session_msg::spawn_request || type == session_msg::spawn_site)

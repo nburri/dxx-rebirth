@@ -6682,6 +6682,11 @@ bool bots_replaceable()
 	return Bot_game.replace;
 }
 
+bool bots_taunt()
+{
+	return Bot_game.taunt;
+}
+
 bool bot_ship_dying(const playernum_t pnum)
 {
 	const auto bs{find_bot(pnum)};
@@ -6718,7 +6723,7 @@ unsigned bots_allocate_slots()
 	/* Section 9.13: the style profiles as the folder has them now. */
 	bots_load_styles(true);
 	/* Section 6.4: the options of this game start as the setup's. */
-	Bot_game = {Bot_setup.default_skill, Bot_setup.default_style, Bot_setup.default_profile, Bot_setup.replace};
+	Bot_game = {Bot_setup.default_skill, Bot_setup.default_style, Bot_setup.default_profile, Bot_setup.replace, Bot_setup.taunt};
 	if (!bots_allowed_in_mode(Netgame.gamemode))
 		return 0;
 	unsigned placed{0};
