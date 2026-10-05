@@ -43,6 +43,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "game.h"
 #include "net_v2_combat.h"
 #include "multi.h"
+#include "taunt.h"
 #include "bot.h"
 #include "movement_record.h"
 #include "movement_record_format.h"
@@ -1550,6 +1551,20 @@ static void multi_send_message_end(const d_robot_info_array &Robot_info, fvmobjp
 				kick_player(static_cast<playernum_t>(i));
 				return;
 			}
+	}
+	else if (+(Game_mode & GM_NETWORK) && taunt_chat_command(Network_message.data()))
+	{
+		/* Documentation/taunts.md: `/mute name`, `/unmute name`, for
+		 * this machine only; not sent.
+		 */
+		multi_message_index = 0;
+		multi_sending_message[Player_num] = msgsend_state::none;
+#if DXX_BUILD_DESCENT == 2
+		multi_send_msgsend_state(msgsend_state::none);
+		key_toggle_repeat(0);
+		game_flush_inputs(Controls);
+#endif
+		return;
 	}
 	else if (+(Game_mode & GM_NETWORK) && bots_chat_command(Network_message.data()))
 	{
@@ -3261,6 +3276,8 @@ void multi_prep_level_objects(const d_powerup_info_array &Powerup_info, const d_
 	net_objects_level_start();
 	/* Captures and flag counts belong to the old level. */
 	net_modes_level_start();
+	/* Documentation/taunts.md */
+	taunt_level_start();
 	/* Spawn assignments and reservations belong to the old level. */
 	net_spawn_level_start();
 	/* Shots, ids and the host's histories too (stage 4). */

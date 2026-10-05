@@ -191,8 +191,10 @@ static inline player_ship_color get_team_color(const team_number tnum)
  * hoard.
  * 111: capture the flag (Classic): its rules in GAME_SETTINGS, CTF_NOTICE.
  * 112: custom ships (SHIP_INFO, ASSET_*; Documentation/custom-ships.md).
+ * 113: taunts (TAUNT_REQUEST, TAUNT, own samples as asset kind 2;
+ * Documentation/taunts.md).
  */
-constexpr std::uint16_t MULTI_PROTO_VERSION{112};
+constexpr std::uint16_t MULTI_PROTO_VERSION{113};
 // PROTOCOL VARIABLES AND DEFINES - END
 
 /* The network tick rate (positions per second, and the pacing of every
@@ -1207,6 +1209,12 @@ void net_ships_frame();
 void net_ships_receive(playernum_t from, uint8_t type, std::span<const uint8_t> payload);
 void net_ships_client_joined(playernum_t slot);
 void net_ships_slot_cleared(playernum_t slot);
+/* The taunts' samples (Documentation/taunts.md), asset kind 2: a client
+ * asks the host for one; the host learns that player `slot` has one
+ * (and fetches it for itself if `want`).
+ */
+void net_ships_taunt_request(std::span<const uint8_t, 32> hash, uint32_t size);
+void net_ships_taunt_owner(playernum_t slot, std::span<const uint8_t, 32> hash, uint32_t size, bool want);
 /* The host: player `pnum` enters the level in progress (CLIENT_READY);
  * assign its first spawn and send it ahead of LEVEL_GO.
  */

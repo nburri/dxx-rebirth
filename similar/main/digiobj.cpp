@@ -436,6 +436,14 @@ static void digi_link_sound_common(const object_base &viewer, sound_object &so, 
 
 }
 
+std::pair<int, sound_pan> digi_sound_location(const vms_vector &pos, const vcsegptridx_t segnum, const fix max_volume, const vm_distance max_distance)
+{
+	if (!Viewer)
+		return {};
+	auto &viewer{*Viewer};
+	return digi_get_sound_loc(viewer.orient, viewer.pos, segnum.absolute_sibling(viewer.segnum), pos, segnum, max_volume, max_distance);
+}
+
 void digi_link_sound_to_object3(const sound_effect org_soundnum, const vcobjptridx_t objnum, const uint8_t forever, const fix max_volume, const sound_stack once, const vm_distance max_distance, const int loop_start, const int loop_end)
 {
 	auto &viewer = *Viewer;

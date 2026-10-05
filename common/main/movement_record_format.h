@@ -54,10 +54,11 @@ constexpr std::uint16_t FORMAT_VERSION{1};
  * record_type::level_event); 6 for the game modes' events (flags and orbs
  * taken, dropped, scored, returned; a bot's role: record_type::mode_event)
  * and the goals of the level (record_type::mode_goal), and the bots'
- * objective goal (bot_goals::objective).  Appended to the header; a header
- * without it is minor 0.
+ * objective goal (bot_goals::objective); 7 for the taunts
+ * (level_event_kind::taunt, Documentation/taunts.md).  Appended to the
+ * header; a header without it is minor 0.
  */
-constexpr std::uint16_t FORMAT_MINOR{6};
+constexpr std::uint16_t FORMAT_MINOR{7};
 /* The file names are cut to this length (the level record has room for
  * the names and two of these).
  */
@@ -286,6 +287,11 @@ constexpr std::uint8_t countdown_set{4};
  * countdown then, 0xffff none).
  */
 constexpr std::uint8_t level_end{5};
+/* Minor 7: `pid` taunted (its horn sounded here); `value` the sample
+ * (taunt::sample_kind: 1-4 a starter horn, 16 the player's own),
+ * `flags` 1 if this machine did not play it (muted, taunts off).
+ */
+constexpr std::uint8_t taunt{6};
 }
 
 [[nodiscard]]
@@ -299,6 +305,7 @@ constexpr const char *level_event_name(const std::uint8_t kind)
 		case level_event_kind::died_in_mine: return "died in the mine";
 		case level_event_kind::countdown_set: return "countdown set";
 		case level_event_kind::level_end: return "level end";
+		case level_event_kind::taunt: return "taunt";
 		default: return "level event";
 	}
 }

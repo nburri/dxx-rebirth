@@ -83,6 +83,17 @@ Fly a ship of your own instead of the Pyro-GX: *Options → Ship...* lists the s
 - Making ships: `shipconv` (next to the game in the Windows package) converts glTF/OBJ models; see [Documentation/custom-ships-authoring.md](Documentation/custom-ships-authoring.md). All players need a build with network protocol 112.
 
 
+### Taunts (horn)
+
+Press **V** (Controls → *Taunt / Horn*; it can also be put on a joystick or mouse button) and your ship sounds its horn. Everyone near your ship hears it from where you are, like a weapon's sound.
+
+- **Your own sound:** put a file named `taunt.wav`, `taunt.mp3`, `taunt.ogg` or `taunt.flac` in the folder with your pilot files (`.plr`) and `descent.cfg`, and choose *Own file* in *Options → Sound Effects & Music* (the default). The menu shows whether the file was found. The game uses at most the first 2 seconds (after any silence at the start) and evens out the volume, so no horn is louder than a weapon.
+- **Starter horns:** the same menu offers a car horn, a bike bell, an air horn and a beep, and *Off*. Choosing one plays it.
+- **Limits:** up to 3 horns within 2 seconds and 4 within 10 seconds; more and your horn cools down for 5 seconds ("Horn cooling down"). The host enforces this for everyone.
+- **Muting:** uncheck *Hear other players' horns* in the same menu, or type `/mute name` in the chat (F8) to mute one player for this session (`/unmute name`, `/mute` lists them).
+- **Bots:** the host can let bots honk after some of their kills (*Bots taunt after kills* on the Bots screens, default off).
+- Your own file is sent to the other players through the host (like custom ships); until it has arrived, they hear the car horn. All players need a build with network protocol 113. Details: [Documentation/taunts.md](Documentation/taunts.md).
+
 ## 4. Legal stuff:
 
 See [COPYING.txt](COPYING.txt) and [GPL-3.txt](GPL-3.txt)

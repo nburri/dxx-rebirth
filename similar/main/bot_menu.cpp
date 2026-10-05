@@ -441,9 +441,9 @@ void run_bot_edit(const unsigned i, const network_game_type mode)
  */
 struct bots_menu
 {
-	static constexpr unsigned first_line{6};
+	static constexpr unsigned first_line{7};
 	unsigned max_bots;
-	unsigned opt_count{0}, opt_skill{1}, opt_style{2}, opt_replace{3};
+	unsigned opt_count{0}, opt_skill{1}, opt_style{2}, opt_replace{3}, opt_taunt{4};
 	unsigned opt_set_all{}, opt_names{}, opt_done{};
 	unsigned nitems{};
 	/* The bots listed on this screen: the item indices are taken from
@@ -471,6 +471,7 @@ struct bots_menu
 		nm_set_item_slider(m[n++], skill_text, static_cast<unsigned>(Bot_setup.default_skill), 0, b::BOT_SKILL_COUNT - 1, skill_saved);
 		nm_set_item_slider(m[n++], style_text, style_choice(Bot_setup.default_style, Bot_setup.default_profile), 0, style_choice_max(), style_saved);
 		nm_set_item_checkbox(m[n++], "Humans replace bots when full", Bot_setup.replace);
+		nm_set_item_checkbox(m[n++], "Bots taunt after kills", Bot_setup.taunt);
 		nm_set_item_text(m[n++], "(new bots take the default skill and style)");
 		nm_set_item_text(m[n++], "");
 		listed = Bot_setup.count;
@@ -524,6 +525,8 @@ int bots_menu_handler(newmenu *, const d_event &event, bots_menu *const bm)
 				set_style_choice(static_cast<unsigned>(bm->m[bm->opt_style].value), Bot_setup.default_style, Bot_setup.default_profile);
 			else if (citem == bm->opt_replace)
 				Bot_setup.replace = bm->m[bm->opt_replace].value != 0;
+			else if (citem == bm->opt_taunt)
+				Bot_setup.taunt = bm->m[bm->opt_taunt].value != 0;
 			bm->update_labels();
 			return 0;
 		}
@@ -565,6 +568,7 @@ void bots_setup_load(const b::bot_profile &p)
 	Bot_setup.default_style = p.default_style;
 	Bot_setup.default_profile = p.default_profile;
 	Bot_setup.replace = p.replace;
+	Bot_setup.taunt = p.taunt;
 	Bot_setup.count = std::min<unsigned>(p.count, MAX_BOTS);
 	for (unsigned i = 0; i < MAX_BOTS; ++i)
 	{
@@ -612,6 +616,7 @@ b::bot_profile bots_setup_profile()
 	p.default_style = Bot_setup.default_style;
 	p.default_profile = Bot_setup.default_profile;
 	p.replace = Bot_setup.replace;
+	p.taunt = Bot_setup.taunt;
 	for (unsigned i = 0; i < p.count; ++i)
 	{
 		const auto &c{Bot_setup.bots[i]};
@@ -928,8 +933,8 @@ bool run_ingame_edit(const bot_in_game *const existing)
  */
 struct ingame_menu
 {
-	static constexpr unsigned first_line{5};
-	static constexpr unsigned opt_skill{0}, opt_style{1}, opt_replace{2};
+	static constexpr unsigned first_line{6};
+	static constexpr unsigned opt_skill{0}, opt_style{1}, opt_replace{2}, opt_taunt{3};
 	unsigned opt_add{}, opt_add_choose{}, opt_save{}, opt_done{};
 	unsigned nitems{};
 	bot_list bots{};
@@ -955,6 +960,7 @@ struct ingame_menu
 		nm_set_item_slider(m[n++], skill_text, static_cast<unsigned>(Bot_game.default_skill), 0, b::BOT_SKILL_COUNT - 1, skill_saved);
 		nm_set_item_slider(m[n++], style_text, style_choice(Bot_game.default_style, Bot_game.default_profile), 0, style_choice_max(), style_saved);
 		nm_set_item_checkbox(m[n++], "Humans replace bots when full", Bot_game.replace);
+		nm_set_item_checkbox(m[n++], "Bots taunt after kills", Bot_game.taunt);
 		nm_set_item_text(m[n++], players_text);
 		nm_set_item_text(m[n++], "");
 		for (unsigned i = 0; i < listed; ++i)
@@ -1013,6 +1019,8 @@ int ingame_menu_handler(newmenu *, const d_event &event, ingame_menu *const im)
 				set_style_choice(static_cast<unsigned>(im->m[ingame_menu::opt_style].value), Bot_game.default_style, Bot_game.default_profile);
 			else if (citem == ingame_menu::opt_replace)
 				Bot_game.replace = im->m[ingame_menu::opt_replace].value != 0;
+			else if (citem == ingame_menu::opt_taunt)
+				Bot_game.taunt = im->m[ingame_menu::opt_taunt].value != 0;
 			im->update_labels();
 			return 0;
 		}
@@ -1197,6 +1205,7 @@ void bots_save_as_default()
 	Bot_setup.default_style = Bot_game.default_style;
 	Bot_setup.default_profile = Bot_game.default_profile;
 	Bot_setup.replace = Bot_game.replace;
+	Bot_setup.taunt = Bot_game.taunt;
 	for (unsigned i = 0; i < MAX_BOTS; ++i)
 		Bot_setup.bots[i] = i < n ? bots[i].cfg : bot_config{};
 	/* Only the bot lines: every other line of the profile stays as the

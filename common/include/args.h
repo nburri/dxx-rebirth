@@ -148,6 +148,12 @@ struct CArg : prohibit_void_ptr<>
 	 * the watchdog); 0 = the default, max(120 s, <seconds> / 5 + 60 s).
 	 */
 	uint32_t DbgBotArenaTimeout;
+	/* -botarena-taunt: the bots taunt after kills (Documentation/taunts.md). */
+	bool DbgBotArenaTaunt;
+	/* -botarena-sound: the arena keeps the sound on (use it with
+	 * SDL_AUDIODRIVER=dummy), so that the sound code runs.
+	 */
+	bool DbgBotArenaSound;
 	std::string DbgBotArenaMission;
 	/* -shipfor "pid:name,..." (custom_ship.h): ships for other players
 	 * or bots, on this machine only (a test aid).

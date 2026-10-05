@@ -74,6 +74,13 @@ struct CCfg : prohibit_void_ptr<>
 	bool FPSIndicator;
 	uint8_t GammaLevel;
 	bool ReverseStereo;
+	/* Taunts (Documentation/taunts.md): the own horn (taunt::choice),
+	 * whether this machine plays the taunts of others and how loud it
+	 * plays all horns (percent, taunt::DEFAULT_HORN_VOLUME the normal).
+	 */
+	uint8_t TauntChoice;
+	bool TauntsHeard;
+	uint8_t HornVolume;
 	bool OrigTrackOrder;
 	uint8_t DigiVolume;
 	uint8_t MusicVolume;

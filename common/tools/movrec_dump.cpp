@@ -280,7 +280,10 @@ int dump(const char *const path, const options &opt)
 				char who[16]{};
 				if (e->pid != PLAYER_NONE)
 					std::snprintf(who, sizeof(who), " P#%u", e->pid);
-				std::snprintf(line, sizeof(line), "  t=%.3f %s%s, countdown %u s, flags 0x%x\n", e->time_ms / 1000.0, level_event_name(e->kind), who, e->value, e->flags);
+				if (e->kind == level_event_kind::taunt)
+					std::snprintf(line, sizeof(line), "  t=%.3f %s%s, sample %u, flags 0x%x\n", e->time_ms / 1000.0, level_event_name(e->kind), who, e->value, e->flags);
+				else
+					std::snprintf(line, sizeof(line), "  t=%.3f %s%s, countdown %u s, flags 0x%x\n", e->time_ms / 1000.0, level_event_name(e->kind), who, e->value, e->flags);
 				level_event_lines += line;
 				if (opt.records)
 					std::printf("  level_event%s", line + 1);

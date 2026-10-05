@@ -30,6 +30,8 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include <SDL.h>
 
 #include "digi.h"
+#include "taunt.h"
+#include "taunt_sample.h"
 #include "menu.h"
 #include "custom_ship.h"
 #include "inferno.h"
@@ -2601,10 +2603,31 @@ namespace {
 #define DXX_MUSIC_OPTIONS_SEPARATOR_TEXT ""
 #endif
 
+#if DXX_BUILD_DESCENT == 2
+/* Documentation/taunts.md */
+#define DXX_TAUNT_CHOICE(C)	static_cast<uint8_t>(::dcx::taunt::choice::C)
+#define DXX_SOUND_TAUNT_MENU_ITEMS(VERB)	\
+	DXX_MENUITEM(VERB, TEXT, "", opt_label_blank_taunt)	\
+	DXX_MENUITEM(VERB, TEXT, "Your horn (key \"Taunt / Horn\"):", opt_label_taunt)	\
+	DXX_MENUITEM(VERB, RADIO, "Own file (taunt.wav/mp3/ogg/flac)", opt_sm_taunt_own, CGameCfg.TauntChoice == DXX_TAUNT_CHOICE(own), optgrp_taunt)	\
+	DXX_MENUITEM(VERB, TEXT, taunt_status.data(), opt_label_taunt_status)	\
+	DXX_MENUITEM(VERB, RADIO, "Horn 1: car horn", opt_sm_taunt_horn1, CGameCfg.TauntChoice == DXX_TAUNT_CHOICE(horn1), optgrp_taunt)	\
+	DXX_MENUITEM(VERB, RADIO, "Horn 2: bike bell", opt_sm_taunt_horn2, CGameCfg.TauntChoice == DXX_TAUNT_CHOICE(horn2), optgrp_taunt)	\
+	DXX_MENUITEM(VERB, RADIO, "Horn 3: air horn", opt_sm_taunt_horn3, CGameCfg.TauntChoice == DXX_TAUNT_CHOICE(horn3), optgrp_taunt)	\
+	DXX_MENUITEM(VERB, RADIO, "Horn 4: beep beep", opt_sm_taunt_horn4, CGameCfg.TauntChoice == DXX_TAUNT_CHOICE(horn4), optgrp_taunt)	\
+	DXX_MENUITEM(VERB, RADIO, "Off", opt_sm_taunt_off, CGameCfg.TauntChoice == DXX_TAUNT_CHOICE(off), optgrp_taunt)	\
+	DXX_MENUITEM(VERB, CHECK, "Hear other players' horns", opt_sm_taunts_heard, CGameCfg.TauntsHeard)	\
+	DXX_MENUITEM(VERB, SCALE_SLIDER, horn_volume_text.data(), opt_sm_horn_volume, CGameCfg.HornVolume, 0, ::dcx::taunt::MAX_HORN_VOLUME / ::dcx::taunt::HORN_VOLUME_STEP, ::dcx::taunt::HORN_VOLUME_STEP)	\
+
+#else
+#define DXX_SOUND_TAUNT_MENU_ITEMS(VERB)
+#endif
+
 #define DSX_SOUND_MENU(VERB)	\
 	DXX_MENUITEM(VERB, SLIDER, TXT_FX_VOLUME, opt_sm_digivol, CGameCfg.DigiVolume, 0, 8)	\
 	DXX_MENUITEM(VERB, SLIDER, "Music volume", opt_sm_musicvol, CGameCfg.MusicVolume, 0, 8)	\
 	DXX_MENUITEM(VERB, CHECK, TXT_REVERSE_STEREO, opt_sm_revstereo, CGameCfg.ReverseStereo)	\
+	DXX_SOUND_TAUNT_MENU_ITEMS(VERB)	\
 	DXX_MENUITEM(VERB, TEXT, "", opt_label_blank0)	\
 	DXX_MENUITEM(VERB, TEXT, "Music type:", opt_label_music_type)	\
 	DXX_MENUITEM(VERB, RADIO, "No music", opt_sm_mtype0, CGameCfg.MusicType == music_type::None, optgrp_music_type)	\
@@ -2625,6 +2648,9 @@ public:
 #if DXX_USE_SDLMIXER
 		optgrp_music_order,
 #endif
+#if DXX_BUILD_DESCENT == 2
+		optgrp_taunt,
+#endif
 	};
 	enum
 	{
@@ -2632,8 +2658,25 @@ public:
 	};
 	DSX_SOUND_MENU(DECL);
 	std::array<newmenu_item, DSX_SOUND_MENU(COUNT)> m;
+#if DXX_BUILD_DESCENT == 2
+	std::array<char, 64> taunt_status{};
+	void update_taunt_status(const bool reload)
+	{
+		std::snprintf(taunt_status.data(), taunt_status.size(), "   %s", taunt_own_status(reload).c_str());
+	}
+	/* "Horn volume" with its value: all horns heard here. */
+	std::array<char, 32> horn_volume_text{};
+	void update_horn_volume_text()
+	{
+		std::snprintf(horn_volume_text.data(), horn_volume_text.size(), "Horn volume: %u %%", static_cast<unsigned>(CGameCfg.HornVolume));
+	}
+#endif
 	sound_menu_items()
 	{
+#if DXX_BUILD_DESCENT == 2
+		update_taunt_status(false);
+		update_horn_volume_text();
+#endif
 		DSX_SOUND_MENU(ADD);
 	}
 	void read()
@@ -2685,6 +2728,23 @@ window_event_result sound_menu::event_handler(const d_event &event)
 			{
 				CGameCfg.ReverseStereo = items[citem].value;
 			}
+#if DXX_BUILD_DESCENT == 2
+			else if (citem == opt_sm_taunts_heard)
+				CGameCfg.TauntsHeard = items[citem].value;
+			else if (citem == opt_sm_horn_volume)
+			{
+				CGameCfg.HornVolume = static_cast<uint8_t>(items[citem].value * ::dcx::taunt::HORN_VOLUME_STEP);
+				update_horn_volume_text();
+				taunt_preview();
+			}
+			else if (citem == opt_sm_taunt_own || citem == opt_sm_taunt_horn1 || citem == opt_sm_taunt_horn2 || citem == opt_sm_taunt_horn3 || citem == opt_sm_taunt_horn4 || citem == opt_sm_taunt_off)
+			{
+				CGameCfg.TauntChoice = citem == opt_sm_taunt_own ? DXX_TAUNT_CHOICE(own) : citem == opt_sm_taunt_horn1 ? DXX_TAUNT_CHOICE(horn1) : citem == opt_sm_taunt_horn2 ? DXX_TAUNT_CHOICE(horn2) : citem == opt_sm_taunt_horn3 ? DXX_TAUNT_CHOICE(horn3) : citem == opt_sm_taunt_horn4 ? DXX_TAUNT_CHOICE(horn4) : DXX_TAUNT_CHOICE(off);
+				/* The own file may have been added or changed since. */
+				update_taunt_status(citem == opt_sm_taunt_own);
+				taunt_preview();
+			}
+#endif
 			else if (citem == opt_sm_mtype0)
 			{
 				CGameCfg.MusicType = music_type::None;

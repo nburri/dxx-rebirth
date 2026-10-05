@@ -867,7 +867,8 @@ d2x-rebirth -hogdir DATA -botarena <mission> <level> <bots> <seconds>
             [-fixedfps N] [-botarena-bots "skill:style[:name],..."]
             [-botarena-seed N] [-botarena-reactor S] [-botarena-timeout S]
             [-botarena-mode anarchy|team|ctf|ctfclassic|hoard|teamhoard]
-            [-botarena-ctf-rules N] [-pilot NAME]
+            [-botarena-ctf-rules N] [-botarena-taunt] [-botarena-sound]
+            [-pilot NAME]
             [-recordmoves -recordmoves-bots]
 tools/botarena-run.sh [-n bots] [-b list] [-s seconds] [-f fps] [-t limit] [-o dir]
                       [-S profile.botstyle]... [-F profile.botstyle[@BOT]]... DATA <mission> [<level>]
@@ -890,6 +891,10 @@ tools/botarena-run.sh [-n bots] [-b list] [-s seconds] [-f fps] [-t limit] [-o d
   else the pilot's bot setup cut or filled to `<bots>`. Without `-pilot` a
   pilot "arena" of defaults, written nowhere. The lobby is skipped
   (`net_udp_arena_start`: slot 0, `bots_allocate_slots`, `StartNewLevel`).
+- **Taunts** (`-botarena-taunt`, Documentation/taunts.md): the bots sound
+  their horns after kills (the host's option *Bots taunt after kills*);
+  `-botarena-sound` keeps the sound on, which the arena otherwise turns off
+  (with `SDL_AUDIODRIVER=dummy` nothing is heard, but the sound code runs).
 - **Reactor countdown** (`-botarena-reactor S`): after `S` game seconds
   the host destroys the reactor (as `/killreactor`) and the arena plays the
   countdown to 0 instead of ending with the reactor: it logs the bots that
