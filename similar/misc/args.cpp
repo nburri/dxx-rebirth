@@ -438,6 +438,8 @@ static void ReadCmdArgs(Inilist &ini, Arglist &&Args)
 			CGameArg.SndNoSound = true;
 			CGameArg.SndNoMusic = true;
 		}
+		else if (!d_stricmp(p, "-shipfor"))
+			CGameArg.DbgShipFor = arg_string(pp, end);
 		else if (!d_stricmp(p, "-fixedfps"))
 			CGameArg.DbgBotArenaFps = static_cast<uint16_t>(std::clamp<long>(arg_integer(pp, end), 10, 1000));
 		else if (!d_stricmp(p, "-botarena-bots"))

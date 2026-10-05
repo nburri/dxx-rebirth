@@ -149,6 +149,10 @@ struct CArg : prohibit_void_ptr<>
 	 */
 	uint32_t DbgBotArenaTimeout;
 	std::string DbgBotArenaMission;
+	/* -shipfor "pid:name,..." (custom_ship.h): ships for other players
+	 * or bots, on this machine only (a test aid).
+	 */
+	std::string DbgShipFor;
 	std::string DbgBotArenaSpec;
 	/* -botarena-mode anarchy|team|ctf|hoard|teamhoard: the game mode (default anarchy);
 	 * bots play every mode the arena offers (game modes, stage 6a).

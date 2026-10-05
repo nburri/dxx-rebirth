@@ -62,6 +62,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 
 #include "lighting.h"
 #include "newdemo.h"
+#include "custom_ship.h"
 #include "newmenu.h"
 #include "gameseq.h"
 #include "hudmsg.h"
@@ -3958,6 +3959,59 @@ bool newdemo_record_stop_if_failed()
 	return true;
 }
 
+/* Custom ships (custom_ship.h): which ship each player flew, in a side
+ * file next to the demo ("<demo>.ships"; lines "pid sha256 name", or
+ * "pid pyro"), so that older builds read the demo unchanged.  Rewritten
+ * whenever a player's ship changes while recording.
+ */
+#define DEMO_SHIPS_SUFFIX	".ships"
+
+void newdemo_record_ships()
+{
+	if (Newdemo_state != ND_STATE_RECORDING)
+		return;
+	auto f{PHYSFSX_openWriteBuffered(DEMO_FILENAME DEMO_SHIPS_SUFFIX).first};
+	if (!f)
+		return;
+	for (playernum_t p = 0; p < MAX_PLAYERS; ++p)
+	{
+		const auto s{custom_ship_of_player(p)};
+		if (!s)
+		{
+			PHYSFSX_printf(f, "%u pyro\n", p);
+			continue;
+		}
+		const auto e{::dcx::custom_ship::find_hash(*s)};
+		PHYSFSX_printf(f, "%u %s %s\n", p, ::dcx::sha256_hex(*s).c_str(), e ? e->name.c_str() : "-");
+	}
+}
+
+namespace {
+
+/* A demo's side file: the ships its players flew (missing: Pyros). */
+void read_demo_ships(const char *const demo_path)
+{
+	custom_ship_clear_players();
+	char path[PATH_MAX];
+	std::snprintf(path, sizeof(path), "%s" DEMO_SHIPS_SUFFIX, demo_path);
+	auto f{PHYSFSX_openReadBuffered(path).first};
+	if (!f)
+		return;
+	PHYSFSX_gets_line_t<128> line;
+	while (PHYSFSX_fgets(line, f))
+	{
+		unsigned pid;
+		char hex[65];
+		if (std::sscanf(line, "%u %64s", &pid, hex) != 2 || pid >= MAX_PLAYERS)
+			continue;
+		sha256_digest d;
+		if (sha256_from_hex(hex, d))
+			custom_ship_set_player(pid, &d);
+	}
+}
+
+}
+
 void newdemo_start_recording()
 {
 	Newdemo_num_written = 0;
@@ -3990,7 +4044,10 @@ void newdemo_start_recording()
 		run_blocking_newmenu<error_writing_demo>(errstr);
 	}
 	else
+	{
 		newdemo_record_start_demo();
+		newdemo_record_ships();
+	}
 }
 
 static void newdemo_write_end()
@@ -4196,10 +4253,12 @@ try_again:
 			snprintf(save_file, sizeof(save_file), DEMO_FORMAT_STRING("tmp%d"), tmpcnt++);
 		remove(save_file);
 		PHYSFSX_rename(DEMO_FILENAME, save_file);
+		PHYSFSX_rename(DEMO_FILENAME DEMO_SHIPS_SUFFIX, (std::string(save_file) + DEMO_SHIPS_SUFFIX).c_str());
 		return;
 	}
 	if (exit == -1) {               // pressed ESC
 		PHYSFS_delete(DEMO_FILENAME);   // might as well remove the file
+		PHYSFS_delete(DEMO_FILENAME DEMO_SHIPS_SUFFIX);
 		return;                     // return without doing anything
 	}
 
@@ -4229,6 +4288,9 @@ try_again:
 	snprintf(fullname, sizeof(fullname), DEMO_FORMAT_STRING("%s"), filename.data());
 	PHYSFS_delete(fullname);
 	PHYSFSX_rename(DEMO_FILENAME, fullname);
+	const auto ships{std::string(fullname) + DEMO_SHIPS_SUFFIX};
+	PHYSFS_delete(ships.c_str());
+	PHYSFSX_rename(DEMO_FILENAME DEMO_SHIPS_SUFFIX, ships.c_str());
 }
 
 //returns the number of demo files on the disk
@@ -4304,6 +4366,7 @@ void newdemo_start_playback(const char * filename)
 		infile.reset();
 		return;
 	}
+	read_demo_ships(filename2);
 
 	Game_mode = GM_NORMAL;
 	Newdemo_state = ND_STATE_PLAYBACK;

@@ -27,6 +27,10 @@ build_appimage() {
         cp --link "contrib/gamecontrollerdb.txt" "${name}.appdir/usr/share/${name}/"
     fi
 
+    # The bundled custom ships (data/ships/README.md), in the share path
+    mkdir -p "${name}.appdir/usr/share/${name}/ships"
+    cp --link data/ships/*.dxship data/ships/README.md "${name}.appdir/usr/share/${name}/ships/"
+
     # Package!
     OUTPUT="${prettyname}.AppImage"	\
     "./$appimage" \

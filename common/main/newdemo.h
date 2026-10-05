@@ -154,6 +154,8 @@ namespace dsx {
 extern void newdemo_stop_playback();
 }
 extern void newdemo_start_recording();
+/* Custom ships: rewrite the demo's side file of ships (newdemo.cpp). */
+void newdemo_record_ships();
 extern void newdemo_stop_recording();
 /* Stop a recording whose file write failed, from a point where the game
  * world time is not paused, so that the save prompt can open.  Returns

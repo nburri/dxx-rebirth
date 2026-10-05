@@ -4933,10 +4933,17 @@ class DXXCommon(LazyObjectConstructor):
 			env.Library(builddir.File(f'{env["LIBPREFIX"]}{self.srcdir}{env["LIBSUFFIX"]}'), self.get_library_objects()),
 		] if boost else []
 		env_LIBS = env.get('LIBS')
+		# The tests and tools are console programs: on Windows, not the
+		# game's GUI subsystem (-mwindows), whose programs print nothing
+		# to the console they are started from.
+		env_LINKFLAGS = env.get('LINKFLAGS')
+		link_flags = {} if env_LINKFLAGS is None or '-mwindows' not in env_LINKFLAGS else {
+			'LINKFLAGS': [f for f in env_LINKFLAGS if f != '-mwindows'] + ['-mconsole'],
+		}
 		for test in tests:
 			LIBS = [] if (env_LIBS is None or not test.use_default_libs) else env_LIBS.copy()
 			LIBS.extend(extra_libs)
-			program = env.Program(target=builddir.File(test.target), source=test.source(self), LIBS=LIBS)
+			program = env.Program(target=builddir.File(test.target), source=test.source(self), LIBS=LIBS, **link_flags)
 			env.Alias(test.target, program)
 
 	runtime_test_boost_tests: collections.abc.Sequence[RuntimeTest] = None
@@ -5179,6 +5186,37 @@ class DXXArchive(DXXCommon):
 		RuntimeTest('movrec-analyse', (
 			'common/tools/movrec_analyse.cpp',
 			)),
+		# Test of the custom ship file (dxship_format.h, sha256.h): round
+		# trips, the reader's checks, and a fuzz test of the reader with
+		# truncated, bit-flipped and mutated files
+		# (Documentation/custom-ships.md section 7).
+		RuntimeTest('test-dxship', (
+			'common/unittest/dxship_format.cpp',
+			'common/misc/dxship_format.cpp',
+			'common/misc/sha256.cpp',
+			)),
+		# Test of the custom ship exchange over the network: messages,
+		# assembly, a host with clients and a bot over simulated links
+		# (net_v2_ships.h, Documentation/custom-ships.md section 5).
+		RuntimeTest('test-net-v2-ships', (
+			'common/unittest/net_v2_ships.cpp',
+			'common/misc/sha256.cpp',
+			'common/main/net_v2_transport.cpp',
+			)),
+		# Not a test: the converter of ship models into custom ship files
+		# (Documentation/custom-ships-authoring.md).
+		RuntimeTest('shipconv', (
+			'common/tools/shipconv.cpp',
+			'common/misc/dxship_format.cpp',
+			'common/misc/sha256.cpp',
+			)),
+		# Test of the converter: synthetic models through `shipconv`
+		# (its path is the argument).
+		RuntimeTest('test-shipconv', (
+			'common/unittest/shipconv.cpp',
+			'common/misc/dxship_format.cpp',
+			'common/misc/sha256.cpp',
+			)),
 			)
 	del RuntimeTest
 
@@ -5221,12 +5259,14 @@ class DXXArchive(DXXCommon):
 'common/main/piggy.cpp',
 'common/maths/rand.cpp',
 'common/mem/mem.cpp',
+'common/misc/dxship_format.cpp',
 'common/misc/error.cpp',
 'common/misc/hash.cpp',
 'common/misc/hmp.cpp',
 'common/misc/ignorecase.cpp',
 'common/misc/physfsrwops.cpp',
 'common/misc/physfsx.cpp',
+'common/misc/sha256.cpp',
 'common/misc/strutil.cpp',
 'common/misc/vgrphys.cpp',
 'common/misc/vgwphys.cpp',
@@ -5292,6 +5332,7 @@ class DXXArchive(DXXCommon):
 	# for ogl
 	get_objects_arch_ogl = DXXCommon.create_lazy_object_getter((
 'common/arch/ogl/ogl_extensions.cpp',
+'common/arch/ogl/ogl_ship.cpp',
 'common/arch/ogl/ogl_sync.cpp',
 ))
 	get_objects_arch_sdlmixer = DXXCommon.create_lazy_object_getter((
@@ -5573,6 +5614,8 @@ class DXXProgram(DXXCommon):
 'similar/main/text.cpp',
 'similar/main/titles.cpp',
 'similar/main/vclip.cpp',
+'similar/main/custom_ship.cpp',
+'similar/main/custom_ship_menu.cpp',
 'similar/main/wall.cpp',
 'similar/main/weapon.cpp',
 'similar/misc/args.cpp',
@@ -5702,6 +5745,7 @@ class DXXProgram(DXXCommon):
 'similar/main/net_modes.cpp',
 'similar/main/net_objects.cpp',
 'similar/main/net_spawn.cpp',
+'similar/main/net_ships.cpp',
 ),
 		transform_target=_apply_target_name,
 	),

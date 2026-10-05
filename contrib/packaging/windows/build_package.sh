@@ -49,6 +49,17 @@ build_app() {
     cp --link "GPL-3.txt" "${outdir}/${prettyname}/"
     cp --link "README.md" "${outdir}/${prettyname}/"
     cp --link "INSTALL.markdown" "${outdir}/${prettyname}/"
+
+    # The bundled custom ships (data/ships/README.md)
+    mkdir -p "${outdir}/${prettyname}/ships"
+    cp --link data/ships/*.dxship "${outdir}/${prettyname}/ships/"
+    cp --link data/ships/README.md "${outdir}/${prettyname}/ships/"
+
+    # The ship converter, if it was built (Documentation/custom-ships-authoring.md)
+    if [ -f "build/common/shipconv.exe" ]; then
+        # It needs no library the game does not (copied above).
+        cp --link "build/common/shipconv.exe" "${outdir}/${prettyname}/"
+    fi
 }
 
 # Build each app

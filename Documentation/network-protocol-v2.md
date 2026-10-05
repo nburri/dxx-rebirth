@@ -1525,7 +1525,9 @@ Stage 3 adds `OBJ_SETTLE` 0x47 and does not use `OBJ_AMMO` 0x23 or
 `DROP_FLAG_REQUEST` 0x3C (§8, "Stage 3 as implemented"). Protocol 105 adds
 `SPAWN_REQUEST` 0x48 and `SPAWN_SITE` 0x49 (§8, "Host-assigned spawns").
 Protocol 109 uses `CAPTURE` 0x39, protocol 110 `ORB_BONUS` 0x3A, protocol
-111 `CTF_NOTICE` 0x4A (§8, "Stage 6a: game modes").
+111 `CTF_NOTICE` 0x4A (§8, "Stage 6a: game modes"). Protocol 112 adds the custom
+ships' `SHIP_INFO` 0x4B, `ASSET_REQUEST` 0x4C, `ASSET_DATA` 0x4D and
+`ASSET_UNAVAILABLE` 0x4E (Documentation/custom-ships.md §11.3).
 The table lives in `net_v2.h` as a `for_each_net_v2_message(VALUE)` macro
 with `(NAME, id, min_len, max_len, allowed_sender)` so the length and
 direction checks of §3.7 are table-driven like v1's `command_length`.

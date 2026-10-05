@@ -238,6 +238,16 @@ struct player_config : prohibit_void_ptr<>
 	};
 	int DynLightColor;
 	d_sp_gameplay_options SPGameplayOptions;
+	/* Custom ships (Documentation/custom-ships.md section 4.2): the id
+	 * of the ship this pilot flies (empty: the Pyro-GX), and whether the
+	 * host may send ships this machine lacks.
+	 */
+	ntstring<24> ShipName;
+	bool AcceptShips;
+	/* "Show custom ships": off draws every player as the Pyro-GX (and
+	 * fetches no ship for drawing).
+	 */
+	bool ShowCustomShips;
 };
 
 }

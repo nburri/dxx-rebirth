@@ -1,0 +1,12 @@
+Licence: CC0 1.0 Universal (public domain dedication)
+https://creativecommons.org/publicdomain/zero/1.0/
+
+To the extent possible under law, Nicolas Burri has waived all copyright
+and related or neighboring rights to the PNG files in this folder.
+
+Provenance: made from TEXT PROMPTS only (PROMPTS.txt) with the "Scenario
+Texture" model of Scenario, https://www.scenario.com.  Scenario's terms say
+that generated outputs belong to the user, with commercial rights
+(https://www.scenario.com/terms-and-conditions).  No image was given to the
+model and no prompt names an existing game, ship or franchise.  Scaled to
+256x256 by our scripts.
