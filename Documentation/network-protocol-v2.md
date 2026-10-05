@@ -1446,8 +1446,8 @@ little-endian.
   the SHA-256 of the sample in the transfer format and `size` its length
   in bytes (12 + 2 × samples, at most 88 212, even). Anything else is
   malformed and dropped.
-- The host checks the sender's rate (below), plays the taunt itself and
-  relays it; a refused request gets no answer (the client's own check has
+- The host checks that the sender's ship is alive and the sender's rate
+  (below), plays the taunt itself and relays it; a refused request gets no answer (the client's own check has
   already told its player).
 - **`TAUNT` (0x51, host → all but the sender, 38 bytes):** `pid` u8 (0–7),
   then `kind`, `size`, `hash` as above. The host sends it for its own taunts
@@ -1463,7 +1463,7 @@ little-endian.
   sender and host. Every receiver checks
   the relayed taunts again with one more in each window (4 in 2 s, 5 in
   10 s, same lockout), as the network may bunch taunts the host allowed.
-  The sender checks its own presses with the host's limits and tells its
+  The sender checks its own presses with these limits and tells its
   player "Horn cooling down".
 - **Sample transfer:** a player's own sample travels with
   the custom ships' asset transfer (`ASSET_REQUEST`/`ASSET_DATA`/

@@ -346,7 +346,8 @@ new ship; each ship is ~100–500 KiB.
 
 ### 5.3 Distribution — Option B: host relays missing ships (stage 3)
 
-Messages (reliable, protocol 113):
+Messages (reliable, protocol 112 as built; the design's table below
+named them `SHIP_*`, the built ones are `ASSET_*`, §11.3):
 
 | Id | Name | Direction | Payload |
 |---|---|---|---|

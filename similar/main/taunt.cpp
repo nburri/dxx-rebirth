@@ -548,6 +548,12 @@ void taunt_level_start()
 		(void)horn_samples(tt::horn_kind(n));
 }
 
+void taunt_slot_reset(const playernum_t pnum)
+{
+	if (pnum < T.received.size())
+		T.received[pnum].reset();
+}
+
 void taunt_bot_kill(const playernum_t pnum)
 {
 #if DXX_USE_MULTIPLAYER && DXX_USE_UDP
@@ -582,6 +588,9 @@ void net_taunt_receive(const playernum_t from, const std::uint8_t type, const st
 			con_printf(CON_VERBOSE, "taunt: malformed TAUNT_REQUEST from P#%u", from);
 			return;
 		}
+		/* Only from a living ship (the sender's key checks this too). */
+		if (const auto ship{ship_of(from)}; !ship || ship->shields < 0)
+			return;
 		if (const auto v{T.received[from].check(now, tt::HOST_LIMITS)}; v != tt::verdict::allowed)
 		{
 			con_printf(CON_VERBOSE, "taunt: P#%u's taunt refused (%s)", from, v == tt::verdict::locked ? "locked out" : "too many, locked out for 5 s");

@@ -40,6 +40,10 @@ void taunt_preview();
  * fight), and the spam limits start afresh (a slot may have a new player).
  */
 void taunt_level_start();
+/* Slot `pnum` has a new occupant (a player left or joined, a bot gave
+ * way): its spam history starts afresh.
+ */
+void taunt_slot_reset(playernum_t pnum);
 /* The host: bot `pnum` (flown here) killed a player. */
 void taunt_bot_kill(playernum_t pnum);
 /* TAUNT_REQUEST and TAUNT (Documentation/network-protocol-v2.md,

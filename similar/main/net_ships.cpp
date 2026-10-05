@@ -218,12 +218,18 @@ void net_ships_receive(const playernum_t from, const uint8_t type, const std::sp
 
 void net_ships_client_joined(const playernum_t slot)
 {
+#if DXX_BUILD_DESCENT == 2
+	taunt_slot_reset(slot);
+#endif
 	if (X)
 		X->client_joined(static_cast<uint8_t>(slot));
 }
 
 void net_ships_slot_cleared(const playernum_t slot)
 {
+#if DXX_BUILD_DESCENT == 2
+	taunt_slot_reset(slot);
+#endif
 	if (X && slot)
 		X->slot_cleared(static_cast<uint8_t>(slot));
 }
@@ -281,6 +287,9 @@ void net_ships_frame()
 			{
 				/* The bot left; a joining human announces its own. */
 				Bot_callsigns[p].clear();
+#if DXX_BUILD_DESCENT == 2
+				taunt_slot_reset(p);
+#endif
 				if (!net_v2::host_slot_is_client(p))
 					X->slot_cleared(static_cast<uint8_t>(p));
 			}
