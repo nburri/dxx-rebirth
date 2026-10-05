@@ -120,11 +120,12 @@ void custom_ship_draw_pieces(grs_canvas &canvas);
 void custom_ship_draw_preview(grs_canvas &canvas, const custom_ship::entry *e, const vms_angvec &angles, unsigned colour);
 /* The ship menu (Options -> Ship...). */
 void custom_ship_menu();
-/* -shipshot: draw the menu once, with item `selected` chosen. */
-void custom_ship_menu_picture(grs_canvas &canvas, unsigned selected);
-
-/* -shipshot (debug): the colour the local player is drawn in, if set. */
-extern std::optional<unsigned> custom_ship_debug_colour;
+/* The pilot's option "Show custom ships" (PlayerCfg.ShowCustomShips):
+ * when off, every player is drawn as the Pyro-GX, whatever ship it
+ * chose, and no ship is fetched from the host for drawing.
+ */
+[[nodiscard]]
+bool custom_ships_shown();
 
 }
 #endif

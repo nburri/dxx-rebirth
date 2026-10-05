@@ -1,9 +1,9 @@
 # Custom player ships (design)
 
-Status: design with the user's decisions (§10); implemented in stages on
-the side branch `exp-visuals` (protocol v2, `Documentation/network-protocol-v2.md`,
-cited as "v2 §n"), never on `experimental-netcode`. D2X-Rebirth with OpenGL
-only. Line numbers are omitted; function and type names are the anchors.
+Status: design with the user's decisions (§10); implemented in stages
+(first on a side branch, then brought to `experimental-netcode` with
+protocol 112; protocol v2, `Documentation/network-protocol-v2.md`, cited
+as "v2 §n"). D2X-Rebirth with OpenGL only. Line numbers are omitted; function and type names are the anchors.
 
 Every player may fly a ship model of their own: new geometry and new
 textures, not a repaint of the Pyro-GX. Other players see it and recognise
@@ -157,9 +157,9 @@ available without a new library.
    downloading → the player is drawn as the coloured Pyro, as today.
 3. **Untrusted input.** A ship file from another player is data from the
    network; the parser is bounded, there is no code, no paths, no scripts.
-4. **Independent of the renderer upgrade.** It works on today's OpenGL
-   path; when the exp-visuals work (per-pixel lighting, bloom) lands it can
-   use the extra data (normals, emissive mask) without format changes.
+4. **Independent of the renderer.** It works on today's fixed-function
+   OpenGL path; a later shader path could use the extra data (normals,
+   emissive mask) without format changes.
 
 ## 3. Model pipeline
 
@@ -410,11 +410,12 @@ value (thrust-scaled) is reused unchanged.
   alpha blending, fully cloaked → flat dark like `draw_tmap_flat`.
 - `-gl_*` texture filtering options apply to the RGBA textures too.
 
-### 6.2 exp-visuals
+### 6.2 A later shader path
 
-If the per-pixel lighting work lands, `draw_custom_ship` passes vertex
-normals and the mask to its shader, and the emissive channel feeds bloom.
-Nothing in the format changes; the fixed-function path stays the fallback.
+If the game ever gets per-pixel lighting, `draw_custom_ship` can pass
+vertex normals and the mask to its shader, and the emissive channel could
+feed a glow. Nothing in the format changes; the fixed-function path stays
+the fallback.
 
 ### 6.3 Death and debris
 
@@ -501,10 +502,12 @@ the visible texel area) so team colours always show.
 |---|---|
 | S1 | `.dxship` reader and writer (`dxship_format.h`), SHA-256, the converter `shipconv` (glTF 2.0 / `.glb` and OBJ input, validation, scaling, colour zone, textures, debris parts, manifest), unit tests incl. a fuzz test of the reader. No game change. |
 | S2 | Game: load `ships/`, RGBA texture upload, the mesh draw path (lighting, tint, cloak), debris, rear view and external camera, pilot setting "Ship" with a rotating preview; the CC0 ships bundled in `data/ships/` and the release packages. |
-| S3 | Network (protocol bump, exp-visuals only): `SHIP_INFO`, the automatic transfer through the host (`SHIP_REQUEST/DATA/UNAVAILABLE`), the cache, the refuse option, bots with ships, the demo side record. |
+| S3 | Network (protocol bump): `SHIP_INFO`, the automatic transfer through the host (`SHIP_REQUEST/DATA/UNAVAILABLE`), the cache, the refuse option, bots with ships, the demo side record. |
 | later | Emissive mask, LOD, VBOs, rotating parts. |
 
-Each stage is a PR into `exp-visuals` with its own review.
+Each stage was a PR with its own review; the whole feature then came to
+`experimental-netcode` in one PR (protocol 112) with the pilot option
+"Show custom ships" (§11.4).
 
 ### 9.1 Tests
 
@@ -566,12 +569,11 @@ only multiplies them with the player's colour. Ships were first scaled to the
 Pyro's collision radius (0.46–0.83 × the Pyro's mean silhouette), then
 to its mean silhouette over all directions (PR #103). Playtesters still
 found them smaller than a Pyro, so D3 now weights what players see in
-combat: the outline from the front and the rear. `-shipshot <mission>
-<level> <dir> -shipshot-size <distance>` measures it in the game: the
-pixels each ship covers at the same place and distance as a Pyro (bloom
-off), seen straight from the front, rear, side and top, written to
-`<dir>/size.txt`, plus pictures of each ship next to a Pyro. At 40 units
-(corona level 1, 1280 × 720), weighted 40/40/10/10:
+combat: the outline from the front and the rear. A debug build of the
+side branch measured it in the game (a tool not carried over): the
+pixels each ship covers at the same place and distance as a Pyro, seen
+straight from the front, rear, side and top. At 40 units (corona level
+1, 1280 × 720), weighted 40/40/10/10:
 
 | Ship | Converter, weighted (front) | In game before: front, rear, weighted | In game now: front, rear, weighted | Outermost point |
 |---|---|---|---|---|
@@ -597,7 +599,7 @@ reject (such a client sees a Pyro).
   after the reader's header checks; the decoded size must equal the
   header's), keeps per material and part index lists, uploads the albedo
   with the colour zone already tinted, one texture set per player colour,
-  with CPU-built mipmaps and the anisotropic filter setting. Each draw
+  with CPU-built mipmaps. Each draw
   multiplies the 3D library's instance matrix into the modelview, turns
   culling off (both sides, lit by |n·view|), computes the vertex colours
   as the polygon models do (`get_noglow_light`: object light ×
@@ -605,8 +607,6 @@ reject (such a client sees a Pyro).
   model's texture, so that an untextured ship keeps its colours in a
   bright room) times vertex colour, base colour and the tint of
   untextured zones, and calls `glDrawElements` per material and part.
-  The world shader is switched off for it; bloom and the other
-  post-process effects of exp-visuals apply to it like to everything.
 - `similar/main/custom_ship.cpp`: the registry of `ships/` and
   `ships/cache/` (scanned on first use and when the menu opens; every
   file fully checked), the per-player table, the hooks:
@@ -627,16 +627,13 @@ reject (such a client sees a Pyro).
   end-level fly-out, guided-missile and marker views. There is no
   third-person camera in the game (it would show around corners in
   multiplayer); none was added.
-- Pilot setting: `[ships]` section of the `.plx` (`ship=`, `accept=`);
-  Options → Ship... (`custom_ship_menu.cpp`): the list, a turning
-  preview in a player colour (C cycles the colours), author, licence and
-  source; applies at the next level start.
+- Pilot setting: `[ships]` section of the `.plx` (`ship=`, `accept=`,
+  `show=`); Options → Ship... (`custom_ship_menu.cpp`): the list, a
+  turning preview in a player colour (C cycles the colours), author,
+  licence and source; applies at the next level start. A toggles "Accept
+  ships from the host", S toggles "Show custom ships" (§11.4).
 - Debug: `-shipfor pid:name,...` gives other players or bots ships on
-  this machine only; `-shipshot <mission> <level> <dir>` writes pictures
-  of every ship (poses, a second colour, fading, cloaked, debris, the
-  menu) for review (like `-visshot`); with `-shipshot-size <distance>`
-  it measures every ship's area on the screen against the Pyro's
-  instead (§11.1).
+  this machine only.
 
 ### 11.2.1 Textures of the fork's own ships
 
@@ -660,10 +657,8 @@ converter's greying the player's colour reads clearly. Files: 360–480 KB.
 `common/main/net_v2_ships.h` (the protocol and the whole exchange as a
 state machine, tested by `test-net-v2-ships`, also over the real
 transport with loss) and `similar/main/net_ships.cpp` (the game's side).
-Protocol 0x7071 (28785, after the taunts' 28784): the exp-visuals line counts 0x7000 plus a
-counter in the low byte, so it never shares a number with
-experimental-netcode, and the low byte that a v1 build reads as its
-packet type stays an unknown one.
+Protocol 112 (`NET_V2_PROTO_VERSION`, `MULTI_PROTO_VERSION`): every
+player needs a build with custom ships.
 
 | Id | Message | Layout |
 |---|---|---|
@@ -672,8 +667,8 @@ packet type stays an unknown one.
 | 0x4d | `ASSET_DATA` | kind u8, SHA-256 32, total u32, offset u32, ≤ 896 bytes, in order |
 | 0x4e | `ASSET_UNAVAILABLE` | kind u8, SHA-256 32, reason u8 (unknown, refused, owner left, invalid) |
 
-Asset kinds: 1 ship (≤ 1 MiB), 2 reserved for the taunts' sounds
-(≤ 128 KiB); a kind announces its assets its own way and transfers
+Asset kinds: 1 ship (≤ 1 MiB), 2 the taunts' sounds (≤ 128 KiB,
+Documentation/taunts.md); a kind announces its assets its own way and transfers
 through `ship_exchange::request` / `note_owner`.
 
 - A player announces its ship on joining (and again when the pilot picks
@@ -682,7 +677,8 @@ through `ship_exchange::request` / `note_owner`.
   ship. Bots: the host gives each one of its own ships, chosen by the
   bot's name (the same ship for the whole session); none → Pyro.
 - A client that lacks an announced ship asks the host (no prompt, D8/D9)
-  unless the pilot switched "Accept ships from the host" off. The host
+  unless the pilot switched "Accept ships from the host" or "Show
+  custom ships" off (§11.4). The host
   sends its copy, or first fetches it from the client who flies it (and
   keeps it), then serves everyone who waits. Data only from the peer
   that was asked, in order, of the announced size; the whole file must
@@ -704,3 +700,16 @@ through `ship_exchange::request` / `note_owner`.
 Not done: a two-instance network test (the game has no unattended host
 and join), the movement-recording header, a per-bot ship setting (bots
 get one of the host's ships).
+
+### 11.4 Show custom ships (pilot option)
+
+Options → Ship..., key S: "Show custom ships" (`[ships] show=` in the
+`.plx`, default on). Off: every player, the pilot's own ship included
+(rear view, death camera), is drawn as the classic Pyro-GX in its player
+colour, whatever ship it chose; no ship pieces fly at a death. The
+pilot's own choice is still announced, so the others see it. The machine
+fetches no ship for drawing (a client asks the host for none, a host
+fetches none for itself); a host still relays ships to the clients who
+want them. Turning it on again (also in a game) fetches the announced
+ships this machine lacks (`ship_exchange::request_missing_ships`) and
+draws them as they arrive. Taunts are not affected.

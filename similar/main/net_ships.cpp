@@ -11,7 +11,7 @@
  * another); the host gives its bots ships from its own and tells
  * everyone every player's; a machine that lacks a ship gets it from the
  * host, paced, verified, and kept in ships/cache/, unless the pilot
- * refuses ships (Options -> Ship...).
+ * refuses ships or does not show custom ships (Options -> Ship...).
  */
 
 #include "dxxsconf.h"
@@ -159,6 +159,14 @@ nv::ship_info_msg bot_info(const playernum_t pnum)
 	return info_of(own[h % own.size()]);
 }
 
+/* Ships are fetched for drawing only: not when the pilot refuses them or
+ * does not show custom ships (a host still relays them to its clients).
+ */
+bool accepts_ships()
+{
+	return PlayerCfg.AcceptShips && custom_ships_shown();
+}
+
 bool same(const std::optional<nv::ship_info_msg> &a, const nv::ship_info_msg &b)
 {
 	return a && a->pyro == b.pyro && a->hash == b.hash;
@@ -175,7 +183,7 @@ void net_ships_start(const bool host, const uint8_t self)
 	cs::rescan();
 	Self = self;
 	X.emplace(Env, host, self);
-	X->accept = PlayerCfg.AcceptShips;
+	X->accept = accepts_ships();
 	Last_pump = timer_query();
 	X->set_local(self, local_info());
 }
@@ -208,7 +216,13 @@ void net_ships_frame()
 {
 	if (!X)
 		return;
-	X->accept = PlayerCfg.AcceptShips;
+	if (const bool accept{accepts_ships()}; accept != X->accept)
+	{
+		X->accept = accept;
+		/* Turned on: fetch the ships already announced that are missing. */
+		if (accept)
+			X->request_missing_ships();
+	}
 	/* The pilot picked another ship (between levels): announce it. */
 	if (const auto l{local_info()}; !same(X->info(Self), l))
 		X->set_local(Self, l);

@@ -377,6 +377,17 @@ void test_exchange()
 	CHECK(w.data_bytes_to[0] >= ship_b.size() && w.data_bytes_to[0] < ship_b.size() * 11 / 10);
 	CHECK(w.data_bytes_to[2] >= ship_a.size() + ship_b.size() + ship_d.size() && w.data_bytes_to[2] < (ship_a.size() + ship_b.size() + ship_d.size()) * 11 / 10);
 	CHECK(w.data_bytes_to[1] >= ship_a.size() + ship_d.size() && w.data_bytes_to[1] < (ship_a.size() + ship_d.size()) * 11 / 10);
+	/* The refusing client turns ships on ("Show custom ships"): it
+	 * fetches every announced ship it lacks, once each.
+	 */
+	c3.ex.accept = true;
+	c3.ex.request_missing_ships();
+	CHECK(run(w, 2000) < 2000);
+	CHECK(c3.shown[0] == hash_of(ship_a) && c3.shown[1] == hash_of(ship_b) && c3.shown[5] == hash_of(ship_d));
+	CHECK(w.data_bytes_to[3] >= ship_a.size() + ship_b.size() + ship_d.size() && w.data_bytes_to[3] < (ship_a.size() + ship_b.size() + ship_d.size()) * 11 / 10);
+	c3.ex.request_missing_ships();
+	CHECK(run(w, 100) < 100);
+	CHECK(w.data_bytes_to[3] < (ship_a.size() + ship_b.size() + ship_d.size()) * 11 / 10);
 	/* A late joiner in slot 4 learns everything and gets what it lacks. */
 	machine c4{w, 4};
 	w.m.push_back(&c4);

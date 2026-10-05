@@ -624,6 +624,33 @@ public:
 		env.note("asking the host for", k, 0);
 		send_msg(0, SHIP_MSG_REQUEST, ship_request_msg{k});
 	}
+	/* `accept` was turned on (the pilot shows custom ships again): get
+	 * the announced ships this machine lacks, a client from the host, the
+	 * host from their owners.
+	 */
+	void request_missing_ships()
+	{
+		if (!accept)
+			return;
+		for (std::uint8_t p = 0; p < MAX_SLOTS; ++p)
+		{
+			if (p == self || !table[p] || table[p]->pyro)
+				continue;
+			const auto k{ship_key(table[p]->hash)};
+			if (env.has_asset(k))
+				continue;
+			if (host)
+			{
+				if (env.is_client(p) && !fetches.contains(k))
+					host_fetch(k, p, std::nullopt, table[p]->size);
+				continue;
+			}
+			/* One that failed before may work now. */
+			if (const auto i{wants.find(k)}; i != wants.end() && i->second.state == want_state::failed)
+				wants.erase(i);
+			request(k, table[p]->size);
+		}
+	}
 	/* Host: player `slot` has the asset (for another kind's
 	 * announcements; ships register through SHIP_INFO).
 	 */

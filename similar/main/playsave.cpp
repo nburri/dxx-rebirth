@@ -189,6 +189,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #define SHIPS_HEADER_TEXT "[ships]"
 #define SHIPS_SHIP_NAME_TEXT "ship"
 #define SHIPS_ACCEPT_NAME_TEXT "accept"
+#define SHIPS_SHOW_NAME_TEXT "show"
 #define GRAPHICS_ALPHAEFFECTS_NAME_TEXT "alphaeffects"
 #define GRAPHICS_DYNLIGHTCOLOR_NAME_TEXT "dynlightcolor"
 #define PLX_VERSION_HEADER_TEXT "[plx version]"
@@ -343,6 +344,7 @@ void new_player_config()
 	PlayerCfg.DynLightColor = 0;
 	PlayerCfg.ShipName = {};
 	PlayerCfg.AcceptShips = true;
+	PlayerCfg.ShowCustomShips = true;
 
 	// Default taunt macros
 #if DXX_BUILD_DESCENT == 1
@@ -628,6 +630,8 @@ static void read_player_dxx(const char *filename)
 					PlayerCfg.ShipName.copy_if(value, std::min<std::size_t>(strlen(value) + 1, PlayerCfg.ShipName.size()));
 				else if (!strcmp(line, SHIPS_ACCEPT_NAME_TEXT))
 					PlayerCfg.AcceptShips = atoi(value) != 0;
+				else if (!strcmp(line, SHIPS_SHOW_NAME_TEXT))
+					PlayerCfg.ShowCustomShips = atoi(value) != 0;
 			}
 		}
 		else if (!strcmp(line,PLX_VERSION_HEADER_TEXT)) // know the version this pilot was used last with - allow modifications
@@ -946,6 +950,7 @@ static int write_player_dxx(const char *filename)
 							);
 		PHYSFSX_printf(fout, SHIPS_SHIP_NAME_TEXT "=%s\n", PlayerCfg.ShipName.data());
 		PHYSFSX_printf(fout, SHIPS_ACCEPT_NAME_TEXT "=%i\n", PlayerCfg.AcceptShips ? 1 : 0);
+		PHYSFSX_printf(fout, SHIPS_SHOW_NAME_TEXT "=%i\n", PlayerCfg.ShowCustomShips ? 1 : 0);
 		PHYSFSX_puts_literal(fout, END_TEXT "\n"
 							PLX_VERSION_HEADER_TEXT "\n"
 							"plx version=" DXX_VERSION_STR "\n"

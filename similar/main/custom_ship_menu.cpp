@@ -65,7 +65,7 @@ struct ship_menu_window : window
 	}
 	/* The layout, shared by drawing and the mouse: the list on the
 	 * left, the preview with the selected ship's credits on the right,
-	 * two help lines at the bottom.  Every height comes from the scaled
+	 * three help lines at the bottom.  Every height comes from the scaled
 	 * font, so nothing overlaps at any resolution.
 	 */
 	struct layout
@@ -86,7 +86,7 @@ struct ship_menu_window : window
 		const int margin{w / 20};
 		l.list_x = margin + 2 * static_cast<int>(gr_get_string_size(font, "> ").width);
 		l.list_y = h / 20 + static_cast<int>(gr_get_string_size(title_font, "Ship").height) + l.line_h;
-		l.help_y = h - h / 30 - 2 * l.line_h;
+		l.help_y = h - h / 30 - 3 * l.line_h;
 		l.list_w = w * 2 / 5 - l.list_x;
 		l.rows = std::max(1, (l.help_y - l.line_h - l.list_y) / l.row_h);
 		l.preview_x = w * 9 / 20;
@@ -190,7 +190,8 @@ void ship_menu_window::draw(grs_canvas &canvas)
 	const int help_w{w - 2 * margin};
 	gr_set_fontcolor(canvas, BM_XRGB(18, 18, 18), -1);
 	gr_string(canvas, font, margin, l.help_y, fit(font, std::string{"Accept ships from the host: "} + (PlayerCfg.AcceptShips ? "yes" : "no") + " (A)", help_w).c_str());
-	gr_string(canvas, font, margin, l.help_y + l.line_h, fit(font, "Up/Down: choose, C: colour, Enter: fly it, Esc: back", help_w).c_str());
+	gr_string(canvas, font, margin, l.help_y + l.line_h, fit(font, std::string{"Show custom ships: "} + (PlayerCfg.ShowCustomShips ? "yes" : "no (everyone is a Pyro-GX)") + " (S)", help_w).c_str());
+	gr_string(canvas, font, margin, l.help_y + 2 * l.line_h, fit(font, "Up/Down: choose, C: colour, Enter: fly it, Esc: back", help_w).c_str());
 }
 
 window_event_result ship_menu_window::event_handler(const d_event &event)
@@ -238,6 +239,12 @@ window_event_result ship_menu_window::event_handler(const d_event &event)
 				case KEY_A:
 					PlayerCfg.AcceptShips = !PlayerCfg.AcceptShips;
 					write_player_file();
+					return window_event_result::handled;
+				case KEY_S:
+					PlayerCfg.ShowCustomShips = !PlayerCfg.ShowCustomShips;
+					write_player_file();
+					/* Decode the ships now, not at the first sight. */
+					custom_ship_preload();
 					return window_event_result::handled;
 				case KEY_ENTER:
 				case KEY_PADENTER:
@@ -301,14 +308,6 @@ window_event_result ship_menu_window::event_handler(const d_event &event)
 	return window_event_result::ignored;
 }
 
-}
-
-void custom_ship_menu_picture(grs_canvas &canvas, const unsigned selected)
-{
-	const auto w{window_create<ship_menu_window>(grd_curscreen->sc_canvas, 0, 0, SWIDTH, SHEIGHT)};
-	w->selected = std::min(selected, w->count() - 1);
-	w->draw(canvas);
-	window_close(w);
 }
 
 void custom_ship_menu()

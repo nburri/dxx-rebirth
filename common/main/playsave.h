@@ -244,6 +244,10 @@ struct player_config : prohibit_void_ptr<>
 	 */
 	ntstring<24> ShipName;
 	bool AcceptShips;
+	/* "Show custom ships": off draws every player as the Pyro-GX (and
+	 * fetches no ship for drawing).
+	 */
+	bool ShowCustomShips;
 };
 
 }

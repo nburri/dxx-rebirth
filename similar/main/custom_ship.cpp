@@ -214,7 +214,6 @@ const entry *store_received(const std::span<const std::uint8_t> bytes, const sha
 
 namespace dsx {
 
-std::optional<unsigned> custom_ship_debug_colour;
 
 namespace {
 
@@ -267,11 +266,20 @@ sg::mesh *load(const sha256_digest &hash)
 
 per_player_array<std::optional<sha256_digest>> Player_ships;
 
+/* The ship a player is drawn as: its own, unless the pilot turned custom
+ * ships off (then the Pyro-GX for everyone).
+ */
+[[maybe_unused]]
+std::optional<sha256_digest> shown_ship(const playernum_t pnum)
+{
+	if (!custom_ships_shown())
+		return std::nullopt;
+	return custom_ship_of_player(pnum);
+}
+
 /* The colour a player is drawn in (the HUD's, the team's in team games). */
 unsigned player_colour(const playernum_t pnum)
 {
-	if (custom_ship_debug_colour && pnum == Player_num)
-		return *custom_ship_debug_colour;
 #if DXX_USE_MULTIPLAYER
 	if (+(Game_mode & GM_MULTI))
 		return static_cast<unsigned>(get_player_or_team_color(Netgame, Game_mode, pnum));
@@ -383,6 +391,11 @@ void update_pieces()
 
 }
 
+bool custom_ships_shown()
+{
+	return PlayerCfg.ShowCustomShips;
+}
+
 void custom_ship_set_player(const playernum_t pnum, const sha256_digest *const hash)
 {
 	if (pnum >= Player_ships.size())
@@ -444,6 +457,8 @@ void custom_ship_preload()
 {
 #if DXX_USE_OGL
 	/* Decode now, not at the first sight in the middle of a fight. */
+	if (!custom_ships_shown())
+		return;
 	for (const auto &s : Player_ships)
 		if (s)
 			load(*s);
@@ -465,7 +480,7 @@ bool custom_ship_draw_player(grs_canvas &, const object_base &obj, const g3s_lrg
 	if (obj.type != object_type::OBJ_PLAYER)
 		return false;
 	const auto pnum{get_player_id(obj)};
-	const auto &hash{custom_ship_of_player(pnum)};
+	const auto hash{shown_ship(pnum)};
 	if (!hash)
 		return false;
 	const auto m{load(*hash)};
@@ -512,7 +527,7 @@ void custom_ship_debris_created(const object_base &obj, const objnum_t debris, c
 	if (obj.type != object_type::OBJ_PLAYER)
 		return;
 	/* Only when the ship's own pieces fly instead. */
-	const auto &hash{custom_ship_of_player(get_player_id(obj))};
+	const auto hash{shown_ship(get_player_id(obj))};
 	if (!hash)
 		return;
 	const auto m{load(*hash)};
@@ -532,7 +547,7 @@ void custom_ship_player_exploded(const object_base &obj)
 	if (obj.type != object_type::OBJ_PLAYER)
 		return;
 	const auto pnum{get_player_id(obj)};
-	const auto &hash{custom_ship_of_player(pnum)};
+	const auto hash{shown_ship(pnum)};
 	if (!hash)
 		return;
 	const auto m{load(*hash)};

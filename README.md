@@ -74,6 +74,14 @@ The host sets three flag rules under *Advanced Options* → *CTF Classic: flag r
 
 When *score only with own flag home* is on but *own team returns its flag by touch* is off, a flag lying away from home goes home by itself after 30 seconds. Without this, a team whose flag was dropped somewhere could never score again. The level needs a goal for each team. When a team has several goal segments, the flag goes to the largest one. All players need a build with this mode (network protocol 111).
 
+### Custom ships
+
+Fly a ship of your own instead of the Pyro-GX: *Options → Ship...* lists the ships in the game's `ships` folder (the release packages bring 13 free CC0 ships) with a turning preview; Enter picks one. It is only the look: size, guns and physics stay the Pyro's for everyone, and your ship always shows your player colour.
+
+- The other players see your ship. When someone lacks it, the host sends it automatically (it is kept in `ships/cache/`); until it has arrived they see a Pyro.
+- **Show custom ships** (S in the ship menu, default on): off draws every player as the classic Pyro-GX, whatever ship they chose, and nothing is downloaded for drawing. **Accept ships from the host** (A) refuses downloads only.
+- Making ships: `shipconv` (next to the game in the Windows package) converts glTF/OBJ models; see [Documentation/custom-ships-authoring.md](Documentation/custom-ships-authoring.md). All players need a build with network protocol 112.
+
 
 ## 4. Legal stuff:
 
