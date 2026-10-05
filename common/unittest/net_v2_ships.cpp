@@ -496,12 +496,17 @@ void test_failures()
 			host.ex.receive(1, SHIP_MSG_INFO, ib);
 			host.ex.pump(i % 10 == 9 ? 3.5 : 0.1, false);
 		}
-		/* 50 announcements over about 20 s: 1 + 5 taken. */
+		/* 50 announcements over about 20 s: 1 + 5 taken, each taken one
+		 * followed by the newest held back (at most 12 in all).
+		 */
 		std::size_t requests{};
 		for (const auto &msg : w.links[std::make_pair(0u, 1u)])
 			if (msg.type == SHIP_MSG_REQUEST)
 				++requests;
-		CHECK(requests >= 2 && requests <= 7);
+		CHECK(requests >= 2 && requests <= 12);
+		/* The last change, held back, is taken once the interval passed. */
+		host.ex.pump(3.5, false);
+		CHECK(host.ex.info(1) && host.ex.info(1)->hash == sha_of(make_ship(149, 4000)));
 		/* Announcing the same again changes nothing. */
 		const auto before{w.links[std::make_pair(0u, 1u)].size()};
 		std::array<std::uint8_t, ship_info_msg::SIZE> ib;

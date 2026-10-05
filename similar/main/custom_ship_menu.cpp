@@ -243,7 +243,11 @@ window_event_result ship_menu_window::event_handler(const d_event &event)
 				case KEY_S:
 					PlayerCfg.ShowCustomShips = !PlayerCfg.ShowCustomShips;
 					write_player_file();
-					/* Decode the ships now, not at the first sight. */
+					/* Pieces of a death drawn the other way go (the Pyro's
+					 * debris shows again); decode the ships now, not at the
+					 * first sight.
+					 */
+					custom_ship_level_start();
 					custom_ship_preload();
 					return window_event_result::handled;
 				case KEY_ENTER:

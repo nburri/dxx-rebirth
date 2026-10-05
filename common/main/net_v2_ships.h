@@ -41,9 +41,9 @@ namespace dcx {
 
 namespace net_v2 {
 
-/* Message ids (session_msg, net_v2_session.h; 0x50/0x51 are the
- * taunts').  REQUEST, DATA and UNAVAILABLE move any kind of asset, named
- * by kind and SHA-256: ships now, the taunts' sounds later.
+/* Message ids (session_msg, net_v2_session.h).  REQUEST, DATA and
+ * UNAVAILABLE move any kind of asset, named by kind and SHA-256: ships
+ * now, the taunts' sounds later.
  */
 constexpr std::uint8_t SHIP_MSG_INFO{0x4b};
 constexpr std::uint8_t SHIP_MSG_REQUEST{0x4c};
@@ -356,10 +356,12 @@ private:
 	double allowance{};
 	/* Seconds the exchange has run (from pump), and when each slot last
 	 * changed its ship: a change sooner than SHIP_CHANGE_INTERVAL after
-	 * the last is ignored, so that nobody floods the others.
+	 * the last waits (only the newest is kept) until the interval has
+	 * passed, so that nobody floods the others.
 	 */
 	double clock{};
 	std::array<double, MAX_SLOTS> last_change{};
+	std::array<std::optional<ship_info_msg>, MAX_SLOTS> deferred{};
 	template <typename M>
 	void send_msg(const std::uint8_t slot, const std::uint8_t type, const M &m)
 	{
@@ -429,7 +431,12 @@ private:
 			if (table[from] && table[from]->pyro == m.pyro && table[from]->hash == m.hash && table[from]->size == m.size)
 				return;
 			if (table[from] && clock - last_change[from] < SHIP_CHANGE_INTERVAL)
+			{
+				/* Applied by pump once the interval has passed. */
+				deferred[from] = m;
 				return;
+			}
+			deferred[from].reset();
 			last_change[from] = clock;
 			/* What the host fetched of its old ship is not needed. */
 			for (auto i{fetches.begin()}; i != fetches.end();)
@@ -684,6 +691,7 @@ public:
 		env.player_ship(pid, nullptr);
 		out[pid].clear();
 		last_change[pid] = 0;
+		deferred[pid].reset();
 		std::erase_if(owners, [pid](const auto &o) { return o.second.slot == pid; });
 		/* The others draw a Pyro there until someone new announces. */
 		if (host)
@@ -704,6 +712,7 @@ public:
 			return;
 		table[slot].reset();
 		last_change[slot] = 0;
+		deferred[slot].reset();
 		env.player_ship(slot, nullptr);
 		for (std::uint8_t p = 0; p < MAX_SLOTS; ++p)
 			if (p != slot && table[p])
@@ -741,6 +750,15 @@ public:
 	void pump(const double seconds, const bool in_level)
 	{
 		clock += std::max(seconds, 0.0);
+		/* Host: ship changes that came too soon after the last. */
+		if (host)
+			for (std::uint8_t p = 0; p < MAX_SLOTS; ++p)
+				if (deferred[p] && clock - last_change[p] >= SHIP_CHANGE_INTERVAL)
+				{
+					const auto m{*deferred[p]};
+					deferred[p].reset();
+					receive_info(p, m);
+				}
 		const double rate{static_cast<double>(in_level ? SHIP_RATE_LEVEL : SHIP_RATE_LOBBY)};
 		allowance = std::min(allowance + rate * std::max(seconds, 0.0), rate / 4);
 		for (std::uint8_t slot = 0; slot < MAX_SLOTS && allowance > 0; ++slot)

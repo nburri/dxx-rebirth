@@ -667,8 +667,8 @@ player needs a build with custom ships.
 | 0x4d | `ASSET_DATA` | kind u8, SHA-256 32, total u32, offset u32, ≤ 896 bytes, in order |
 | 0x4e | `ASSET_UNAVAILABLE` | kind u8, SHA-256 32, reason u8 (unknown, refused, owner left, invalid) |
 
-Asset kinds: 1 ship (≤ 1 MiB), 2 the taunts' sounds (≤ 128 KiB,
-Documentation/taunts.md); a kind announces its assets its own way and transfers
+Asset kinds: 1 ship (≤ 1 MiB), 2 reserved for the taunts' sounds
+(≤ 128 KiB); a kind announces its assets its own way and transfers
 through `ship_exchange::request` / `note_owner`.
 
 - A player announces its ship on joining (and again when the pilot picks
@@ -685,6 +685,8 @@ through `ship_exchange::request` / `note_owner`.
   have its SHA-256 and pass the reader before it is stored in
   `ships/cache/<sha256>.dxship` and drawn. Peers never talk to each
   other.
+- A player who changes its ship again within 3 s: the host keeps the
+  newest change and applies it when the 3 s have passed.
 - Pacing: 96 KiB/s in the lobby, 16 KiB/s during a level, and never more
   than 12 KiB of ship data waiting in a connection's reliable queue, so
   gameplay messages do not wait behind a transfer (a 600 KB ship relayed
@@ -694,8 +696,6 @@ through `ship_exchange::request` / `note_owner`.
   written when recording starts and whenever a player's ship changes,
   renamed or deleted with the demo, read at playback; older builds
   ignore it.
-- `-botarena-shots <dir>`: pictures from behind the arena's bots, every
-  10 game seconds, for review.
 
 Not done: a two-instance network test (the game has no unattended host
 and join), the movement-recording header, a per-bot ship setting (bots
@@ -712,4 +712,5 @@ fetches no ship for drawing (a client asks the host for none, a host
 fetches none for itself); a host still relays ships to the clients who
 want them. Turning it on again (also in a game) fetches the announced
 ships this machine lacks (`ship_exchange::request_missing_ships`) and
-draws them as they arrive. Taunts are not affected.
+draws them as they arrive (downloads already running when it is
+turned off finish).
