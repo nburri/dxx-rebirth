@@ -71,6 +71,7 @@
 #include <memory>
 #include <utility>
 #include "frame_probe.h"
+#include "ogl_ship.h"
 using std::max;
 
 //change to 1 for lots of spew.
@@ -267,6 +268,8 @@ void ogl_init_texture_list_internal(void){
 }
 
 void ogl_smash_texture_list_internal(void){
+	/* The custom ships' textures too (ogl_ship.h). */
+	ship_gl::textures_lost();
 	sphere_va.reset();
 	circle_va.reset();
 	disk_va.reset();

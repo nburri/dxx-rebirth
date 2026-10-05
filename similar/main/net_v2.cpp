@@ -1243,7 +1243,12 @@ bool join_in_progress(const _sockaddr &ignore_addr)
 void drop_peer(peer &p)
 {
 	if (multi_i_am_master())
+	{
 		Public_tally.forget(peer_slot(p));
+		/* Its ship goes with it (custom ships, net_ships.cpp). */
+		if (p.conn)
+			net_ships_slot_cleared(peer_slot(p));
+	}
 	p.conn.reset();
 	p.ph = peer::phase::none;
 	p.token = 0;
@@ -3359,6 +3364,8 @@ void accept_peer(const playernum_t slot, const ::dcx::net_v2::join_request &req,
 	};
 	acc.write(p.accept_payload.data());
 	send_unconnected(from, S.session_id, p.token, 0, session_msg::join_accept, p.accept_payload);
+	/* Everyone's ship, first thing on the new connection. */
+	net_ships_client_joined(slot);
 	{
 		_sockaddr::presentation_buffer dbuf;
 		con_printf(CON_NORMAL, "net: accepted '%s' from %s:%hu as P#%u", callsign.operator const char *(), dxx_ntop(from, dbuf), dxx_sockaddr_port(from), slot);
@@ -3833,6 +3840,8 @@ void handle_join_accept(const packet_header &h, const std::span<const uint8_t> p
 	 */
 	S.info_addr.reset();
 	con_printf(CON_NORMAL, "net: joined session %08x as P#%u, tick rate %u Hz", S.session_id, acc->player_id, Netgame.TickRate);
+	/* Our ship, to the host (custom ships, net_ships.cpp). */
+	net_ships_start(false, static_cast<uint8_t>(acc->player_id));
 	/* Protocol 108: tell the host the address it answered from, which
 	 * behind a NAT router is its public one.
 	 */
@@ -4735,6 +4744,14 @@ void handle_reliable(peer &p, const session_msg type, const std::span<const uint
 			net_modes_receive(slot, static_cast<uint8_t>(type), payload);
 		return;
 	}
+	/* Custom ships (net_ships.cpp): any phase; the exchange checks who
+	 * may send what.
+	 */
+	if (type == session_msg::ship_info || type == session_msg::asset_request || type == session_msg::asset_data || type == session_msg::asset_unavailable)
+	{
+		net_ships_receive(slot, static_cast<uint8_t>(type), payload);
+		return;
+	}
 	if (type == session_msg::spawn_request || type == session_msg::spawn_site)
 	{
 		if (multi_i_am_master() ? peer_sends_game_data(p) : legacy_processing_allowed())
@@ -5148,6 +5165,8 @@ void frame(const bool listen)
 		read_sockets();
 
 	client_join_frame();
+	/* Custom ships: announcements, the bots' ships, paced transfers. */
+	net_ships_frame();
 
 	/* Each connection paces its own packets (connection::begin_tick); a
 	 * connection's tick carries the newest state.  The host builds the
@@ -5355,10 +5374,27 @@ void game_send_to(const playernum_t slot, const uint8_t type, const std::span<co
 	send_to_slot(slot, static_cast<session_msg>(type), payload);
 }
 
+std::size_t game_queued_bytes(const playernum_t slot)
+{
+	if (slot >= MAX_PLAYERS)
+		return 0;
+	const auto &p{S.peers[slot]};
+	return p.conn ? p.conn->stats().queue_bytes + p.backlog_bytes : 0;
+}
+
+bool host_slot_is_client(const playernum_t slot)
+{
+	if (slot >= MAX_PLAYERS || !slot)
+		return false;
+	const auto &p{S.peers[slot]};
+	return p.conn && p.ph != peer::phase::none && p.ph != peer::phase::closing;
+}
+
 void session_reset()
 {
 	con_printf(CON_VERBOSE, "teardown: network session reset");
 	bots_session_reset();
+	net_ships_reset();
 	for (auto &p : S.peers)
 		drop_peer(p);
 	S.awaits_entry = {};
@@ -5554,6 +5590,7 @@ void host_open_session(const uint32_t fixed_id)
 	Public_tally.clear();
 	Public_logged.clear();
 	con_printf(CON_NORMAL, "net: hosting session %08x at %u Hz", S.session_id, Netgame.TickRate);
+	net_ships_start(true, 0);
 }
 
 void host_broadcast_game_info_lite()

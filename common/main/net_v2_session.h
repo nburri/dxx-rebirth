@@ -91,6 +91,13 @@ enum class session_msg : std::uint8_t
 	 * refused (protocol 111).
 	 */
 	ctf_notice = 0x4a,
+	/* Custom ships (net_v2_ships.h, protocol 112); REQUEST, DATA and
+	 * UNAVAILABLE carry an asset kind.
+	 */
+	ship_info = 0x4b,
+	asset_request = 0x4c,
+	asset_data = 0x4d,
+	asset_unavailable = 0x4e,
 	drop_request = 0x3b,
 	obj_settle = 0x47,
 	/* Host-assigned spawns (section 8, "Host-assigned spawns",

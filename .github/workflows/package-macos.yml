@@ -76,6 +76,9 @@ jobs:
             if [ -d "$app" ] && [ -f "contrib/gamecontrollerdb.txt" ]; then
               cp "contrib/gamecontrollerdb.txt" "$app/Contents/Resources/"
             fi
+            # The bundled custom ships (data/ships/README.md)
+            mkdir -p "$app/Contents/Resources/ships"
+            cp data/ships/*.dxship data/ships/README.md "$app/Contents/Resources/ships/"
           done
 
           mv build/D2X-Rebirth.app ..

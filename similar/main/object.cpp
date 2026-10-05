@@ -40,6 +40,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "gameseg.h"
 #include "textures.h"
 #include "object.h"
+#include "custom_ship.h"
 #include "controls.h"
 #include "physics.h"
 #include "slew.h"
@@ -406,6 +407,18 @@ static void draw_cloaked_object(grs_canvas &canvas, const object_base &obj, cons
 				})
 	};
 
+	/* A custom ship fades and cloaks the same way (custom_ship.h). */
+	if (obj.type == object_type::OBJ_PLAYER)
+	{
+		if (fading
+			? custom_ship_draw_player(canvas, obj, g3s_lrgb{
+				.r = fixmul(light.r, light_scale),
+				.g = fixmul(light.g, light_scale),
+				.b = fixmul(light.b, light_scale)
+			}, 1.0f, false)
+			: custom_ship_draw_player(canvas, obj, light, 1.0f - static_cast<float>(cloak_value) / static_cast<float>(NUM_LIGHTING_LEVELS), true))
+			return;
+	}
 	auto &Polygon_models = LevelSharedPolygonModelState.Polygon_models;
 	if (fading) {
 		glow[0] = fixmul(glow[0],light_scale);
@@ -442,6 +455,12 @@ static void draw_polygon_object(grs_canvas &canvas, const d_level_unique_light_s
 	auto &BossUniqueState = LevelUniqueObjectState.BossState;
 	auto &Robot_info = LevelSharedRobotInfoState.Robot_info;
 	g3s_lrgb light;
+
+	/* The Pyro's debris of a custom ship's explosion: the ship's own
+	 * pieces are drawn instead (custom_ship.h).
+	 */
+	if (obj->type == object_type::OBJ_DEBRIS && custom_ship_hides_debris(obj.get_unchecked_index(), obj->signature))
+		return;
 
 	//	If option set for bright players in netgame, brighten them!
 	light = unlikely(Netgame.BrightPlayers && +(Game_mode & GM_MULTI) && obj->type == object_type::OBJ_PLAYER)
@@ -565,6 +584,9 @@ static void draw_polygon_object(grs_canvas &canvas, const d_level_unique_light_s
 			}
 #endif
 
+			/* A custom ship, drawn instead of the Pyro (custom_ship.h). */
+			if (obj->type == object_type::OBJ_PLAYER && custom_ship_draw_player(canvas, obj, light, 1.0f, false))
+				return;
 			const auto alt_textures{
 				({
 					const std::size_t ati{static_cast<std::size_t>(obj->rtype.pobj_info.alt_textures) - 1u};

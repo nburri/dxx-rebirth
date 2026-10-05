@@ -190,8 +190,9 @@ static inline player_ship_color get_team_color(const team_number tnum)
  * 110: ORB_BONUS, the host decides scored orbs and a death's extra orb in
  * hoard.
  * 111: capture the flag (Classic): its rules in GAME_SETTINGS, CTF_NOTICE.
+ * 112: custom ships (SHIP_INFO, ASSET_*; Documentation/custom-ships.md).
  */
-constexpr std::uint16_t MULTI_PROTO_VERSION{111};
+constexpr std::uint16_t MULTI_PROTO_VERSION{112};
 // PROTOCOL VARIABLES AND DEFINES - END
 
 /* The network tick rate (positions per second, and the pacing of every
@@ -1197,6 +1198,15 @@ std::optional<unsigned> net_spawn_take_assigned();
  * client, on the host; the host, on a client).
  */
 void net_spawn_receive(playernum_t from, uint8_t type, std::span<const uint8_t> payload);
+/* Custom ships over the network (similar/main/net_ships.cpp,
+ * net_v2_ships.h).
+ */
+void net_ships_start(bool host, uint8_t self);
+void net_ships_reset();
+void net_ships_frame();
+void net_ships_receive(playernum_t from, uint8_t type, std::span<const uint8_t> payload);
+void net_ships_client_joined(playernum_t slot);
+void net_ships_slot_cleared(playernum_t slot);
 /* The host: player `pnum` enters the level in progress (CLIENT_READY);
  * assign its first spawn and send it ahead of LEVEL_GO.
  */
