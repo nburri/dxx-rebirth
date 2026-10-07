@@ -195,8 +195,10 @@ static inline player_ship_color get_team_color(const team_number tnum)
  * 113: taunts (TAUNT_REQUEST, TAUNT, own samples as asset kind 2;
  * Documentation/taunts.md).
  * 114: team-side spawns and the respawn delay in GAME_SETTINGS.
+ * 115: the mission transfer (mission bundle in GAME_SETTINGS,
+ * MISSION_MANIFEST, asset kind 3; net_v2_mission.h).
  */
-constexpr std::uint16_t MULTI_PROTO_VERSION{114};
+constexpr std::uint16_t MULTI_PROTO_VERSION{115};
 // PROTOCOL VARIABLES AND DEFINES - END
 
 /* The network tick rate (positions per second, and the pacing of every

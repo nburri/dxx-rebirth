@@ -5775,6 +5775,7 @@ class DXXProgram(DXXCommon):
 'similar/main/net_spawn.cpp',
 'similar/main/team_spawns.cpp',
 'similar/main/net_ships.cpp',
+'similar/main/net_mission.cpp',
 ),
 		transform_target=_apply_target_name,
 	),

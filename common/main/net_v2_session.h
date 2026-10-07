@@ -110,6 +110,11 @@ enum class session_msg : std::uint8_t
 	 */
 	taunt_request = 0x50,
 	taunt = 0x51,
+	/* Mission transfer (net_v2_mission.h, protocol 115): the host's
+	 * mission bundle, host to client on every new connection; the files
+	 * go as ASSET_* messages of kind 3.
+	 */
+	mission_manifest = 0x52,
 	/* v1 `endlevel_h` payload (without the upid byte), host to client. */
 	legacy_endlevel_host = 0x7c,
 	/* v1 `endlevel_c` payload (without upid and player number), client to

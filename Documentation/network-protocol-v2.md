@@ -446,7 +446,7 @@ before a delay that was just seen.
 |---|---|---|
 | Packet size | 1200 bytes | Sender: never built; receiver: dropped. |
 | Packets per tick per connection | 1 normally; 2 if the reliable backlog, a further bundle part or a pending event does not fit next to the state chunk; a bundle that needs n > 1 packets allows n + 1 | – |
-| Reliable send queue (queued + in flight) per connection | 512 messages or 96 KiB | Host: kick that client, `kick_player_reason::queue_overflow` (new reason). Client: leave the game with the message "Connection to host too slow". |
+| Reliable send queue (queued + in flight) per connection | 512 messages or 96 KiB (320 KiB from protocol 115, for the mission transfer's window) | Host: kick that client, `kick_player_reason::queue_overflow` (new reason). Client: leave the game with the message "Connection to host too slow". |
 | Messages in flight | 256 (receiver window) | Sender stops taking new messages from the queue until acks arrive. |
 | Oldest unacked reliable message | 10 s in a level, 60 s outside one (below) | Same as queue overflow (this replaces the v1 `pkttimeout`; a message unacked for 10 s means the link is dead or unusable). |
 | No valid packet received | `NET_V2_TIMEOUT` = 5 s (v1 `UDP_TIMEOUT`) in a level; `NET_V2_LOBBY_TIMEOUT` = 60 s outside one (below) | Host: disconnect the player, broadcast `PLAYER_LEFT(timeout)`. Client: "Host left the game", return to menu; while waiting for the level start, "Lost the connection to the host" with the time it was silent. |
@@ -1580,7 +1580,8 @@ Protocol 109 uses `CAPTURE` 0x39, protocol 110 `ORB_BONUS` 0x3A, protocol
 111 `CTF_NOTICE` 0x4A (§8, "Stage 6a: game modes"). Protocol 112 adds the custom
 ships' `SHIP_INFO` 0x4B, `ASSET_REQUEST` 0x4C, `ASSET_DATA` 0x4D and
 `ASSET_UNAVAILABLE` 0x4E (Documentation/custom-ships.md §11.3). Protocol 113 adds
-`TAUNT_REQUEST` 0x50 and `TAUNT` 0x51 (§6.9a).
+`TAUNT_REQUEST` 0x50 and `TAUNT` 0x51 (§6.9a). Protocol 115 adds
+`MISSION_MANIFEST` 0x52 and asset kind 3 (§8, "Mission transfer").
 The table lives in `net_v2.h` as a `for_each_net_v2_message(VALUE)` macro
 with `(NAME, id, min_len, max_len, allowed_sender)` so the length and
 direction checks of §3.7 are table-driven like v1's `command_length`.
@@ -2675,6 +2676,122 @@ Differences from §6.1–§6.4 and decisions:
   within 200 u of its home, so "away" equals "own half"; it differs on
   levels with starts near the flag rooms.
 - **Version.** `MULTI_PROTO_VERSION` and `NET_V2_PROTO_VERSION` are 114.
+
+#### Mission transfer (protocol 115)
+
+**For players.** A player who joins a game whose mission they do not have
+(or have in another version) gets it from the host automatically, before
+the level loads: the join shows "Downloading mission *title*: N %" with
+the megabytes received; ESC cancels. Nothing to install by hand. The
+downloaded files go to `missions/downloaded/<12 hex digits>/` in the
+game's user folder (where the pilot files are; on Windows usually the
+game folder), one folder per version, so a download never overwrites the
+player's own copy of a mission or another version; the mission list
+shows them too (folder "downloaded"). Next time the same version is
+found there and nothing is downloaded. The host's lobby shows "mission
+45%" next to a player who is still downloading; starting the game waits
+for them like for any player still loading (ESC → start without them;
+they join the level in progress when ready). Two options in Options →
+Gameplay: **Accept missions from the host** (default on) and **Send
+missions to players** (as host; default on). Without a download (either
+option off) a player with another version of the mission still joins
+with it, as before (the host refuses them only if the levels differ);
+one without the mission at all is told which option stops it. Not sent:
+built-in missions and Vertigo (`d2x`, commercial).
+
+- **What a mission is.** A *bundle*: `<name>.mn2` and, if present,
+  `<name>.hog` (the HOG holds the levels and every custom file a mission
+  has: `.pog`, `.hxm`, `.ham`, `.s11`/`.s22`, briefings, music), found
+  next to each other, names compared without case. A mission whose name
+  breaks the rules below, or whose files exceed the caps, is not sent.
+  Missions needing a second mission's HOG (an `ham =` line naming
+  another HOG, as Vertigo-based ones do) are not covered: that HOG is not
+  part of the bundle.
+- **Bundle hash.** SHA-256 over `DXX-MISSION-BUNDLE-1\0`, then per file in
+  order of the lower-cased names: the lower-cased name, NUL, size (u32),
+  SHA-256 of the contents. The title is not in it (the `.mn2` is).
+- **`GAME_SETTINGS`** (and so `GAME_INFO`) ends with 37 more bytes after
+  the mission name: bundle hash (32; zeros: none, e.g. a built-in
+  mission), bundle size u32, flags u8 (bit 0: the host sends missions).
+  A size of 0 or over the cap reads as "none".
+- **`MISSION_MANIFEST` (0x52, host → client, reliable, on every new
+  connection when the host sends missions):** bundle hash (32), basename
+  (9, NUL padded), title (26, NUL padded), file count u8 (1–2), then per
+  file: name (13, NUL padded), size u32, SHA-256 (32). The receiver
+  checks every field (nothing but NULs after a string's NUL, names
+  `[A-Za-z0-9_-]{1,8}` + `.mn2`/`.hog`, exactly one `.mn2`, at most one
+  `.hog`, both of the basename, no duplicate names or contents, sizes
+  within the caps) and recomputes the bundle hash; it must also equal the
+  one `GAME_SETTINGS` announced.
+- **Files: asset kind 3** on the custom ships' ids (the kind byte routes
+  them; `net_v2_ships.h` never sees kind 3):
+  - `ASSET_REQUEST` (0x4C, client → host, 37 bytes): kind 3, file SHA-256,
+    offset u32 (resume point).
+  - `ASSET_DATA` (0x4D, host → client): kind 3, file SHA-256, file size
+    u32, offset u32, then 1–983 bytes (`NET_V2_MAX_MESSAGE` − 41), in
+    order. A part that skips ahead fails the download; one already held
+    (after a resumed request) is ignored.
+  - `ASSET_UNAVAILABLE` (0x4E, host → client, 34 bytes): kind 3, file
+    SHA-256, reason u8 (0 not a file of this mission, 1 the host does not
+    send missions, 2 the host's file no longer matches its hash).
+  The client asks for one file at a time: the `.hog` first, the `.mn2`
+  last, so that an interrupted download never shows up as a mission.
+  What it holds of the current file survives a cancel or a lost
+  connection (while the game runs), and the next join resumes there.
+- **Checks before use.** Each file must match its SHA-256 and its type's
+  structure: a HOG is `DHF` then entries of a 13-byte name (1–12
+  printable characters, no `/`, `\`, `:`, NUL terminated) and a u32 size,
+  every entry within the file, to its exact end, at most 4096 entries;
+  an MN2 is text without NUL, at most 64 KiB, whose first line is
+  `name`/`xname`/`zname`/`!name`. Only then is it written, under the
+  bundle's folder, by its checked name. The fuzz test feeds 20 000
+  mutated HOGs to the check.
+- **Caps.** 48 MiB per file and per bundle (the group's 66 missions: the
+  largest, The Enemy Within, is 27.4 MiB; the next 4.2 MiB), `.mn2`
+  64 KiB.
+- **Choosing the mission.** The client looks at every add-on mission with
+  the host's file name (its own and the downloaded ones), computes their
+  bundle hashes (cached by file size and time) and plays the one that
+  matches; otherwise it downloads (both options on), or tries the first
+  of another version, or says why it cannot join
+  (`net_v2::choose_mission`).
+- **Join flow.** The client decides before its `JOIN_REQUEST` (from
+  `GAME_INFO`) and downloads after `JOIN_ACCEPT`, on the new connection,
+  before it loads the level. In the lobby the host just sees a player not
+  ready yet. In a game in progress the joining peer stays `joining`; the
+  host's 30 s join timeout (§4.4) counts from the end of the download, so
+  other players wanting to join wait meanwhile (one join at a time; their
+  clients retry for 10 s). A level end removes a joiner still
+  downloading, as any joiner (it rejoins and resumes).
+- **Speed and pacing.** In the lobby a connection carrying a transfer
+  sends up to 32 packets per tick (`connection::set_max_packets_per_tick`)
+  and keeps up to 224 KiB queued or in flight (the sender's queue bound,
+  §3.6, grows from 96 to 320 KiB). The rate starts at 512 KiB/s and grows
+  by a quarter every 0.25 s while the round trip stays below 1.25 × the
+  lowest seen + 15 ms; it shrinks by 30 % when the round trip rises
+  above that (a queue building on the path, which would delay others) or
+  more than 15 % is retransmitted; 64 KiB/s to 4 MiB/s. Random loss alone
+  does not slow it. During a level (a join in progress) the transfer is
+  capped at 192 KiB/s, 4 packets per tick and a 32 KiB window, so that
+  the players in the level do not notice. To keep up with that many
+  packets the receiving end acks after every 16 received packets that
+  carry reliable messages, outside its tick budget (`NET_V2_ACK_EVERY`):
+  the ack bitfield covers only 64 packets, and a packet falling out of it
+  unacked would be sent again.
+- **Measured** (`test-net-v2-mission`, real transport, simulated link
+  with bottleneck, delay and loss, 10 MB): 8 MB/s link, 20 ms each way,
+  0.5 % loss: 1.49 MB/s (7.0 s), at 30 fps menus 1.53 MB/s; 2 % loss
+  1.42 MB/s; 5 % loss 1.21 MB/s; 50 ms each way 0.98 MB/s; a 1 MB/s
+  uplink with a 64 KB buffer 0.69 MB/s; 0.5 MB/s 0.37 MB/s; during a
+  level 180 KiB/s. Over real UDP sockets on the loopback interface
+  (`test-net-v2-mission --missions DIR`, the group's missions folder) The
+  Enemy Within, 28.8 MB, took 17.6 s: 1.64 MB/s, nothing resent.
+- **Code.** `common/main/net_v2_mission.h` (layouts, checks, the choice,
+  the host's sender and the client's downloader as state machines),
+  `similar/main/net_mission.cpp` (files, PhysFS, options),
+  `similar/main/net_udp.cpp` (the join's progress menu, the lobby list),
+  `common/unittest/net_v2_mission.cpp`.
+- **Version.** `MULTI_PROTO_VERSION` and `NET_V2_PROTO_VERSION` are 115.
 
 ### Stage 4 — Firing, hits, damage, kills, respawn with lag compensation
 

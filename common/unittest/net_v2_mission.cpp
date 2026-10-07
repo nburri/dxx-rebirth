@@ -14,8 +14,20 @@
  * link with a bottleneck, delay and loss, which measures the throughput.
  */
 
+#include <chrono>
 #include <cinttypes>
 #include <cstdio>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <thread>
+#ifndef _WIN32
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
 #include <cstdlib>
 #include <deque>
 #include <map>
@@ -817,11 +829,207 @@ void test_throughput()
 	}
 }
 
+/* --missions DIR: every mission of a real missions folder (the group's)
+ * through the checks, then the largest over real UDP sockets on the
+ * loopback interface, in real time.
+ */
+std::optional<bytes> slurp(const std::filesystem::path &p)
+{
+	std::ifstream f(p, std::ios::binary);
+	if (!f)
+		return std::nullopt;
+	return bytes(std::istreambuf_iterator<char>(f), {});
 }
 
-int main()
+struct real_bundle
+{
+	mission_manifest manifest;
+	std::map<std::string, bytes> files;
+};
+
+std::vector<real_bundle> read_missions(const std::filesystem::path &dir)
+{
+	std::map<std::string, real_bundle> by_base;
+	for (const auto &e : std::filesystem::directory_iterator(dir))
+	{
+		const auto name{e.path().filename().string()};
+		const auto t{mission_file_type_of(name)};
+		if (!t)
+			continue;
+		const auto base{name.substr(0, name.find('.'))};
+		auto &b{by_base[mission_lower(base)]};
+		b.manifest.basename = base;
+		if (const auto data{slurp(e.path())})
+		{
+			b.manifest.files.push_back(file_of(name, *data));
+			b.files[name] = *data;
+		}
+	}
+	std::vector<real_bundle> out;
+	for (auto &[k, b] : by_base)
+	{
+		/* The title: the .mn2's name line, as the game reads it. */
+		for (const auto &[n, d] : b.files)
+			if (mission_file_type_of(n) == mission_file_type::mn2)
+			{
+				const std::string t(d.begin(), std::find(d.begin(), d.end(), '\n'));
+				const auto eq{t.find('=')};
+				b.manifest.title = eq == std::string::npos ? b.manifest.basename : t.substr(t.find_first_not_of(' ', eq + 1));
+				while (!b.manifest.title.empty() && (b.manifest.title.back() == '\r' || b.manifest.title.back() == ' '))
+					b.manifest.title.pop_back();
+				b.manifest.title.resize(std::min<std::size_t>(b.manifest.title.size(), MISSION_TITLE_FIELD - 1));
+			}
+		b.manifest.normalise();
+		out.push_back(std::move(b));
+	}
+	return out;
+}
+
+#ifndef _WIN32
+struct udp_socket
+{
+	int fd{-1};
+	sockaddr_in addr{};
+	udp_socket()
+	{
+		fd = socket(AF_INET, SOCK_DGRAM, 0);
+		addr.sin_family = AF_INET;
+		addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+		addr.sin_port = 0;
+		bind(fd, reinterpret_cast<const sockaddr *>(&addr), sizeof(addr));
+		socklen_t l{sizeof(addr)};
+		getsockname(fd, reinterpret_cast<sockaddr *>(&addr), &l);
+		fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+		/* A large receive buffer, as an operating system's default is. */
+		const int size{1 << 20};
+		setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &size, sizeof(size));
+	}
+	~udp_socket()
+	{
+		close(fd);
+	}
+	void send_to(const udp_socket &to, const std::span<const std::uint8_t> p) const
+	{
+		sendto(fd, p.data(), p.size(), 0, reinterpret_cast<const sockaddr *>(&to.addr), sizeof(to.addr));
+	}
+	std::optional<bytes> receive() const
+	{
+		bytes b(1500);
+		const auto n{recv(fd, b.data(), b.size(), 0)};
+		if (n <= 0)
+			return std::nullopt;
+		b.resize(static_cast<std::size_t>(n));
+		return b;
+	}
+};
+
+void loopback_transfer(const real_bundle &rb)
+{
+	sim_end he{}, ce{};
+	connection hc{connection_config{.session_id = 9, .peer_token = 0x99, .local_player_id = 0, .remote_player_id = 1, .timeout = net_seconds(60), .unacked_timeout = net_seconds(60)}, 0};
+	connection cc{connection_config{.session_id = 9, .peer_token = 0x99, .local_player_id = 1, .remote_player_id = 0, .timeout = net_seconds(60), .unacked_timeout = net_seconds(60)}, 0};
+	he.c = &hc;
+	ce.c = &cc;
+	he.files = rb.files;
+	mission_host host{he};
+	mission_client client{ce};
+	host.set_manifest(rb.manifest);
+	CHECK(host.current().has_value());
+	udp_socket hs, cs;
+	client.begin(rb.manifest.bundle_hash());
+	host.client_joined(1);
+	const auto t0{std::chrono::steady_clock::now()};
+	auto last{t0};
+	unsigned frames{};
+	while (client.state() != mission_client_state::done && client.state() != mission_client_state::failed)
+	{
+		const auto now_tp{std::chrono::steady_clock::now()};
+		const double now{std::chrono::duration<double>(now_tp - t0).count()};
+		if (now > 120)
+			break;
+		const double dt{std::chrono::duration<double>(now_tp - last).count()};
+		last = now_tp;
+		const auto t{static_cast<net_clock>(now * 65536.0)};
+		while (const auto d{cs.receive()})
+			for (const auto &m : cc.on_receive(*d, t).reliable)
+				client.receive(0, m.type, m.payload);
+		while (const auto d{hs.receive()})
+			for (const auto &m : hc.on_receive(*d, t).reliable)
+				host.receive(1, m.type, m.payload);
+		host.pump(dt, false);
+		client.tick(dt);
+		for (auto [c, from, to] : {std::tuple{&hc, &hs, &cs}, std::tuple{&cc, &cs, &hs}})
+		{
+			c->begin_tick(t);
+			for (;;)
+			{
+				const auto p{c->build_outgoing(t)};
+				if (p.empty())
+					break;
+				from->send_to(*to, p);
+			}
+		}
+		++frames;
+		/* A game frame at some 120 fps. */
+		std::this_thread::sleep_until(now_tp + std::chrono::microseconds(8333));
+	}
+	const double secs{std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count()};
+	bool same{client.state() == mission_client_state::done};
+	for (const auto &[n, d] : rb.files)
+		same = same && ce.files[n] == d;
+	CHECK(same);
+	const auto s{hc.stats()};
+	std::printf("    loopback UDP: '%s' (%.1f MB) in %.1f s real time, %.2f MB/s, %u frames, %" PRIu64 " of %" PRIu64 " messages resent%s\n", rb.manifest.title.c_str(), static_cast<double>(rb.manifest.total_size()) / 1e6, secs, static_cast<double>(rb.manifest.total_size()) / 1e6 / secs, frames, s.message_resends, s.message_sends, same ? "" : "  <-- FAILED");
+}
+#endif
+
+void test_missions_dir(const char *const dir)
+{
+	const auto bundles{read_missions(dir)};
+	unsigned valid{}, hogs_ok{}, hogs{};
+	const real_bundle *largest{};
+	for (const auto &b : bundles)
+	{
+		for (const auto &[n, d] : b.files)
+			if (mission_file_type_of(n) == mission_file_type::hog)
+			{
+				++hogs;
+				hogs_ok += mission_hog_valid(d);
+				if (!mission_hog_valid(d))
+					std::printf("    %s: not a valid HOG\n", n.c_str());
+			}
+		const bool ok{b.manifest.valid()};
+		valid += ok;
+		if (!ok)
+			std::printf("    %s: not a bundle (%u files)\n", b.manifest.basename.c_str(), static_cast<unsigned>(b.manifest.files.size()));
+		else
+		{
+			const auto w{mission_manifest_msg::write(b.manifest)};
+			const auto r{mission_manifest_msg::read(w)};
+			CHECK(r && r->bundle_hash() == b.manifest.bundle_hash());
+			if (!largest || b.manifest.total_size() > largest->manifest.total_size())
+				largest = &b;
+		}
+	}
+	std::printf("    %s: %u missions, %u valid bundles, %u of %u HOGs valid; largest '%s' %.1f MiB (cap %u MiB)\n", dir, static_cast<unsigned>(bundles.size()), valid, hogs_ok, hogs, largest ? largest->manifest.title.c_str() : "-", largest ? static_cast<double>(largest->manifest.total_size()) / (1 << 20) : 0.0, MISSION_BUNDLE_MAX >> 20);
+	CHECK(hogs_ok == hogs);
+#ifndef _WIN32
+	if (largest)
+		loopback_transfer(*largest);
+#endif
+}
+
+}
+
+int main(const int argc, char **const argv)
 {
 	std::printf("test-net-v2-mission:\n");
+	if (argc == 3 && !std::strcmp(argv[1], "--missions"))
+	{
+		test_missions_dir(argv[2]);
+		std::printf("test-net-v2-mission: %s\n", failures ? "checks failed" : "all checks passed");
+		return failures ? EXIT_FAILURE : EXIT_SUCCESS;
+	}
 	test_names();
 	test_hog();
 	test_mn2();
