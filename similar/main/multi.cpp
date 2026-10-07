@@ -1144,6 +1144,8 @@ window_event_result multi_do_frame()
 	net_combat_frame();
 	/* Game modes: the host tests the goals (CAPTURE). */
 	net_modes_frame();
+	/* Respawn requests held back for the respawn delay. */
+	net_spawn_frame();
 	if (Network_status == network_state::playing)
 	{
 		// Repopulate the level if necessary
@@ -1894,6 +1896,8 @@ static void multi_do_player_deres(const d_robot_info_array &Robot_info, object_a
 
 	if (buf[2] == deres_explode)
 	{
+		/* The respawn delay runs from here (the host). */
+		net_spawn_host_exploded(pnum);
 		explode_badass_player(Robot_info, objp);
 
 		objp->flags &= ~OF_SHOULD_BE_DEAD;              //don't really kill player
@@ -3278,8 +3282,11 @@ void multi_prep_level_objects(const d_powerup_info_array &Powerup_info, const d_
 	net_modes_level_start();
 	/* Documentation/taunts.md */
 	taunt_level_start();
-	/* Spawn assignments and reservations belong to the old level. */
+	/* Spawn assignments and reservations belong to the old level, the
+	 * sides of its starts too.
+	 */
 	net_spawn_level_start();
+	team_spawn_level_start();
 	/* Shots, ids and the host's histories too (stage 4). */
 	net_combat_level_start();
 }
@@ -5984,6 +5991,8 @@ void show_netgame_info(const netgame_info &netgame)
 			spawn_site_header,
 			spawn_count,
 			spawn_invulnerable_time,
+			team_spawns,
+			respawn_delay,
 			blank_4,
 			objects_allowed_header,
 			allow_laser_upgrade,
@@ -6132,6 +6141,15 @@ void show_netgame_info(const netgame_info &netgame)
 #endif
 			array_snprintf(lines[spawn_count], "Use * Furthest Spawn Sites\t  %i", netgame.SecludedSpawns+1);
 			array_snprintf(lines[spawn_invulnerable_time], "Invulnerable Time\t  %1.1f sec", static_cast<float>(netgame.InvulAppear) / 2);
+			if (gamemode == network_game_type::team_anarchy
+#if DXX_BUILD_DESCENT == 2
+				|| gamemode == network_game_type::capture_flag || gamemode == network_game_type::team_hoard
+#endif
+				)
+				array_snprintf(lines[team_spawns], "Team Spawns\t  %s", ::dcx::team_spawn::rule_text(::dcx::team_spawn::rule_from_byte(netgame.TeamSpawns)));
+			else
+				menu_items[team_spawns].text = const_cast<char *>(" ");
+			array_snprintf(lines[respawn_delay], "Respawn Delay\t  %u s", static_cast<unsigned>(netgame.RespawnDelay));
 			array_snprintf(lines[allow_laser_upgrade], "Laser Upgrade\t  %s", (netgame.AllowedItems & netflag_flag::NETFLAG_DOLASER) != netflag_flag::None ? TXT_YES : TXT_NO);
 			array_snprintf(lines[allow_quad_laser], "Quad Lasers\t  %s", (netgame.AllowedItems & netflag_flag::NETFLAG_DOQUAD) != netflag_flag::None ? TXT_YES : TXT_NO);
 			array_snprintf(lines[allow_vulcan_cannon], "Vulcan Cannon\t  %s", (netgame.AllowedItems & netflag_flag::NETFLAG_DOVULCAN) != netflag_flag::None ? TXT_YES : TXT_NO);

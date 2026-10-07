@@ -679,6 +679,7 @@ void print_summary(const double game_seconds)
 	/* The game mode's own numbers (captures, flag counts). */
 	net_modes_arena_summary();
 	print_mode_summary(game_seconds);
+	team_spawn_print_stats();
 }
 
 }
@@ -725,6 +726,13 @@ bool bot_arena_start()
 		Netgame.CtfClassicFlags = CGameArg.DbgBotArenaMode == "ctfclassic"
 			? static_cast<uint8_t>(ctf_rule::classic | (CGameArg.DbgBotArenaCtfRules >= 0 ? CGameArg.DbgBotArenaCtfRules : ctf_rule::defaults))
 			: uint8_t{0};
+	/* Team-side spawns: -botarena-spawns, else the mode's default; the
+	 * respawn delay.
+	 */
+	Netgame.TeamSpawns = static_cast<uint8_t>(CGameArg.DbgBotArenaSpawns >= 0
+		? ::dcx::team_spawn::rule_from_byte(static_cast<uint8_t>(CGameArg.DbgBotArenaSpawns))
+		: ::dcx::team_spawn::default_rule(*mode == network_game_type::capture_flag && (Netgame.CtfClassicFlags & ctf_rule::classic)));
+	Netgame.RespawnDelay = static_cast<uint8_t>(CGameArg.DbgBotArenaRespawnDelay);
 	if (!setup_bots(bots))
 		return false;
 	con_printf(CON_URGENT, "botarena: level %u of \"%s\" (%s), %u bots, %" PRIu32 " s at %u fps, seed %" PRIu32,

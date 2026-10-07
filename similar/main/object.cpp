@@ -1653,6 +1653,10 @@ window_event_result dead_player_frame(const d_robot_info_array &Robot_info)
 	auto &vmobjptr = Objects.vmptr;
 	auto &vmobjptridx = Objects.vmptridx;
 	static fix	time_dead = 0;
+#if DXX_USE_MULTIPLAYER
+	/* The last "Respawn in N" shown (the respawn delay). */
+	static unsigned shown_seconds;
+#endif
 
 	if (Player_dead_state != player_dead_state::no)
 	{
@@ -1737,6 +1741,29 @@ window_event_result dead_player_frame(const d_robot_info_array &Robot_info)
 		}
 
 
+		/* The host's respawn delay (Netgame.RespawnDelay, network
+		 * deathmatch): no respawn before it passed, counted from the
+		 * end of the explosion; the HUD counts down.
+		 */
+		fix respawn_wait{0};
+#if DXX_USE_MULTIPLAYER
+		if (+(Game_mode & GM_NETWORK) && !(Game_mode & GM_MULTI_COOP) && Netgame.RespawnDelay && Player_dead_state == player_dead_state::exploded)
+		{
+			const fix allowed{DEATH_SEQUENCE_EXPLODE_TIME + i2f(std::min<unsigned>(Netgame.RespawnDelay, ::dcx::team_spawn::RESPAWN_DELAY_LIMIT))};
+			if (time_dead < allowed)
+			{
+				respawn_wait = allowed - time_dead;
+				const unsigned seconds{static_cast<unsigned>(f2i(respawn_wait + F1_0 - 1))};
+				if (seconds != shown_seconds)
+				{
+					shown_seconds = seconds;
+					HUD_init_message(HM_DEFAULT, "Respawn in %u", seconds);
+				}
+			}
+			else
+				shown_seconds = 0;
+		}
+#endif
 		if (GameViewUniqueState.Death_sequence_aborted)
 		{
 			auto &player_info = get_local_plrobj().ctype.player_info;
@@ -1744,6 +1771,11 @@ window_event_result dead_player_frame(const d_robot_info_array &Robot_info)
 				player_info.Player_eggs_dropped = true;
 				drop_local_player_eggs(vmobjptridx(ConsoleObject));
 			}
+			/* Fire was pressed during the respawn delay: the ship
+			 * respawns once it has passed.
+			 */
+			if (respawn_wait > 0)
+				return window_event_result::handled;
 
 			/* A network deathmatch client asks the host where to
 			 * respawn and waits for the answer (at most 1 s); not
@@ -1756,7 +1788,12 @@ window_event_result dead_player_frame(const d_robot_info_array &Robot_info)
 		}
 	}
 	else
+	{
 		time_dead = 0;
+#if DXX_USE_MULTIPLAYER
+		shown_seconds = 0;
+#endif
+	}
 
 	return window_event_result::handled;
 }

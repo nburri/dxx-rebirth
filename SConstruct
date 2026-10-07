@@ -5051,6 +5051,12 @@ class DXXArchive(DXXCommon):
 		RuntimeTest('test-spawn-site', (
 			'common/unittest/spawn_site.cpp',
 			)),
+		# Test of team-side spawns (team_spawn.h): the sides of start
+		# positions, the rules' tiers, the flag carrier rule, the level
+		# start placement.
+		RuntimeTest('test-team-spawn', (
+			'common/unittest/team_spawn.cpp',
+			)),
 		# Test of the Omega cannon's fire rule and of the damage a held
 		# Omega does at 30 to 500 fps (omega_fire.h, laser.cpp).
 		RuntimeTest('test-omega-fire', (
@@ -5758,6 +5764,7 @@ class DXXProgram(DXXCommon):
 'similar/main/net_modes.cpp',
 'similar/main/net_objects.cpp',
 'similar/main/net_spawn.cpp',
+'similar/main/team_spawns.cpp',
 'similar/main/net_ships.cpp',
 ),
 		transform_target=_apply_target_name,

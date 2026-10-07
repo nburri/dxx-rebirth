@@ -644,7 +644,8 @@ constexpr program_version Program_version{DXX_VERSION_MAJORi, DXX_VERSION_MINORi
 /* Stage 1 wire sizes (Documentation/network-protocol-v2.md, sections 4.1,
  * 4.3, 4.4, 4.5 and the stage 1 notes of section 6.10).
  */
-constexpr std::size_t GAME_SETTINGS_FIXED_SIZE{64};
+/* Protocol 114: 66 (TeamSpawns, RespawnDelay). */
+constexpr std::size_t GAME_SETTINGS_FIXED_SIZE{66};
 constexpr std::size_t PLAYER_LIST_ENTRY_SIZE{12};
 constexpr std::size_t PLAYER_LIST_SIZE{MAX_PLAYERS * PLAYER_LIST_ENTRY_SIZE};
 constexpr std::size_t PLAYER_JOINED_SIZE{12};
@@ -1457,6 +1458,9 @@ void write_game_settings(writer &w)
 	 * reserved byte (once PacketLossPrevention) was.
 	 */
 	w.u8(Netgame.CtfClassicFlags);
+	/* Protocol 114: team-side spawns and the respawn delay. */
+	w.u8(Netgame.TeamSpawns);
+	w.u8(Netgame.RespawnDelay);
 	w.u32(static_cast<uint32_t>(Netgame.KillGoal));
 	w.u32(Netgame.PlayTimeAllowed.count());
 	for (auto &i : Netgame.team_name)
@@ -1498,6 +1502,8 @@ void read_game_settings(reader &r)
 	const auto mouselook{r.u8()};
 	const auto pitchlock{r.u8()};
 	const auto ctf_classic{r.u8()};
+	const auto team_spawns{r.u8()};
+	const auto respawn_delay{r.u8()};
 	const auto killgoal{r.i32()};
 	const auto playtime{r.i32()};
 	per_team_array<callsign_t> team_name;
@@ -1552,6 +1558,8 @@ void read_game_settings(reader &r)
 	Netgame.MouselookFlags = mouselook;
 	Netgame.PitchLockFlags = pitchlock;
 	Netgame.CtfClassicFlags = ctf_classic & ::dcx::net_v2::CTF_RULES_KNOWN;
+	Netgame.TeamSpawns = static_cast<uint8_t>(::dcx::team_spawn::rule_from_byte(team_spawns));
+	Netgame.RespawnDelay = std::min<uint8_t>(respawn_delay, ::dcx::team_spawn::RESPAWN_DELAY_LIMIT);
 	Netgame.KillGoal = killgoal;
 	Netgame.PlayTimeAllowed = d_time_fix(playtime);
 	Netgame.team_name = team_name;

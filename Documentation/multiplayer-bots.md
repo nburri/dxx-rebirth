@@ -868,6 +868,7 @@ d2x-rebirth -hogdir DATA -botarena <mission> <level> <bots> <seconds>
             [-botarena-seed N] [-botarena-reactor S] [-botarena-timeout S]
             [-botarena-mode anarchy|team|ctf|ctfclassic|hoard|teamhoard]
             [-botarena-ctf-rules N] [-botarena-taunt] [-botarena-sound]
+            [-botarena-spawns 0|1|2] [-botarena-respawn-delay 0-3]
             [-pilot NAME]
             [-recordmoves -recordmoves-bots]
 tools/botarena-run.sh [-n bots] [-b list] [-s seconds] [-f fps] [-t limit] [-o dir]
@@ -880,7 +881,10 @@ tools/botarena-run.sh [-n bots] [-b list] [-s seconds] [-f fps] [-t limit] [-o d
   then the pilot's `.ngp` with its game options), then anarchy (or the mode
   of `-botarena-mode`: `team`, `ctf`, `ctfclassic` with the flag rules of
   `-botarena-ctf-rules`, `hoard`, `teamhoard`; in a team mode the bots by turns
-  blue and red) on the given level with `<bots> + 1` players, no kill goal,
+  blue and red; `-botarena-spawns` the team spawn rule, 0 anywhere, 1 own
+  half, 2 own half away from the flag, default the mode's;
+  `-botarena-respawn-delay` the respawn delay; network-protocol-v2.md
+  "Team-side spawns") on the given level with `<bots> + 1` players, no kill goal,
   no time limit, no autosave. In capture the flag and hoard the bots play
   their roles (§9.19); the summary adds the captures or orb scores and the
   host's flag or orb count (network-protocol-v2.md, "Stage 6a"), and the

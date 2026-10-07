@@ -858,11 +858,13 @@ part 60 bytes (D2), then three NUL-terminated strings as in `GAME_INFO_LITE`:
 | 34 | 1 | `NoFriendlyFire` |
 | 35 | 1 | `MouselookFlags` |
 | 36 | 1 | `PitchLockFlags` |
-| 37 | 1 | reserved (was `PacketLossPrevention`; always reliable now) |
-| 38 | 4 | `KillGoal` |
-| 42 | 4 | `PlayTimeAllowed` (fix seconds) |
-| 46 | 2 × 9 | `team_name[blue]`, `team_name[red]` (fixed 9 bytes each) |
-| 64 | … | `game_name`, `mission_title`, `mission_name`, each NUL-terminated |
+| 37 | 1 | `CtfClassicFlags` (protocol 111; was `PacketLossPrevention`) |
+| 38 | 1 | `TeamSpawns` (protocol 114: 0 anywhere, 1 own half, 2 own half away from the flag) |
+| 39 | 1 | `RespawnDelay` (protocol 114: 0–3 s) |
+| 40 | 4 | `KillGoal` |
+| 44 | 4 | `PlayTimeAllowed` (fix seconds) |
+| 48 | 2 × 9 | `team_name[blue]`, `team_name[red]` (fixed 9 bytes each) |
+| 66 | … | `game_name`, `mission_title`, `mission_name`, each NUL-terminated |
 
 D1: the four D2-only bytes are sent as 0 so the layout is shared.
 
@@ -2587,6 +2589,92 @@ Differences from §6.1–§6.4 and decisions:
   every `SecludedSpawns`), more requests than sites (the site farthest
   from ships and reserved sites); `test-net-v2-authority`: round trips and
   malformed sizes of both messages.
+
+#### Team-side spawns and the respawn delay (protocol 114)
+
+- **What.** Two host options under "Advanced Options" → "Spawn Options":
+  - **Team spawns** (`Netgame.TeamSpawns`, team modes only: team anarchy,
+    capture the flag, CTF Classic, team hoard): *anywhere* (as before:
+    every start, the most secluded first), *own half* (the starts on the
+    own team's side), *own half, away from the flag* (the own starts at
+    least 200 units by path from the own home goal). Selecting a mode in
+    the setup sets the mode's default: *own half, away from the flag* for
+    CTF Classic, *anywhere* for the others. Saved in the `.ngp`
+    (`TeamSpawns=`; a profile without it gets its mode's default), shown in
+    the game info (Shift+Pause).
+  - **Respawn delay** (`Netgame.RespawnDelay`, 0–3 s, default 0 =
+    classic): a dead player respawns no earlier than this after its ship
+    exploded (the 2 s of the death sequence come first). The HUD counts
+    down ("Respawn in 2"); fire pressed meanwhile respawns the ship when
+    the delay is over. Bots wait the same. Recommended for CTF Classic:
+    2 s. `.ngp`: `RespawnDelay=`.
+- **Sides of the starts** (`common/main/team_spawn.h` `assign_sides`,
+  `similar/main/team_spawns.cpp`). The level designers' convention: no
+  mark in the level file (the RL2 format has no free field: segment
+  special 7+ is rejected, `s2_flags` is recomputed on load, player object
+  ids are overwritten by load order); the geometry decides. A player start
+  belongs to the team whose *home goal* (its largest goal segment, the
+  home of its flag, `net_modes_home_segment`) is nearer by path: the
+  shortest path from the start's segment to the goal segment through
+  ship-passable sides (no wall, an open side, an illusion, a door of any
+  kind, a blastable wall; not solid or cloaked walls), measured centre →
+  side centre → centre. If the two distances are within 15 % of each
+  other, or a home goal is missing or unreachable, the start is
+  *neutral* (either team's). A level without any goal (team anarchy) is
+  split into two halves: the two starts farthest apart by path are the
+  seeds (the lower numbered one blue), every start goes to the nearer
+  seed, and the halves are balanced so that each team gets at least half
+  of the starts (rounded down). Every machine computes the same sides
+  when it first needs them in a level; the game log lists them
+  (`team spawns: start N (segment S, x X): blue, … u to the blue home,
+  … u to the red home`).
+- **Choice.** The candidates for a player of a team are the sites of the
+  best *tier* that has a free (not reserved) site (`site_tier`,
+  `partition_by_tier`):
+  - own half: own starts, then neutral starts, then all;
+  - away from the flag: own starts ≥ 200 u from the own home goal; the
+    own start farthest from it; the other own starts; the neutral starts;
+    all starts; a start in the own flag room (< 60 u by path from the home
+    goal) only when nothing else is left. A team without a home goal
+    plays "own half".
+  Among the candidates the draw is as before (`SecludedSpawns` + 1 best,
+  300-unit check), ranked by the distance to the nearest *enemy*; a
+  teammate counts only when it sits on the site (< 30 u); while an enemy
+  carries the own flag, by the distance to that carrier (the defender
+  respawns away from the carrier's escape route, not onto it). The host
+  decides as before (§8 "Host-assigned spawns"); bots and clients that
+  choose themselves (no answer) use the same rules.
+- **Level start.** `net_udp_send_sync`: the teams take turns, one player
+  at a time, each taking a random start of its best tier with a free
+  start (`assign_start_locations`); `LEVEL_START` carries the result as
+  before.
+- **Respawn delay, host.** The host notes when each ship exploded
+  (`MULTI_PLAYER_DERES`) and holds back a `SPAWN_REQUEST` that comes more
+  than ¼ s early until the delay has passed (`net_spawn_frame`).
+- **Tests.** `test-team-spawn`: sides on synthetic levels (two bases,
+  the 15 % margin, path not straight distance, a missing or unreachable
+  goal, no goals with even, odd and uneven start counts), the tiers of
+  each rule with the 200 u filter and its fallbacks, the choice under
+  reservations, the score with the carrier rule, the level start
+  placement (200 seeds, 4 v 4 and 5 v 2). Arena (`-botarena-spawns N`,
+  `-botarena-respawn-delay N`; the summary's `spawns:` lines give the
+  spawns per side and the mean path to the own home), CTF Classic, 6 bots,
+  4 seeds × 10 min each, captures per 10 min (both teams):
+
+  | Level | anywhere | own half | away | away + 2 s delay |
+  |---|---|---|---|---|
+  | Corona 1 | 12.5 | 14.0 | 14.0 | 12.8 |
+  | SNYTEK-P 6 | 26.5 | 30.3 | 30.3 | 30.0 |
+  | X-Loom 1 | 11.0 | 10.3 | 10.3 | 7.0 |
+
+  Sides: Corona and SNYTEK-P 6 4 blue / 4 red, X-Loom 2 / 2 / 4 neutral;
+  SNYTEK-P 1, 2, 9, Tynos and Peekaboo all neutral (symmetric, or within
+  15 %), SNYTEK-P 3 all neutral (goals behind switch walls). Mean path to
+  the own home after a respawn: Corona 548 u anywhere → 438 u, SNYTEK-P 6
+  656 → 564 u, X-Loom 798 → 591 u. On these levels no own start lies
+  within 200 u of its home, so "away" equals "own half"; it differs on
+  levels with starts near the flag rooms.
+- **Version.** `MULTI_PROTO_VERSION` and `NET_V2_PROTO_VERSION` are 114.
 
 ### Stage 4 — Firing, hits, damage, kills, respawn with lag compensation
 

@@ -73,6 +73,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "sounds.h"
 #include "args.h"
 #include "gameseq.h"
+#include "team_spawn.h"
 #include "gamefont.h"
 #include "newmenu.h"
 #include "hudmsg.h"
@@ -2339,10 +2340,39 @@ public:
 	 * are where their newest state has them, not at their delayed
 	 * (interpolated) place.
 	 */
+	/* Team-side spawns (team_spawn.h; a network team game whose host
+	 * chose "Own half" or "Own half, away from the flag"): the sites are
+	 * ranked by the distance to the nearest enemy (a teammate counts only
+	 * when it sits on the site), or, while an enemy carries the own flag,
+	 * by the distance to that carrier; the candidates are the sites of
+	 * the best tier for the player's team that has a free site.
+	 */
 	respawn_locations(fvmobjptr &vmobjptr, fvcsegptridx &vcsegptridx, const playernum_t player_num, const per_player_array<bool> *const site_open = nullptr, const fix64 *const reservations_now = nullptr)
 	{
-		const auto find_closest_player = [player_num, &vmobjptr, &vcsegptridx, reservations_now](const obj_position &candidate) {
+		namespace ts = ::dcx::team_spawn;
+#if DXX_USE_MULTIPLAYER
+		const auto own_team{team_spawn_rule() != ts::rule::anywhere ? team_spawn_team_of(player_num) : std::nullopt};
+#else
+		const std::optional<uint8_t> own_team;
+#endif
+		const bool team_rule{own_team && *own_team < ts::TEAMS};
+		/* The enemy that carries the own flag. */
+		std::optional<playernum_t> carrier;
+#if DXX_USE_MULTIPLAYER && DXX_BUILD_DESCENT == 2
+		if (team_rule && game_mode_capture_flag(Game_mode))
+			for (playernum_t i = N_players; i--;)
+			{
+				if (i == player_num || team_spawn_team_of(i) == own_team)
+					continue;
+				const auto &&objp = vmobjptr(vcplayerptr(i)->objnum);
+				if (objp->type == object_type::OBJ_PLAYER && +(objp->ctype.player_info.powerup_flags & player_flag::has_team_flag))
+					carrier = i;
+			}
+#endif
+		const auto find_closest_player = [player_num, &vmobjptr, &vcsegptridx, reservations_now, team_rule, own_team, carrier](const obj_position &candidate) {
 			fix closest_dist = INT32_MAX;
+			double nearest_enemy{ts::UNREACHABLE}, nearest_teammate{ts::UNREACHABLE};
+			std::optional<double> carrier_dist;
 			const auto &&candidate_segp = vcsegptridx(candidate.segnum);
 			for (playernum_t i = N_players; i--;)
 			{
@@ -2363,8 +2393,24 @@ public:
 				const auto dist = find_connected_distance(pos, candidate_segp.absolute_sibling(segnum), candidate.pos, candidate_segp, -1, wall_is_doorway_mask::None);
 				if (dist >= 0 && closest_dist > dist)
 					closest_dist = dist;
+				if (team_rule && dist >= 0)
+				{
+					const double d{f2fl(dist)};
+#if DXX_USE_MULTIPLAYER
+					auto &nearest{team_spawn_team_of(i) == own_team ? nearest_teammate : nearest_enemy};
+#else
+					auto &nearest{nearest_enemy};
+#endif
+					if (d < nearest)
+						nearest = d;
+					if (carrier == i)
+						carrier_dist = d;
+				}
 			}
-			return closest_dist;
+			if (!team_rule)
+				return closest_dist;
+			const double score{ts::spawn_score(nearest_enemy, nearest_teammate, carrier_dist)};
+			return score >= f2fl(INT32_MAX) ? fix{INT32_MAX} : fl2f(score);
 		};
 		const auto max_spawn_sites = std::min<unsigned>(NumNetPlayerPositions, sites.size());
 		for (playernum_t i = max_spawn_sites; i--;)
@@ -2376,7 +2422,10 @@ public:
 		const auto reserved = [reservations_now](const int site_index) {
 			return Spawn_reservations.reserved(static_cast<unsigned>(site_index), *reservations_now);
 		};
-		if (reservations_now)
+		/* A team player's ranking ignores the reserved sites (most are
+		 * its teammates'); they are only left out below.
+		 */
+		if (reservations_now && !team_rule)
 			count_reserved_spawn_sites(std::span<site>(sites.data(), max_spawn_sites), reserved, [&vcsegptridx](const int a, const int b) {
 				const auto &pa{Player_init[a]};
 				const auto &pb{Player_init[b]};
@@ -2392,6 +2441,15 @@ public:
 			if (const auto open{static_cast<unsigned>(std::distance(sites.begin(), open_end))})
 				candidate_sites = open;
 		}
+#if DXX_USE_MULTIPLAYER
+		if (team_rule)
+			candidate_sites = ts::partition_by_tier(std::span<site>(sites.data(), candidate_sites), [player_num](const int site_index) {
+				return team_spawn_tier(player_num, static_cast<unsigned>(site_index));
+			}, [&reserved, reservations_now](const int site_index) {
+				return reservations_now && reserved(site_index);
+			});
+		else
+#endif
 		if (reservations_now)
 			candidate_sites = partition_free_spawn_sites(std::span<site>(sites.data(), candidate_sites), reserved);
 		max_usable_spawn_sites = rank_secluded_spawn_sites(std::span<site>(sites.data(), candidate_sites), Netgame.SecludedSpawns + 1);
@@ -2418,6 +2476,9 @@ spawn_choice draw_spawn(const respawn_locations &locations, const playernum_t pn
 	const auto site{pick_spawn_site(locations.get_sites(), locations.get_usable_sites(), i2f(15*20), MAX_PLAYERS * 2, std::forward<Draw>(draw))};
 	if (reservations_now)
 		Spawn_reservations.reserve(static_cast<unsigned>(site), *reservations_now, SPAWN_RESERVATION_TIME, pnum);
+#if DXX_USE_MULTIPLAYER
+	team_spawn_note(pnum, static_cast<unsigned>(site));
+#endif
 	return {spawn_choice::kind::site, static_cast<unsigned>(site)};
 }
 
