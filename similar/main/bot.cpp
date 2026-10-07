@@ -6404,6 +6404,9 @@ void explode(bot_state &bs, object &obj, const d_robot_info_array &Robot_info)
 #endif
 	bs.life = bot_life::dead;
 	bs.respawn_at = GameTime64 + to_fix(bs.rng.uniform(BOT_RESPAWN_MIN_S, BOT_RESPAWN_MAX_S));
+	/* The host's respawn delay holds bots back as it holds humans. */
+	if (!(Game_mode & GM_MULTI_COOP))
+		bs.respawn_at += i2f(std::min<unsigned>(Netgame.RespawnDelay, ::dcx::team_spawn::RESPAWN_DELAY_LIMIT));
 }
 
 /* Section 4.8, step 3: respawn at a spawn site. */

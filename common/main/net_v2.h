@@ -52,11 +52,12 @@ constexpr net_clock net_milliseconds(const net_clock ms)
  * ADDRESS_SEEN, 109: CAPTURE, 110: ORB_BONUS, 111: CTF Classic,
  * CTF_NOTICE, 112: custom ships, SHIP_INFO and the ASSET_* transfer,
  * net_v2_ships.h, 113: taunts, TAUNT_REQUEST and TAUNT,
- * Documentation/taunts.md);
+ * Documentation/taunts.md, 114: TeamSpawns and RespawnDelay in
+ * GAME_SETTINGS);
  * named differently so that the two never shadow each other in a
  * translation unit that sees both.
  */
-constexpr std::uint16_t NET_V2_PROTO_VERSION{113};
+constexpr std::uint16_t NET_V2_PROTO_VERSION{114};
 constexpr std::size_t NET_V2_HEADER_SIZE{34};
 constexpr std::size_t NET_V2_MAX_PACKET{1200};
 constexpr std::size_t NET_V2_ACK_BITS{64};

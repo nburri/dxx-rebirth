@@ -71,6 +71,28 @@ struct client_spawn_state
 
 client_spawn_state C;
 
+/* The respawn delay (Netgame.RespawnDelay), host side: when each ship
+ * exploded (its MULTI_PLAYER_DERES), and the request held back until
+ * the delay has passed.  A client that keeps the delay asks no earlier;
+ * the slack covers the way of the explosion message to the host.
+ */
+constexpr fix64 RESPAWN_DELAY_SLACK{F1_0 / 4};
+
+struct held_request
+{
+	bool held{};
+	uint8_t request{};
+	fix64 due{};
+};
+
+struct host_spawn_state
+{
+	per_player_array<fix64> exploded{};
+	per_player_array<held_request> held{};
+};
+
+host_spawn_state H;
+
 /* A network deathmatch, played (not a demo played back). */
 [[nodiscard]]
 bool spawns_assigned()
@@ -94,6 +116,17 @@ void host_receive_request(const playernum_t from, const std::span<const uint8_t>
 	const auto rq{nv::spawn_request_msg::read(payload)};
 	if (!rq || from == Player_num || from >= N_players || !spawns_assigned())
 		return;
+	if (const auto delay{Netgame.RespawnDelay})
+	{
+		const fix64 now{timer_query()};
+		if (const auto exploded{H.exploded[from]}; exploded && now < exploded + i2f(delay) - RESPAWN_DELAY_SLACK)
+		{
+			H.held[from] = {true, rq->request, exploded + i2f(delay) - RESPAWN_DELAY_SLACK};
+			con_printf(CON_VERBOSE, "net: spawn request %u of P#%u held back for the respawn delay", rq->request, from);
+			return;
+		}
+	}
+	H.held[from].held = false;
 	auto &Objects = LevelUniqueObjectState.Objects;
 	send_site(from, rq->request, assign_spawn(Objects.vmptr, from));
 }
@@ -121,7 +154,35 @@ void client_receive_site(const std::span<const uint8_t> payload)
 void net_spawn_level_start()
 {
 	C = {};
+	H = {};
 	spawn_reservations_reset();
+}
+
+void net_spawn_host_exploded(const playernum_t pnum)
+{
+	if (pnum < H.exploded.size() && spawns_assigned() && multi_i_am_master())
+	{
+		H.exploded[pnum] = timer_query();
+		H.held[pnum].held = false;
+	}
+}
+
+void net_spawn_frame()
+{
+	if (!spawns_assigned() || !multi_i_am_master())
+		return;
+	const fix64 now{timer_query()};
+	for (playernum_t i = 0; i < H.held.size(); ++i)
+	{
+		auto &h{H.held[i]};
+		if (!h.held || now < h.due)
+			continue;
+		h.held = false;
+		if (i >= N_players || i == Player_num || vcplayerptr(i)->connected != player_connection_status::playing)
+			continue;
+		auto &Objects = LevelUniqueObjectState.Objects;
+		send_site(i, h.request, assign_spawn(Objects.vmptr, i));
+	}
 }
 
 bool net_spawn_ready()

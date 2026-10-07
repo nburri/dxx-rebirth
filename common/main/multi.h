@@ -57,6 +57,7 @@ enum class multi_macro_message_index : uint8_t
 #include "fwd-vecmat.h"
 #include "objnum.h"
 #include "player-callsign.h"
+#include "team_spawn.h"
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -193,8 +194,9 @@ static inline player_ship_color get_team_color(const team_number tnum)
  * 112: custom ships (SHIP_INFO, ASSET_*; Documentation/custom-ships.md).
  * 113: taunts (TAUNT_REQUEST, TAUNT, own samples as asset kind 2;
  * Documentation/taunts.md).
+ * 114: team-side spawns and the respawn delay in GAME_SETTINGS.
  */
-constexpr std::uint16_t MULTI_PROTO_VERSION{113};
+constexpr std::uint16_t MULTI_PROTO_VERSION{114};
 // PROTOCOL VARIABLES AND DEFINES - END
 
 /* The network tick rate (positions per second, and the pacing of every
@@ -964,6 +966,14 @@ struct netgame_info : prohibit_void_ptr<>
 	 * CTF_RULE_* bits of net_v2_modes.h, game modes, stage 6a).
 	 */
 	uint8_t CtfClassicFlags{};
+	/* Team-side spawns: the rule of team_spawn.h (0 anywhere, 1 own half,
+	 * 2 own half away from the flag; protocol 114).
+	 */
+	uint8_t TeamSpawns{};
+	/* Seconds a dead player waits on top of the death sequence before
+	 * it may respawn (0 to 3; protocol 114).
+	 */
+	uint8_t RespawnDelay{};
 	ubyte						NoFriendlyFire;
 	per_team_array<callsign_t>						team_name;
 	per_player_array<uint32_t>						locations;
@@ -1219,6 +1229,42 @@ void net_ships_taunt_owner(playernum_t slot, std::span<const uint8_t, 32> hash, 
  * assign its first spawn and send it ahead of LEVEL_GO.
  */
 void net_spawn_host_join(playernum_t pnum);
+/* The host: player `pnum`'s ship exploded (MULTI_PLAYER_DERES); its
+ * respawn may come Netgame.RespawnDelay seconds later.
+ */
+void net_spawn_host_exploded(playernum_t pnum);
+/* The host: answer the respawn requests held back for the respawn
+ * delay (every frame).
+ */
+void net_spawn_frame();
+
+/* Team-side spawns (similar/main/team_spawns.cpp, team_spawn.h,
+ * Documentation/network-protocol-v2.md section 8, "Team-side spawns").
+ */
+/* The rule in force: Netgame.TeamSpawns in a network team game,
+ * "anywhere" otherwise.
+ */
+[[nodiscard]]
+::dcx::team_spawn::rule team_spawn_rule();
+/* The team of player `pnum` in a team game. */
+[[nodiscard]]
+std::optional<uint8_t> team_spawn_team_of(playernum_t pnum);
+/* How good start `site` is for player `pnum` under the rule (0 best,
+ * ::dcx::team_spawn::site_tier).
+ */
+[[nodiscard]]
+unsigned team_spawn_tier(playernum_t pnum, unsigned site);
+/* The host at level start: the start position of each of the first
+ * `site_count` slots under the rule (false: the rule is "anywhere",
+ * `locations` unchanged).
+ */
+bool team_spawn_assign_locations(per_player_array<uint32_t> &locations, unsigned site_count, uint32_t seed);
+/* A spawn of player `pnum` at `site` (statistics; verbose log). */
+void team_spawn_note(playernum_t pnum, unsigned site);
+/* Level start: the sides are computed again when next needed. */
+void team_spawn_level_start();
+/* The arena's summary: the spawns per team and side, the paths home. */
+void team_spawn_print_stats();
 
 /* Stage 4 additions to the object authority (net_objects.cpp). */
 /* The host applied `amount` of damage to the client in slot `pnum`: into

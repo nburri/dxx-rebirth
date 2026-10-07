@@ -450,6 +450,10 @@ static void ReadCmdArgs(Inilist &ini, Arglist &&Args)
 			CGameArg.DbgBotArenaMode = arg_string(pp, end);
 		else if (!d_stricmp(p, "-botarena-ctf-rules"))
 			CGameArg.DbgBotArenaCtfRules = static_cast<int>(std::clamp<long>(arg_integer(pp, end), 0, 15));
+		else if (!d_stricmp(p, "-botarena-spawns"))
+			CGameArg.DbgBotArenaSpawns = static_cast<int>(std::clamp<long>(arg_integer(pp, end), 0, 2));
+		else if (!d_stricmp(p, "-botarena-respawn-delay"))
+			CGameArg.DbgBotArenaRespawnDelay = static_cast<int>(std::clamp<long>(arg_integer(pp, end), 0, 3));
 		else if (!d_stricmp(p, "-botarena-seed"))
 			CGameArg.DbgBotArenaSeed = static_cast<uint32_t>(std::clamp<long>(arg_integer(pp, end), 1, 0x7fffffff));
 		else if (!d_stricmp(p, "-botarena-reactor"))

@@ -1613,6 +1613,8 @@ constexpr std::integral_constant<unsigned, 5 * reactor_invul_time_mini_scale> re
 	DXX_MENUITEM(VERB, TEXT, "Spawn Options", spawn_label)	                   \
 	DXX_MENUITEM(VERB, SLIDER, SecludedSpawnText, opt_secluded_spawns, Netgame.SecludedSpawns, 0, MAX_PLAYERS - 1)	\
 	DXX_MENUITEM(VERB, SLIDER, SpawnInvulnerableText, opt_start_invul, Netgame.InvulAppear, 0, 8)	\
+	DXX_MENUITEM(VERB, SLIDER, TeamSpawnText, opt_team_spawns, Netgame.TeamSpawns, 0, ::dcx::team_spawn::RULE_COUNT - 1)	\
+	DXX_MENUITEM(VERB, SLIDER, RespawnDelayText, opt_respawn_delay, Netgame.RespawnDelay, 0, ::dcx::team_spawn::RESPAWN_DELAY_LIMIT)	\
 	DXX_MENUITEM(VERB, TEXT, "", blank_2)                                     \
 	DXX_MENUITEM(VERB, TEXT, "Object Options", powerup_label)	                \
 	DXX_MENUITEM(VERB, CHECK, "Shuffle powerups in anarchy games", opt_shuffle_powerups, Netgame.ShufflePowerupSeed)	\
@@ -1636,6 +1638,16 @@ constexpr std::integral_constant<unsigned, 5 * reactor_invul_time_mini_scale> re
 	DXX_MENUITEM(VERB, TEXT, "Network port", opt_label_port)	\
 	DXX_MENUITEM(VERB, INPUT, portstring, opt_port)	\
 	DXX_UDP_MENU_TRACKER_OPTION(VERB)
+
+/* The team spawn rule a mode starts with. */
+static ::dcx::team_spawn::rule netgame_default_team_spawns()
+{
+#if DXX_BUILD_DESCENT == 2
+	return ::dcx::team_spawn::default_rule(Netgame.gamemode == network_game_type::capture_flag && (Netgame.CtfClassicFlags & ctf_rule::classic));
+#else
+	return ::dcx::team_spawn::default_rule(false);
+#endif
+}
 
 static unsigned MouselookMPFlag(const unsigned game_is_cooperative)
 {
@@ -1742,6 +1754,8 @@ protected:
 	char PlayText[sizeof("Max time: 1092 min")];
 	char SpawnInvulnerableText[sizeof("Invul. Time: 0.0 sec")];
 	char SecludedSpawnText[sizeof("Use 0 Furthest Sites")];
+	char TeamSpawnText[sizeof("Team spawns: own half, away from flag")];
+	char RespawnDelayText[sizeof("Respawn delay: 0 s")];
 	char KillText[sizeof("Kill goal: 000 kills")];
 	char extraPrimary[sizeof("Primaries: 0")];
 	char extraSecondary[sizeof("Secondaries: 0")];
@@ -1830,6 +1844,14 @@ public:
 		cf_assert(SecludedSpawns < MAX_PLAYERS);
 		snprintf(SecludedSpawnText, sizeof(SecludedSpawnText), "Use %u Furthest Sites", SecludedSpawns + 1);
 	}
+	void update_team_spawn_string()
+	{
+		snprintf(TeamSpawnText, sizeof(TeamSpawnText), "Team spawns: %s", ::dcx::team_spawn::rule_text(::dcx::team_spawn::rule_from_byte(Netgame.TeamSpawns)));
+	}
+	void update_respawn_delay_string()
+	{
+		snprintf(RespawnDelayText, sizeof(RespawnDelayText), "Respawn delay: %u s", static_cast<unsigned>(Netgame.RespawnDelay));
+	}
 	void update_kill_goal_string()
 	{
 		snprintf(KillText, sizeof(KillText), "Kill Goal: %3d", Netgame.KillGoal * 5);
@@ -1852,6 +1874,8 @@ public:
 		update_max_play_time_string();
 		update_spawn_invuln_string();
 		update_secluded_spawn_string();
+		update_team_spawn_string();
+		update_respawn_delay_string();
 		update_kill_goal_string();
 		auto primary = Netgame.DuplicatePowerups.get_primary_count();
 		auto secondary = Netgame.DuplicatePowerups.get_secondary_count();
@@ -2059,6 +2083,16 @@ window_event_result more_game_options_menu::event_handler(const d_event &event)
 				Netgame.SecludedSpawns = menus[opt_secluded_spawns].value;
 				update_secluded_spawn_string();
 			}
+			else if (citem == opt_team_spawns)
+			{
+				Netgame.TeamSpawns = static_cast<uint8_t>(::dcx::team_spawn::rule_from_byte(menus[opt_team_spawns].value));
+				update_team_spawn_string();
+			}
+			else if (citem == opt_respawn_delay)
+			{
+				Netgame.RespawnDelay = static_cast<uint8_t>(menus[opt_respawn_delay].value);
+				update_respawn_delay_string();
+			}
 			else if (citem == opt_tickrate)
 				update_tickrate_string(menus[opt_tickrate].value);
 			break;
@@ -2170,6 +2204,10 @@ static int net_udp_game_param_handler( newmenu *menu,const d_event &event, param
 
 			if ((citem >= opt->mode) && (citem <= opt->mode_end))
 			{
+				const auto old_mode{Netgame.gamemode};
+#if DXX_BUILD_DESCENT == 2
+				const auto old_classic{Netgame.CtfClassicFlags & ctf_rule::classic};
+#endif
 				if ( menus[opt->anarchy].value )
 					Netgame.gamemode = network_game_type::anarchy;
 				
@@ -2210,6 +2248,17 @@ static int net_udp_game_param_handler( newmenu *menu,const d_event &event, param
 				else if ( menus[opt->coop].value ) 
 					Netgame.gamemode = network_game_type::cooperative;
 				else Int3(); // Invalid mode -- see Rob
+				/* Another mode: team-side spawns start as the mode's
+				 * default ("Own half, away from the flag" for capture
+				 * the flag (Classic), "Anywhere" else); Advanced Options
+				 * change it.
+				 */
+				if (Netgame.gamemode != old_mode
+#if DXX_BUILD_DESCENT == 2
+					|| (Netgame.CtfClassicFlags & ctf_rule::classic) != old_classic
+#endif
+					)
+					Netgame.TeamSpawns = static_cast<uint8_t>(netgame_default_team_spawns());
 			}
 
 			if (menus[opt->closed].value)
@@ -2304,12 +2353,19 @@ static void net_udp_setup_defaults()
 #if DXX_BUILD_DESCENT == 2
 	Netgame.CtfClassicFlags = ctf_rule::defaults;
 #endif
+	/* Unset: a profile without TeamSpawns= (older pilots) gets the
+	 * default of its mode below.
+	 */
+	Netgame.TeamSpawns = UINT8_MAX;
+	Netgame.RespawnDelay = 0;
 
 #if DXX_USE_TRACKER
 	Netgame.Tracker = 1;
 #endif
 
 	read_netgame_profile(&Netgame);
+	if (Netgame.TeamSpawns >= ::dcx::team_spawn::RULE_COUNT)
+		Netgame.TeamSpawns = static_cast<uint8_t>(netgame_default_team_spawns());
 	if (!netgame_tick_rate_valid(Netgame.TickRate))
 		Netgame.TickRate = NETGAME_TICK_RATE_DEFAULT;
 
@@ -2530,6 +2586,8 @@ static int net_udp_send_sync(void)
 		 */
 		std::minstd_rand mrd(timer_query());
 		std::shuffle(locations.begin(), locations.end(), mrd);
+		/* Team-side spawns: every team player on its own side. */
+		team_spawn_assign_locations(Netgame.locations, supported_start_positions_on_level, static_cast<uint32_t>(timer_query()));
 	}
 
 	// Push current data into the level start messages

@@ -169,6 +169,12 @@ struct CArg : prohibit_void_ptr<>
 	 * team returns, 8 score only with own flag home); -1: the defaults.
 	 */
 	int DbgBotArenaCtfRules{-1};
+	/* -botarena-spawns N: the team spawn rule (team_spawn.h: 0 anywhere,
+	 * 1 own half, 2 own half away from the flag); -1: the mode's default.
+	 * -botarena-respawn-delay N: the respawn delay, 0 to 3 s.
+	 */
+	int DbgBotArenaSpawns{-1};
+	int DbgBotArenaRespawnDelay{0};
 #if DXX_USE_SHAREPATH
 	bool SysNoHogDir;
 #endif

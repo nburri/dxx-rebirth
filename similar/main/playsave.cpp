@@ -86,6 +86,8 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #define ControlInvulTimeStr "control_invul_time"
 #define TickRateStr "TickRate"
 #define CtfClassicStr "CtfClassic"
+#define TeamSpawnsStr "TeamSpawns"
+#define RespawnDelayStr "RespawnDelay"
 #define NoFriendlyFireStr "NoFriendlyFire"
 #define MouselookFlagsStr "Mouselook"
 #define PitchLockFlagsStr "PitchLockRelease"
@@ -1862,6 +1864,16 @@ void read_netgame_profile(netgame_info *ng)
 			if (const auto r{convert_integer<unsigned>(value)})
 				ng->CtfClassicFlags = static_cast<uint8_t>(*r & 0xff);
 		}
+		else if (compare_nonterminated_name(name, TeamSpawnsStr))
+		{
+			if (const auto r{convert_integer<unsigned>(value)}; r && *r < ::dcx::team_spawn::RULE_COUNT)
+				ng->TeamSpawns = static_cast<uint8_t>(*r);
+		}
+		else if (compare_nonterminated_name(name, RespawnDelayStr))
+		{
+			if (const auto r{convert_integer<unsigned>(value)}; r && *r <= ::dcx::team_spawn::RESPAWN_DELAY_LIMIT)
+				ng->RespawnDelay = static_cast<uint8_t>(*r);
+		}
 		else if (compare_nonterminated_name(name, NoFriendlyFireStr))
 			convert_integer(ng->NoFriendlyFire, value);
 		else if (compare_nonterminated_name(name, MouselookFlagsStr))
@@ -1923,6 +1935,8 @@ void write_netgame_profile(const netgame_info *ng)
 	PHYSFSX_printf(file, ControlInvulTimeStr "=%i\n", ng->control_invul_time);
 	PHYSFSX_printf(file, TickRateStr "=%i\n", ng->TickRate);
 	PHYSFSX_printf(file, CtfClassicStr "=%i\n", ng->CtfClassicFlags);
+	PHYSFSX_printf(file, TeamSpawnsStr "=%i\n", ng->TeamSpawns);
+	PHYSFSX_printf(file, RespawnDelayStr "=%i\n", ng->RespawnDelay);
 	PHYSFSX_printf(file, NoFriendlyFireStr "=%i\n", ng->NoFriendlyFire);
 	PHYSFSX_printf(file, MouselookFlagsStr "=%i\n", ng->MouselookFlags);
 	PHYSFSX_printf(file, PitchLockFlagsStr "=%i\n", ng->PitchLockFlags);
