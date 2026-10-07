@@ -277,6 +277,13 @@ void connection::set_peer_tick(tick_period peer_tick)
 	m_seq_jump_bound = static_cast<std::int16_t>(std::min<net_clock>(ticks * per_tick * NET_V2_SEQ_JUMP_MARGIN, 0x7fff));
 }
 
+void connection::set_max_packets_per_tick(const unsigned packets)
+{
+	m_config.max_packets_per_tick = std::max(packets, 2u);
+	/* The jump bound is a function of the packets per tick. */
+	set_peer_tick(m_config.peer_tick);
+}
+
 void connection::set_timeouts(const net_clock timeout, const net_clock unacked_timeout)
 {
 	m_config.timeout = std::max<net_clock>(timeout, 1);
@@ -610,7 +617,14 @@ std::span<const std::uint8_t> connection::build_outgoing(const net_clock now)
 	if (!header_due && !messages_due)
 		return {};
 	const bool opens_tick{!m_tick_open || m_tick_packets >= m_tick_budget || !m_tick_backlog};
-	if (opens_tick && m_tick_credit == 0)
+	/* A bulk transfer from the peer (many packets with reliable messages
+	 * per tick): an ack every NET_V2_ACK_EVERY such packets, outside the
+	 * tick's budget, so that no packet falls out of the 64-packet ack
+	 * bitfield unacknowledged (the peer would resend what arrived).  It
+	 * carries the header only.
+	 */
+	const bool ack_only{opens_tick && m_tick_credit == 0 && m_ack_owed && m_packets_unacked >= NET_V2_ACK_EVERY};
+	if (opens_tick && m_tick_credit == 0 && !ack_only)
 		return {};
 
 	/* Select the reliable messages: resends first, then new ones, each
@@ -684,7 +698,13 @@ std::span<const std::uint8_t> connection::build_outgoing(const net_clock now)
 		if (reserved + event_size <= NET_V2_MAX_PACKET - NET_V2_HEADER_SIZE)
 			reserved += event_size;
 	}
-	select(reserved);
+	if (ack_only)
+	{
+		m_carried.clear();
+		m_runs.clear();
+	}
+	else
+		select(reserved);
 	if (!header_due && m_carried.empty())
 		/* Something is due but did not fit this time; never emit an
 		 * empty packet for it, or the caller's send loop would not end.
@@ -736,7 +756,11 @@ std::span<const std::uint8_t> connection::build_outgoing(const net_clock now)
 	 */
 	const auto needed{plan.packets};
 	const auto budget_now{std::max(m_config.max_packets_per_tick, needed > 1 ? needed + 1 : 0u)};
-	if (opens_tick)
+	if (ack_only)
+	{
+		/* Outside the tick: its budget and credit stay as they are. */
+	}
+	else if (opens_tick)
 	{
 		--m_tick_credit;
 		m_tick_open = true;
@@ -785,14 +809,15 @@ std::span<const std::uint8_t> connection::build_outgoing(const net_clock now)
 		++m_stats.message_sends;
 		log.msg_seqs.push_back(m.seq);
 	}
-	write_state_parts(buf, pos);
+	if (!ack_only)
+		write_state_parts(buf, pos);
 	/* Events: every one that fits, in queue order; one that does not fit
 	 * is skipped (not a head-of-line block) and dropped once it has been
 	 * skipped NET_V2_EVENT_SKIP_MAX times.  Sent and dropped ones free
 	 * their slot; the kept ones' indices close up behind the head.
 	 */
 	std::size_t kept{};
-	for (std::size_t i{}; i != m_events_count; ++i)
+	for (std::size_t i{}; i != m_events_count && !ack_only; ++i)
 	{
 		const auto slot{event_index(i)};
 		auto &e{m_event_slots[slot]};
@@ -813,7 +838,8 @@ std::span<const std::uint8_t> connection::build_outgoing(const net_clock now)
 		std::copy_n(e.data.data(), e.size, buf + pos);
 		pos += e.size;
 	}
-	m_events_count = kept;
+	if (!ack_only)
+		m_events_count = kept;
 
 	packet_header h;
 	h.session_id = m_config.session_id;
@@ -845,7 +871,8 @@ std::span<const std::uint8_t> connection::build_outgoing(const net_clock now)
 	log.seq = seq;
 	log.sent_at = now;
 	m_last_sent = now;
-	++m_tick_packets;
+	if (!ack_only)
+		++m_tick_packets;
 	/* Judged now, not at the next call: messages queued in between
 	 * belong to the next tick.
 	 */
@@ -855,6 +882,7 @@ std::span<const std::uint8_t> connection::build_outgoing(const net_clock now)
 	 */
 	m_tick_backlog = any_message_due() || any_state_pending() || m_events_count != 0;
 	m_ack_owed = false;
+	m_packets_unacked = 0;
 	++m_stats.packets_sent;
 	return {buf, pos};
 }
@@ -1179,6 +1207,7 @@ void connection::deliver_reliable(const net_clock now)
 	if (!had_pending || !m_report_reliable.empty())
 		m_recv_gap_since = now;
 	m_ack_owed = true;
+	++m_packets_unacked;
 }
 
 std::optional<std::uint16_t> &connection::latest_for(const chunk_type type, const unsigned part)

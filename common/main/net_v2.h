@@ -100,7 +100,11 @@ constexpr net_clock NET_V2_RTO_MAX{net_milliseconds(1000)};
 
 /* Section 3.6 */
 constexpr unsigned NET_V2_QUEUE_MAX_MESSAGES{512};
-constexpr std::size_t NET_V2_QUEUE_MAX_BYTES{96 * 1024};
+/* 96 KiB until protocol 115; raised for the mission transfer's window
+ * (net_v2_mission.h, MISSION_WINDOW_LOBBY).  A sender's own bound, not
+ * seen on the wire.
+ */
+constexpr std::size_t NET_V2_QUEUE_MAX_BYTES{320 * 1024};
 constexpr net_clock NET_V2_UNACKED_TIMEOUT{net_seconds(10)};
 constexpr net_clock NET_V2_TIMEOUT{net_seconds(5)};
 constexpr net_clock NET_V2_KEEPALIVE_INTERVAL{net_milliseconds(100)};

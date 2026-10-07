@@ -5219,6 +5219,15 @@ class DXXArchive(DXXCommon):
 			'common/misc/sha256.cpp',
 			'common/main/net_v2_transport.cpp',
 			)),
+		# Test of the mission transfer: names, HOG/MN2 checks (fuzzed),
+		# the bundle manifest and hash, the choice by hash, both ends'
+		# state machines, and a 10 MB transfer over the transport through
+		# simulated links (net_v2_mission.h).
+		RuntimeTest('test-net-v2-mission', (
+			'common/unittest/net_v2_mission.cpp',
+			'common/misc/sha256.cpp',
+			'common/main/net_v2_transport.cpp',
+			)),
 		# Not a test: the converter of ship models into custom ship files
 		# (Documentation/custom-ships-authoring.md).
 		RuntimeTest('shipconv', (
