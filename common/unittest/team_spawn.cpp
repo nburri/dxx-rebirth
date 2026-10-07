@@ -173,7 +173,6 @@ void test_missing_or_unreachable_goal()
 	/* A start in a sealed part of the level: neutral; the others as
 	 * usual.
 	 */
-	auto t{corridor(41, 10)};
 	const auto sealed{graph::build(43, [] {
 		std::vector<graph::triple> v;
 		for (std::uint32_t i = 0; i + 1 < 41; ++i)
@@ -190,7 +189,6 @@ void test_missing_or_unreachable_goal()
 	CHECK(u.side[0] == BLUE);
 	CHECK(u.side[1] == SIDE_NONE);
 	CHECK(u.side[2] == RED);
-	(void)t;
 }
 
 /* No goals at all (team anarchy): halves around the two starts
@@ -226,10 +224,12 @@ void test_no_goals()
 		CHECK(s.side[1] == BLUE);
 	}
 	{
-		/* Odd count, symmetric: 3 + 2 or 2 + 3. */
+		/* Odd count, symmetric: the seeds 0 and 40, the middle start
+		 * (equal distances) blue: 3 + 2.
+		 */
 		const std::vector<std::uint32_t> starts{0, 10, 20, 30, 40};
 		const auto s{assign_sides(g, starts, {})};
-		CHECK(s.count(BLUE) >= 2 && s.count(RED) >= 2);
+		CHECK(s.side == (std::vector<std::uint8_t>{BLUE, BLUE, BLUE, RED, RED}));
 	}
 	{
 		/* One start: nothing to split. */
@@ -415,8 +415,8 @@ void test_score()
 	CHECK(usable == 2);
 	CHECK(sites[0].first == 4);	/* 280 from the carrier */
 	CHECK(sites[1].first == 3);	/* 180 */
-	/* Without the carrier rule the nearest enemy (at 380) decides:
-	 * site 0 (380 away) first.
+	/* Without the carrier rule both enemies count (the carrier at 120,
+	 * the other at 380): site 0 (120 from the nearer) first.
 	 */
 	std::vector<std::pair<int, double>> plain;
 	for (unsigned i = 0; i < site_pos.size(); ++i)
@@ -426,7 +426,7 @@ void test_score()
 		plain.push_back({static_cast<int>(i), spawn_score(e < c ? e : c, UNREACHABLE, std::nullopt)});
 	}
 	(void)dcx::rank_secluded_spawn_sites(std::span<std::pair<int, double>>(plain), 2);
-	CHECK(plain[0].first == 4 || plain[0].first == 0);
+	CHECK(plain[0].first == 0);
 }
 
 /* Level start: each team on its own side, all sites distinct. */
@@ -467,10 +467,10 @@ void test_start_locations()
 	/* Anywhere: a plain permutation. */
 	std::minstd_rand rng(7);
 	const auto shuffle = [&rng](std::vector<unsigned> &v) { std::shuffle(v.begin(), v.end(), rng); };
-	const std::vector<std::uint8_t> teams{BLUE, RED, BLUE, RED};
+	const std::vector<std::uint8_t> teams{BLUE, RED, BLUE, RED, SIDE_NONE, SIDE_NONE};
 	const auto loc{assign_start_locations(teams, 6, [](std::uint8_t, unsigned) { return 0u; }, shuffle)};
 	std::set<unsigned> used(loc.begin(), loc.end());
-	CHECK(used.size() == 4);
+	CHECK(used.size() == 6);
 	for (const auto l : loc)
 		CHECK(l < 6);
 }

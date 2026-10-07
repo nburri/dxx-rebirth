@@ -1653,6 +1653,10 @@ window_event_result dead_player_frame(const d_robot_info_array &Robot_info)
 	auto &vmobjptr = Objects.vmptr;
 	auto &vmobjptridx = Objects.vmptridx;
 	static fix	time_dead = 0;
+#if DXX_USE_MULTIPLAYER
+	/* The last "Respawn in N" shown (the respawn delay). */
+	static unsigned shown_seconds;
+#endif
 
 	if (Player_dead_state != player_dead_state::no)
 	{
@@ -1745,7 +1749,6 @@ window_event_result dead_player_frame(const d_robot_info_array &Robot_info)
 #if DXX_USE_MULTIPLAYER
 		if (+(Game_mode & GM_NETWORK) && !(Game_mode & GM_MULTI_COOP) && Netgame.RespawnDelay && Player_dead_state == player_dead_state::exploded)
 		{
-			static unsigned shown_seconds;
 			const fix allowed{DEATH_SEQUENCE_EXPLODE_TIME + i2f(std::min<unsigned>(Netgame.RespawnDelay, ::dcx::team_spawn::RESPAWN_DELAY_LIMIT))};
 			if (time_dead < allowed)
 			{
@@ -1785,7 +1788,12 @@ window_event_result dead_player_frame(const d_robot_info_array &Robot_info)
 		}
 	}
 	else
+	{
 		time_dead = 0;
+#if DXX_USE_MULTIPLAYER
+		shown_seconds = 0;
+#endif
+	}
 
 	return window_event_result::handled;
 }

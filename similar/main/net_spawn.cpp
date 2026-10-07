@@ -82,7 +82,11 @@ struct held_request
 {
 	bool held{};
 	uint8_t request{};
+	/* When it may be answered, and when it came (a client gives up
+	 * after SPAWN_ANSWER_TIMEOUT and chooses itself).
+	 */
 	fix64 due{};
+	fix64 arrived{};
 };
 
 struct host_spawn_state
@@ -121,7 +125,7 @@ void host_receive_request(const playernum_t from, const std::span<const uint8_t>
 		const fix64 now{timer_query()};
 		if (const auto exploded{H.exploded[from]}; exploded && now < exploded + i2f(delay) - RESPAWN_DELAY_SLACK)
 		{
-			H.held[from] = {true, rq->request, exploded + i2f(delay) - RESPAWN_DELAY_SLACK};
+			H.held[from] = {true, rq->request, exploded + i2f(delay) - RESPAWN_DELAY_SLACK, now};
 			con_printf(CON_VERBOSE, "net: spawn request %u of P#%u held back for the respawn delay", rq->request, from);
 			return;
 		}
@@ -178,7 +182,8 @@ void net_spawn_frame()
 		if (!h.held || now < h.due)
 			continue;
 		h.held = false;
-		if (i >= N_players || i == Player_num || vcplayerptr(i)->connected != player_connection_status::playing)
+		/* The client gave up waiting (it chose itself), or left. */
+		if (now - h.arrived >= SPAWN_ANSWER_TIMEOUT || i >= N_players || i == Player_num || vcplayerptr(i)->connected != player_connection_status::playing)
 			continue;
 		auto &Objects = LevelUniqueObjectState.Objects;
 		send_site(i, h.request, assign_spawn(Objects.vmptr, i));
@@ -238,6 +243,12 @@ void net_spawn_host_join(const playernum_t pnum)
 {
 	if (!spawns_assigned() || !multi_i_am_master())
 		return;
+	/* A new player in the slot: nothing held for the previous one. */
+	if (pnum < H.held.size())
+	{
+		H.held[pnum] = {};
+		H.exploded[pnum] = 0;
+	}
 	auto &Objects = LevelUniqueObjectState.Objects;
 	const auto spawn{assign_spawn(Objects.vmptr, pnum)};
 	if (spawn.what == spawn_choice::kind::site)

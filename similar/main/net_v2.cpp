@@ -644,7 +644,8 @@ constexpr program_version Program_version{DXX_VERSION_MAJORi, DXX_VERSION_MINORi
 /* Stage 1 wire sizes (Documentation/network-protocol-v2.md, sections 4.1,
  * 4.3, 4.4, 4.5 and the stage 1 notes of section 6.10).
  */
-constexpr std::size_t GAME_SETTINGS_FIXED_SIZE{64};
+/* Protocol 114: 66 (TeamSpawns, RespawnDelay). */
+constexpr std::size_t GAME_SETTINGS_FIXED_SIZE{66};
 constexpr std::size_t PLAYER_LIST_ENTRY_SIZE{12};
 constexpr std::size_t PLAYER_LIST_SIZE{MAX_PLAYERS * PLAYER_LIST_ENTRY_SIZE};
 constexpr std::size_t PLAYER_JOINED_SIZE{12};

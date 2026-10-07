@@ -222,7 +222,8 @@ bool team_spawn_assign_locations(per_player_array<uint32_t> &locations, const un
 
 void team_spawn_note(const playernum_t pnum, const unsigned site)
 {
-	if (!(Game_mode & GM_TEAM) || !(Game_mode & GM_NETWORK))
+	/* Only under a team rule: "anywhere" needs no sides. */
+	if (team_spawn_rule() == ts::rule::anywhere)
 		return;
 	const auto team{team_spawn_team_of(pnum)};
 	if (!team || *team >= ts::TEAMS)
