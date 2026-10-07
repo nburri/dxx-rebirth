@@ -1245,7 +1245,15 @@ bool join_in_progress(const _sockaddr &ignore_addr)
 {
 	per_player_array<::dcx::net_v2::join_peer_view> views{};
 	for (auto &&[i, p] : enumerate(S.peers))
-		views[i] = {.phase = p.ph, .same_address = p.addr == ignore_addr};
+	{
+		/* A joining player still downloading the mission (it has not
+		 * loaded the level) does not hold up the others: the snapshot
+		 * and the extras, which the joins wait for, come after its
+		 * LEVEL_READY.
+		 */
+		const bool downloading{p.ph == peer::phase::joining && !p.has_ready && net_mission_host_requested(static_cast<playernum_t>(i))};
+		views[i] = {.phase = downloading ? peer::phase::none : p.ph, .same_address = p.addr == ignore_addr};
+	}
 	return ::dcx::net_v2::join_in_progress(views, Network_sending_extras || !S.extras_queue.empty());
 }
 
@@ -5057,6 +5065,18 @@ void receive_datagram(const std::span<const uint8_t> datagram, const _sockaddr &
 			return;
 		handle_unreliable(*p, ::dcx::net_v2::unreliable_view{.type = type, .payload = payload});
 	}
+	/* A bulk transfer from the peer (a mission download): its acks go out
+	 * now, not at the end of the frame, so that a slow frame never lets
+	 * a packet fall out of the 64-packet ack bitfield.
+	 */
+	if (p->conn && p->conn->ack_urgent())
+		for (;;)
+		{
+			const auto packet{p->conn->build_outgoing(S.now)};
+			if (packet.empty())
+				break;
+			send_raw(packet, p->addr);
+		}
 }
 
 void read_sockets()

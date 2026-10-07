@@ -126,6 +126,8 @@ constexpr unsigned MISSION_LEVEL_PACKETS_PER_TICK{4};
  * comes for this long while it waits for some.
  */
 constexpr double MISSION_MANIFEST_TIMEOUT{15};
+/* Requests the host serves per connection. */
+constexpr unsigned MISSION_MAX_REQUESTS{16};
 constexpr double MISSION_STALL_TIMEOUT{20};
 
 [[nodiscard]]
@@ -151,7 +153,9 @@ constexpr bool mission_name_char(const char c)
 }
 
 /* A mission's file name without folder or extension: 1..8 of
- * [A-Za-z0-9_-] (no path, no dot, nothing a file system could misread).
+ * [A-Za-z0-9_-] (no path, no dot, nothing a file system could misread),
+ * and not the name of a built-in mission or of Vertigo (a download must
+ * never stand in for those).
  */
 [[nodiscard]]
 constexpr bool mission_basename_valid(const std::string_view s)
@@ -160,6 +164,10 @@ constexpr bool mission_basename_valid(const std::string_view s)
 		return false;
 	for (const auto c : s)
 		if (!mission_name_char(c))
+			return false;
+	constexpr std::string_view reserved[]{"d2x", "d2", "d2demo", "descent", "descent2"};
+	for (const auto r : reserved)
+		if (s.size() == r.size() && std::equal(s.begin(), s.end(), r.begin(), [](const char a, const char b) { return mission_lower(a) == b; }))
 			return false;
 	return true;
 }
@@ -187,10 +195,30 @@ inline std::optional<mission_file_type> mission_file_type_of(const std::string_v
 	return std::nullopt;
 }
 
+/* The kinds of file a mission's HOG may hold (levels, their custom
+ * textures and robots, sounds, briefings, music, notes): a received HOG
+ * is mounted ahead of everything else, so it must not hold anything the
+ * game reads for other purposes (pilot files, configuration, saves).
+ */
+[[nodiscard]]
+inline bool mission_hog_entry_allowed(const std::string_view name)
+{
+	const auto dot{name.rfind('.')};
+	if (dot == std::string_view::npos || dot == 0)
+		return false;
+	static constexpr std::string_view allowed[]{
+		"rl2", "rdl", "pog", "hxm", "ham", "s11", "s22", "txb", "tex", "ctb",
+		"pcx", "bbm", "256", "lgt", "clr", "hmp", "mid", "ogg", "mp3", "wav",
+		"flac", "sng", "txt", "rep", "aut", "mn2", "msn", "dtx", "fnt", "raw",
+	};
+	const auto ext{mission_lower(name.substr(dot + 1))};
+	return std::ranges::find(allowed, std::string_view{ext}) != std::end(allowed);
+}
+
 /* A HOG: "DHF", then entries of a name (13 bytes, NUL terminated) and a
  * size (u32), each followed by its data, to the exact end of the file.
- * Every entry within the file, every name a plain file name, at most
- * MISSION_HOG_MAX_ENTRIES of them.
+ * Every entry within the file, every name a plain file name of an
+ * allowed kind, at most MISSION_HOG_MAX_ENTRIES of them.
  */
 [[nodiscard]]
 inline bool mission_hog_valid(const std::span<const std::uint8_t> b)
@@ -213,7 +241,7 @@ inline bool mission_hog_valid(const std::span<const std::uint8_t> b)
 				return false;
 			++n;
 		}
-		if (!n || n == 13)
+		if (!n || n == 13 || !mission_hog_entry_allowed(std::string_view(reinterpret_cast<const char *>(&b[at]), n)))
 			return false;
 		const std::size_t size{net_get_le32(&b[at + 13])};
 		at += 17;
@@ -224,17 +252,16 @@ inline bool mission_hog_valid(const std::span<const std::uint8_t> b)
 	return true;
 }
 
-/* An MN2: text without NUL bytes whose first line names the mission
- * ("name", "xname", "zname" or "!name", as mission.cpp reads it).
+/* An MN2: text without NUL bytes whose first line starts with the
+ * mission's name ("name", "xname", "zname" or "!name"), exactly as
+ * mission.cpp reads it (no blank line, space or byte order mark first).
  */
 [[nodiscard]]
 inline bool mission_mn2_valid(const std::span<const std::uint8_t> b)
 {
 	if (b.empty() || b.size() > MISSION_MN2_MAX || std::ranges::find(b, std::uint8_t{0}) != b.end())
 		return false;
-	std::size_t i{};
-	while (i != b.size() && (b[i] == ' ' || b[i] == '\t' || b[i] == '\r' || b[i] == '\n'))
-		++i;
+	const std::size_t i{};
 	const auto starts{[&](const std::string_view t) {
 		if (b.size() - i < t.size())
 			return false;
@@ -625,7 +652,7 @@ inline mission_choice choose_mission(const mission_announcement &a, const std::s
 }
 
 /* The folder a downloaded bundle is kept in, under missions/: by the
- * first 12 hex digits of its hash, so that another version never
+ * first 32 hex digits of its hash, so that another version never
  * overwrites the player's own files or another download.
  */
 [[nodiscard]]
@@ -633,7 +660,7 @@ inline std::string mission_download_dir(const mission_hash &bundle)
 {
 	static constexpr char hex[]{"0123456789abcdef"};
 	std::string r{"missions/downloaded/"};
-	for (std::size_t i{}; i != 6; ++i)
+	for (std::size_t i{}; i != 16; ++i)
 	{
 		r.push_back(hex[bundle[i] >> 4]);
 		r.push_back(hex[bundle[i] & 15]);
@@ -755,6 +782,18 @@ private:
 		std::uint64_t done{};
 		std::vector<mission_hash> finished;
 		unsigned bulk{};
+		/* The last chunk is queued; the queue still drains (at bulk
+		 * speed, and busy() still says so).
+		 */
+		bool draining{};
+		/* The client asked for a file of the mission (since it
+		 * connected).
+		 */
+		bool requested{};
+		/* Requests since it connected: a client needs one per file (two
+		 * per connection); more than MISSION_MAX_REQUESTS are ignored.
+		 */
+		unsigned requests{};
 	};
 	mission_env &env;
 	std::optional<mission_manifest> manifest;
@@ -787,6 +826,9 @@ private:
 			return;
 		}
 		auto &o{out[slot]};
+		if (++o.requests > MISSION_MAX_REQUESTS)
+			return;
+		o.requested = true;
 		/* The file the client is getting already: from where it asks. */
 		if (!o.active || o.file.hash != f->hash)
 		{
@@ -863,7 +905,10 @@ public:
 			auto &o{out[slot]};
 			if (!o.active)
 			{
-				set_bulk(slot, 0);
+				if (o.draining && env.queued_bytes(slot) == 0)
+					o.draining = false;
+				if (!o.draining)
+					set_bulk(slot, 0);
 				continue;
 			}
 			set_bulk(slot, in_level ? MISSION_LEVEL_PACKETS_PER_TICK : MISSION_BULK_PACKETS_PER_TICK);
@@ -888,21 +933,31 @@ public:
 						o.done += o.file.size;
 					}
 					o.active = false;
+					o.draining = true;
 					o.bytes.reset();
 				}
 			}
 		}
 	}
+	/* Files are on their way to that slot (sending, or still draining
+	 * from the queue).
+	 */
 	[[nodiscard]]
 	bool busy(const std::uint8_t slot) const
 	{
-		return slot < MAX_SLOTS && out[slot].active;
+		return slot < MAX_SLOTS && (out[slot].active || out[slot].draining);
+	}
+	/* The client asked for the mission since it connected. */
+	[[nodiscard]]
+	bool requested(const std::uint8_t slot) const
+	{
+		return slot < MAX_SLOTS && out[slot].requested;
 	}
 	/* Percent of the bundle sent to that slot, while it gets files. */
 	[[nodiscard]]
 	std::optional<unsigned> progress(const std::uint8_t slot) const
 	{
-		if (slot >= MAX_SLOTS || !out[slot].active || !manifest)
+		if (slot >= MAX_SLOTS || !busy(slot) || !manifest)
 			return std::nullopt;
 		const auto total{manifest->total_size()};
 		const auto &o{out[slot]};

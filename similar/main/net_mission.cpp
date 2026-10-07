@@ -126,6 +126,10 @@ std::optional<local_bundle> bundle_of(const std::string &path, const char *const
 	local_bundle b;
 	b.manifest.basename = base;
 	b.manifest.title = std::string{title}.substr(0, nv::MISSION_TITLE_FIELD - 1);
+	/* A tab in the .mn2's name line: shown as a space. */
+	for (auto &c : b.manifest.title)
+		if (static_cast<unsigned char>(c) < 0x20 || c == 0x7f)
+			c = ' ';
 	PHYSFSX_uncounted_list files{PHYSFS_enumerateFiles(dir.empty() ? "." : dir.c_str())};
 	if (!files)
 		return std::nullopt;
@@ -209,10 +213,20 @@ struct game_mission_env final : nv::mission_env
 		const auto dir{nv::mission_download_dir(m.bundle_hash())};
 		const auto path{dir + "/" + f.name};
 		PHYSFS_mkdir(dir.c_str());
-		auto file{PHYSFSX_openWriteBuffered(path.c_str()).first};
-		if (!file || PHYSFS_writeBytes(file, bytes.data(), bytes.size()) != static_cast<PHYSFS_sint64>(bytes.size()))
 		{
-			con_printf(CON_URGENT, "mission: cannot write %s", path.c_str());
+			auto file{PHYSFSX_openWriteBuffered(path.c_str()).first};
+			if (!file || PHYSFS_writeBytes(file, bytes.data(), bytes.size()) != static_cast<PHYSFS_sint64>(bytes.size()))
+			{
+				con_printf(CON_URGENT, "mission: cannot write %s", path.c_str());
+				return false;
+			}
+		}
+		/* Closed: read it back (a full disk shows only now). */
+		Hash_cache.erase(path);
+		if (!client_has_file(m, f))
+		{
+			con_printf(CON_URGENT, "mission: %s did not keep what was written (disk full?)", path.c_str());
+			PHYSFS_delete(path.c_str());
 			return false;
 		}
 		return true;
@@ -258,8 +272,29 @@ void net_mission_host_start()
 	auto b{bundle_of(std::string{Current_mission->path.c_str()}, Current_mission->mission_name.data())};
 	if (!b)
 	{
-		con_printf(CON_NORMAL, "mission: %s cannot be sent (a name, a size or a file out of bounds)", Current_mission->path.c_str());
+		con_printf(CON_NORMAL, "mission: %s cannot be sent (its name, a file's size or a file missing; see network-protocol-v2.md, \"Mission transfer\")", Current_mission->path.c_str());
 		return;
+	}
+	/* The files as the players will check them, read once for the
+	 * session (sending never reads or hashes again, so a join during a
+	 * level costs the players nothing).  A file the clients would refuse
+	 * is not announced: they load the mission by name, as before.
+	 */
+	for (const auto &f : b->manifest.files)
+	{
+		const auto p{b->paths.find(f.name)};
+		auto bytes{p == b->paths.end() ? std::nullopt : read_file(p->second.c_str(), nv::MISSION_FILE_MAX)};
+		if (!bytes || bytes->size() != f.size || ::dcx::sha256_of(*bytes) != f.hash)
+		{
+			con_printf(CON_URGENT, "mission: %s changed while it was read; it is not sent", f.name.c_str());
+			return;
+		}
+		if (!nv::mission_file_content_valid(f.type(), *bytes))
+		{
+			con_printf(CON_NORMAL, "mission: %s is not sent: it breaks the rules a player checks it by (a HOG entry of a kind a mission does not use, or an .mn2 that does not start with its name line)", f.name.c_str());
+			return;
+		}
+		Env.files.emplace(f.hash, std::make_shared<const std::vector<std::uint8_t>>(std::move(*bytes)));
 	}
 	Env.host_paths = b->paths;
 	con_printf(CON_NORMAL, "mission: '%s' is bundle %s, %u files, %" PRIu64 " bytes (hashed in %u ms)%s", b->manifest.title.c_str(), hash_text(b->bundle).c_str(), static_cast<unsigned>(b->manifest.files.size()), b->manifest.total_size(), static_cast<unsigned>((timer_query() - start) * 1000 / F1_0), CGameCfg.SendMissions ? "" : "; not sent (option off)");
@@ -319,6 +354,11 @@ bool net_mission_host_busy(const playernum_t slot)
 	return Host && Host->busy(static_cast<uint8_t>(slot));
 }
 
+bool net_mission_host_requested(const playernum_t slot)
+{
+	return Host && Host->requested(static_cast<uint8_t>(slot));
+}
+
 std::optional<unsigned> net_mission_host_progress(const playernum_t slot)
 {
 	if (!Host)
@@ -337,12 +377,6 @@ void net_mission_frame()
 			return;
 		Host->enabled = CGameCfg.SendMissions;
 		Host->pump(seconds, Network_status == network_state::playing);
-		/* Files no transfer needs any more: not kept in memory. */
-		bool any{};
-		for (playernum_t s{1}; s < MAX_PLAYERS; ++s)
-			any |= Host->busy(s);
-		if (!any)
-			Env.files.clear();
 	}
 	else
 		Client.tick(seconds);
@@ -357,11 +391,14 @@ join_mission net_mission_prepare_join(const char *const basename, std::string &m
 	std::vector<std::string> usable;
 	if (Announced.known())
 		for (const auto &p : paths)
-			if (const auto b{bundle_of(p, "")})
-			{
-				candidates.push_back({usable.size(), b->bundle});
-				usable.push_back(p);
-			}
+		{
+			/* One that cannot be a bundle (a file over a cap, two .hog of
+			 * different case) is still another version to try.
+			 */
+			const auto b{bundle_of(p, "")};
+			candidates.push_back({usable.size(), b ? b->bundle : nv::mission_hash{}});
+			usable.push_back(p);
+		}
 	const auto c{nv::choose_mission(Announced, candidates, accepts())};
 	switch (c.decision)
 	{

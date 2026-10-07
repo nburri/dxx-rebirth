@@ -116,7 +116,14 @@ void test_names()
 	CHECK(!mission_file_type_of(".hog"));
 	CHECK(!mission_file_type_of("Corona"));
 	CHECK(!mission_file_type_of("missions/Corona.hog"));
-	CHECK(mission_download_dir(mission_hash{{0xab, 0xcd, 0x01, 0x23, 0x45, 0x67, 0x89}}) == "missions/downloaded/abcd01234567");
+	CHECK(mission_download_dir(mission_hash{{0xab, 0xcd, 0x01, 0x23, 0x45, 0x67, 0x89}}) == "missions/downloaded/abcd0123456789000000000000000000");
+	/* Built-in missions and Vertigo: never a download's name. */
+	CHECK(!mission_basename_valid("d2x"));
+	CHECK(!mission_basename_valid("D2X"));
+	CHECK(!mission_basename_valid("descent2"));
+	CHECK(!mission_basename_valid("d2demo"));
+	CHECK(!mission_basename_valid("D2"));
+	CHECK(mission_basename_valid("d2x2"));
 	std::printf("    names: basenames, extensions, folders\n");
 }
 
@@ -163,6 +170,14 @@ void test_hog()
 		b[4] = 0x01;
 		CHECK(!mission_hog_valid(b));
 	}
+	/* Entries of a kind a mission does not use (the HOG is mounted ahead
+	 * of the pilot files and the configuration).
+	 */
+	CHECK(!mission_hog_valid(make_hog({{"evil.plr", 10}}, 4)));
+	CHECK(!mission_hog_valid(make_hog({{"descent.cfg", 10}}, 4)));
+	CHECK(!mission_hog_valid(make_hog({{"d2x.ini", 10}}, 4)));
+	CHECK(!mission_hog_valid(make_hog({{"noext", 10}}, 4)));
+	CHECK(mission_hog_valid(make_hog({{"a.RL2", 1}, {"b.pog", 1}, {"c.hxm", 1}, {"d.s22", 1}, {"e.txb", 1}, {"f.hmp", 1}, {"g.ogg", 1}}, 4)));
 	{
 		std::vector<std::pair<std::string, std::size_t>> many(MISSION_HOG_MAX_ENTRIES + 1, {"x.rl2", 0});
 		CHECK(!mission_hog_valid(make_hog(many, 3)));
@@ -192,7 +207,13 @@ void test_hog()
 void test_mn2()
 {
 	CHECK(mission_mn2_valid(Mn2));
-	CHECK(mission_mn2_valid(text("\r\n  zname = Vertigo\n")));
+	CHECK(mission_mn2_valid(text("zname = Vertigo\n")));
+	/* The game reads the first line only: a blank line, a space or a byte
+	 * order mark first is no mission to it.
+	 */
+	CHECK(!mission_mn2_valid(text("\r\nname = x\n")));
+	CHECK(!mission_mn2_valid(text(" name = x\n")));
+	CHECK(!mission_mn2_valid(text("\xef\xbb\xbfname = x\n")));
 	CHECK(mission_mn2_valid(text("!name=x")));
 	CHECK(mission_mn2_valid(text("NAME=x")));
 	CHECK(!mission_mn2_valid(text("")));
@@ -447,6 +468,7 @@ void test_direct()
 		CHECK(p.client.state() == mission_client_state::done);
 		CHECK(p.ce.files.size() == 2 && p.ce.files["Corona.HOG"] == hog && p.ce.files["Corona.MN2"] == Mn2);
 		CHECK(saw_bulk && !p.ce.bulk);
+		CHECK(p.host.requested(1));
 		CHECK(saw_progress && p.client.percent() == 100);
 		/* The order of the stores: the .mn2 last. */
 		bool hog_first{};
@@ -459,6 +481,65 @@ void test_direct()
 		}
 		p.step(0.01);
 		CHECK(!p.host.busy(1) && !p.he.bulk);
+	}
+	/* The tail of a file drains at bulk speed: bulk stays on (and the
+	 * slot busy) until the queue is empty.
+	 */
+	{
+		direct_pair p;
+		p.he.files = {{"Corona.MN2", Mn2}, {"Corona.HOG", hog}};
+		p.host.set_manifest(m);
+		p.client.begin(m.bundle_hash());
+		p.host.client_joined(1);
+		bool drained_in_bulk{}, bulk_dropped_early{}, released{};
+		for (unsigned i{}; i != 400 && p.client.state() != mission_client_state::done; ++i)
+		{
+			p.host.pump(0.01, false);
+			p.client.tick(0.01);
+			/* The link delivers only 2 messages per step: a queue builds. */
+			for (unsigned k{}; k != 2 && !p.he.to_peer.empty(); ++k)
+			{
+				auto [t, b]{std::move(p.he.to_peer.front())};
+				p.he.to_peer.pop_front();
+				p.client.receive(0, t, b);
+			}
+			while (!p.ce.to_peer.empty())
+			{
+				auto [t, b]{std::move(p.ce.to_peer.front())};
+				p.ce.to_peer.pop_front();
+				p.host.receive(1, t, b);
+			}
+			if (p.host.busy(1) && !p.host.progress(1).has_value())
+				CHECK(false);
+			/* Whatever is still queued drains in bulk mode. */
+			if (!p.he.to_peer.empty())
+			{
+				if (p.he.bulk && p.host.busy(1))
+					drained_in_bulk = true;
+				else
+					bulk_dropped_early = true;
+			}
+		}
+		p.host.pump(0.01, false);
+		released = !p.host.busy(1) && !p.he.bulk;
+		CHECK(p.client.state() == mission_client_state::done && drained_in_bulk && !bulk_dropped_early && released);
+	}
+	/* A client asking again and again: served MISSION_MAX_REQUESTS times. */
+	{
+		direct_pair p;
+		p.he.files = {{"Corona.MN2", Mn2}, {"Corona.HOG", hog}};
+		p.host.set_manifest(m);
+		std::array<std::uint8_t, MISSION_REQUEST_SIZE> b;
+		mission_request_msg{m.files[1].hash, static_cast<std::uint32_t>(hog.size() - 1)}.write(b.data());
+		unsigned served{};
+		for (unsigned i{}; i != 100; ++i)
+		{
+			p.host.receive(1, MISSION_MSG_REQUEST, b);
+			p.host.pump(0.01, false);
+			served += !p.he.to_peer.empty();
+			p.he.to_peer.clear();
+		}
+		CHECK(served == MISSION_MAX_REQUESTS);
 	}
 	/* Already has the .hog (an interrupted earlier download): only the
 	 * .mn2 comes.

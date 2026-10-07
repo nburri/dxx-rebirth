@@ -16,9 +16,11 @@
 #include <span>
 #include <string>
 
+#include "dxxsconf.h"
 #include "dsx-ns.h"
 #include "fwd-player.h"
 
+#ifdef DXX_BUILD_DESCENT
 namespace dsx {
 
 /* Host: the session opened; describe Current_mission. */
@@ -35,6 +37,9 @@ void net_mission_slot_cleared(playernum_t slot);
 bool net_mission_host_busy(playernum_t slot);
 [[nodiscard]]
 std::optional<unsigned> net_mission_host_progress(playernum_t slot);
+/* Host: `slot` asked for the mission since it connected. */
+[[nodiscard]]
+bool net_mission_host_requested(playernum_t slot);
 /* GAME_SETTINGS' mission announcement (net_v2::mission_announcement,
  * 37 bytes): the host writes its own, a client reads the host's.
  */
@@ -80,3 +85,4 @@ const char *net_mission_client_finish();
 void net_mission_client_cancel();
 
 }
+#endif

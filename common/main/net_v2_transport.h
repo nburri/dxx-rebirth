@@ -845,6 +845,17 @@ public:
 	 */
 	void set_max_packets_per_tick(unsigned packets);
 
+	/* NET_V2_ACK_EVERY packets with reliable messages arrived since our
+	 * last packet: build_outgoing would send a header-only ack now even
+	 * without a tick's budget.  A caller reading many datagrams at once
+	 * sends in between when this says so.
+	 */
+	[[nodiscard]]
+	bool ack_urgent() const
+	{
+		return m_ack_owed && m_packets_unacked >= NET_V2_ACK_EVERY && m_state != connection_state::closed;
+	}
+
 	/* Change the timeouts of section 3.6 (connection_config::timeout and
 	 * unacked_timeout); they apply from the next check, measured from the
 	 * same instants as before (the last packet heard, the oldest unacked

@@ -2683,7 +2683,7 @@ Differences from §6.1–§6.4 and decisions:
 (or have in another version) gets it from the host automatically, before
 the level loads: the join shows "Downloading mission *title*: N %" with
 the megabytes received; ESC cancels. Nothing to install by hand. The
-downloaded files go to `missions/downloaded/<12 hex digits>/` in the
+downloaded files go to `missions/downloaded/<32 hex digits>/` in the
 game's user folder (where the pilot files are; on Windows usually the
 game folder), one folder per version, so a download never overwrites the
 player's own copy of a mission or another version; the mission list
@@ -2697,7 +2697,9 @@ missions to players** (as host; default on). Without a download (either
 option off) a player with another version of the mission still joins
 with it, as before (the host refuses them only if the levels differ);
 one without the mission at all is told which option stops it. Not sent:
-built-in missions and Vertigo (`d2x`, commercial).
+built-in missions and Vertigo (`d2x`, commercial); a mission whose files
+a player would refuse (see the checks below) is not announced, and the
+players load it by name as before.
 
 - **What a mission is.** A *bundle*: `<name>.mn2` and, if present,
   `<name>.hog` (the HOG holds the levels and every custom file a mission
@@ -2719,7 +2721,9 @@ built-in missions and Vertigo (`d2x`, commercial).
   (9, NUL padded), title (26, NUL padded), file count u8 (1–2), then per
   file: name (13, NUL padded), size u32, SHA-256 (32). The receiver
   checks every field (nothing but NULs after a string's NUL, names
-  `[A-Za-z0-9_-]{1,8}` + `.mn2`/`.hog`, exactly one `.mn2`, at most one
+  `[A-Za-z0-9_-]{1,8}` + `.mn2`/`.hog`, not `d2x`, `d2`, `d2demo`,
+  `descent`, `descent2` (a download must never stand in for a built-in
+  mission or Vertigo), exactly one `.mn2`, at most one
   `.hog`, both of the basename, no duplicate names or contents, sizes
   within the caps) and recomputes the bundle hash; it must also equal the
   one `GAME_SETTINGS` announced.
@@ -2736,16 +2740,24 @@ built-in missions and Vertigo (`d2x`, commercial).
     send missions, 2 the host's file no longer matches its hash).
   The client asks for one file at a time: the `.hog` first, the `.mn2`
   last, so that an interrupted download never shows up as a mission.
+  The host serves 16 requests per connection at most (a client needs
+  two).
   What it holds of the current file survives a cancel or a lost
   connection (while the game runs), and the next join resumes there.
 - **Checks before use.** Each file must match its SHA-256 and its type's
   structure: a HOG is `DHF` then entries of a 13-byte name (1–12
   printable characters, no `/`, `\`, `:`, NUL terminated) and a u32 size,
-  every entry within the file, to its exact end, at most 4096 entries;
-  an MN2 is text without NUL, at most 64 KiB, whose first line is
-  `name`/`xname`/`zname`/`!name`. Only then is it written, under the
-  bundle's folder, by its checked name. The fuzz test feeds 20 000
-  mutated HOGs to the check.
+  every entry within the file, to its exact end, at most 4096 entries,
+  and every entry of a kind missions use (`rl2 rdl pog hxm ham s11 s22
+  txb tex ctb pcx bbm 256 lgt clr hmp mid ogg mp3 wav flac sng txt rep
+  aut mn2 msn dtx fnt raw`): the HOG is mounted ahead of everything, so
+  it must not carry pilot files, configuration or saves. An MN2 is text
+  without NUL, at most 64 KiB, whose first line starts with
+  `name`/`xname`/`zname`/`!name` (as the game reads it: nothing before).
+  Only then is it written, under the bundle's folder, by its checked
+  name, and read back (a full disk shows there). The host applies the
+  same checks to its own files before it announces them. The fuzz test
+  feeds 20 000 mutated HOGs to the check; the group's 64 HOGs pass.
 - **Caps.** 48 MiB per file and per bundle (the group's 66 missions: the
   largest, The Enemy Within, is 27.4 MiB; the next 4.2 MiB), `.mn2`
   64 KiB.
@@ -2753,16 +2765,21 @@ built-in missions and Vertigo (`d2x`, commercial).
   the host's file name (its own and the downloaded ones), computes their
   bundle hashes (cached by file size and time) and plays the one that
   matches; otherwise it downloads (both options on), or tries the first
-  of another version, or says why it cannot join
+  of another version (also one that cannot be a bundle, e.g. a file over
+  a cap), or says why it cannot join
   (`net_v2::choose_mission`).
 - **Join flow.** The client decides before its `JOIN_REQUEST` (from
   `GAME_INFO`) and downloads after `JOIN_ACCEPT`, on the new connection,
   before it loads the level. In the lobby the host just sees a player not
   ready yet. In a game in progress the joining peer stays `joining`; the
-  host's 30 s join timeout (§4.4) counts from the end of the download, so
-  other players wanting to join wait meanwhile (one join at a time; their
-  clients retry for 10 s). A level end removes a joiner still
-  downloading, as any joiner (it rejoins and resumes).
+  host's 30 s join timeout (§4.4) counts from the end of the download.
+  A joiner that is downloading (it asked for the mission and has not
+  sent `LEVEL_READY`) does not hold up other joins or bots (the joins
+  are serialised for the snapshot and the extras, which only start at
+  `LEVEL_READY`). A level end removes a joiner still downloading, as any
+  joiner (it rejoins and resumes). The host reads and hashes its files
+  once, when it opens the session, and keeps them in memory for it, so
+  a join during a level costs the players nothing.
 - **Speed and pacing.** In the lobby a connection carrying a transfer
   sends up to 32 packets per tick (`connection::set_max_packets_per_tick`)
   and keeps up to 224 KiB queued or in flight (the sender's queue bound,
@@ -2771,21 +2788,29 @@ built-in missions and Vertigo (`d2x`, commercial).
   lowest seen + 15 ms; it shrinks by 30 % when the round trip rises
   above that (a queue building on the path, which would delay others) or
   more than 15 % is retransmitted; 64 KiB/s to 4 MiB/s. Random loss alone
-  does not slow it. During a level (a join in progress) the transfer is
-  capped at 192 KiB/s, 4 packets per tick and a 32 KiB window, so that
-  the players in the level do not notice. To keep up with that many
+  does not slow it. The connection stays in bulk mode until what was
+  queued has drained. During a level (a join in progress) the transfer
+  is capped at 192 KiB/s, 4 packets per tick and a 32 KiB window, so
+  that the players in the level do not notice. To keep up with that many
   packets the receiving end acks after every 16 received packets that
-  carry reliable messages, outside its tick budget (`NET_V2_ACK_EVERY`):
-  the ack bitfield covers only 64 packets, and a packet falling out of it
-  unacked would be sent again.
+  carry reliable messages, outside its tick budget (`NET_V2_ACK_EVERY`),
+  and the game sends such an ack while it reads its socket, not only at
+  the end of the frame: the ack bitfield covers only 64 packets, and a
+  packet falling out of it unacked would be sent again.
 - **Measured** (`test-net-v2-mission`, real transport, simulated link
   with bottleneck, delay and loss, 10 MB): 8 MB/s link, 20 ms each way,
-  0.5 % loss: 1.49 MB/s (7.0 s), at 30 fps menus 1.53 MB/s; 2 % loss
-  1.42 MB/s; 5 % loss 1.21 MB/s; 50 ms each way 0.98 MB/s; a 1 MB/s
-  uplink with a 64 KB buffer 0.69 MB/s; 0.5 MB/s 0.37 MB/s; during a
+  0.5 % loss: 1.61 MB/s (6.5 s), at 30 fps menus 1.60 MB/s; 2 % loss
+  1.58 MB/s; 5 % loss 1.33 MB/s; 50 ms each way 0.98 MB/s; a 1 MB/s
+  uplink with a 64 KB buffer 0.72 MB/s; 0.5 MB/s 0.37 MB/s; during a
   level 180 KiB/s. Over real UDP sockets on the loopback interface
   (`test-net-v2-mission --missions DIR`, the group's missions folder) The
-  Enemy Within, 28.8 MB, took 17.6 s: 1.64 MB/s, nothing resent.
+  Enemy Within, 28.8 MB, took 16.3 s: 1.77 MB/s, 2 messages resent.
+- **Known limits.** The queue bound of 320 KiB applies to every
+  connection, so a stalled peer is closed for overflow a little later
+  than before. The host's "waiting for players" screen at the level start
+  does not show a download's progress (the lobby list does). A mission
+  whose levels need another mission's HOG is not covered. Not yet tested
+  between two machines.
 - **Code.** `common/main/net_v2_mission.h` (layouts, checks, the choice,
   the host's sender and the client's downloader as state machines),
   `similar/main/net_mission.cpp` (files, PhysFS, options),
