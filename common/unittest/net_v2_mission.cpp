@@ -511,8 +511,10 @@ void test_direct()
 			}
 			if (p.host.busy(1) && !p.host.progress(1).has_value())
 				CHECK(false);
-			/* Whatever is still queued drains in bulk mode. */
-			if (!p.he.to_peer.empty())
+			/* What is still queued drains in bulk mode (down to the last
+			 * few KiB, which gameplay messages could keep up for ever).
+			 */
+			if (p.he.queued_bytes(1) > MISSION_DRAIN_DONE_BYTES)
 			{
 				if (p.he.bulk && p.host.busy(1))
 					drained_in_bulk = true;

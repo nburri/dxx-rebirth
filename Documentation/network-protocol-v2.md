@@ -2789,7 +2789,7 @@ players load it by name as before.
   above that (a queue building on the path, which would delay others) or
   more than 15 % is retransmitted; 64 KiB/s to 4 MiB/s. Random loss alone
   does not slow it. The connection stays in bulk mode until what was
-  queued has drained. During a level (a join in progress) the transfer
+  queued has drained (to 8 KiB, at most 5 s). During a level (a join in progress) the transfer
   is capped at 192 KiB/s, 4 packets per tick and a 32 KiB window, so
   that the players in the level do not notice. To keep up with that many
   packets the receiving end acks after every 16 received packets that

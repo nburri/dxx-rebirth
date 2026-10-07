@@ -126,6 +126,11 @@ constexpr unsigned MISSION_LEVEL_PACKETS_PER_TICK{4};
  * comes for this long while it waits for some.
  */
 constexpr double MISSION_MANIFEST_TIMEOUT{15};
+/* After a file's last part was queued, the connection stays in bulk mode
+ * until no more than this is queued, at most MISSION_DRAIN_MAX seconds.
+ */
+constexpr std::size_t MISSION_DRAIN_DONE_BYTES{8 * 1024};
+constexpr double MISSION_DRAIN_MAX{5};
 /* Requests the host serves per connection. */
 constexpr unsigned MISSION_MAX_REQUESTS{16};
 constexpr double MISSION_STALL_TIMEOUT{20};
@@ -786,6 +791,7 @@ private:
 		 * speed, and busy() still says so).
 		 */
 		bool draining{};
+		double drain_time{};
 		/* The client asked for a file of the mission (since it
 		 * connected).
 		 */
@@ -905,7 +911,10 @@ public:
 			auto &o{out[slot]};
 			if (!o.active)
 			{
-				if (o.draining && env.queued_bytes(slot) == 0)
+				/* Drained: the queue holds no more than gameplay messages
+				 * would (it carries them too), or the bound passed.
+				 */
+				if (o.draining && (env.queued_bytes(slot) <= MISSION_DRAIN_DONE_BYTES || (o.drain_time += std::max(seconds, 0.0)) >= MISSION_DRAIN_MAX))
 					o.draining = false;
 				if (!o.draining)
 					set_bulk(slot, 0);
@@ -934,6 +943,7 @@ public:
 					}
 					o.active = false;
 					o.draining = true;
+					o.drain_time = 0;
 					o.bytes.reset();
 				}
 			}
