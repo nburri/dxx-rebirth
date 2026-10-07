@@ -1,10 +1,17 @@
 """The Cow ship: the Cow of Quaternius' Ultimate Animated Animal Pack (CC0 1.0,
 https://quaternius.com/packs/ultimateanimatedanimals.html) in its rest pose,
-repainted as a Holstein whose spots are the player-colour zone (material
-accent_spots), pink snout and udder, dark hooves, plus a collar (also the
-colour zone) and a brass cow bell.  Head, legs, udder, tail and bell are
+repainted as a matte Holstein (cream hide with baked shading: ambient
+occlusion, fur noise, darker belly and legs, as vertex colours) whose spots
+are the player-colour zone (material accent_spots), pink snout and udder,
+dark hooves.  A collar (colour zone too) and a leather harness carry
+weapons at the Pyro's gun points, where the game's shots come from:
+laser cannons (guns 0/1), quad-laser stub wings (2/3), missile pods with
+noses in the player's colour (4/5), a cow bell (6: vulcan, gauss,
+spreadfire, helix, flares) and a milk churn under the udder (7: mines,
+smart and mega missiles, earthshakers); gun0..gun7 marker nodes let
+shipconv check them.  Head, legs, udder (with churn), tail and bell are
 debris_* nodes.  The additions are CC0 1.0 as well.
-Usage: cow.py <pack>/glTF/Cow.gltf out.glb   (python3 with numpy)
+Usage: cow.py <pack>/glTF/Cow.gltf out.glb   (python3 with numpy; ~1 min)
 """
 import json, struct, sys, math
 import numpy as np
@@ -35,13 +42,16 @@ JP = {n: np.linalg.inv(M.T)[:3, 3] for n, M in zip(JN, IB)}
 
 # output materials: name -> RGBA (linear factors, glTF)
 MATS = {
-    'hide_white': (0.93, 0.92, 0.88, 1),
+    'hide_white': (0.80, 0.77, 0.69, 1),  # matte cream; shading in the vertex colours
     'accent_spots': (1, 1, 1, 1),        # player colour zone (spots + collar)
     'pink': (0.95, 0.55, 0.60, 1),       # snout, udder
     'dark': (0.07, 0.06, 0.06, 1),       # hooves, eyes, tail tuft
     'horn': (0.86, 0.80, 0.62, 1),
     'eye_white': (1, 1, 1, 1),
-    'brass': (0.85, 0.62, 0.18, 1),
+    'brass': (0.78, 0.56, 0.18, 1),
+    'gunmetal': (0.20, 0.21, 0.23, 1),
+    'steel': (0.62, 0.63, 0.65, 1),
+    'leather': (0.28, 0.16, 0.08, 1),
 }
 
 # ---------------------------------------------------------------- source tris
@@ -177,25 +187,6 @@ for P, N, mat, part in tris:
             out.append((cp, cn, 'accent_spots' if ins else 'hide_white', part))
 tris = out
 
-# ------------------------------------------------------- collar and cow bell
-n1, n2 = JP['Neck2'], JP['Neck3']
-axis = (n2 - n1) / np.linalg.norm(n2 - n1)
-cen = n1 + (n2 - n1) * 0.35
-# neck radius: hide vertices near the collar plane
-hp = np.array([p for t in tris if t[3] in ('body', 'debris_head') and t[2] in ('hide_white', 'accent_spots') for p in t[0]])
-dist_plane = (hp - cen) @ axis
-near = hp[np.abs(dist_plane) < 0.25]
-radial = near - cen - np.outer((near - cen) @ axis, axis)
-rn = np.linalg.norm(radial, axis=1)
-u = np.array([1.0, 0, 0]); v = np.cross(axis, u); v /= np.linalg.norm(v)   # v points ~down/forward
-
-
-def neck_r(ang):
-    d = math.cos(ang) * u + math.sin(ang) * v
-    sel = (radial @ d) > rn * 0.85
-    return np.percentile(rn[sel], 80) if sel.any() else np.median(rn)
-
-
 def add_quad_strip(ring_a, ring_b, na, nb, mat, part):
     k = len(ring_a)
     for i in range(k):
@@ -204,51 +195,213 @@ def add_quad_strip(ring_a, ring_b, na, nb, mat, part):
         tris.append((np.array([ring_a[i], ring_b[j], ring_a[j]]), np.array([na[i], nb[j], na[j]]), mat, part))
 
 
-K = 28
-angs = [2 * math.pi * i / K for i in range(K)]
-rads = [neck_r(a) + 0.03 for a in angs]
-dirs = [math.cos(a) * u + math.sin(a) * v for a in angs]
-w = 0.09
-outer_f = [cen + axis * w + d * r for d, r in zip(dirs, rads)]
-outer_b = [cen - axis * w + d * r for d, r in zip(dirs, rads)]
-add_quad_strip(outer_b, outer_f, dirs, dirs, 'accent_spots', 'body')
-inner_f = [cen + axis * w + d * (r - 0.12) for d, r in zip(dirs, rads)]
-inner_b = [cen - axis * w + d * (r - 0.12) for d, r in zip(dirs, rads)]
-add_quad_strip(outer_f, inner_f, [axis] * K, [axis] * K, 'accent_spots', 'body')
-add_quad_strip(inner_b, outer_b, [-axis] * K, [-axis] * K, 'accent_spots', 'body')
-# lowest point of the collar
-low = min(range(K), key=lambda i: outer_f[i][1])
-top = (outer_f[low] + outer_b[low]) / 2 + np.array([0, -0.02, 0])
+# ------------------------------------------------------- shapes
+def frame(axis):
+    axis = axis / np.linalg.norm(axis)
+    e1 = np.cross(axis, [0, 1, 0] if abs(axis[1]) < 0.9 else [1, 0, 0]); e1 /= np.linalg.norm(e1)
+    return axis, e1, np.cross(axis, e1)
 
 
-def lathe(profile, centre, mat, part, seg=20):
-    """profile: [(r, y)] from top to bottom, rotated round the vertical axis."""
+def lathe(profile, origin, axis, mat, part, seg=16):
+    """profile: [(r, t)]; t along axis from origin."""
+    axis, e1, e2 = frame(np.asarray(axis, float))
     rings, norms = [], []
-    for k, (r, y) in enumerate(profile):
-        y0 = profile[max(k - 1, 0)]; y1 = profile[min(k + 1, len(profile) - 1)]
-        dr, dy = y1[0] - y0[0], y1[1] - y0[1]
-        nrm2 = np.array([-dy, dr]); nrm2 /= np.linalg.norm(nrm2) + 1e-12
-        if nrm2[0] < 0:
-            nrm2 = -nrm2
+    for k, (r, t) in enumerate(profile):
+        p0 = profile[max(k - 1, 0)]; p1 = profile[min(k + 1, len(profile) - 1)]
+        dr, dt = p1[0] - p0[0], p1[1] - p0[1]
+        nr, nt = dt, -dr                      # outward normal in (r, t)
+        l = math.hypot(nr, nt) + 1e-12
+        nr, nt = nr / l, nt / l
+        if nr < 0:
+            nr, nt = -nr, -nt
         ring, nring = [], []
         for i in range(seg):
             a = 2 * math.pi * i / seg
-            c, s = math.cos(a), math.sin(a)
-            ring.append(centre + np.array([r * c, y, r * s]))
-            n = np.array([nrm2[0] * c, nrm2[1], nrm2[0] * s])
+            d = math.cos(a) * e1 + math.sin(a) * e2
+            ring.append(origin + axis * t + d * r)
+            n = d * nr + axis * nt
             nring.append(n / (np.linalg.norm(n) + 1e-12))
         rings.append(ring); norms.append(nring)
     for k in range(len(rings) - 1):
         add_quad_strip(rings[k], rings[k + 1], norms[k], norms[k + 1], mat, part)
 
 
-# bell: hanger loop, flared body, clapper ball
-lathe([(0.0, 0.0), (0.07, -0.0), (0.07, -0.08), (0.0, -0.08)], top, 'brass', 'debris_bell', 10)
-bell = [(0.0, -0.08), (0.17, -0.10), (0.22, -0.18), (0.24, -0.32), (0.27, -0.46),
-        (0.34, -0.56), (0.36, -0.60), (0.30, -0.60), (0.24, -0.56), (0.2, -0.5)]
-lathe(bell, top, 'brass', 'debris_bell', 20)
-clap = [(0.0, -0.52), (0.06, -0.55), (0.08, -0.6), (0.06, -0.65), (0.0, -0.68)]
-lathe(clap, top, 'dark', 'debris_bell', 10)
+def tube(p0, p1, r, mat, part, seg=12, caps=True):
+    p0 = np.asarray(p0, float); p1 = np.asarray(p1, float)
+    L = np.linalg.norm(p1 - p0)
+    prof = [(r, 0), (r, L)]
+    if caps:
+        prof = [(0, 0)] + prof + [(0, L)]
+    lathe(prof, p0, p1 - p0, mat, part, seg)
+
+
+def beam(p0, p1, width, thick, mat, part):
+    """A flat box from p0 to p1, wide in the horizontal plane (a stub wing)."""
+    p0 = np.asarray(p0, float); p1 = np.asarray(p1, float)
+    d = (p1 - p0) / np.linalg.norm(p1 - p0)
+    w = np.cross([0, 1, 0], d); w /= np.linalg.norm(w)
+    h = np.cross(d, w)
+    c = [(-1, -1), (1, -1), (1, 1), (-1, 1)]
+    a = [p0 + w * x * width / 2 + h * y * thick / 2 for x, y in c]
+    b = [p1 + w * x * width / 2 + h * y * thick / 2 for x, y in c]
+    norms = [-h, w, h, -w]
+    for i in range(4):
+        j = (i + 1) % 4
+        n = norms[i]
+        tris.append((np.array([a[i], b[i], b[j]]), np.array([n, n, n]), mat, part))
+        tris.append((np.array([a[i], b[j], a[j]]), np.array([n, n, n]), mat, part))
+    for q, n in ((a, -d), (b, d)):
+        tris.append((np.array([q[0], q[1], q[2]]), np.array([n, n, n]), mat, part))
+        tris.append((np.array([q[0], q[2], q[3]]), np.array([n, n, n]), mat, part))
+
+
+def band(cen, axis, width, thick, mat, part, ymin=-1e9, K=28):
+    """A strap round the body (or neck) in the plane through cen normal to axis."""
+    axis, u, v = frame(np.asarray(axis, float))
+    hp = np.array([p for t in tris if t[2] in ('hide_white', 'accent_spots') and t[3] in ('body', 'debris_head') for p in t[0]])
+    hp = hp[hp[:, 1] > ymin]
+    near = hp[np.abs((hp - cen) @ axis) < 0.25]
+    radial = near - cen - np.outer((near - cen) @ axis, axis)
+    rn = np.linalg.norm(radial, axis=1)
+    dirs, rads = [], []
+    for i in range(K):
+        a = 2 * math.pi * i / K
+        d = math.cos(a) * u + math.sin(a) * v
+        sel = (radial @ d) > rn * 0.85
+        dirs.append(d); rads.append((np.percentile(rn[sel], 80) if sel.any() else np.median(rn)) + 0.03)
+    of = [cen + axis * width + d * r for d, r in zip(dirs, rads)]
+    ob = [cen - axis * width + d * r for d, r in zip(dirs, rads)]
+    inf = [cen + axis * width + d * (r - thick) for d, r in zip(dirs, rads)]
+    inb = [cen - axis * width + d * (r - thick) for d, r in zip(dirs, rads)]
+    add_quad_strip(ob, of, dirs, dirs, mat, part)
+    add_quad_strip(of, inf, [axis] * K, [axis] * K, mat, part)
+    add_quad_strip(inb, ob, [-axis] * K, [-axis] * K, mat, part)
+    return of, ob
+
+
+# ------------------------------------------------------- gun points
+# The Pyro's gun points (Player_ship->gun_points, as in shipconv.cpp) in
+# game units; every ship fires from them.  They map into this model's
+# space through the converter's transform (x mirrored, re-centred, scaled),
+# found by converting and measuring until the markers gun0..gun7 match
+# (shipconv warns when a marker is more than 1 unit off).
+PYRO_GUNS = np.array([[2.23, -0.91, 0.55], [-2.25, -0.91, 0.53], [3.39, -1.81, 2.26], [-3.41, -1.80, 2.26],
+                      [2.33, 0.0, -1.39], [-2.39, 0.0, -1.39], [0.02, -1.34, 2.82], [-0.02, -1.34, -2.91]])
+CONV_SCALE = float(sys.argv[3]) if len(sys.argv) > 3 else 0.9998
+CONV_CENTRE = np.array([float(x) for x in sys.argv[4].split(',')]) if len(sys.argv) > 4 else np.array([0, 2.23785, 1.0539])
+GUN = PYRO_GUNS / CONV_SCALE + CONV_CENTRE
+GUN[:, 0] = -(PYRO_GUNS[:, 0] / CONV_SCALE)
+
+# ------------------------------------------------------- harness and weapons
+# Two leather girths round the barrel of the body carry the guns.
+gz_front, gz_rear = 1.05, -0.75
+band(np.array([0, 2.6, gz_front]), [0, 0, 1], 0.1, 0.06, 'leather', 'body', ymin=1.65)
+band(np.array([0, 2.6, gz_rear]), [0, 0, 1], 0.1, 0.06, 'leather', 'body', ymin=1.65)
+
+for side, (gl_, gq, gm) in ((-1, (0, 2, 4)), (1, (1, 3, 5))):
+    L, Q, M = GUN[gl_], GUN[gq], GUN[gm]
+    part = 'body'
+    # guns 0/1: laser cannon under the flank, muzzle at the gun point
+    lathe([(0, -1.25), (0.17, -1.25), (0.17, -0.45), (0.13, -0.40), (0.13, -0.1), (0.17, -0.08), (0.17, 0), (0.09, 0), (0.09, -0.15), (0, -0.15)],
+          L, [0, 0, 1], 'gunmetal', part, 14)
+    tube(L + [0, 0.02, -0.85], [side * 0.55, L[1] + 0.25, gz_front - 0.2], 0.07, 'gunmetal', part, 8)
+    tube(L + [0, 0.02, -0.4], [side * 0.6, L[1] + 0.3, gz_front + 0.05], 0.06, 'gunmetal', part, 8)
+    # guns 2/3: quad outrigger, an arm from the cannon to a short barrel
+    beam(L + [0, 0, -0.75], Q + [0, 0, -0.45], 0.42, 0.07, 'gunmetal', part)
+    lathe([(0, -0.7), (0.12, -0.7), (0.12, -0.12), (0.09, -0.08), (0.09, 0), (0.05, 0), (0.05, -0.1), (0, -0.1)],
+          Q, [0, 0, 1], 'gunmetal', part, 12)
+    tube(Q + [0, 0, -0.45], Q + [0, 0, -0.3], 0.135, 'brass', part, 12)
+    # guns 4/5: missile pod on the flank, open at the front, a missile nose in the player's colour
+    lathe([(0, -1.35), (0.2, -1.3), (0.24, -1.15), (0.24, -0.05), (0.26, -0.02), (0.26, 0), (0.2, 0), (0.2, -0.3)],
+          M, [0, 0, 1], 'gunmetal', part, 14)
+    lathe([(0.17, -0.25), (0.17, -0.12), (0.1, 0.0), (0, 0.06)], M + [0, 0, -0.08], [0, 0, 1], 'accent_spots', part, 12)
+    tube(M + [0, 0, -1.0], M + [0, 0, -0.85], 0.27, 'brass', part, 14, caps=False)
+    tube(M + [-side * 0.1, 0, -0.95], [side * 0.7, M[1] + 0.05, gz_rear], 0.07, 'gunmetal', part, 8)
+    tube(M + [-side * 0.1, 0, -0.25], [side * 0.75, M[1] + 0.05, gz_front - 0.15], 0.07, 'gunmetal', part, 8)
+
+# collar (neck) and the bell: gun 6 (vulcan, gauss, spreadfire, helix,
+# flares) fires from the bell's mouth, tilted forward like a blunderbuss.
+n2, n3 = JP['Neck2'], JP['Neck3']
+outer_f, outer_b = band(n2 + (n3 - n2) * 0.35, n3 - n2, 0.09, 0.12, 'accent_spots', 'body')
+low = min(range(len(outer_f)), key=lambda i: outer_f[i][1])
+hang = (outer_f[low] + outer_b[low]) / 2
+B = GUN[6]
+bax = np.array([0, -0.55, 0.835]); bax /= np.linalg.norm(bax)
+blen = 0.8
+btop = B - bax * blen
+tube(hang + [0, 0.02, 0], btop + [0, 0.05, 0], 0.05, 'leather', 'debris_bell', 6)
+s_ = 1.35
+bell = [(0.0, 0.0), (0.17 * s_, 0.02), (0.22 * s_, 0.10), (0.24 * s_, 0.24), (0.27 * s_, 0.42),
+        (0.34 * s_, 0.55), (0.36 * s_, blen), (0.30 * s_, blen), (0.24 * s_, 0.6), (0.18 * s_, 0.45), (0, 0.45)]
+lathe(bell, btop, bax, 'brass', 'debris_bell', 18)
+lathe([(0, 0.5), (0.07, 0.53), (0.09, 0.6), (0.07, 0.67), (0, 0.7)], btop, bax, 'gunmetal', 'debris_bell', 8)
+
+# gun 7 (mines, smart and mega missiles, earthshakers): a milk churn
+# hanging under the udder, its open mouth at the gun point.
+ud = np.array([p for t in tris if t[3] == 'debris_udder' for p in t[0]])
+C = GUN[7]
+utop = ud[:, 1].min() + 0.12
+h = utop - C[1]
+churn = [(0, h), (0.09, h), (0.09, h - 0.08), (0.13, h - 0.16), (0.2, h - 0.26), (0.2, 0.06),
+         (0.22, 0.04), (0.22, 0), (0.16, 0), (0.16, 0.08), (0, 0.08)]
+lathe(churn, np.array([0, C[1], C[2]]), [0, 1, 0], 'steel', 'debris_udder', 14)
+tube([0, C[1] + h * 0.55, C[2]], [0, C[1] + h * 0.55 + 0.04, C[2]], 0.215, 'leather', 'debris_udder', 14, caps=False)
+
+# ------------------------------------------------------- matte shading
+# Vertex colours (multiplied with the base colours by shipconv; the colour
+# zone stays flat grey there): local ambient occlusion by ray casting,
+# soft fur noise, a darker belly and legs.
+allP = np.array([t[0] for t in tris])                    # (T, 3, 3)
+v0, e1_, e2_ = allP[:, 0], allP[:, 1] - allP[:, 0], allP[:, 2] - allP[:, 0]
+
+
+def occlusion(points, normals, nray=24, reach=0.9):
+    rng2 = np.random.default_rng(3)
+    dirs = rng2.normal(size=(nray, 3)); dirs /= np.linalg.norm(dirs, axis=1, keepdims=True)
+    out = np.zeros(len(points))
+    for k in range(0, len(points), 16):
+        p = points[k:k + 16]; n = normals[k:k + 16]
+        d = dirs[None, :, :] * np.sign(np.einsum('rj,pj->pr', dirs, n))[:, :, None]   # hemisphere
+        cosw = np.einsum('prj,pj->pr', d, n)
+        o = p + n * 0.02
+        D = d.reshape(-1, 3); O = np.repeat(o, nray, axis=0)
+        pv = np.cross(D[:, None, :], e2_[None])          # (R, T, 3)
+        det = np.einsum('rtj,tj->rt', pv, e1_)
+        inv = 1 / np.where(np.abs(det) < 1e-9, 1e-9, det)
+        tv = O[:, None, :] - v0[None]
+        u = np.einsum('rtj,rtj->rt', tv, pv) * inv
+        qv = np.cross(tv, e1_[None])
+        v = np.einsum('rj,rtj->rt', D, qv) * inv
+        tt = np.einsum('tj,rtj->rt', e2_, qv) * inv
+        hit = (np.abs(det) > 1e-9) & (u >= 0) & (v >= 0) & (u + v <= 1) & (tt > 1e-3) & (tt < reach)
+        dist = np.where(hit, tt, np.inf).min(1)
+        occ = np.where(np.isfinite(dist), 1 - dist / reach, 0).reshape(-1, nray)
+        out[k:k + 16] = (occ * cosw).sum(1) / cosw.sum(1)
+    return out
+
+
+def fur(p):
+    s = 0
+    for f, a, ph in ((3.1, 0.05, (0.3, 1.7, 2.9)), (7.3, 0.03, (1.1, 0.4, 2.2)), (15.0, 0.02, (2.5, 0.9, 0.1))):
+        s += a * np.sin(f * p[:, 0] + ph[0]) * np.sin(f * 0.9 * p[:, 1] + ph[1]) * np.sin(f * 1.1 * p[:, 2] + ph[2]) * 2
+    return s
+
+
+shade_mats = {'hide_white', 'pink', 'horn', 'leather', 'gunmetal', 'brass', 'steel', 'dark'}
+SP = np.array([p for t in tris for p in t[0]]); SN = np.array([n for t in tris for n in t[1]])
+key = np.round(SP, 4)
+uk, inv = np.unique(key, axis=0, return_inverse=True)
+inv = inv.reshape(-1)
+nsum = np.zeros_like(uk); np.add.at(nsum, inv, SN)
+nsum /= np.linalg.norm(nsum, axis=1, keepdims=True) + 1e-12
+ao = occlusion(uk, nsum)
+yb = uk[:, 1]
+belly = np.clip((2.4 - yb) / 1.6, 0, 1)                  # 0 above the flank, 1 at the hooves
+under = np.clip(-nsum[:, 1], 0, 1)
+vshade = (1 - 0.55 * ao) * (1 + fur(uk)) * (1 - 0.18 * belly) * (1 - 0.12 * under)
+vshade = np.clip(vshade, 0.35, 1.0)
+VC = vshade[inv].reshape(len(tris), 3)
+tris = [(P, N, m, part, VC[i] if m in shade_mats else np.ones(3)) for i, (P, N, m, part) in enumerate(tris)]
 
 # ------------------------------------------------------------------ write glb
 parts = sorted(set(t[3] for t in tris), key=lambda p: (p != 'body', p))
@@ -278,22 +431,27 @@ for part in parts:
             continue
         P = np.array([t[0] for t in sel], np.float32).reshape(-1, 3)
         N = np.array([t[1] for t in sel], np.float32).reshape(-1, 3)
-        # weld identical vertices
-        key = np.round(np.hstack([P, N]), 5)
+        Cc = np.repeat(np.array([t[4] for t in sel], np.float32).reshape(-1, 1), 3, axis=1)
+        key = np.round(np.hstack([P, N, Cc[:, :1]]), 4)
         uniq, inv = np.unique(key, axis=0, return_inverse=True)
-        Pu = uniq[:, :3].astype(np.float32); Nu = uniq[:, 3:].astype(np.float32)
+        inv = inv.reshape(-1)
+        Pu = uniq[:, :3].astype(np.float32); Nu = uniq[:, 3:6].astype(np.float32)
         Nu /= np.linalg.norm(Nu, axis=1, keepdims=True)
-        idx = inv.reshape(-1).astype(np.uint16 if len(uniq) < 65535 else np.uint32)
+        Cu = np.hstack([np.repeat(uniq[:, 6:7], 3, axis=1), np.ones((len(uniq), 1))]).astype(np.float32)
+        idx = inv.astype(np.uint16 if len(uniq) < 65535 else np.uint32)
         pa = add(Pu, 34962, 'VEC3', 5126, True)
         na = add(Nu, 34962, 'VEC3', 5126)
+        ca = add(Cu, 34962, 'VEC4', 5126)
         ia = add(idx, 34963, 'SCALAR', 5123 if idx.dtype == np.uint16 else 5125)
-        prims.append({'attributes': {'POSITION': pa, 'NORMAL': na}, 'indices': ia, 'material': mi})
+        prims.append({'attributes': {'POSITION': pa, 'NORMAL': na, 'COLOR_0': ca}, 'indices': ia, 'material': mi})
         ntri += len(sel)
         stats[m] = stats.get(m, 0) + len(sel)
     meshes.append({'name': part, 'primitives': prims})
     nodes.append({'name': part, 'mesh': len(meshes) - 1})
+for i, gp in enumerate(GUN):
+    nodes.append({'name': 'gun%d' % i, 'translation': [float(x) for x in gp]})
 
-gl = {'asset': {'version': '2.0', 'generator': 'build_cow.py'},
+gl = {'asset': {'version': '2.0', 'generator': 'cow.py'},
       'scene': 0, 'scenes': [{'nodes': list(range(len(nodes)))}], 'nodes': nodes, 'meshes': meshes,
       'materials': [{'name': m, 'pbrMetallicRoughness': {'baseColorFactor': list(MATS[m]), 'metallicFactor': 0, 'roughnessFactor': 1}} for m in mats],
       'accessors': accs, 'bufferViews': views, 'buffers': [{'byteLength': len(blob)}]}
@@ -315,3 +473,4 @@ tot = area(tris)
 print('triangles', ntri, 'parts', parts)
 print('per material', stats)
 print('accent area %.1f %%' % (100 * area([t for t in tris if t[2] == 'accent_spots']) / tot))
+print('ao mean %.2f, shade min %.2f mean %.2f' % (ao.mean(), vshade.min(), vshade.mean()))

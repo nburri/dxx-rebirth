@@ -44,7 +44,17 @@ with the player's colour. `convert-own.sh` runs both steps.
 
 The Cow is the Cow of Quaternius' Ultimate Animated Animal Pack (CC0 1.0,
 its `License.txt` and the pack's page) in its rest pose, repainted by
-`src/cow.py` as a Holstein: white hide, pink snout and udder, dark hooves;
-its spots and a collar are the player-colour zone, and a brass cow bell
-hangs at the neck. Head, legs, udder, tail and bell fly off as debris.
-`convert-cow.sh` rebuilds it from the pack's `glTF/Cow.gltf`.
+`src/cow.py` as a matte Holstein. The cream hide has baked shading
+(ambient occlusion, fur noise, a darker belly and legs), the snout and
+udder are pink, the hooves dark. Its spots, its collar and the noses of
+its missiles are the player-colour zone. A harness carries weapons at the
+Pyro's gun points, where every ship's shots come from:
+- laser cannons (guns 0/1);
+- quad-laser stub wings (2/3);
+- missile pods (4/5);
+- a cow bell (6: vulcan, gauss, spreadfire, helix, flares);
+- a milk churn under the udder (7: mines, smart and mega missiles,
+  earthshakers).
+
+The head, legs, udder, tail and bell fly off as debris. `convert-cow.sh`
+rebuilds it from the pack's `glTF/Cow.gltf`.
