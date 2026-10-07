@@ -30,6 +30,9 @@ build_appimage() {
     # The bundled custom ships (data/ships/README.md), in the share path
     mkdir -p "${name}.appdir/usr/share/${name}/ships"
     cp --link data/ships/*.dxship data/ships/README.md "${name}.appdir/usr/share/${name}/ships/"
+    # The bundled missions (data/missions/README.md), in the share path
+    mkdir -p "${name}.appdir/usr/share/${name}/missions"
+    cp --link data/missions/*.HOG data/missions/*.MN2 data/missions/README.md "${name}.appdir/usr/share/${name}/missions/"
 
     # Package!
     OUTPUT="${prettyname}.AppImage"	\
