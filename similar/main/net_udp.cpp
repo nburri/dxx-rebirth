@@ -73,6 +73,7 @@
 #include "partial_range.h"
 #include "clipboard.h"
 #include "net_address_text.h"
+#include "net_mission.h"
 #include <array>
 #include <utility>
 
@@ -571,6 +572,7 @@ namespace {
 direct_join::connect_type net_udp_show_game_info(const netgame_info &Netgame);
 static bool net_udp_join_precheck();
 static int net_udp_do_join_game();
+static bool net_udp_download_mission();
 
 static void net_udp_show_version_mismatch()
 {
@@ -605,6 +607,9 @@ static int net_udp_game_connect(direct_join *const dj)
 			case net_v2::join_status::accepted:
 				net_v2::client_end_join();
 				dj->connecting = direct_join::connect_type::idle;
+				/* The host's mission first, if this machine lacks it. */
+				if (net_mission_download_needed() && !net_udp_download_mission())
+					return 0;
 				return net_udp_do_join_game();
 			case net_v2::join_status::denied:
 				net_v2::client_end_join();
@@ -1507,7 +1512,11 @@ static int net_udp_start_poll(newmenu *, const d_event &event, start_poll_menu_i
 	for (int i=0; i<N_players; i++ ) // fill this in always in case players change but not their numbers
 	{
 		const auto &&rankstr = GetRankStringWithSpace(Netgame.players[i].rank);
-		snprintf(menus[i].text, 45, "%d. %s%s%-20s", i+1, rankstr.first, rankstr.second, static_cast<const char *>(Netgame.players[i].callsign));
+		/* A player still downloading the mission (net_mission.cpp). */
+		if (const auto pct{net_mission_host_progress(i)})
+			snprintf(menus[i].text, 45, "%d. %s%s%-12s mission %u%%", i+1, rankstr.first, rankstr.second, static_cast<const char *>(Netgame.players[i].callsign), *pct);
+		else
+			snprintf(menus[i].text, 45, "%d. %s%s%-20s", i+1, rankstr.first, rankstr.second, static_cast<const char *>(Netgame.players[i].callsign));
 	}
 
 	const unsigned players_last_poll = items->get_player_count();
@@ -3048,6 +3057,23 @@ bool net_udp_join_precheck()
 		return false;
 	}
 
+	/* The host's version of its mission (protocol 115): here already,
+	 * to be downloaded after the join, or the reason why not.
+	 */
+	{
+		std::string message;
+		switch (net_mission_prepare_join(Netgame.mission_name, message))
+		{
+			case join_mission::loaded:
+			case join_mission::download:
+				goto mission_checked;
+			case join_mission::by_name:
+				break;
+			case join_mission::failed:
+				nm_messagebox_str(menu_title{TXT_MISSION_NOT_FOUND}, nm_messagebox_tie(TXT_OK), menu_subtitle{message.c_str()});
+				return false;
+		}
+	}
 	// Check for valid mission name
 	{
 		mission_entry_predicate mission_predicate;
@@ -3080,6 +3106,7 @@ bool net_udp_join_precheck()
 		return false;
 	}
 	}
+mission_checked:
 
 #if DXX_BUILD_DESCENT == 2
 	if (is_D2_OEM)
@@ -3143,6 +3170,69 @@ bool net_udp_join_precheck()
 		return false;
 	}
 	return true;
+}
+
+/* The join was accepted, the host's mission is missing: download it
+ * (Documentation/network-protocol-v2.md section 8, "Mission transfer"),
+ * showing the progress, and load it.  False if that failed or the
+ * player gave up (the host is told).
+ */
+struct download_mission_state
+{
+	std::array<char, 160> text{};
+};
+
+static int net_udp_download_poll(newmenu *, const d_event &event, download_mission_state *const d)
+{
+	if (event.type != event_type::window_draw)
+		return 0;
+	net_udp_listen();
+	/* The host is gone, or removed us (it said why already). */
+	if (!net_v2::host_slot_has_peer(0))
+		return -2;
+	const auto s{net_mission_client_status()};
+	if (s.state != client_mission_status::running)
+		return -2;
+	if (s.received)
+		std::snprintf(d->text.data(), d->text.size(), "Downloading mission\n%.40s: %u %%\n(%.1f of %.1f MB)", s.title.c_str(), s.percent, static_cast<double>(s.received) / 1e6, static_cast<double>(s.total) / 1e6);
+	else
+		std::snprintf(d->text.data(), d->text.size(), "Downloading mission\n%.40s: waiting for the host\n(%.1f MB)", s.title.c_str(), static_cast<double>(s.total) / 1e6);
+	return 0;
+}
+
+bool net_udp_download_mission()
+{
+	download_mission_state d;
+	std::snprintf(d.text.data(), d.text.size(), "Downloading mission\n%.40s: waiting for the host\n                    ", Netgame.mission_title.data());
+	std::array<newmenu_item, 2> m{{
+		newmenu_item::nm_item_text{d.text.data()},
+		newmenu_item::nm_item_text{"Press ESC to cancel"},
+	}};
+	for (int choice{0}; choice > -1;)
+		choice = newmenu_do2(menu_title{nullptr}, menu_subtitle{"PLEASE WAIT"}, m, net_udp_download_poll, &d);
+	const auto s{net_mission_client_status()};
+	if (s.state == client_mission_status::done)
+	{
+		if (const auto err{net_mission_client_finish()})
+		{
+			net_v2::client_send_leave(kick_player_reason::cancelled);
+			nm_messagebox(menu_title{TXT_ERROR}, {TXT_OK}, "The mission was downloaded\nbut does not load:\n%s", err);
+			return false;
+		}
+		return true;
+	}
+	net_mission_client_cancel();
+	if (!net_v2::host_slot_has_peer(0))
+	{
+		/* A kick has shown its reason; a lost host has not. */
+		if (net_v2::client_take_host_lost())
+			nm_messagebox_str(menu_title{TXT_ERROR}, nm_messagebox_tie(TXT_OK), menu_subtitle{"Lost the connection to the host\nwhile downloading the mission.\n\nJoin again to continue the download."});
+		return false;
+	}
+	net_v2::client_send_leave(kick_player_reason::cancelled);
+	if (s.state == client_mission_status::failed)
+		nm_messagebox(menu_title{TXT_ERROR}, {TXT_OK}, "Could not download the mission:\n%s.", s.error.c_str());
+	return false;
 }
 
 int net_udp_do_join_game()

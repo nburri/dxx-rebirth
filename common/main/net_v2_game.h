@@ -289,6 +289,22 @@ void game_send_to(playernum_t slot, uint8_t type, std::span<const uint8_t> paylo
 std::size_t game_queued_bytes(playernum_t slot);
 /* Host: player `slot` is a connected client (joining or in the game). */
 bool host_slot_is_client(playernum_t slot);
+/* The mission transfer (net_mission.cpp): the reliable messages sent
+ * and retransmitted to `slot` (a client: slot 0) and its round trip in
+ * seconds (0: not known yet).
+ */
+struct game_link_counters
+{
+	std::uint64_t sends{}, resends{};
+	double rtt{};
+};
+[[nodiscard]]
+game_link_counters game_link(playernum_t slot);
+/* A transfer runs on the connection to `slot` at this many packets per
+ * tick (net_v2_mission.h), or 0: none does.  In the lobby's bulk mode
+ * the connection's queue also takes a larger window.
+ */
+void game_set_bulk(playernum_t slot, unsigned packets_per_tick);
 
 /* Log the sizes of the session's queues (for the -verbose frame
  * probe's session report).

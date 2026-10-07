@@ -56,6 +56,8 @@
 #include "multi.h"
 #include "bot.h"
 #include "taunt.h"
+#include "net_mission.h"
+#include "net_v2_mission.h"
 #include "multiinternal.h"
 #include "powerup.h"
 #include "gameseg.h"
@@ -645,7 +647,7 @@ constexpr program_version Program_version{DXX_VERSION_MAJORi, DXX_VERSION_MINORi
  * 4.3, 4.4, 4.5 and the stage 1 notes of section 6.10).
  */
 /* Protocol 114: 66 (TeamSpawns, RespawnDelay). */
-constexpr std::size_t GAME_SETTINGS_FIXED_SIZE{66};
+constexpr std::size_t GAME_SETTINGS_FIXED_SIZE{66 + ::dcx::net_v2::mission_announcement::SIZE};
 constexpr std::size_t PLAYER_LIST_ENTRY_SIZE{12};
 constexpr std::size_t PLAYER_LIST_SIZE{MAX_PLAYERS * PLAYER_LIST_ENTRY_SIZE};
 constexpr std::size_t PLAYER_JOINED_SIZE{12};
@@ -721,6 +723,11 @@ struct peer
 	fix64 close_at{};
 	std::deque<queued_message> backlog;
 	std::size_t backlog_bytes{};
+	/* How full the connection's queue may be before messages wait in the
+	 * backlog: larger while a mission transfer runs in the lobby
+	 * (game_set_bulk).
+	 */
+	std::size_t pump_bytes{BACKLOG_PUMP_BYTES};
 	/* Host: when this peer's bundle next carries the ping list. */
 	fix64 next_pings{};
 	fix64 next_stats{};
@@ -1238,7 +1245,15 @@ bool join_in_progress(const _sockaddr &ignore_addr)
 {
 	per_player_array<::dcx::net_v2::join_peer_view> views{};
 	for (auto &&[i, p] : enumerate(S.peers))
-		views[i] = {.phase = p.ph, .same_address = p.addr == ignore_addr};
+	{
+		/* A joining player still downloading the mission (it has not
+		 * loaded the level) does not hold up the others: the snapshot
+		 * and the extras, which the joins wait for, come after its
+		 * LEVEL_READY.
+		 */
+		const bool downloading{p.ph == peer::phase::joining && !p.has_ready && net_mission_host_requested(static_cast<playernum_t>(i))};
+		views[i] = {.phase = downloading ? peer::phase::none : p.ph, .same_address = p.addr == ignore_addr};
+	}
 	return ::dcx::net_v2::join_in_progress(views, Network_sending_extras || !S.extras_queue.empty());
 }
 
@@ -1249,9 +1264,13 @@ void drop_peer(peer &p)
 		Public_tally.forget(peer_slot(p));
 		/* Its ship goes with it (custom ships, net_ships.cpp). */
 		if (p.conn)
+		{
 			net_ships_slot_cleared(peer_slot(p));
+			net_mission_slot_cleared(peer_slot(p));
+		}
 	}
 	p.conn.reset();
+	p.pump_bytes = BACKLOG_PUMP_BYTES;
 	p.ph = peer::phase::none;
 	p.token = 0;
 	p.nonce = 0;
@@ -1273,7 +1292,7 @@ void pump_peer(peer &p)
 	const auto stats{p.conn->stats()};
 	std::size_t queued_bytes{stats.queue_bytes};
 	std::size_t queued_messages{stats.queue_messages};
-	while (!p.backlog.empty() && queued_bytes < BACKLOG_PUMP_BYTES && queued_messages < BACKLOG_PUMP_MESSAGES)
+	while (!p.backlog.empty() && queued_bytes < p.pump_bytes && queued_messages < BACKLOG_PUMP_MESSAGES)
 	{
 		auto &m{p.backlog.front()};
 		const auto size{m.payload.size()};
@@ -1298,7 +1317,7 @@ void peer_queue(peer &p, const session_msg type, const std::span<const uint8_t> 
 	if (p.backlog.empty())
 	{
 		const auto stats{p.conn->stats()};
-		if (stats.queue_bytes + payload.size() < BACKLOG_PUMP_BYTES && stats.queue_messages < BACKLOG_PUMP_MESSAGES)
+		if (stats.queue_bytes + payload.size() < p.pump_bytes && stats.queue_messages < BACKLOG_PUMP_MESSAGES)
 		{
 			p.conn->enqueue_reliable(static_cast<uint8_t>(type), payload);
 			return;
@@ -1468,6 +1487,10 @@ void write_game_settings(writer &w)
 	w.ntstr(Netgame.game_name);
 	w.ntstr(Netgame.mission_title);
 	w.ntstr(Netgame.mission_name);
+	/* Protocol 115: the mission's bundle (net_v2_mission.h). */
+	std::array<uint8_t, ::dcx::net_v2::mission_announcement::SIZE> mission;
+	net_mission_write_announcement(mission.data());
+	w.bytes(mission.data(), mission.size());
 }
 
 /* Reads GAME_SETTINGS into Netgame.  Leaves the reader positioned after
@@ -1516,7 +1539,8 @@ void read_game_settings(reader &r)
 	r.ntstr(game_name);
 	r.ntstr(mission_title);
 	r.ntstr(mission_name);
-	if (!r.ok || !status || max_numplayers > MAX_PLAYERS || numplayers > MAX_PLAYERS)
+	const auto mission{r.take(::dcx::net_v2::mission_announcement::SIZE)};
+	if (!r.ok || !mission || !status || max_numplayers > MAX_PLAYERS || numplayers > MAX_PLAYERS)
 	{
 		r.ok = false;
 		return;
@@ -1566,6 +1590,7 @@ void read_game_settings(reader &r)
 	Netgame.game_name = game_name;
 	Netgame.mission_title = mission_title;
 	Netgame.mission_name = mission_name;
+	net_mission_read_announcement(mission);
 }
 
 void write_player_list(writer &w)
@@ -3373,8 +3398,11 @@ void accept_peer(const playernum_t slot, const ::dcx::net_v2::join_request &req,
 	};
 	acc.write(p.accept_payload.data());
 	send_unconnected(from, S.session_id, p.token, 0, session_msg::join_accept, p.accept_payload);
-	/* Everyone's ship, first thing on the new connection. */
+	/* Everyone's ship, first thing on the new connection; the mission's
+	 * description, for a client that lacks it.
+	 */
 	net_ships_client_joined(slot);
+	net_mission_client_joined(slot);
 	{
 		_sockaddr::presentation_buffer dbuf;
 		con_printf(CON_NORMAL, "net: accepted '%s' from %s:%hu as P#%u", callsign.operator const char *(), dxx_ntop(from, dbuf), dxx_sockaddr_port(from), slot);
@@ -3851,6 +3879,8 @@ void handle_join_accept(const packet_header &h, const std::span<const uint8_t> p
 	con_printf(CON_NORMAL, "net: joined session %08x as P#%u, tick rate %u Hz", S.session_id, acc->player_id, Netgame.TickRate);
 	/* Our ship, to the host (custom ships, net_ships.cpp). */
 	net_ships_start(false, static_cast<uint8_t>(acc->player_id));
+	/* The mission, if this client lacks the host's version. */
+	net_mission_client_connected();
 	/* Protocol 108: tell the host the address it answered from, which
 	 * behind a NAT router is its public one.
 	 */
@@ -4753,6 +4783,15 @@ void handle_reliable(peer &p, const session_msg type, const std::span<const uint
 			net_modes_receive(slot, static_cast<uint8_t>(type), payload);
 		return;
 	}
+	/* Mission transfer (net_mission.cpp): the manifest and the asset
+	 * messages of kind 3, in any phase (a joining client downloads before
+	 * it loads the level).
+	 */
+	if (type == session_msg::mission_manifest || ::dcx::net_v2::is_mission_asset_message(static_cast<uint8_t>(type), payload))
+	{
+		net_mission_receive(slot, static_cast<uint8_t>(type), payload);
+		return;
+	}
 	/* Custom ships (net_ships.cpp): any phase; the exchange checks who
 	 * may send what.
 	 */
@@ -5026,6 +5065,18 @@ void receive_datagram(const std::span<const uint8_t> datagram, const _sockaddr &
 			return;
 		handle_unreliable(*p, ::dcx::net_v2::unreliable_view{.type = type, .payload = payload});
 	}
+	/* A bulk transfer from the peer (a mission download): its acks go out
+	 * now, not at the end of the frame, so that a slow frame never lets
+	 * a packet fall out of the 64-packet ack bitfield.
+	 */
+	if (p->conn && p->conn->ack_urgent())
+		for (;;)
+		{
+			const auto packet{p->conn->build_outgoing(S.now)};
+			if (packet.empty())
+				break;
+			send_raw(packet, p->addr);
+		}
 }
 
 void read_sockets()
@@ -5187,6 +5238,8 @@ void frame(const bool listen)
 	client_join_frame();
 	/* Custom ships: announcements, the bots' ships, paced transfers. */
 	net_ships_frame();
+	/* The mission transfer: paced sending, the client's timeouts. */
+	net_mission_frame();
 
 	/* Each connection paces its own packets (connection::begin_tick); a
 	 * connection's tick carries the newest state.  The host builds the
@@ -5232,6 +5285,11 @@ void frame(const bool listen)
 			continue;
 		}
 		report_stats(p);
+		/* A joining player that downloads the mission is not stalled:
+		 * its join time counts from the end of the download.
+		 */
+		if (multi_i_am_master() && net_mission_host_busy(peer_slot(p)))
+			p.phase_since = S.now;
 		if (multi_i_am_master() && ::dcx::net_v2::join_stalled(p.ph, p.phase_since, S.now))
 		{
 			/* Section 4.4: a join in progress that does not finish.  The
@@ -5402,6 +5460,28 @@ std::size_t game_queued_bytes(const playernum_t slot)
 	return p.conn ? p.conn->stats().queue_bytes + p.backlog_bytes : 0;
 }
 
+game_link_counters game_link(const playernum_t slot)
+{
+	if (slot >= MAX_PLAYERS)
+		return {};
+	const auto &p{S.peers[slot]};
+	if (!p.conn)
+		return {};
+	const auto s{p.conn->stats()};
+	return {s.message_sends, s.message_resends, s.rtt_valid ? static_cast<double>(s.srtt) / F1_0 : 0.0};
+}
+
+void game_set_bulk(const playernum_t slot, const unsigned packets_per_tick)
+{
+	if (slot >= MAX_PLAYERS)
+		return;
+	auto &p{S.peers[slot]};
+	p.pump_bytes = packets_per_tick >= ::dcx::net_v2::MISSION_BULK_PACKETS_PER_TICK ? ::dcx::net_v2::MISSION_WINDOW_LOBBY + ::dcx::net_v2::NET_V2_MAX_MESSAGE : BACKLOG_PUMP_BYTES;
+	if (p.conn)
+		p.conn->set_max_packets_per_tick(packets_per_tick ? packets_per_tick : ::dcx::net_v2::NET_V2_DEFAULT_MAX_PACKETS_PER_TICK);
+	con_printf(CON_VERBOSE, "net: P#%u: %u packets per tick%s", slot, packets_per_tick ? packets_per_tick : ::dcx::net_v2::NET_V2_DEFAULT_MAX_PACKETS_PER_TICK, packets_per_tick ? " (mission transfer)" : "");
+}
+
 bool host_slot_is_client(const playernum_t slot)
 {
 	if (slot >= MAX_PLAYERS || !slot)
@@ -5417,6 +5497,7 @@ void session_reset()
 	net_ships_reset();
 	for (auto &p : S.peers)
 		drop_peer(p);
+	net_mission_reset();
 	S.awaits_entry = {};
 	S.session_id = 0;
 	S.my_token = 0;
@@ -5611,6 +5692,7 @@ void host_open_session(const uint32_t fixed_id)
 	Public_logged.clear();
 	con_printf(CON_NORMAL, "net: hosting session %08x at %u Hz", S.session_id, Netgame.TickRate);
 	net_ships_start(true, 0);
+	net_mission_host_start();
 }
 
 void host_broadcast_game_info_lite()

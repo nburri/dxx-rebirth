@@ -84,6 +84,14 @@ constexpr net_clock NET_V2_SEQ_JUMP_MARGIN{2};
  */
 constexpr unsigned NET_V2_EVENT_SKIP_MAX{8};
 
+/* After this many received packets with reliable messages and nothing
+ * sent since, a header-only ack goes out even when the tick's budget is
+ * spent: a bulk transfer from the peer (dozens of packets per tick, a
+ * mission download) must not outrun the 64-packet ack bitfield.  An
+ * implementation choice; any packet carries the acks.
+ */
+constexpr unsigned NET_V2_ACK_EVERY{16};
+
 /* A tick period as a ratio of net time units, so that 1/60 s (65536/60,
  * not a whole number of units) is exact and a tick origin advanced by
  * whole periods never drifts against a true 60 Hz caller.
@@ -592,6 +600,8 @@ class connection
 	/* Reliable messages were due but did not fit in the last packet. */
 	bool m_tick_backlog{};
 	bool m_ack_owed{};
+	/* Packets with reliable messages received since our last packet. */
+	unsigned m_packets_unacked{};
 	packet_buffer m_outgoing{};
 	std::vector<out_msg *> m_carried;
 	std::vector<selected_run> m_runs;
@@ -827,6 +837,24 @@ public:
 	 * mean the same as `tick`.
 	 */
 	void set_peer_tick(tick_period peer_tick);
+
+	/* Change the packet budget per tick (config.max_packets_per_tick,
+	 * clamped to at least 2): the lobby raises it on a connection that
+	 * carries a mission transfer (net_v2_mission.h).  The sequence jump
+	 * bound follows.
+	 */
+	void set_max_packets_per_tick(unsigned packets);
+
+	/* NET_V2_ACK_EVERY packets with reliable messages arrived since our
+	 * last packet: build_outgoing would send a header-only ack now even
+	 * without a tick's budget.  A caller reading many datagrams at once
+	 * sends in between when this says so.
+	 */
+	[[nodiscard]]
+	bool ack_urgent() const
+	{
+		return m_ack_owed && m_packets_unacked >= NET_V2_ACK_EVERY && m_state != connection_state::closed;
+	}
 
 	/* Change the timeouts of section 3.6 (connection_config::timeout and
 	 * unacked_timeout); they apply from the next check, measured from the

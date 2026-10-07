@@ -1226,6 +1226,43 @@ const char *load_mission_by_file_or_title(const char *const name)
 	return "No mission of that file name or title";
 }
 
+namespace {
+
+static void collect_missions_by_basename(const mission_list_type &list, const char *const basename, std::vector<std::string> &out)
+{
+	for (auto &i : list)
+	{
+		if (!i.directory.empty())
+			collect_missions_by_basename(i.directory, basename, out);
+#if DXX_BUILD_DESCENT == 2
+		else if (i.descent_version == Mission::descent_version_type::descent1)
+			continue;
+#endif
+		else if (i.builtin_hogsize == descent_hog_size::None && !d_stricmp(&*i.filename, basename))
+			out.emplace_back(i.path.c_str());
+	}
+}
+
+}
+
+std::vector<std::string> mission_paths_by_basename(const char *const basename)
+{
+	std::vector<std::string> out;
+	collect_missions_by_basename(build_mission_list(mission_filter_mode::include_anarchy), basename, out);
+	return out;
+}
+
+const char *load_mission_by_path(const char *const path)
+{
+	return load_mission_by_name(mission_entry_predicate{
+		.filesystem_name = path,
+#if DXX_BUILD_DESCENT == 2
+		.check_version = false,
+		.descent_version = {},
+#endif
+	}, mission_name_type::pathname);
+}
+
 //loads the named mission if exists.
 //Returns nullptr if mission loaded ok, else error string.
 const char *load_mission_by_name (const mission_entry_predicate mission_name, const mission_name_type name_match_mode)

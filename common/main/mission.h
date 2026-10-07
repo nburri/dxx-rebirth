@@ -28,6 +28,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 
 #include <memory>
 #include <string>
+#include <vector>
 #include "pstypes.h"
 #include "inferno.h"
 #include "dxxsconf.h"
@@ -253,6 +254,13 @@ struct mission_entry_predicate
 //loads the named mission if it exists.
 //Returns nullptr if mission loaded ok, else error string.
 const char *load_mission_by_name (mission_entry_predicate mission_name, mission_name_type);
+/* Mission transfer (similar/main/net_mission.cpp): the PhysFS paths
+ * (without extension, e.g. "missions/downloaded/0123abcd4567/Corona") of
+ * every add-on Descent 2 mission of that file name, in the order of the
+ * mission list; and loading one by such a path.
+ */
+std::vector<std::string> mission_paths_by_basename(const char *basename);
+const char *load_mission_by_path(const char *path);
 /* -botarena: load the mission of file name `name` (without folder or
  * extension, case ignored), else the one titled `name`.  Returns nullptr
  * if it was loaded, else an error string.

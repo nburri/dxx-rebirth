@@ -2883,6 +2883,8 @@ void do_sound_menu()
 	DXX_MENUITEM(VERB, CHECK, "Persistent Debris",opt_persist_debris,PlayerCfg.PersistentDebris)	\
 	DXX_MENUITEM(VERB, CHECK, "No Rankings (Multi)",opt_noranking,PlayerCfg.NoRankings)	\
 	DXX_MENUITEM(VERB, CHECK, "Free Flight in Automap",opt_freeflight, PlayerCfg.AutomapFreeFlight)	\
+	DXX_MENUITEM(VERB, CHECK, "Accept missions from the host (Multi)", opt_accept_missions, CGameCfg.AcceptMissions)	\
+	DXX_MENUITEM(VERB, CHECK, "Send missions to players (Multi host)", opt_send_missions, CGameCfg.SendMissions)	\
 	DSX_GAME_SPECIFIC_OPTIONS(VERB)	\
 	DXX_MENUITEM(VERB, TEXT, "", opt_label_blank)	\
         DXX_MENUITEM(VERB, TEXT, "Weapon Autoselect options:", opt_label_autoselect)	\

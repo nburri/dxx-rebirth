@@ -53,11 +53,12 @@ constexpr net_clock net_milliseconds(const net_clock ms)
  * CTF_NOTICE, 112: custom ships, SHIP_INFO and the ASSET_* transfer,
  * net_v2_ships.h, 113: taunts, TAUNT_REQUEST and TAUNT,
  * Documentation/taunts.md, 114: TeamSpawns and RespawnDelay in
- * GAME_SETTINGS);
+ * GAME_SETTINGS, 115: the mission transfer, the mission bundle in
+ * GAME_SETTINGS, MISSION_MANIFEST and asset kind 3, net_v2_mission.h);
  * named differently so that the two never shadow each other in a
  * translation unit that sees both.
  */
-constexpr std::uint16_t NET_V2_PROTO_VERSION{114};
+constexpr std::uint16_t NET_V2_PROTO_VERSION{115};
 constexpr std::size_t NET_V2_HEADER_SIZE{34};
 constexpr std::size_t NET_V2_MAX_PACKET{1200};
 constexpr std::size_t NET_V2_ACK_BITS{64};
@@ -100,7 +101,11 @@ constexpr net_clock NET_V2_RTO_MAX{net_milliseconds(1000)};
 
 /* Section 3.6 */
 constexpr unsigned NET_V2_QUEUE_MAX_MESSAGES{512};
-constexpr std::size_t NET_V2_QUEUE_MAX_BYTES{96 * 1024};
+/* 96 KiB until protocol 115; raised for the mission transfer's window
+ * (net_v2_mission.h, MISSION_WINDOW_LOBBY).  A sender's own bound, not
+ * seen on the wire.
+ */
+constexpr std::size_t NET_V2_QUEUE_MAX_BYTES{320 * 1024};
 constexpr net_clock NET_V2_UNACKED_TIMEOUT{net_seconds(10)};
 constexpr net_clock NET_V2_TIMEOUT{net_seconds(5)};
 constexpr net_clock NET_V2_KEEPALIVE_INTERVAL{net_milliseconds(100)};

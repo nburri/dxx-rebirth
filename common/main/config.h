@@ -81,6 +81,12 @@ struct CCfg : prohibit_void_ptr<>
 	uint8_t TauntChoice;
 	bool TauntsHeard;
 	uint8_t HornVolume;
+	/* Mission transfer (net_mission.cpp): get a mission this machine
+	 * lacks (or has in another version) from the host; send this host's
+	 * mission to the players who lack it.
+	 */
+	bool AcceptMissions;
+	bool SendMissions;
 	bool OrigTrackOrder;
 	uint8_t DigiVolume;
 	uint8_t MusicVolume;
