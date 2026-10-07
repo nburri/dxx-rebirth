@@ -79,6 +79,9 @@ jobs:
             # The bundled custom ships (data/ships/README.md)
             mkdir -p "$app/Contents/Resources/ships"
             cp data/ships/*.dxship data/ships/README.md "$app/Contents/Resources/ships/"
+            # The bundled missions (data/missions/README.md)
+            mkdir -p "$app/Contents/Resources/missions"
+            cp data/missions/*.HOG data/missions/*.MN2 data/missions/README.md "$app/Contents/Resources/missions/"
           done
 
           mv build/D2X-Rebirth.app ..

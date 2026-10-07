@@ -54,6 +54,9 @@ build_app() {
     mkdir -p "${outdir}/${prettyname}/ships"
     cp --link data/ships/*.dxship "${outdir}/${prettyname}/ships/"
     cp --link data/ships/README.md "${outdir}/${prettyname}/ships/"
+    # The bundled missions (data/missions/README.md)
+    mkdir -p "${outdir}/${prettyname}/missions"
+    cp --link data/missions/*.HOG data/missions/*.MN2 data/missions/README.md "${outdir}/${prettyname}/missions/"
 
     # The ship converter, if it was built (Documentation/custom-ships-authoring.md)
     if [ -f "build/common/shipconv.exe" ]; then
