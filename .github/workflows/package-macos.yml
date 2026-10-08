@@ -82,6 +82,9 @@ jobs:
             # The bundled missions (data/missions/README.md)
             mkdir -p "$app/Contents/Resources/missions"
             cp data/missions/*.HOG data/missions/*.MN2 data/missions/README.md "$app/Contents/Resources/missions/"
+            # The bundled sounds (data/sounds/README.md)
+            mkdir -p "$app/Contents/Resources/sounds"
+            cp data/sounds/*.wav data/sounds/README.md "$app/Contents/Resources/sounds/"
           done
 
           mv build/D2X-Rebirth.app ..

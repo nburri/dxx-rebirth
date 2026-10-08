@@ -335,8 +335,10 @@ static int player_hit_flag_powerup(player_info &player_info, const std::span<con
 	{
 		player_info.powerup_flags |= player_flag::has_team_flag;
 		powerup_basic_str(15, 0, 15, 0, desc);
-		/* The others learn it from the host's PICKUP_GRANT. */
-		digi_start_sound_queued(sound_effect::SOUND_HUD_YOU_GOT_FLAG, F1_0 * 2);
+		/* The others learn it from the host's PICKUP_GRANT.  The cue and
+		 * the voice ("You have the flag").
+		 */
+		net_modes_ctf_event(::dcx::ctf_cues::event::flag_taken, TEAM == team_number::blue ? ::dcx::ctf_cues::TEAM_RED : ::dcx::ctf_cues::TEAM_BLUE, pnum);
 		return 1;
 	}
 	return 0;
