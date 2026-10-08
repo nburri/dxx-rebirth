@@ -52,6 +52,10 @@ struct bot_config
 	 * built-in `style`).
 	 */
 	bot::style_name profile{};
+	/* Section 9.20: the ship it flies (Random: its style profile's, else
+	 * one of the host's own ships).
+	 */
+	bot::ship_choice ship{};
 };
 
 /* The host's bot setup, from the setup menu (section 6.2).  Bots take
@@ -206,6 +210,13 @@ bool bots_remove(playernum_t pnum);
  * in `profile`, `style` its base) from now on.
  */
 bool bots_set_skill_style(playernum_t pnum, ::dcx::bot::bot_skill skill, ::dcx::bot::bot_style style, const ::dcx::bot::style_name &profile = {});
+/* Section 9.20: bot `pnum` flies `ship` from now on (the host announces
+ * it to everyone, net_ships.cpp).
+ */
+bool bots_set_ship(playernum_t pnum, const ::dcx::bot::ship_choice &ship);
+/* The setup of bot `pnum` this machine flies, if it is one. */
+[[nodiscard]]
+std::optional<bot_config> bot_local_config(playernum_t pnum);
 /* Bot `pnum`'s team (team modes; automatic keeps its team). */
 bool bots_set_team(playernum_t pnum, ::dcx::bot::bot_team team);
 /* Bot `pnum` is called `name` (made unique) from now on. */

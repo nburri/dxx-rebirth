@@ -13,7 +13,7 @@
 #
 # Options:
 #   -n N        bots (1-7, default 5)
-#   -b LIST     the bots, skill:style[:name] by commas (default with 5
+#   -b LIST     the bots, skill:style[:name[:ship]] by commas (default with 5
 #               bots: those of the group's games, Hotshot/Balanced,
 #               Insane/Balanced, Insane/Aggressive, Insane/Cautious,
 #               Insane/Collector; with another -n: the pilot's setup);

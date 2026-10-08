@@ -135,7 +135,7 @@ struct CArg : prohibit_void_ptr<>
 	 * multiplayer-bots.md section 8.2): a headless anarchy game of bots
 	 * on this machine, run for <seconds> of game time, then a summary
 	 * and exit.  -fixedfps N its frames per game second (10-1000,
-	 * default 200), -botarena-bots "skill:style[:name],..." the bots,
+	 * default 200), -botarena-bots "skill:style[:name[:ship]],..." the bots,
 	 * -botarena-seed N its randomness (default 1).
 	 */
 	uint8_t DbgBotArenaLevel;

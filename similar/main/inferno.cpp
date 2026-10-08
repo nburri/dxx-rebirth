@@ -272,7 +272,7 @@ static void print_commandline_help()
 	VERB("  -lagtest <ms>                 As network host, delay your own pickups as a\n\t\t\t\tclient with a round trip of <ms> feels them (0-500)\n")	\
 	VERB("  -botarena <m> <l> <n> <s>     Headless test: <n> bots (1-7) fight on level <l>\n\t\t\t\tof mission <m> (name or file) for <s> game\n\t\t\t\tseconds, then print a summary and quit\n")	\
 	VERB("  -fixedfps <n>                 -botarena: <n> frames per game second (10-1000,\n\t\t\t\tdefault 200), as fast as the machine runs\n")	\
-	VERB("  -botarena-bots <list>         -botarena: the bots, skill:style[:name] by commas\n\t\t\t\t(default: the pilot's bot setup)\n")	\
+	VERB("  -botarena-bots <list>         -botarena: the bots, skill:style[:name[:ship]] by commas\n\t\t\t\t(default: the pilot's bot setup)\n")	\
 	VERB("  -botarena-seed <n>            -botarena: the game's random seed (default 1)\n")	\
 	VERB("  -botarena-reactor <s>         -botarena: the host destroys the reactor after <s>\n\t\t\t\tgame seconds; the arena ends with the countdown\n")	\
 	VERB("  -botarena-timeout <s>         -botarena: abort after <s> wall seconds (default\n\t\t\t\tmax(120, <seconds> / 5 + 60))\n")	\

@@ -303,7 +303,7 @@ const b::loaded_style *find_profile(const std::string_view s)
 	return lib.find(s);
 }
 
-/* -botarena-bots "skill:style[:name],...": the bots, in order; a bot the
+/* -botarena-bots "skill:style[:name[:ship]],...": the bots, in order; a bot the
  * list leaves out (or a field it leaves empty) plays the setup's default.
  * False (and a log line) if a word is no skill or style.
  */
@@ -328,7 +328,10 @@ bool parse_bot_list(const std::string_view list, const unsigned count, b::bot_pr
 		auto &e{p.bots[i]};
 		if (item.empty())
 			continue;
-		std::array<std::string_view, 3> field{};
+		/* skill:style:name:ship (section 9.20: a ship's name, pyro or
+		 * random).
+		 */
+		std::array<std::string_view, 4> field{};
 		std::string_view f{item};
 		for (auto &w : field)
 		{
@@ -372,6 +375,16 @@ bool parse_bot_list(const std::string_view list, const unsigned count, b::bot_pr
 		const auto n{std::min(field[2].size(), e.name.size() - 1)};
 		std::copy_n(field[2].data(), n, e.name.data());
 		e.name[n] = 0;
+		if (!field[3].empty())
+		{
+			const auto ship{b::parse_ship_choice(field[3])};
+			if (!ship)
+			{
+				con_printf(CON_URGENT, "botarena: \"%.*s\" is no ship's name (or pyro, random)", static_cast<int>(field[3].size()), field[3].data());
+				return false;
+			}
+			e.ship = *ship;
+		}
 	}
 	return true;
 }

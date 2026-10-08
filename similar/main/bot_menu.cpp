@@ -21,6 +21,10 @@
  *
  * Section 9.13: the style profiles (`.botstyle` files of `botstyles/`),
  * offered after the built-in styles wherever a style is chosen.
+ *
+ * Section 9.20: each bot's ship (Random, the Pyro-GX or one of the
+ * host's ships), on the per-bot screens (a slider, Enter opens the ship
+ * menu's list with its preview) and with `/bot ship`.
  */
 
 #include "dxxsconf.h"
@@ -38,6 +42,7 @@
 #include <vector>
 
 #include "bot.h"
+#include "custom_ship.h"
 #include "args.h"
 #include "console.h"
 #include "event.h"
@@ -157,7 +162,10 @@ constexpr int MENU_DONE{-2};
 constexpr int MENU_REBUILD{-3};
 constexpr int MENU_SET_ALL_SKILL{-4};
 constexpr int MENU_NEW_NAMES{-5};
+constexpr int MENU_PICK_SHIP{-10};
 constexpr int MENU_EDIT_BOT_BASE{-100};
+
+namespace cs = ::dcx::custom_ship;
 
 /* The Bots list's short style names. */
 constexpr std::array<const char *, b::BOT_STYLE_COUNT> style_short_names{{"Bal", "Aggr", "Caut", "Coll"}};
@@ -328,6 +336,7 @@ struct bot_edit_menu
 		skill,
 		style,
 		team,
+		ship,
 		blank,
 		remove,
 		done,
@@ -340,7 +349,97 @@ struct bot_edit_menu
 	char skill_text[40]{};
 	char style_text[56]{};
 	char team_text[40]{};
-	ntstring<NM_MAX_TEXT_LEN> skill_saved, style_saved, team_saved;
+	char ship_text[72]{};
+	ntstring<NM_MAX_TEXT_LEN> skill_saved, style_saved, team_saved, ship_saved;
+	/* Section 9.20: the ship slider's places: 0 Random, 1 the Pyro-GX,
+	 * 2 + i the host's ship i, and last the bot's ship when the host
+	 * does not have it (any more): it stays unless the slider moves.
+	 */
+	std::vector<cs::entry> ships;
+	b::ship_choice ship_start{};
+	bool ship_missing{};
+	void load_ships(const b::ship_choice &start)
+	{
+		ships = cs::list();
+		ship_start = start;
+		ship_missing = start.kind == b::ship_kind::named && !b::find_ship_named(start.name.data(), &start, candidates());
+	}
+	[[nodiscard]]
+	std::vector<b::ship_candidate> candidates() const
+	{
+		std::vector<b::ship_candidate> r;
+		r.reserve(ships.size());
+		for (const auto &e : ships)
+			r.push_back({e.name, e.hash, e.cached});
+		return r;
+	}
+	[[nodiscard]]
+	unsigned ship_max() const
+	{
+		return static_cast<unsigned>(1 + ships.size() + (ship_missing ? 1 : 0));
+	}
+	[[nodiscard]]
+	unsigned ship_value(const b::ship_choice &c) const
+	{
+		switch (c.kind)
+		{
+			case b::ship_kind::random:
+				return 0;
+			case b::ship_kind::pyro:
+				return 1;
+			case b::ship_kind::named:
+				if (const auto i{b::find_ship_named(c.name.data(), &c, candidates())})
+					return static_cast<unsigned>(2 + *i);
+				break;
+		}
+		return ship_missing && c == ship_start ? ship_max() : 0;
+	}
+	[[nodiscard]]
+	b::ship_choice ship_of_value(const unsigned v) const
+	{
+		if (v == 1)
+			return b::pyro_ship();
+		if (v >= 2 && v - 2 < ships.size())
+		{
+			const auto &e{ships[v - 2]};
+			return b::named_ship(e.name, e.hash).value_or(b::ship_choice{});
+		}
+		if (v >= 2 && ship_missing)
+			return ship_start;
+		return {};
+	}
+	void set_ship_item(const unsigned v)
+	{
+		nm_set_item_slider(m[ship], ship_text, std::min(v, ship_max()), 0, ship_max(), ship_saved);
+	}
+	/* The ship the style chosen on the screen names (empty: none). */
+	[[nodiscard]]
+	std::string_view style_ship() const
+	{
+		const auto &lib{bots_style_library()};
+		const auto v{static_cast<unsigned>(m[style].value)};
+		if (v >= b::BOT_STYLE_COUNT && v - b::BOT_STYLE_COUNT < lib.size())
+			return lib[v - b::BOT_STYLE_COUNT].profile.ship;
+		return {};
+	}
+	void update_ship_label()
+	{
+		const auto v{static_cast<unsigned>(m[ship].value)};
+		if (v == 0)
+		{
+			const auto from_style{style_ship()};
+			if (from_style.empty())
+				std::snprintf(ship_text, sizeof(ship_text), "Ship: Random");
+			else
+				std::snprintf(ship_text, sizeof(ship_text), "Ship: Random (style's %.*s)", static_cast<int>(from_style.size()), from_style.data());
+		}
+		else if (v == 1)
+			std::snprintf(ship_text, sizeof(ship_text), "Ship: Pyro-GX");
+		else if (v - 2 < ships.size())
+			std::snprintf(ship_text, sizeof(ship_text), "Ship: %s", ships[v - 2].title.c_str());
+		else
+			std::snprintf(ship_text, sizeof(ship_text), "Ship: %s (no file)", ship_start.name.data());
+	}
 	/* Section 9.13: the bot's style profile is not loaded (its file is
 	 * gone): the slider's first place stands for it.
 	 */
@@ -366,6 +465,32 @@ struct bot_edit_menu
 			std::snprintf(team_text, sizeof(team_text), "Team: %s", team_name(b::bot_team{static_cast<uint8_t>(m[team].value)}));
 		else
 			std::snprintf(team_text, sizeof(team_text), "Team: (team modes only)");
+		update_ship_label();
+	}
+	/* Section 9.20: Enter on the ship slider: the ship menu's list with
+	 * its preview.  False if the game closed it.
+	 */
+	bool pick_ship(const char *const bot_name)
+	{
+		const auto before{ship_of_value(static_cast<unsigned>(m[ship].value))};
+		const auto v{static_cast<unsigned>(m[ship].value)};
+		char title[40];
+		std::snprintf(title, sizeof(title), "Ship of %s", bot_name && bot_name[0] ? bot_name : "the new bot");
+		char random_label[64];
+		update_ship_label();
+		const auto from_style{style_ship()};
+		if (from_style.empty())
+			std::snprintf(random_label, sizeof(random_label), "Random");
+		else
+			std::snprintf(random_label, sizeof(random_label), "Random (style's %.*s)", static_cast<int>(from_style.size()), from_style.data());
+		bool forced{};
+		const auto row{custom_ship_pick_for_bot(title, random_label, v - 2 < ships.size() || v < 2 ? v : 0, forced)};
+		/* The picker read the folder again: the places follow it. */
+		const auto keep{ship_start};
+		load_ships(keep);
+		set_ship_item(ship_value(row ? ship_of_value(*row) : before));
+		update_labels();
+		return !forced;
 	}
 };
 
@@ -381,6 +506,8 @@ int bot_edit_handler(newmenu *, const d_event &event, bot_edit_menu *const e)
 			const auto citem{static_cast<const d_select_event &>(event).citem};
 			if (citem == bot_edit_menu::remove)
 				return MENU_REBUILD;
+			if (citem == bot_edit_menu::ship)
+				return MENU_PICK_SHIP;
 			if (citem == bot_edit_menu::done)
 				return MENU_DONE;
 			return 0;
@@ -410,11 +537,20 @@ void run_bot_edit(const unsigned i, const network_game_type mode)
 		nm_set_item_slider(e.m[bot_edit_menu::team], e.team_text, static_cast<unsigned>(c.team), 0, b::BOT_TEAM_COUNT - 1, e.team_saved);
 	else
 		nm_set_item_text(e.m[bot_edit_menu::team], e.team_text);
+	e.load_ships(c.ship);
+	e.set_ship_item(e.ship_value(c.ship));
 	nm_set_item_text(e.m[bot_edit_menu::blank], "");
 	nm_set_item_menu(e.m[bot_edit_menu::remove], "Remove this bot");
 	nm_set_item_menu(e.m[bot_edit_menu::done], "Done");
 	e.update_labels();
-	const int r{newmenu_do2(menu_title{title}, menu_subtitle{nullptr}, e.m, bot_edit_handler, &e, bot_edit_menu::done)};
+	int r;
+	for (int citem = bot_edit_menu::done;; citem = bot_edit_menu::ship)
+	{
+		r = newmenu_do2(menu_title{title}, menu_subtitle{nullptr}, e.m, bot_edit_handler, &e, citem);
+		if (r != MENU_PICK_SHIP)
+			break;
+		(void)e.pick_ship(e.name_text.data());
+	}
 	if (r == MENU_REBUILD)
 	{
 		remove_bot(i);
@@ -428,6 +564,7 @@ void run_bot_edit(const unsigned i, const network_game_type mode)
 		set_style_choice(static_cast<unsigned>(e.m[bot_edit_menu::style].value), c.style, c.profile);
 	if (e.team_mode)
 		c.team = b::bot_team{static_cast<uint8_t>(e.m[bot_edit_menu::team].value)};
+	c.ship = e.ship_of_value(static_cast<unsigned>(e.m[bot_edit_menu::ship].value));
 	/* An empty or taken name keeps the old one, and so does a word
 	 * `/bot` reads as something else (section 6.4: `all`, a skill, a
 	 * style, a command).
@@ -581,6 +718,7 @@ void bots_setup_load(const b::bot_profile &p)
 		c.style = e.style;
 		c.team = e.team;
 		c.profile = e.profile;
+		c.ship = e.ship;
 	}
 	/* Names after every line is in place, so that a missing or taken
 	 * one gets the next built-in name no other bot has.
@@ -626,6 +764,7 @@ b::bot_profile bots_setup_profile()
 		e.style = c.style;
 		e.team = c.team;
 		e.profile = c.profile;
+		e.ship = c.ship;
 	}
 	return p;
 }
@@ -845,7 +984,7 @@ bool run_ingame_edit(const bot_in_game *const existing)
 	ingame_edit e{};
 	if (existing)
 		e.existing = *existing;
-	const bot_config start{existing ? existing->cfg : bot_config{{}, Bot_game.default_skill, Bot_game.default_style, b::bot_team::automatic, Bot_game.default_profile}};
+	const bot_config start{existing ? existing->cfg : bot_config{{}, Bot_game.default_skill, Bot_game.default_style, b::bot_team::automatic, Bot_game.default_profile, {}}};
 	e.team_mode = (Game_mode & GM_TEAM) != game_mode_flags{};
 	std::snprintf(e.name_text.data(), e.name_text.size(), "%s", static_cast<const char *>(start.name));
 	/* A playing bot shows the team it is on. */
@@ -859,12 +998,26 @@ bool run_ingame_edit(const bot_in_game *const existing)
 		nm_set_item_slider(e.m[bot_edit_menu::team], e.team_text, static_cast<unsigned>(team), 0, b::BOT_TEAM_COUNT - 1, e.team_saved);
 	else
 		nm_set_item_text(e.m[bot_edit_menu::team], e.team_text);
+	e.load_ships(start.ship);
+	e.set_ship_item(e.ship_value(start.ship));
 	nm_set_item_text(e.m[bot_edit_menu::blank], "");
 	/* `remove` closes with MENU_REBUILD, `done` with MENU_DONE. */
 	nm_set_item_menu(e.m[bot_edit_menu::remove], existing ? "Remove this bot" : "Add this bot");
 	nm_set_item_menu(e.m[bot_edit_menu::done], existing ? "Done" : "Cancel");
 	e.update_labels();
-	const int r{newmenu_do2(menu_title{existing ? "BOT" : "NEW BOT"}, menu_subtitle{existing ? static_cast<const char *>(start.name) : nullptr}, e.m, ingame_edit_handler, &e, existing ? bot_edit_menu::done : bot_edit_menu::remove)};
+	int r;
+	for (int citem = existing ? bot_edit_menu::done : bot_edit_menu::remove;; citem = bot_edit_menu::ship)
+	{
+		e.watch = {};
+		r = newmenu_do2(menu_title{existing ? "BOT" : "NEW BOT"}, menu_subtitle{existing ? static_cast<const char *>(start.name) : nullptr}, e.m, ingame_edit_handler, &e, citem);
+		if (r != MENU_PICK_SHIP)
+			break;
+		/* Section 9.20: the ship list; the game may close it (the host
+		 * was hit), or the bot may leave meanwhile.
+		 */
+		if (!e.pick_ship(existing ? static_cast<const char *>(start.name) : e.name_text.data()) || (existing ? !still_playing(*existing) : !bots_manageable()))
+			return false;
+	}
 	if (r == MENU_GONE || !bots_manageable() || (r == -1 && e.watch.forced))
 		return false;
 	if (r != MENU_DONE && r != MENU_REBUILD)
@@ -875,6 +1028,7 @@ bool run_ingame_edit(const bot_in_game *const existing)
 		set_style_choice(static_cast<unsigned>(e.m[bot_edit_menu::style].value), c.style, c.profile);
 	if (e.team_mode)
 		c.team = b::bot_team{static_cast<uint8_t>(e.m[bot_edit_menu::team].value)};
+	c.ship = e.ship_of_value(static_cast<unsigned>(e.m[bot_edit_menu::ship].value));
 	if (!existing)
 	{
 		/* Only "Add this bot" adds ("Cancel" is the screen's `done`). */
@@ -908,6 +1062,7 @@ bool run_ingame_edit(const bot_in_game *const existing)
 		return true;
 	}
 	bots_set_skill_style(existing->pid, c.skill, c.style, c.profile);
+	bots_set_ship(existing->pid, c.ship);
 	if (e.team_mode && c.team != team)
 		bots_set_team(existing->pid, c.team);
 	/* An empty name keeps the old one, as does an untouched one (a name
@@ -1064,7 +1219,8 @@ void command_list()
 		const auto &bot{bots[i]};
 		char line[80];
 		const auto team{team_label(bot.pid)};
-		std::snprintf(line, sizeof(line), "%u. %s: %s, %s%s%s", i + 1, static_cast<const char *>(bot.cfg.name), skill_name(bot.cfg.skill), config_style_name(bot.cfg.style, bot.cfg.profile), team[0] ? ", " : "", team);
+		const auto &ship{bot.cfg.ship};
+		std::snprintf(line, sizeof(line), "%u. %s: %s, %s%s%s%s%s", i + 1, static_cast<const char *>(bot.cfg.name), skill_name(bot.cfg.skill), config_style_name(bot.cfg.style, bot.cfg.profile), team[0] ? ", " : "", team, ship.kind == b::ship_kind::random ? "" : ", ship ", ship.kind == b::ship_kind::pyro ? "Pyro-GX" : ship.name.data());
 		reply(line);
 	}
 }
@@ -1135,6 +1291,7 @@ bool bots_chat_command(const char *const text)
 		case b::command_kind::help:
 			reply("/bot add [skill] [style] [name], /bot remove <name|all>");
 			reply("/bot skill <name|all> <skill>, /bot style <name|all> <style>");
+			reply("/bot ship <name|all> <ship|random|pyro>");
 			reply("/bot list, /bot save (as the default setup)");
 			con_printf(CON_NORMAL, "bots: %s", b::BOT_COMMAND_USAGE);
 			break;
@@ -1151,7 +1308,7 @@ bool bots_chat_command(const char *const text)
 			break;
 		case b::command_kind::add:
 		{
-			bot_config cfg{{}, c.skill.value_or(Bot_game.default_skill), c.style.value_or(Bot_game.default_style), b::bot_team::automatic, c.style ? b::style_name{} : Bot_game.default_profile};
+			bot_config cfg{{}, c.skill.value_or(Bot_game.default_skill), c.style.value_or(Bot_game.default_style), b::bot_team::automatic, c.style ? b::style_name{} : Bot_game.default_profile, {}};
 			if (c.profile)
 				set_style_choice(b::BOT_STYLE_COUNT + *c.profile, cfg.style, cfg.profile);
 			set_name(cfg.name, c.name.data());
@@ -1188,6 +1345,57 @@ bool bots_chat_command(const char *const text)
 				else if (c.profile)
 					set_style_choice(b::BOT_STYLE_COUNT + *c.profile, style, profile);
 				bots_set_skill_style(bot.pid, c.skill.value_or(bot.cfg.skill), style, profile);
+			}
+			break;
+		}
+		case b::command_kind::ship:
+		{
+			/* Section 9.20: the host's ships as the folder was last read
+			 * (reading it again would stall the game).
+			 */
+			const auto &ships{cs::list()};
+			std::vector<std::string_view> names;
+			names.reserve(ships.size());
+			for (const auto &e : ships)
+				names.emplace_back(e.name);
+			const auto m{b::match_ship_word(c.ship_word.data(), names)};
+			b::ship_choice choice{};
+			const char *label{"a random ship"};
+			switch (m.result)
+			{
+				case b::ship_word_result::random:
+					break;
+				case b::ship_word_result::pyro:
+					choice = b::pyro_ship();
+					label = "the Pyro-GX";
+					break;
+				case b::ship_word_result::found:
+					if (const auto n{b::named_ship(ships[m.index].name, ships[m.index].hash)})
+					{
+						choice = *n;
+						label = ships[m.index].name.c_str();
+						break;
+					}
+					[[fallthrough]];
+				case b::ship_word_result::none:
+					std::snprintf(line, sizeof(line), "No ship '%s': random, pyro or a ship of ships/", c.ship_word.data());
+					reply(line);
+					return true;
+				case b::ship_word_result::ambiguous:
+					std::snprintf(line, sizeof(line), "Several ships begin with '%s'", c.ship_word.data());
+					reply(line);
+					return true;
+			}
+			const auto count{command_targets(c, bots, n, targets)};
+			for (unsigned i = 0; i < count; ++i)
+				bots_set_ship(bots[targets[i]].pid, choice);
+			if (count)
+			{
+				if (c.all)
+					std::snprintf(line, sizeof(line), "All bots fly %s", label);
+				else
+					std::snprintf(line, sizeof(line), "%s flies %s", static_cast<const char *>(bots[targets[0]].cfg.name), label);
+				reply(line);
 			}
 			break;
 		}
@@ -1240,7 +1448,7 @@ void bots_ingame_menu()
 		if (r == MENU_ADD_BOT)
 		{
 			b::add_verdict why;
-			if (!bots_add(bot_config{{}, Bot_game.default_skill, Bot_game.default_style, b::bot_team::automatic, Bot_game.default_profile}, why))
+			if (!bots_add(bot_config{{}, Bot_game.default_skill, Bot_game.default_style, b::bot_team::automatic, Bot_game.default_profile, {}}, why))
 			{
 				char msg[64];
 				say_add_failure(why, msg, sizeof(msg));

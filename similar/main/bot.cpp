@@ -7628,6 +7628,27 @@ bool bots_set_skill_style(const playernum_t pnum, const b::bot_skill skill, cons
 	return true;
 }
 
+bool bots_set_ship(const playernum_t pnum, const b::ship_choice &ship)
+{
+	const auto bs{find_bot(pnum)};
+	if (!bs || !bots_running())
+		return false;
+	if (bs->cfg.ship == ship)
+		return true;
+	bs->cfg.ship = ship;
+	/* net_ships_frame sees the change and announces the ship. */
+	con_printf(CON_NORMAL, "bots: '%s' (P#%u) now flies %s", static_cast<const char *>(bs->cfg.name), pnum, ship.kind == b::ship_kind::pyro ? "the Pyro-GX" : ship.kind == b::ship_kind::named ? ship.name.data() : "a random ship");
+	return true;
+}
+
+std::optional<bot_config> bot_local_config(const playernum_t pnum)
+{
+	const auto bs{find_bot(pnum)};
+	if (!bs)
+		return std::nullopt;
+	return bs->cfg;
+}
+
 bool bots_set_team(const playernum_t pnum, const b::bot_team team)
 {
 	const auto bs{find_bot(pnum)};

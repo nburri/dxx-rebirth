@@ -675,8 +675,11 @@ through `ship_exchange::request` / `note_owner`.
 - A player announces its ship on joining (and again when the pilot picks
   another between levels); the host checks that a client speaks only for
   itself, relays to everyone and tells a joining client every player's
-  ship. Bots: the host gives each one of its own ships, chosen by the
-  bot's name (the same ship for the whole session); none → Pyro.
+  ship. Bots: each has a ship setting (Documentation/multiplayer-bots.md
+  §9.20): Random (one of the host's own ships, chosen by the bot's name,
+  the same for the whole session; none → Pyro), the Pyro-GX, or any ship
+  the host has (its own or cached); a style profile may name one. The
+  host announces it again when the setting changes.
 - A client that lacks an announced ship asks the host (no prompt, D8/D9)
   unless the pilot switched "Accept ships from the host" or "Show
   custom ships" off (§11.4). The host
@@ -699,8 +702,8 @@ through `ship_exchange::request` / `note_owner`.
   ignore it.
 
 Not done: a two-instance network test (the game has no unattended host
-and join), the movement-recording header, a per-bot ship setting (bots
-get one of the host's ships).
+and join), the movement-recording header. (The per-bot ship setting came
+later, multiplayer-bots.md §9.20.)
 
 ### 11.4 Show custom ships (pilot option)
 

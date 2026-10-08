@@ -8,7 +8,8 @@
  * Custom ships over the network (Documentation/custom-ships.md section
  * 5): the game's side of the exchange of net_v2_ships.h.  Every player
  * announces its ship when it joins (and again when the pilot picks
- * another); the host gives its bots ships from its own and tells
+ * another); the host gives its bots their ships (the bot's setting, its
+ * style profile's ship, else one of its own at random) and tells
  * everyone every player's; a machine that lacks a ship gets it from the
  * host, paced, verified, and kept in ships/cache/, unless the pilot
  * refuses ships or does not show custom ships (Options -> Ship...).
@@ -24,6 +25,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <vector>
 
 #include "net_v2_ships.h"
 #include "net_v2_game.h"
@@ -36,6 +38,7 @@
 #include "timer.h"
 #include "game.h"
 #include "taunt.h"
+#include "physfsx.h"
 
 namespace dsx {
 
@@ -43,6 +46,7 @@ namespace {
 
 namespace nv = ::dcx::net_v2;
 namespace cs = ::dcx::custom_ship;
+namespace b = ::dcx::bot;
 
 std::string hash_text(const nv::asset_key &k)
 {
@@ -128,10 +132,12 @@ game_ship_env Env;
 std::optional<nv::ship_exchange> X;
 fix64 Last_pump;
 uint8_t Self;
-/* The ship each bot slot got (host), by callsign, so that a bot keeps
- * its ship for the session.
+/* What each bot slot's ship was chosen from (host): the callsign, the
+ * ship setting and the style profile's ship.  The ship is chosen again
+ * (and announced) when one of them changes, so that a bot keeps its
+ * ship for the session otherwise.
  */
-std::array<std::string, MAX_PLAYERS> Bot_callsigns;
+std::array<std::string, MAX_PLAYERS> Bot_keys;
 
 nv::ship_info_msg info_of(const cs::entry *const e)
 {
@@ -153,26 +159,61 @@ nv::ship_info_msg local_info()
 	return info_of(name.empty() ? nullptr : cs::find_name(name));
 }
 
-/* A bot's ship: one of the host's own ships, chosen by the bot's name, so
- * that it keeps it for the session (decision: random from the host's
- * ships).
+/* What bot `pnum` flies, as the host has it: its setting and the ship
+ * its style profile names (Documentation/multiplayer-bots.md section
+ * 9.20).
  */
-nv::ship_info_msg bot_info(const playernum_t pnum)
+struct bot_wish
 {
-	std::vector<const cs::entry *> own;
-	for (const auto &e : cs::list())
-		if (!e.cached)
-			own.push_back(&e);
-	if (own.empty())
-		return {};
-	const char *const callsign{vcplayerptr(pnum)->callsign};
-	uint32_t h{2166136261u};
-	for (auto p{callsign}; *p; ++p)
+	b::ship_choice choice{};
+	std::string profile_ship;
+	std::string callsign;
+	[[nodiscard]]
+	std::string key() const
 	{
-		h ^= static_cast<uint8_t>(*p);
-		h *= 16777619u;
+		return callsign + '|' + format_ship_choice(choice).data() + '|' + profile_ship;
 	}
-	return info_of(own[h % own.size()]);
+};
+
+bot_wish bot_wish_of(const playernum_t pnum)
+{
+	bot_wish w;
+	w.callsign = static_cast<const char *>(vcplayerptr(pnum)->callsign);
+	if (const auto cfg{bot_local_config(pnum)})
+	{
+		w.choice = cfg->ship;
+		if (cfg->profile[0])
+			if (const auto ls{bots_style_library().find(cfg->profile.data())})
+				w.profile_ship = ls->profile.ship;
+	}
+	return w;
+}
+
+/* A bot's ship: its setting, else its style profile's ship, else one of
+ * the host's own ships chosen by the bot's name; a ship the host does not
+ * have (any more) is replaced by one at random, said on the console.
+ */
+nv::ship_info_msg bot_info(const bot_wish &w)
+{
+	/* A ship file deleted since the folder was read: read it again. */
+	if (std::ranges::any_of(cs::list(), [](const cs::entry &e) { return !PHYSFS_exists(e.path.c_str()); }))
+		cs::rescan();
+	const auto &ships{cs::list()};
+	std::vector<b::ship_candidate> candidates;
+	candidates.reserve(ships.size());
+	for (const auto &e : ships)
+		candidates.push_back({e.name, e.hash, e.cached});
+	const auto r{b::resolve_ship(w.choice, w.profile_ship, w.callsign, candidates)};
+	const auto e{r.ship ? &ships[*r.ship] : nullptr};
+	const char *const flies{e ? e->name.c_str() : "the Pyro-GX"};
+	if (r.missing)
+	{
+		const char *const wanted{r.from_profile ? w.profile_ship.c_str() : w.choice.name.data()};
+		con_printf(CON_URGENT, "ships: bot '%s': no ship \"%s\" in the ships folder%s; it flies %s (Random)", w.callsign.c_str(), wanted, r.from_profile ? " (its style's)" : "", flies);
+	}
+	else
+		con_printf(CON_NORMAL, "ships: bot '%s' flies %s%s", w.callsign.c_str(), flies, r.random ? " (Random)" : r.from_profile ? " (its style's)" : "");
+	return info_of(e);
 }
 
 /* Ships are fetched for drawing only: not when the pilot refuses them or
@@ -194,7 +235,7 @@ void net_ships_start(const bool host, const uint8_t self)
 {
 	X.reset();
 	Env.files.clear();
-	Bot_callsigns = {};
+	Bot_keys = {};
 	custom_ship_clear_players();
 	cs::rescan();
 	Self = self;
@@ -275,18 +316,20 @@ void net_ships_frame()
 			const bool bot{player_is_bot(p) && p < N_players && vcplayerptr(p)->connected != player_connection_status::disconnected};
 			if (bot)
 			{
-				/* A bot (new, or another bot in the slot): its ship. */
-				const std::string callsign{static_cast<const char *>(vcplayerptr(p)->callsign)};
-				if (!X->info(p) || Bot_callsigns[p] != callsign)
+				/* A bot (new, or another bot in the slot, renamed, or
+				 * given another ship): its ship.
+				 */
+				const auto wish{bot_wish_of(p)};
+				if (auto key{wish.key()}; !X->info(p) || Bot_keys[p] != key)
 				{
-					Bot_callsigns[p] = callsign;
-					X->set_local(static_cast<uint8_t>(p), bot_info(p));
+					Bot_keys[p] = std::move(key);
+					X->set_local(static_cast<uint8_t>(p), bot_info(wish));
 				}
 			}
-			else if (!Bot_callsigns[p].empty())
+			else if (!Bot_keys[p].empty())
 			{
 				/* The bot left; a joining human announces its own. */
-				Bot_callsigns[p].clear();
+				Bot_keys[p].clear();
 #if DXX_BUILD_DESCENT == 2
 				taunt_slot_reset(p);
 #endif
