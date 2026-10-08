@@ -12,14 +12,14 @@ game's `ships` folder.
 | `pancake.dxship` | Pancake | Quaternius | CC0 1.0 | [Ultimate Spaceships](https://quaternius.com/packs/ultimatespaceships.html) |
 | `spitfire.dxship` | Spitfire | Quaternius | CC0 1.0 | [Ultimate Spaceships](https://quaternius.com/packs/ultimatespaceships.html) |
 | `executioner.dxship` | Executioner | Quaternius | CC0 1.0 | [Ultimate Spaceships](https://quaternius.com/packs/ultimatespaceships.html) |
-| `rae.dxship` | Rae | Quaternius | CC0 1.0 | [Ultimate Space Kit](https://quaternius.com/packs/ultimatespacekit.html) |
-| `speeder-c.dxship` | Speeder C | Kenney | CC0 1.0 | [Space Kit](https://kenney.nl/assets/space-kit) |
-| `speeder-d.dxship` | Speeder D | Kenney | CC0 1.0 | [Space Kit](https://kenney.nl/assets/space-kit) |
+| `rae.dxship` | Rae | Quaternius; texture: this fork | CC0 1.0 | [Ultimate Space Kit](https://quaternius.com/packs/ultimatespacekit.html) |
+| `speeder-c.dxship` | Speeder C | Kenney; texture: this fork | CC0 1.0 | [Space Kit](https://kenney.nl/assets/space-kit) |
+| `speeder-d.dxship` | Speeder D | Kenney; texture: this fork | CC0 1.0 | [Space Kit](https://kenney.nl/assets/space-kit) |
 | `anvil.dxship` | Anvil | this fork (procedural) | CC0 1.0 | `src/anvil.glb` |
 | `manta.dxship` | Manta | this fork (procedural) | CC0 1.0 | `src/manta.glb` |
 | `locust.dxship` | Locust | this fork (procedural) | CC0 1.0 | `src/locust.glb` |
 | `bulwark.dxship` | Bulwark | this fork (procedural) | CC0 1.0 | `src/bulwark.glb` |
-| `cow.dxship` | Cow | Quaternius; spots, collar, bell: this fork | CC0 1.0 | [Ultimate Animated Animal Pack](https://quaternius.com/packs/ultimateanimatedanimals.html), `src/cow.py` |
+| `cow.dxship` | Cow | Quaternius; spots, collar, weapons: this fork | CC0 1.0 | [Ultimate Animated Animal Pack](https://quaternius.com/packs/ultimateanimatedanimals.html), `src/cow.py` |
 
 The models are public domain (CC0 1.0 Universal); credit to Quaternius
 (https://quaternius.com) and Kenney (https://kenney.nl) all the same, and the same credit is in each
@@ -42,6 +42,13 @@ glowing nozzles). The player-colour zone (material `accent`) is a
 near-white painted plate; `shipconv` greys it and the game multiplies it
 with the player's colour. `convert-own.sh` runs both steps.
 
+Speeder C, Speeder D and Rae come flat-coloured (one colour per material,
+or a palette); they get textures the same way: `src/texture/prep_flat.py`
+sorts their faces into the same surface kinds (hull, armour, colour zone,
+canopy, nozzles, dark panels), `texture_ships.py` unwraps and paints them.
+`convert-kenney.sh` and `convert.sh` run these steps. The textures are
+CC0 1.0 as well.
+
 The Cow is the Cow of Quaternius' Ultimate Animated Animal Pack (CC0 1.0,
 its `License.txt` and the pack's page) in its rest pose, repainted by
 `src/cow.py` as a matte Holstein. The cream hide has baked shading
@@ -52,9 +59,11 @@ Pyro's gun points, where every ship's shots come from:
 - laser cannons (guns 0/1);
 - quad-laser stub wings (2/3);
 - missile pods (4/5);
-- a cow bell (6: vulcan, gauss, spreadfire, helix, flares);
+- a rotary cannon under the chin, on a yoke from the laser cannons
+  (6: vulcan, gauss, spreadfire, helix, flares);
 - a milk churn under the udder (7: mines, smart and mega missiles,
   earthshakers).
 
-The head, legs, udder, tail and bell fly off as debris. `convert-cow.sh`
+A small bell sits on the collar. The head, legs, udder, tail and
+cannon fly off as debris. `convert-cow.sh`
 rebuilds it from the pack's `glTF/Cow.gltf`.
