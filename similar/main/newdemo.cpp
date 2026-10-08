@@ -3365,6 +3365,9 @@ static int newdemo_read_frame_information(int rewrite)
 				Game_mode = Newdemo_game_mode;
 				if (game_mode_hoard(Game_mode))
 					init_hoard_data(Vclip);
+				/* The recording has the cues' sound ids. */
+				if (game_mode_capture_flag(Game_mode))
+					net_modes_load_ctf_cues();
 
 				if (game_mode_capture_flag(Game_mode) || game_mode_hoard(Game_mode))
 					multi_apply_goal_textures ();

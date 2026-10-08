@@ -33,6 +33,9 @@ build_appimage() {
     # The bundled missions (data/missions/README.md), in the share path
     mkdir -p "${name}.appdir/usr/share/${name}/missions"
     cp --link data/missions/*.HOG data/missions/*.MN2 data/missions/README.md "${name}.appdir/usr/share/${name}/missions/"
+    # The bundled sounds (data/sounds/README.md), in the share path
+    mkdir -p "${name}.appdir/usr/share/${name}/sounds"
+    cp --link data/sounds/*.wav data/sounds/README.md "${name}.appdir/usr/share/${name}/sounds/"
 
     # Package!
     OUTPUT="${prettyname}.AppImage"	\

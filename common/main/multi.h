@@ -58,6 +58,7 @@ enum class multi_macro_message_index : uint8_t
 #include "objnum.h"
 #include "player-callsign.h"
 #include "team_spawn.h"
+#include "ctf_cues.h"
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -810,9 +811,10 @@ void multi_send_light_specific (playernum_t pnum, vcsegptridx_t segnum, sidemask
 void multi_send_capture_bonus (playernum_t pnum);
 /* A capture's message, sound and scores (the host's CAPTURE or a v1
  * MULTI_CAPTURE_BONUS): the scores after it, and whether the kill goal
- * counts the team's score.
+ * counts the team's score; `play_voice`: the original game's voice
+ * ("Blue team has scored"; the host's CAPTURE plays it after its cue).
  */
-void multi_apply_capture(playernum_t pnum, int team_score, int kills, int kill_goal_count, bool team_goal);
+void multi_apply_capture(playernum_t pnum, int team_score, int kills, int kill_goal_count, bool team_goal, bool play_voice);
 /* Orbs scored (the host's ORB_BONUS or a v1 MULTI_ORB_BONUS): the scores
  * after it, and whether the kill goal counts the team's score.
  */
@@ -1370,6 +1372,21 @@ void net_modes_host_flag_home(uint8_t team, playernum_t returned_by, bool return
  */
 [[nodiscard]]
 bool net_modes_host_respawn_flag(powerup_type_t powerup);
+/* Capture the flag: the cues (ctf_cues.h, data/sounds).  Load them into
+ * their sound ids, every machine as a capture the flag game (or its
+ * demo) starts.
+ */
+void net_modes_load_ctf_cues();
+/* Every machine: play what the local player hears for event `e` of the
+ * flag of team `flag_team`, `actor` the player who took or captured it
+ * (MAX_PLAYERS: none): the cue, then the original game's voice where it
+ * has one.
+ */
+void net_modes_ctf_event(::dcx::ctf_cues::event e, uint8_t flag_team, playernum_t actor);
+/* Every machine: player `pnum` lost the flag of team `flag_team` where
+ * it is (death, or by hand): the HUD message and the cue.
+ */
+void net_modes_flag_dropped(playernum_t pnum, uint8_t flag_team);
 
 /* Where the remote ship of player `pnum` is shown this frame: the host
  * time of its pose (net_interp.cpp).  False if it is not shown by

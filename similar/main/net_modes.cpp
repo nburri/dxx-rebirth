@@ -57,6 +57,11 @@
 
 #include "net_v2_modes.h"
 #include "net_v2_session.h"
+#include "ctf_cues.h"
+#include "taunt_sample.h"
+#include "args.h"
+#include "physfsx.h"
+#include "piggy.h"
 #include "net_v2_game.h"
 #include "multi.h"
 #include "bot.h"
@@ -324,7 +329,8 @@ nv::orb_check orb_view(const playernum_t pnum)
 void apply_capture(const nv::capture_msg &m)
 {
 	movement_record_mode_event(mr::mode_event_kind::flag_capture, m.pid, m.flag, 0, static_cast<unsigned>(std::max<int>(m.scores.team_score, 0)));
-	multi_apply_capture(playernum_t{m.pid}, m.scores.team_score, m.scores.kills, m.scores.kill_goal_count, true);
+	net_modes_ctf_event(::dcx::ctf_cues::event::capture, m.flag, playernum_t{m.pid});
+	multi_apply_capture(playernum_t{m.pid}, m.scores.team_score, m.scores.kills, m.scores.kill_goal_count, true, false);
 	if (ctf_rules().classic)
 		HUD_init_message(HM_MULTI, "%s team scores!", team_title(m.team));
 }
@@ -594,12 +600,16 @@ void show_notice(const nv::ctf_notice_msg &m)
 	switch (m.kind)
 	{
 		case nv::ctf_notice_kind::returned:
+		{
+			/* "Your flag" for the listener's team's own. */
+			const bool own{m.team == team_of(Player_num)};
 			if (m.pid < N_players)
-				HUD_init_message(HM_MULTI, "%s flag returned by %s", team_title(m.team), static_cast<const char *>(vcplayerptr(playernum_t{m.pid})->callsign));
+				HUD_init_message(HM_MULTI, "%s flag returned by %s", own ? "Your" : team_title(m.team), static_cast<const char *>(vcplayerptr(playernum_t{m.pid})->callsign));
 			else
-				HUD_init_message(HM_MULTI, "%s flag returned", team_title(m.team));
-			digi_play_sample(sound_effect::SOUND_HUD_MESSAGE, F1_0);
+				HUD_init_message(HM_MULTI, "%s flag returned home", own ? "Your" : team_title(m.team));
+			net_modes_ctf_event(::dcx::ctf_cues::event::flag_returned, m.team, m.pid < N_players ? playernum_t{m.pid} : playernum_t{MAX_PLAYERS});
 			break;
+		}
 		case nv::ctf_notice_kind::own_flag_away:
 			if (m.pid == Player_num)
 			{
@@ -799,6 +809,9 @@ void net_modes_record_drop(const playernum_t pnum, const bool had_flag, const st
 	{
 		const bool home{flag_went_home ? *flag_went_home : nv::dropped_flag_goes_home(ctf_rules())};
 		movement_record_mode_event(mr::mode_event_kind::flag_drop, pnum, nv::other_team(team_of(pnum)), 0, 0, home ? mr::mode_drop_flag::went_home : 0);
+		/* A flag that goes home is announced by the host's notice. */
+		if (!home)
+			net_modes_flag_dropped(pnum, nv::other_team(team_of(pnum)));
 	}
 	if (had_orbs && game_mode_hoard(Game_mode))
 		movement_record_mode_event(mr::mode_event_kind::orb_drop, pnum, mr::PLAYER_NONE, 0, orbs);
@@ -959,6 +972,173 @@ bool net_modes_host_respawn_flag(const powerup_type_t powerup)
 #else
 	(void)powerup;
 	return false;
+#endif
+}
+
+#if DXX_BUILD_DESCENT == 2
+namespace {
+
+namespace cc = ::dcx::ctf_cues;
+
+static_assert(cc::SOUND_IDS[underlying_value(cc::cue::own_flag_taken)] == underlying_value(sound_effect::SOUND_CTF_OWN_FLAG_TAKEN));
+static_assert(cc::SOUND_IDS[underlying_value(cc::cue::enemy_flag_taken)] == underlying_value(sound_effect::SOUND_CTF_ENEMY_FLAG_TAKEN));
+static_assert(cc::SOUND_IDS[underlying_value(cc::cue::own_flag_dropped)] == underlying_value(sound_effect::SOUND_CTF_OWN_FLAG_DROPPED));
+static_assert(cc::SOUND_IDS[underlying_value(cc::cue::enemy_flag_dropped)] == underlying_value(sound_effect::SOUND_CTF_ENEMY_FLAG_DROPPED));
+static_assert(cc::SOUND_IDS[underlying_value(cc::cue::own_flag_returned)] == underlying_value(sound_effect::SOUND_CTF_OWN_FLAG_RETURNED));
+static_assert(cc::SOUND_IDS[underlying_value(cc::cue::enemy_flag_returned)] == underlying_value(sound_effect::SOUND_CTF_ENEMY_FLAG_RETURNED));
+static_assert(cc::SOUND_IDS[underlying_value(cc::cue::we_scored)] == underlying_value(sound_effect::SOUND_CTF_WE_SCORED));
+static_assert(cc::SOUND_IDS[underlying_value(cc::cue::they_scored)] == underlying_value(sound_effect::SOUND_CTF_THEY_SCORED));
+static_assert(cc::SOUND_IDS.size() == cc::CUES && cc::FILES.size() == cc::CUES);
+
+/* The cues take the last game sound slots: the game's own sounds (and a
+ * mission's) count up from 0, the hoard's 4 follow them.
+ */
+constexpr unsigned CUE_FIRST_SLOT{MAX_SOUND_FILES - cc::CUES};
+constexpr unsigned HOARD_SOUNDS{4};
+
+/* The cues mapped to their sound ids now. */
+std::array<bool, cc::CUES> cue_ready{};
+
+std::optional<std::vector<uint8_t>> read_cue_file(const char *const path)
+{
+	auto file{PHYSFSX_openReadBuffered(path).first};
+	if (!file)
+		return std::nullopt;
+	const auto length{PHYSFS_fileLength(file)};
+	if (length <= 0 || length > static_cast<PHYSFS_sint64>(cc::MAX_FILE_SIZE))
+		return std::nullopt;
+	std::vector<uint8_t> data(static_cast<std::size_t>(length));
+	if (PHYSFS_readBytes(file, data.data(), data.size()) != length)
+		return std::nullopt;
+	return data;
+}
+
+sound_effect voice_sound(const cc::voice v)
+{
+	switch (v)
+	{
+		case cc::voice::none:
+			break;
+		case cc::voice::you_got_flag:
+			return sound_effect::SOUND_HUD_YOU_GOT_FLAG;
+		case cc::voice::blue_got_flag:
+			return sound_effect::SOUND_HUD_BLUE_GOT_FLAG;
+		case cc::voice::red_got_flag:
+			return sound_effect::SOUND_HUD_RED_GOT_FLAG;
+		case cc::voice::you_scored:
+			return sound_effect::SOUND_HUD_YOU_GOT_GOAL;
+		case cc::voice::blue_scored:
+			return sound_effect::SOUND_HUD_BLUE_GOT_GOAL;
+		case cc::voice::red_scored:
+			return sound_effect::SOUND_HUD_RED_GOT_GOAL;
+	}
+	return sound_effect::None;
+}
+
+}
+#endif
+
+void net_modes_load_ctf_cues()
+{
+#if DXX_BUILD_DESCENT == 2
+	/* Every time: the level's HAM (read again for each mission) resets
+	 * the sound ids, and a mission's own sounds may fill the slots.
+	 */
+	cue_ready = {};
+	if (Num_sound_files + HOARD_SOUNDS > CUE_FIRST_SLOT)
+	{
+		con_printf(CON_NORMAL, "ctf: the cues have no room (%u game sounds)", Num_sound_files);
+		return;
+	}
+	const bool half_rate{GameArg.SndDigiSampleRate == sound_sample_rate::_11k};
+	unsigned ready{0};
+	for (std::size_t i{}; i != cc::CUES; ++i)
+	{
+		const auto path{cc::FILES[i]};
+		const auto id{static_cast<sound_effect>(cc::SOUND_IDS[i])};
+		const auto slot{static_cast<sound_effect>(CUE_FIRST_SLOT + i)};
+		if (Sounds[id] != sound_effect::None && Sounds[id] != slot)
+		{
+			con_printf(CON_NORMAL, "ctf: %s not loaded: the mission uses sound %u", path, static_cast<unsigned>(cc::SOUND_IDS[i]));
+			continue;
+		}
+		const auto bytes{read_cue_file(path)};
+		if (!bytes)
+		{
+			con_printf(CON_NORMAL, "ctf: %s: cannot read (or larger than 1 MiB)", path);
+			continue;
+		}
+		std::string error;
+		const auto decoded{::dcx::taunt::decode_audio_file(*bytes, error)};
+		if (!decoded || decoded->samples.empty())
+		{
+			con_printf(CON_NORMAL, "ctf: %s: %s", path, error.empty() ? "no sound" : error.c_str());
+			continue;
+		}
+		const auto at_22k{::dcx::taunt::resample(decoded->samples, decoded->rate)};
+		const auto pcm{cc::to_game_sound(at_22k, half_rate)};
+		if (pcm.empty())
+			continue;
+		auto &gs{GameSounds[CUE_FIRST_SLOT + i]};
+		auto data{std::make_unique<uint8_t[]>(pcm.size())};
+		std::ranges::copy(pcm, data.get());
+		gs.length = static_cast<uint32_t>(pcm.size());
+		gs.freq = GameArg.SndDigiSampleRate;
+		gs.data = digi_sound::allocated_data{std::move(data)};
+		Sounds[id] = AltSounds[id] = slot;
+		cue_ready[i] = true;
+		++ready;
+	}
+	con_printf(CON_VERBOSE, "ctf: %u of %u cues loaded", ready, static_cast<unsigned>(cc::CUES));
+#endif
+}
+
+void net_modes_ctf_event(const ::dcx::ctf_cues::event e, const uint8_t flag_team, const playernum_t actor)
+{
+#if DXX_BUILD_DESCENT == 2
+	if (!game_mode_capture_flag(Game_mode) || flag_team >= nv::CTF_TEAMS)
+		return;
+	const auto a{cc::announce(e, flag_team, team_of(Player_num), actor == Player_num)};
+	const auto index{underlying_value(a.sound)};
+	const auto voice{voice_sound(a.then)};
+	/* The cue, then the voice after it (the queue plays one after the
+	 * other); without the cue's file the voice alone, or the HUD
+	 * message's beep.
+	 */
+	if (index < cc::CUES && cue_ready[index])
+	{
+		const auto cue{static_cast<sound_effect>(cc::SOUND_IDS[index])};
+		if (Newdemo_state == ND_STATE_RECORDING)
+			newdemo_record_sound(cue);
+		digi_start_sound_queued(cue, F1_0 * 2);
+	}
+	else if (voice == sound_effect::None)
+		digi_play_sample(sound_effect::SOUND_HUD_MESSAGE, F1_0);
+	if (voice != sound_effect::None)
+	{
+		if (Newdemo_state == ND_STATE_RECORDING)
+			newdemo_record_sound(voice);
+		digi_start_sound_queued(voice, F1_0 * 2);
+	}
+#else
+	(void)e;
+	(void)flag_team;
+	(void)actor;
+#endif
+}
+
+void net_modes_flag_dropped(const playernum_t pnum, const uint8_t flag_team)
+{
+#if DXX_BUILD_DESCENT == 2
+	if (!game_mode_capture_flag(Game_mode) || pnum >= N_players || flag_team >= nv::CTF_TEAMS)
+		return;
+	/* The local player knows (its death, or "Flag dropped!"). */
+	if (pnum != Player_num)
+		HUD_init_message(HM_MULTI, "%s dropped %s flag!", static_cast<const char *>(vcplayerptr(pnum)->callsign), flag_team == team_of(Player_num) ? "your" : "the enemy");
+	net_modes_ctf_event(cc::event::flag_dropped, flag_team, pnum);
+#else
+	(void)pnum;
+	(void)flag_team;
 #endif
 }
 

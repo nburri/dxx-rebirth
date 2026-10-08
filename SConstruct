@@ -5036,6 +5036,16 @@ class DXXArchive(DXXCommon):
 		RuntimeTest('test-net-v2-modes', (
 			'common/unittest/net_v2_modes.cpp',
 			)),
+		# Test of the capture-the-flag cues (ctf_cues.h): the cue and
+		# voice for each event from each team's side, the sound ids, the
+		# 8-bit conversion and the files of data/sounds.  Run from the
+		# top of the tree.
+		RuntimeTest('test-ctf-cues', (
+			'common/unittest/ctf_cues.cpp',
+			'common/misc/taunt_sample.cpp',
+			'common/misc/taunt_decode.cpp',
+			'common/misc/sha256.cpp',
+			)),
 		# Test of the taunts (taunt_sample.h): the rate limiter, the
 		# decoding of the own file, the limits, hostile input, the
 		# transfer format, the starter horns, the messages

@@ -3342,6 +3342,8 @@ void multi_prep_level_player(void)
 #if DXX_BUILD_DESCENT == 2
 	if (game_mode_hoard(Game_mode))
 		init_hoard_data(Vclip);
+	else if (game_mode_capture_flag(Game_mode))
+		net_modes_load_ctf_cues();
 
 	if (game_mode_capture_flag(Game_mode) || game_mode_hoard(Game_mode))
 		multi_apply_goal_textures();
@@ -4034,7 +4036,7 @@ void multi_do_capture_bonus(const playernum_t pnum)
 	auto &plr = *vcplayerptr(pnum);
 	auto &player_info = Objects.vmptr(plr.objnum)->ctype.player_info;
 	const auto team{multi_get_team_from_player(Netgame, pnum)};
-	multi_apply_capture(pnum, team_kills[team] + 5, player_info.net_kills_total + 5, player_info.KillGoalCount + 5, false);
+	multi_apply_capture(pnum, team_kills[team] + 5, player_info.net_kills_total + 5, player_info.KillGoalCount + 5, false, true);
 }
 
 }
@@ -4042,9 +4044,10 @@ void multi_do_capture_bonus(const playernum_t pnum)
 /* A capture (the host's CAPTURE, or a v1 MULTI_CAPTURE_BONUS in a demo):
  * the message, the sound and the scores.  `team_goal`: the kill goal
  * counts the team's score (the host's rule, as for a kill), else the
- * carrier's own count (v1).
+ * carrier's own count (v1).  `play_voice`: the voice ("Blue team has
+ * scored").
  */
-void multi_apply_capture(const playernum_t pnum, const int team_score, const int kills, const int kill_goal_count, const bool team_goal)
+void multi_apply_capture(const playernum_t pnum, const int team_score, const int kills, const int kill_goal_count, const bool team_goal, const bool play_voice)
 {
 	auto &Objects = LevelUniqueObjectState.Objects;
 	auto &vmobjptr = Objects.vmptr;
@@ -4056,12 +4059,16 @@ void multi_apply_capture(const playernum_t pnum, const int team_score, const int
 	else
 		HUD_init_message(HM_MULTI, "%s has Scored!", static_cast<const char *>(vcplayerptr(pnum)->callsign));
 
-	digi_play_sample(pnum == Player_num
-		? sound_effect::SOUND_HUD_YOU_GOT_GOAL
-		: (multi_get_team_from_player(Netgame, pnum) == team_number::blue
-			? sound_effect::SOUND_HUD_BLUE_GOT_GOAL
-			: sound_effect::SOUND_HUD_RED_GOT_GOAL
-		), F1_0*2);
+	/* The host's CAPTURE plays its cue and this voice after it
+	 * (net_modes_ctf_event).
+	 */
+	if (play_voice)
+		digi_play_sample(pnum == Player_num
+			? sound_effect::SOUND_HUD_YOU_GOT_GOAL
+			: (multi_get_team_from_player(Netgame, pnum) == team_number::blue
+				? sound_effect::SOUND_HUD_BLUE_GOT_GOAL
+				: sound_effect::SOUND_HUD_RED_GOT_GOAL
+			), F1_0*2);
 
 
 	const auto team{multi_get_team_from_player(Netgame, pnum)};
