@@ -12,4 +12,4 @@ python3 "$out/src/cow.py" "$pack/glTF/Cow.gltf" "$tmp/cow.glb" > /dev/null
 "$shipconv" "$tmp/cow.glb" -o "$out/cow.dxship" --name cow --title Cow \
 	--author "Quaternius; paint, harness, guns: Claude" --licence CC0-1.0 \
 	--source https://quaternius.com/packs/ultimateanimatedanimals.html \
-	--description "Armed Holstein (Quaternius Ultimate Animated Animals, CC0): spots, collar and missile noses in your colour; cow-bell vulcan, udder churn."
+	--description "Armed Holstein (Quaternius Ultimate Animated Animals, CC0): spots, collar and missile noses in your colour; rotary cannon under the chin, udder churn."

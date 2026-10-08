@@ -65,6 +65,22 @@ STYLES = {
         "panel": ("solarcell", 1.2, (0.055, 0.06, 0.075), 1.0),
         "accent": ("whitepaint", 2.2, (0.90, 0.90, 0.90), 0.6),
     }),
+    # flat-coloured CC0 ships of the packs, prepared by prep_flat.py: Kenney's speeders
+    # (light hull, blue-grey armour) and Quaternius' Rae (dark grey hull, orange zone)
+    "speeder-c": dict(seed=43, number="43", panel=(1.0, 0.7), mats={
+        "body": ("composite", 2.2, (0.66, 0.68, 0.71), 0.8),
+        "armour": ("gunmetal", 2.0, (0.50, 0.53, 0.58), 0.9),
+        "accent": ("whitepaint", 2.2, (0.90, 0.90, 0.90), 0.6),
+    }),
+    "speeder-d": dict(seed=58, number="58", panel=(1.1, 0.75), mats={
+        "body": ("whitepaint", 2.2, (0.70, 0.71, 0.73), 0.9),
+        "armour": ("military", 2.0, (0.48, 0.51, 0.56), 0.9),
+        "accent": ("whitepaint", 2.2, (0.90, 0.90, 0.90), 0.6),
+    }),
+    "rae": dict(seed=66, number="66", panel=(1.3, 0.8), mats={
+        "body": ("darkarmour", 2.2, (0.28, 0.29, 0.31), 1.0),
+        "accent": ("whitepaint", 2.2, (0.90, 0.90, 0.90), 0.6),
+    }),
 }
 DEFAULT_MAT = ("gunmetal", 2.0, (0.35, 0.36, 0.38), 0.9)
 
@@ -345,7 +361,8 @@ def texture(in_glb, out_glb, style_name, atlas_out=None, report=None):
                 tri_part.append(pi)
                 tri_mat.append(mat)
                 n = nrm[3 * k].astype(np.float64)
-                tri_n.append(n / np.linalg.norm(n))
+                g = tri_normal(t)        # the face's own normal (sources may be smooth-shaded)
+                tri_n.append(g if g @ n >= 0 else -g)
                 refs.append((pi, qi, k))
     tris = np.array(tris)
     tri_n = np.array(tri_n)
