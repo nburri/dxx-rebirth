@@ -544,7 +544,7 @@ void run_bot_edit(const unsigned i, const network_game_type mode)
 	nm_set_item_menu(e.m[bot_edit_menu::done], "Done");
 	e.update_labels();
 	int r;
-	for (int citem{bot_edit_menu::done};; citem = bot_edit_menu::ship)
+	for (int citem = bot_edit_menu::done;; citem = bot_edit_menu::ship)
 	{
 		r = newmenu_do2(menu_title{title}, menu_subtitle{nullptr}, e.m, bot_edit_handler, &e, citem);
 		if (r != MENU_PICK_SHIP)
@@ -1006,7 +1006,7 @@ bool run_ingame_edit(const bot_in_game *const existing)
 	nm_set_item_menu(e.m[bot_edit_menu::done], existing ? "Done" : "Cancel");
 	e.update_labels();
 	int r;
-	for (int citem{existing ? bot_edit_menu::done : bot_edit_menu::remove};; citem = bot_edit_menu::ship)
+	for (int citem = existing ? bot_edit_menu::done : bot_edit_menu::remove;; citem = bot_edit_menu::ship)
 	{
 		e.watch = {};
 		r = newmenu_do2(menu_title{existing ? "BOT" : "NEW BOT"}, menu_subtitle{existing ? static_cast<const char *>(start.name) : nullptr}, e.m, ingame_edit_handler, &e, citem);
