@@ -6,11 +6,11 @@ are the player-colour zone (material accent_spots), pink snout and udder,
 dark hooves.  A collar (colour zone too) and a leather harness carry
 weapons at the Pyro's gun points, where the game's shots come from:
 laser cannons (guns 0/1), quad-laser stub wings (2/3), missile pods with
-noses in the player's colour (4/5), a cow bell (6: vulcan, gauss,
-spreadfire, helix, flares) and a milk churn under the udder (7: mines,
+noses in the player's colour (4/5), a rotary cannon under the chin (6:
+vulcan, gauss, spreadfire, helix, flares) and a milk churn under the udder (7: mines,
 smart and mega missiles, earthshakers); gun0..gun7 marker nodes let
-shipconv check them.  Head, legs, udder (with churn), tail and bell are
-debris_* nodes.  The additions are CC0 1.0 as well.
+shipconv check them.  A small bell sits on the collar.  Head, legs,
+udder (with churn), tail and cannon are debris_* nodes.  The additions are CC0 1.0 as well.
 Usage: cow.py <pack>/glTF/Cow.gltf out.glb   (python3 with numpy; ~1 min)
 """
 import json, struct, sys, math
@@ -319,22 +319,40 @@ for side, (gl_, gq, gm) in ((-1, (0, 2, 4)), (1, (1, 3, 5))):
     tube(M + [-side * 0.1, 0, -0.95], [side * 0.7, M[1] + 0.05, gz_rear], 0.07, 'gunmetal', part, 8)
     tube(M + [-side * 0.1, 0, -0.25], [side * 0.75, M[1] + 0.05, gz_front - 0.15], 0.07, 'gunmetal', part, 8)
 
-# collar (neck) and the bell: gun 6 (vulcan, gauss, spreadfire, helix,
-# flares) fires from the bell's mouth, tilted forward like a blunderbuss.
+# collar (neck) with a small bell sitting tight on it (decoration), and gun 6
+# (vulcan, gauss, spreadfire, helix, flares): a compact rotary cannon under the
+# chin, six barrels round a spindle, its muzzle at the gun point.
 n2, n3 = JP['Neck2'], JP['Neck3']
 outer_f, outer_b = band(n2 + (n3 - n2) * 0.35, n3 - n2, 0.09, 0.12, 'accent_spots', 'body')
 low = min(range(len(outer_f)), key=lambda i: outer_f[i][1])
-hang = (outer_f[low] + outer_b[low]) / 2
+ccen = n2 + (n3 - n2) * 0.35
 B = GUN[6]
-bax = np.array([0, -0.55, 0.835]); bax /= np.linalg.norm(bax)
-blen = 0.8
-btop = B - bax * blen
-tube(hang + [0, 0.02, 0], btop + [0, 0.05, 0], 0.05, 'leather', 'debris_bell', 6)
-s_ = 1.35
-bell = [(0.0, 0.0), (0.17 * s_, 0.02), (0.22 * s_, 0.10), (0.24 * s_, 0.24), (0.27 * s_, 0.42),
-        (0.34 * s_, 0.55), (0.36 * s_, blen), (0.30 * s_, blen), (0.24 * s_, 0.6), (0.18 * s_, 0.45), (0, 0.45)]
-lathe(bell, btop, bax, 'brass', 'debris_bell', 18)
-lathe([(0, 0.5), (0.07, 0.53), (0.09, 0.6), (0.07, 0.67), (0, 0.7)], btop, bax, 'gunmetal', 'debris_bell', 8)
+cax = np.array([0.0, 0.0, 1.0])
+clen = 0.95
+c0 = B - cax * clen
+lathe([(0, 0), (0.15, 0), (0.19, 0.05), (0.19, 0.36), (0.16, 0.40), (0, 0.40)], c0, cax, 'gunmetal', 'debris_gun', 14)
+for k in range(6):
+    a_ = 2 * math.pi * (k + 0.5) / 6
+    off = np.array([math.cos(a_), math.sin(a_), 0]) * 0.085
+    tube(c0 + off + cax * 0.38, B + off, 0.03, 'steel', 'debris_gun', 6)
+tube(c0 + cax * 0.38, B - cax * 0.02, 0.03, 'gunmetal', 'debris_gun', 6)        # spindle
+tube(B - cax * 0.47, B - cax * 0.40, 0.135, 'gunmetal', 'debris_gun', 14, caps=False)
+tube(B - cax * 0.07, B, 0.135, 'gunmetal', 'debris_gun', 14, caps=False)
+# a yoke from the laser cannons (guns 0/1) carries it
+for side in (-1, 1):
+    L = GUN[0 if side < 0 else 1]
+    beam(L + [0, 0.0, -0.3], c0 + cax * 0.2 + [side * 0.17, 0, 0], 0.2, 0.07, 'gunmetal', 'debris_gun')
+
+# the bell: small, its crown on the collar a little to the side, mouth outwards
+bi = (low + 3) % len(outer_f)
+bpos = (outer_f[bi] + outer_b[bi]) / 2
+bout = bpos - ccen
+bout -= (n3 - n2) / np.linalg.norm(n3 - n2) * (bout @ ((n3 - n2) / np.linalg.norm(n3 - n2)))
+bout /= np.linalg.norm(bout)
+s_ = 0.42
+bell = [(0.0, 0.0), (0.17 * s_, 0.02 * s_), (0.22 * s_, 0.10 * s_), (0.24 * s_, 0.24 * s_), (0.27 * s_, 0.42 * s_),
+        (0.34 * s_, 0.55 * s_), (0.36 * s_, 0.8 * s_), (0.30 * s_, 0.8 * s_), (0.24 * s_, 0.6 * s_), (0.18 * s_, 0.45 * s_), (0, 0.45 * s_)]
+lathe(bell, bpos - bout * 0.02, bout, 'brass', 'body', 14)
 
 # gun 7 (mines, smart and mega missiles, earthshakers): a milk churn
 # hanging under the udder, its open mouth at the gun point.
