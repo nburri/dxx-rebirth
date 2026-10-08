@@ -7,11 +7,15 @@
 /*
  * The ship menu (Options -> Ship...): the pilot's custom ship, chosen
  * from the ships found, with a rotating preview in the player colours
- * (Documentation/custom-ships.md section 4.2).
+ * (Documentation/custom-ships.md section 4.2).  The bot screens use the
+ * same window to choose a bot's ship, with "Random" as the first row
+ * (Documentation/multiplayer-bots.md section 9.20).
  */
 
 #include "dxxsconf.h"
 #include <algorithm>
+#include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -36,32 +40,70 @@ namespace cs = ::dcx::custom_ship;
 
 constexpr unsigned PREVIEW_COLOURS{8};
 
-struct ship_menu_window : window
+/* The bot screens' use of the window: the bot's name for the title, the
+ * label of the "Random" row, and where the choice goes.
+ */
+struct bot_pick
 {
-	/* 0 is the Pyro-GX, then the ships found. */
+	std::string title;
+	std::string random_label;
+	std::shared_ptr<std::optional<unsigned>> result{std::make_shared<std::optional<unsigned>>()};
+	/* The window was closed by the pilot (a key or a click), not by the
+	 * game (game_leave_menus).
+	 */
+	std::shared_ptr<bool> by_user{std::make_shared<bool>()};
+};
+
+struct ship_menu_window : window, mixin_trackable_window
+{
+	/* 0 is the Pyro-GX, then the ships found; for a bot 0 is Random,
+	 * 1 the Pyro-GX.
+	 */
 	unsigned selected{};
 	unsigned first_visible{};
 	unsigned colour{};
 	std::vector<cs::entry> ships;
-	ship_menu_window(grs_canvas &src, const int x, const int y, const int w, const int h) :
-		window(src, x, y, w, h)
+	std::optional<bot_pick> bot;
+	ship_menu_window(grs_canvas &src, const int x, const int y, const int w, const int h, std::optional<bot_pick> for_bot = std::nullopt, const unsigned start = 0) :
+		window(src, x, y, w, h), bot(std::move(for_bot))
 	{
 		cs::rescan();
 		ships = cs::list();
+		if (bot)
+		{
+			selected = std::min(start, count() - 1);
+			return;
+		}
 		const std::string_view current{PlayerCfg.ShipName.data()};
 		for (std::size_t i = 0; i < ships.size(); ++i)
 			if (!current.empty() && ships[i].name == current)
 				selected = static_cast<unsigned>(i + 1);
 	}
+	/* The rows before the ships: Random (bots), the Pyro-GX. */
+	[[nodiscard]]
+	unsigned first_ship() const
+	{
+		return bot ? 2 : 1;
+	}
 	[[nodiscard]]
 	unsigned count() const
 	{
-		return static_cast<unsigned>(ships.size() + 1);
+		return static_cast<unsigned>(ships.size() + first_ship());
 	}
 	[[nodiscard]]
 	const cs::entry *entry_of(const unsigned i) const
 	{
-		return i ? &ships[i - 1] : nullptr;
+		return i >= first_ship() ? &ships[i - first_ship()] : nullptr;
+	}
+	[[nodiscard]]
+	bool is_random(const unsigned i) const
+	{
+		return bot && i == 0;
+	}
+	void close_by_user()
+	{
+		if (bot)
+			*bot->by_user = true;
 	}
 	/* The layout, shared by drawing and the mouse: the list on the
 	 * left, the preview with the selected ship's credits on the right,
@@ -99,6 +141,12 @@ struct ship_menu_window : window
 	}
 	void choose()
 	{
+		if (bot)
+		{
+			*bot->result = selected;
+			*bot->by_user = true;
+			return;
+		}
 		const auto e{entry_of(selected)};
 		PlayerCfg.ShipName = {};
 		if (e)
@@ -137,7 +185,7 @@ void ship_menu_window::draw(grs_canvas &canvas)
 	auto &font{*GAME_FONT};
 	const int margin{w / 20};
 	gr_set_fontcolor(canvas, BM_XRGB(28, 28, 28), -1);
-	gr_string(canvas, title_font, margin, canvas.cv_bitmap.bm_h / 20, "Ship");
+	gr_string(canvas, title_font, margin, canvas.cv_bitmap.bm_h / 20, bot ? fit(title_font, bot->title, w - 2 * margin).c_str() : "Ship");
 	const auto l{get_layout(canvas, font, title_font)};
 	if (selected < first_visible)
 		first_visible = selected;
@@ -157,7 +205,7 @@ void ship_menu_window::draw(grs_canvas &canvas)
 		}
 		else
 			gr_set_fontcolor(canvas, e && e->cached ? BM_XRGB(16, 20, 26) : BM_XRGB(22, 22, 22), -1);
-		gr_string(canvas, font, l.list_x, y + text_pad, fit(font, e ? e->title : std::string{"Pyro-GX (standard)"}, l.list_w - 4).c_str());
+		gr_string(canvas, font, l.list_x, y + text_pad, fit(font, e ? e->title : is_random(i) ? bot->random_label : std::string{"Pyro-GX (standard)"}, l.list_w - 4).c_str());
 	}
 	/* More rows above or below. */
 	gr_set_fontcolor(canvas, BM_XRGB(16, 16, 16), -1);
@@ -165,7 +213,8 @@ void ship_menu_window::draw(grs_canvas &canvas)
 		gr_string(canvas, font, l.list_x, l.list_y - l.line_h, "...");
 	if (first_visible + static_cast<unsigned>(l.rows) < count())
 		gr_string(canvas, font, l.list_x, l.list_y + l.rows * l.row_h, "...");
-	/* The preview, turning, in its own area. */
+	/* The preview, turning, in its own area (none for Random). */
+	if (!is_random(selected))
 	{
 		auto sub{gr_create_sub_canvas(canvas, static_cast<uint16_t>(l.preview_x), static_cast<uint16_t>(l.preview_y), static_cast<uint16_t>(l.preview_w), static_cast<uint16_t>(l.preview_h))};
 		const fix64 t{timer_query()};
@@ -181,6 +230,11 @@ void ship_menu_window::draw(grs_canvas &canvas)
 		if (!e->source.empty())
 			gr_string(canvas, font, l.preview_x, l.info_y + 2 * l.line_h, fit(font, e->source, l.preview_w).c_str());
 	}
+	else if (is_random(selected))
+	{
+		gr_string(canvas, font, l.preview_x, l.info_y, fit(font, "Its style's ship if it names one,", l.preview_w).c_str());
+		gr_string(canvas, font, l.preview_x, l.info_y + l.line_h, fit(font, "else one of yours, by the bot's name.", l.preview_w).c_str());
+	}
 	else
 	{
 		gr_string(canvas, font, l.preview_x, l.info_y, fit(font, "The original ship.", l.preview_w).c_str());
@@ -189,6 +243,12 @@ void ship_menu_window::draw(grs_canvas &canvas)
 	/* How to use the menu. */
 	const int help_w{w - 2 * margin};
 	gr_set_fontcolor(canvas, BM_XRGB(18, 18, 18), -1);
+	if (bot)
+	{
+		gr_string(canvas, font, margin, l.help_y, fit(font, "The bot flies it; players who do not show custom ships see a Pyro-GX.", help_w).c_str());
+		gr_string(canvas, font, margin, l.help_y + 2 * l.line_h, fit(font, "Up/Down: choose, C: colour, Enter: take it, Esc: back", help_w).c_str());
+		return;
+	}
 	gr_string(canvas, font, margin, l.help_y, fit(font, std::string{"Accept ships from the host: "} + (PlayerCfg.AcceptShips ? "yes" : "no") + " (A)", help_w).c_str());
 	gr_string(canvas, font, margin, l.help_y + l.line_h, fit(font, std::string{"Show custom ships: "} + (PlayerCfg.ShowCustomShips ? "yes" : "no (everyone is a Pyro-GX)") + " (S)", help_w).c_str());
 	gr_string(canvas, font, margin, l.help_y + 2 * l.line_h, fit(font, "Up/Down: choose, C: colour, Enter: fly it, Esc: back", help_w).c_str());
@@ -212,6 +272,7 @@ window_event_result ship_menu_window::event_handler(const d_event &event)
 			switch (event_key_get(event))
 			{
 				case KEY_ESC:
+					close_by_user();
 					return window_event_result::close;
 				case KEY_UP:
 				case KEY_PAD8:
@@ -237,10 +298,14 @@ window_event_result ship_menu_window::event_handler(const d_event &event)
 					colour = (colour + 1) % PREVIEW_COLOURS;
 					return window_event_result::handled;
 				case KEY_A:
+					if (bot)
+						break;
 					PlayerCfg.AcceptShips = !PlayerCfg.AcceptShips;
 					write_player_file();
 					return window_event_result::handled;
 				case KEY_S:
+					if (bot)
+						break;
 					PlayerCfg.ShowCustomShips = !PlayerCfg.ShowCustomShips;
 					write_player_file();
 					/* Pieces of a death drawn the other way go (the Pyro's
@@ -273,7 +338,10 @@ window_event_result ship_menu_window::event_handler(const d_event &event)
 					return window_event_result::handled;
 				}
 				if (b == mbtn::right)
+				{
+					close_by_user();
 					return window_event_result::close;
+				}
 				if (b != mbtn::left)
 					break;
 				const auto [mx, my, mz]{mouse_get_pos()};
@@ -318,6 +386,21 @@ void custom_ship_menu()
 {
 	auto w{window_create<ship_menu_window>(grd_curscreen->sc_canvas, 0, 0, SWIDTH, SHEIGHT)};
 	(void)w;
+}
+
+std::optional<unsigned> custom_ship_pick_for_bot(const char *const title, const char *const random_label, const unsigned selected, bool &forced)
+{
+	bot_pick pick;
+	pick.title = title;
+	pick.random_label = random_label;
+	const auto result{pick.result};
+	const auto by_user{pick.by_user};
+	auto w{window_create<ship_menu_window>(grd_curscreen->sc_canvas, 0, 0, SWIDTH, SHEIGHT, std::move(pick), selected)};
+	/* Until it closes, as a newmenu_do2 waits. */
+	for (const auto exists{w->track()}; *exists;)
+		event_process();
+	forced = !*by_user;
+	return *result;
 }
 
 }

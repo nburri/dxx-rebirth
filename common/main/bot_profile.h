@@ -29,6 +29,12 @@
  *
  *	BotDefaultStyle=EC style
  *	BotStyle1=EC style
+ *
+ * Section 9.20: a bot whose ship is not Random has a line with it, the
+ * ship's name and the start of its SHA-256 (bot_ship.h), or `pyro`:
+ *
+ *	BotShip0=longhorn,3fa94c01d2e7
+ *	BotShip2=pyro
  */
 
 #pragma once
@@ -45,6 +51,7 @@
 
 #include "bot_brain.h"
 #include "bot_style_library.h"
+#include "bot_ship.h"
 
 namespace dcx::bot {
 
@@ -62,6 +69,8 @@ struct profile_entry
 	bot_team team{bot_team::automatic};
 	/* Section 9.13: the style profile it flies (empty: `style`). */
 	style_name profile{};
+	/* Section 9.20: the ship it flies. */
+	ship_choice ship{};
 	constexpr bool operator==(const profile_entry &) const = default;
 };
 
@@ -80,20 +89,20 @@ struct bot_profile
 };
 
 /* The most lines format_profile writes. */
-constexpr std::size_t BOT_PROFILE_MAX_LINES{5 + 2 * BOT_PROFILE_MAX_BOTS};
+constexpr std::size_t BOT_PROFILE_MAX_LINES{5 + 3 * BOT_PROFILE_MAX_BOTS};
 
 using profile_line = std::array<char, BOT_PROFILE_LINE_SIZE>;
 
 /* The lines of `p` (without newlines) into `out`; returns how many (0
  * if `out` is too small: it needs BOT_PROFILE_MAX_LINES lines, or 3 +
- * p.count and one per style profile).
+ * p.count and one per style profile and per ship that is not Random).
  */
 inline std::size_t format_profile(const bot_profile &p, const std::span<profile_line> out)
 {
 	const unsigned count{std::min<unsigned>(p.count, BOT_PROFILE_MAX_BOTS)};
 	std::size_t need{3 + count + (p.default_profile[0] ? 1u : 0u) + (p.taunt ? 1u : 0u)};
 	for (unsigned i = 0; i < count; ++i)
-		need += p.bots[i].profile[0] ? 1 : 0;
+		need += (p.bots[i].profile[0] ? 1 : 0) + (p.bots[i].ship.kind != ship_kind::random ? 1 : 0);
 	if (out.size() < need)
 		return 0;
 	std::size_t n{0};
@@ -111,6 +120,8 @@ inline std::size_t format_profile(const bot_profile &p, const std::span<profile_
 		std::snprintf(out[n++].data(), BOT_PROFILE_LINE_SIZE, "Bot%u=%.8s,%u,%u,%u", i, b.name.data(), static_cast<unsigned>(b.skill), static_cast<unsigned>(b.style), static_cast<unsigned>(b.team));
 		if (b.profile[0])
 			std::snprintf(out[n++].data(), BOT_PROFILE_LINE_SIZE, "BotStyle%u=%.31s", i, b.profile.data());
+		if (b.ship.kind != ship_kind::random)
+			std::snprintf(out[n++].data(), BOT_PROFILE_LINE_SIZE, "BotShip%u=%s", i, format_ship_choice(b.ship).data());
 	}
 	return n;
 }
@@ -168,6 +179,8 @@ class profile_reader
 	 * lines).
 	 */
 	std::array<style_name, BOT_PROFILE_MAX_BOTS> m_profiles{};
+	/* Section 9.20: the ship lines. */
+	std::array<ship_choice, BOT_PROFILE_MAX_BOTS> m_ships{};
 	bool m_seen{};
 public:
 	/* Line `key`=`value`: true if it is a bot key (taken, or ignored as
@@ -212,6 +225,17 @@ public:
 			m_seen = true;
 			if (*i < BOT_PROFILE_MAX_BOTS)
 				m_profiles[*i] = make_style_name(value);
+			return true;
+		}
+		if (rest.starts_with("Ship"))
+		{
+			const auto i{detail::parse_unsigned(rest.substr(4))};
+			if (!i)
+				return false;
+			m_seen = true;
+			if (*i < BOT_PROFILE_MAX_BOTS)
+				if (const auto c{parse_ship_choice(value)})
+					m_ships[*i] = *c;
 			return true;
 		}
 		if (rest == "Taunt")
@@ -278,6 +302,11 @@ public:
 				p.bots[i] = {.skill = p.default_skill, .style = p.default_style, .profile = p.default_profile};
 			else
 				p.bots[i].profile = m_profiles[i];
+			/* The ship goes with the bot's position, also when its
+			 * bot line is missing.
+			 */
+			if (i < p.count)
+				p.bots[i].ship = m_ships[i];
 		}
 		return p;
 	}

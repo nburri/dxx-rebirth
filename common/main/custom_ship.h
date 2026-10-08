@@ -120,6 +120,15 @@ void custom_ship_draw_pieces(grs_canvas &canvas);
 void custom_ship_draw_preview(grs_canvas &canvas, const custom_ship::entry *e, const vms_angvec &angles, unsigned colour);
 /* The ship menu (Options -> Ship...). */
 void custom_ship_menu();
+/* The ship picker of the bot screens (Documentation/multiplayer-bots.md
+ * section 9.20): the ship menu's list and preview with the rows Random
+ * (`random_label`), the Pyro-GX, then custom_ship::list() (read again).
+ * `selected`: the row to start on.  Returns the row chosen (0 Random,
+ * 1 the Pyro-GX, 2 + i ship i), or nothing; `forced`: the game closed
+ * it (game_leave_menus), not the pilot.
+ */
+[[nodiscard]]
+std::optional<unsigned> custom_ship_pick_for_bot(const char *title, const char *random_label, unsigned selected, bool &forced);
 /* The pilot's option "Show custom ships" (PlayerCfg.ShowCustomShips):
  * when off, every player is drawn as the Pyro-GX, whatever ship it
  * chose, and no ship is fetched from the host for drawing.

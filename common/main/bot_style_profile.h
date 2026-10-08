@@ -17,6 +17,10 @@
  * today (`tune.<name>`), each with a confidence.  Keys a reader does not
  * know are kept and otherwise ignored, so the format can grow.
  *
+ * Optional `ship = <name>` (Documentation/multiplayer-bots.md section
+ * 9.20): the ship a bot flying the profile flies, a ship's name or
+ * `pyro`, unless the bot's own ship setting is not Random.
+ *
  * Header-only, standard library and the bots' pure headers only.
  */
 
@@ -35,6 +39,7 @@
 #include "bot_brain.h"
 #include "bot_goals.h"
 #include "bot_weapons.h"
+#include "bot_ship.h"
 
 namespace dcx::bot {
 
@@ -165,6 +170,8 @@ struct style_profile
 	/* What every value not in the profile is taken from. */
 	bot_skill base_skill{BOT_DEFAULT_SKILL};
 	bot_style base_style{bot_style::balanced};
+	/* Section 9.20: the ship's name, or "pyro" (empty: none named). */
+	std::string ship;
 	/* In file order.  `style.`, `skill.` and `tune.` keys are values of
 	 * the bot; `measured.` keys are plain statistics for people.
 	 */
@@ -296,6 +303,8 @@ inline std::string write_style_profile(const style_profile &p)
 		out += "source = " + clean_text(p.source) + "\n";
 	out += std::string{"base_skill = "} + bot_skill_names[std::min<std::size_t>(static_cast<std::size_t>(p.base_skill), BOT_SKILL_COUNT - 1)] + "\n";
 	out += std::string{"base_style = "} + bot_style_names[std::min<std::size_t>(static_cast<std::size_t>(p.base_style), BOT_STYLE_COUNT - 1)] + "\n";
+	if (!p.ship.empty())
+		out += "ship = " + clean_text(p.ship) + "\n";
 	std::string_view section;
 	for (const auto &e : p.entries)
 	{
@@ -356,6 +365,20 @@ inline std::optional<style_profile> parse_style_profile(std::string_view text)
 			p.callsign = clean_text(value);
 		else if (key == "source")
 			p.source = clean_text(value);
+		else if (key == "ship")
+		{
+			/* A ship's name or `pyro`; anything else (and `random`) names
+			 * none.
+			 */
+			p.ship.clear();
+			if (const auto c{parse_ship_choice(value)})
+			{
+				if (c->kind == ship_kind::pyro)
+					p.ship = SHIP_WORD_PYRO;
+				else if (c->kind == ship_kind::named)
+					p.ship = c->name.data();
+			}
+		}
 		else if (key == "base_skill")
 		{
 			for (std::size_t i{}; i != BOT_SKILL_COUNT; ++i)

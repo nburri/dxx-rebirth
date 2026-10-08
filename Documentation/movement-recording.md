@@ -676,6 +676,10 @@ Rules (`common/main/bot_style_profile.h`: `write_style_profile`,
   profile's.
 - Known keys are clamped to a range (below); unknown keys are kept and
   ignored, so a later version can add keys.
+- `ship` (optional, written by hand; Documentation/multiplayer-bots.md
+  §9.20): the ship a bot flying the profile flies, a ship's name as in
+  `ships/` (`ship = longhorn`) or `pyro`, unless the bot's own ship
+  setting is not Random. An older reader skips the line.
 
 The keys, their range, and what they are computed from:
 

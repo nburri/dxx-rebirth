@@ -14,6 +14,7 @@
  *	/bot remove <name|all>
  *	/bot skill <name|all> <skill>
  *	/bot style <name|all> <style>
+ *	/bot ship <name|all> <ship|random|pyro>	(section 9.20)
  *	/bot list
  *	/bot save	(the bots playing become the saved setup, section 6.5)
  *   A skill is trainee, rookie, hotshot, ace or insane; a style
@@ -41,6 +42,7 @@
 #include <string_view>
 
 #include "bot_brain.h"
+#include "bot_ship.h"
 
 namespace dcx::bot {
 
@@ -58,6 +60,8 @@ enum class command_kind : uint8_t
 	remove,
 	skill,
 	style,
+	/* Section 9.20: `ship_word` (bot_ship.h match_ship_word). */
+	ship,
 	save,
 	/* A /bot command that could not be read: `error` says why. */
 	error,
@@ -78,11 +82,13 @@ struct command
 	 */
 	std::array<char, BOT_COMMAND_NAME_LEN + 1> name{};
 	bool all{};
+	/* ship: the ship word as typed, lower case (cut to its length). */
+	std::array<char, BOT_SHIP_NAME_LEN + 1> ship_word{};
 	/* kind == error: the reason, for the host's HUD. */
 	const char *error{};
 };
 
-inline constexpr const char *BOT_COMMAND_USAGE{"/bot add [skill] [style] [name], remove <name|all>, skill <name|all> <skill>, style <name|all> <style>, list, save"};
+inline constexpr const char *BOT_COMMAND_USAGE{"/bot add [skill] [style] [name], remove <name|all>, skill <name|all> <skill>, style <name|all> <style>, ship <name|all> <ship|random|pyro>, list, save"};
 
 namespace detail {
 
@@ -211,7 +217,7 @@ constexpr std::optional<bot_style> parse_style(const std::string_view w)
 [[nodiscard]]
 constexpr bool name_reserved(const std::string_view w)
 {
-	constexpr std::array<std::string_view, 11> words{{"all", "add", "remove", "rm", "kick", "skill", "style", "list", "save", "help", "bot"}};
+	constexpr std::array<std::string_view, 12> words{{"all", "add", "remove", "rm", "kick", "skill", "style", "ship", "list", "save", "help", "bot"}};
 	for (const auto r : words)
 		if (detail::iequal(w, r))
 			return true;
@@ -313,10 +319,11 @@ constexpr command parse_command(std::string_view s, const std::span<const std::s
 	const bool is_remove{detail::iequal(verb, "remove") || detail::iequal(verb, "rm") || detail::iequal(verb, "kick")};
 	const bool is_skill{detail::iequal(verb, "skill")};
 	const bool is_style{detail::iequal(verb, "style")};
-	if (!is_remove && !is_skill && !is_style)
+	const bool is_ship{detail::iequal(verb, "ship")};
+	if (!is_remove && !is_skill && !is_style && !is_ship)
 		return detail::error("Unknown /bot command; /bot help");
 	const auto target{detail::next_word(rest)};
-	const char *const usage{is_remove ? "Usage: /bot remove <name|all>" : is_skill ? "Usage: /bot skill <name|all> <trainee..insane>" : "Usage: /bot style <name|all> <balanced|aggressive|cautious|collector>"};
+	const char *const usage{is_remove ? "Usage: /bot remove <name|all>" : is_skill ? "Usage: /bot skill <name|all> <trainee..insane>" : is_ship ? "Usage: /bot ship <name|all> <ship|random|pyro>" : "Usage: /bot style <name|all> <balanced|aggressive|cautious|collector>"};
 	if (target.empty())
 		return detail::error(usage);
 	if (detail::iequal(target, "all"))
@@ -333,6 +340,15 @@ constexpr command parse_command(std::string_view s, const std::span<const std::s
 	const auto value{detail::next_word(rest)};
 	if (value.empty() || !detail::next_word(rest).empty())
 		return detail::error(usage);
+	if (is_ship)
+	{
+		c.kind = command_kind::ship;
+		if (value.size() > BOT_SHIP_NAME_LEN)
+			return detail::error("No ship has so long a name");
+		for (std::size_t i = 0; i < value.size(); ++i)
+			c.ship_word[i] = detail::lower(value[i]);
+		return c;
+	}
 	if (is_skill)
 	{
 		c.kind = command_kind::skill;

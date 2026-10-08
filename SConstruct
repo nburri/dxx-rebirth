@@ -5141,6 +5141,13 @@ class DXXArchive(DXXCommon):
 		RuntimeTest('test-bot-commands', (
 			'common/unittest/bot_command.cpp',
 			)),
+		# Test of the bots' ships: the setting, the ship it means among
+		# the host's, the netgame profile's lines, a style profile's ship
+		# and `/bot ship` (bot_ship.h, Documentation/multiplayer-bots.md
+		# section 9.20).
+		RuntimeTest('test-bot-ships', (
+			'common/unittest/bot_ship.cpp',
+			)),
 		# Test of the score carry-over across a level load
 		# (net_score_carry.h).
 		RuntimeTest('test-net-score-carry', (

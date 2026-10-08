@@ -639,6 +639,7 @@ and team hoard; the text remains for the modes without bots).
    Skill:        Ace   [===|=]
    Style: Aggressive   [=|==]
    Team:        Auto   [|==]     (Auto / Blue / Red; team modes only)
+   Ship:      Random   [|====]   (Random / Pyro-GX / the host's ships, §9.20)
    Remove this bot
    Done
 ```
@@ -700,6 +701,7 @@ bots, in the modes bots play (anarchy, team anarchy, bounty).
   | `/bot remove <name\|all>` | removes the bot, or all |
   | `/bot skill <name\|all> <skill>` | trainee, rookie, hotshot, ace, insane |
   | `/bot style <name\|all> <style>` | balanced, aggressive, cautious, collector, or a loaded style profile's word (§9.13) |
+  | `/bot ship <name\|all> <ship>` | a ship of the host's by its name or a unique beginning of it, `random` or `pyro` (§9.20) |
   | `/bot list` | one HUD line per bot, for the host only |
   | `/bot save` | as "Save as default setup" |
   | `/bot`, `/bot help` | the usage |
@@ -709,7 +711,7 @@ bots, in the modes bots play (anarchy, team anarchy, bounty).
   bot is named by its name or by a unique beginning of it. No bot is
   called by a reserved word: `all`, a skill or style word (full, three
   letters, the list's short names) or a command word (`add`, `remove`,
-  `rm`, `kick`, `skill`, `style`, `list`, `save`, `help`, `bot`). So
+  `rm`, `kick`, `skill`, `style`, `ship`, `list`, `save`, `help`, `bot`). So
   `/bot add col ace` (style before skill) is an error that says the
   order, not a bot named "ace"; the Bots screens refuse such a name with
   a message, and the setup keeps the old name. The answers
@@ -752,6 +754,9 @@ bots, in the modes bots play (anarchy, team anarchy, bounty).
   ```
 
   The fields are name, skill 0–4, style 0–3, and team (0 auto, 1 blue, 2 red).
+  Section 9.20: a bot whose ship is not Random has a line
+  `BotShip<n>=<ship name>,<first 12 hex digits of its SHA-256>` or
+  `BotShip<n>=pyro`; an older build ignores it.
   Section 9.13: a bot that flies a style profile has a line
   `BotStyle<n>=<profile name>` besides (and the default
   `BotDefaultStyle=<profile name>`); its style number is the profile's
@@ -864,7 +869,7 @@ it is the main tuning tool:
 
 ```
 d2x-rebirth -hogdir DATA -botarena <mission> <level> <bots> <seconds>
-            [-fixedfps N] [-botarena-bots "skill:style[:name],..."]
+            [-fixedfps N] [-botarena-bots "skill:style[:name[:ship]],..."]
             [-botarena-seed N] [-botarena-reactor S] [-botarena-timeout S]
             [-botarena-mode anarchy|team|ctf|ctfclassic|hoard|teamhoard]
             [-botarena-ctf-rules N] [-botarena-taunt] [-botarena-sound]
@@ -891,7 +896,7 @@ tools/botarena-run.sh [-n bots] [-b list] [-s seconds] [-f fps] [-t limit] [-o d
   `mode:` lines of §9.19 (roles, carries, orbs, team kills, stays in a
   goal).
   The bots are those of `-botarena-bots` (skill and style by the names of
-  `/bot`, an optional name; a bot the list leaves out plays the default),
+  `/bot`, an optional name and ship, §9.20; a bot the list leaves out plays the default),
   else the pilot's bot setup cut or filled to `<bots>`. Without `-pilot` a
   pilot "arena" of defaults, written nowhere. The lobby is skipped
   (`net_udp_arena_start`: slot 0, `bots_allocate_slots`, `StartNewLevel`).
@@ -4394,6 +4399,73 @@ targets' weights.
 keys for the roles (the styles choose them); bots do not shoot switches to
 open trigger walls; a missile in flight does not care for a teammate who
 flies into it.
+
+### 9.20 Ships for bots
+
+The user's question: "Is it possible to assign bots a ship type too?"
+Until now a bot got one of the host's own custom ships
+(Documentation/custom-ships.md), chosen by its name. Each bot now has a
+**Ship** setting; it is as cosmetic as a player's ship (same Pyro-GX size,
+guns and physics).
+
+- **Values.** *Random* (the default, the old behaviour: one of the host's
+  own ships in `ships/`, chosen by the bot's name, so the same for the
+  session; none: the Pyro-GX), *Pyro-GX*, or any ship the host has: the
+  bundled ones, the user's own files in `ships/` (a private "Longhorn"
+  or "TIE-style" placed there is listed like any other), and those
+  received from hosts (`ships/cache/`). A ship is kept by its name and
+  the start of its SHA-256 (`bot_ship.h`: `ship_choice`); among two
+  ships of one name the id chooses, and a ship found by neither is
+  *missing*.
+- **Style profiles.** A `.botstyle` may name a ship (`ship = longhorn`
+  or `ship = pyro`, Documentation/movement-recording.md §8.5). A bot
+  flying the profile whose own setting is Random flies that ship; any
+  other setting overrides it. The per-bot screen shows it: "Ship: Random
+  (style's longhorn)".
+- **Missing.** A ship the host does not have (the file was deleted or
+  renamed, a `.ngp` from another machine, a profile naming a ship nobody
+  installed) is replaced by Random, and the console says so: `ships: bot
+  'havoc': no ship "longhorn" in the ships folder; it flies anvil
+  (Random)`. When it chooses a bot's ship the host first reads the folder
+  again if a listed file is gone. The setting itself is kept: the bot
+  flies the ship again once the file is back.
+- **Screens.** The per-bot screen (setup §6.3 and in game §6.4) has a
+  *Ship* slider: Random, Pyro-GX, then the host's ships by title (a
+  missing ship stays as the last place, "(no file)", unless the slider
+  moves). Enter on it opens the ship menu's list with the rotating
+  preview (Options → Ship..., the same window) with *Random* as the first
+  row; Enter takes a ship, Escape keeps the old one. In game only
+  "Done" applies it, like the other fields. `/bot list` shows a ship
+  that is not Random.
+- **Chat.** `/bot ship <bot|all> <ship|random|pyro>`: the bot by its
+  name or a unique beginning, the ship by its name or a unique beginning
+  of it (`/bot ship hav long`), `pyro`/`pyro-gx`, `random`. The ships are
+  those of the folder as last read (reading it again would stall the
+  game). "ship" is now a reserved word and no bot's name.
+- **Persistence.** In the `.ngp` (§6.5) as `BotShip<n>=`; *Save as default
+  setup* and `/bot save` keep the ships of the bots playing.
+  `-botarena-bots` takes a fourth field, `skill:style:name:ship`.
+- **Network.** Nothing new on the wire: the host announces a bot's ship
+  with `SHIP_INFO` as before (custom-ships.md §11.3), and again whenever
+  the bot's name, ship setting or style profile changes
+  (`net_ships_frame`: the key callsign, setting, profile's ship). Clients
+  that lack the ship fetch it through the host with the asset transfer;
+  the host serves it from `ships/` or `ships/cache/`. A pilot whose *Show
+  custom ships* is off sees every bot as a Pyro-GX, as every player.
+- **Tests.** `test-bot-ships` (`common/unittest/bot_ship.cpp`): the
+  setting's text, the ship it means (own before received, the id between
+  two of one name, by id when renamed, the profile's ship and its
+  override, missing → Random, Random never a received ship), the word of
+  `/bot ship` (prefixes, ambiguity, one name twice), the `.ngp` lines
+  (round trip, the longest line under 50 characters, order, a line beyond
+  the count, *Save as default setup*), the profile's `ship` line, the
+  command's parse. Arena smoke run (Corona, 60 s, five bots
+  `hotshot:balanced:alpha:longhorn,hotshot:tst:bravo,ace:aggressive:charlie:pyro,
+  insane:cautious:delta:gone,rookie:balanced:echo`, a `tst.botstyle` with
+  `ship = tie-style`, the user's private Longhorn and TIE-style in
+  `ships/`): alpha flies longhorn, bravo tie-style (its style's), charlie
+  the Pyro-GX, delta "gone" → the console line and anvil (Random), echo
+  a random one; the game ran to its end.
 
 ## 10. Risks
 
