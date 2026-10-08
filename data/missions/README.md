@@ -7,8 +7,8 @@ only, so they need the Descent 2 game data like any custom mission.
 
 | File | Mission | Mode |
 |---|---|---|
-| GGCKEEP2.HOG / .MN2 | GGC Crucible Keep v2 | anarchy, 8 players |
-| GGCFORG2.HOG / .MN2 | GGC Twin Forges v2 | CTF Classic (also CTF/anarchy) |
+| GGCKEEP3.HOG / .MN2 | GGC Crucible Keep v3 | anarchy, 8 players |
+| GGCFORG3.HOG / .MN2 | GGC Twin Forges v3 | CTF Classic (also CTF/anarchy) |
 
 Licence: CC0 1.0 (public domain dedication).
 
