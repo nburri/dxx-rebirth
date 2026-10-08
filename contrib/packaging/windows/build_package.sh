@@ -57,6 +57,9 @@ build_app() {
     # The bundled missions (data/missions/README.md)
     mkdir -p "${outdir}/${prettyname}/missions"
     cp --link data/missions/*.HOG data/missions/*.MN2 data/missions/README.md "${outdir}/${prettyname}/missions/"
+    # The bundled sounds (data/sounds/README.md)
+    mkdir -p "${outdir}/${prettyname}/sounds"
+    cp --link data/sounds/*.wav data/sounds/README.md "${outdir}/${prettyname}/sounds/"
 
     # The ship converter, if it was built (Documentation/custom-ships-authoring.md)
     if [ -f "build/common/shipconv.exe" ]; then

@@ -547,6 +547,22 @@ void show_cannot_use(const powerup_type_t id, const nv::pickup_desc &d, const nv
 	}
 }
 
+/* Capture the flag: player `owner` dropped (spat) the flag `id` by hand
+ * (a death's drop has no owner: net_modes_record_drop announces it).
+ */
+void report_flag_spat(const uint8_t owner, const powerup_type_t id)
+{
+#if DXX_BUILD_DESCENT == 2
+	if (owner >= N_players || !game_mode_capture_flag(Game_mode))
+		return;
+	if (id == powerup_type_t::POW_FLAG_BLUE || id == powerup_type_t::POW_FLAG_RED)
+		net_modes_flag_dropped(playernum_t{owner}, id == powerup_type_t::POW_FLAG_BLUE ? nv::CTF_TEAM_BLUE : nv::CTF_TEAM_RED);
+#else
+	(void)owner;
+	(void)id;
+#endif
+}
+
 /* The HUD message and sound for another player's flag or orb (the v1
  * MULTI_GOT_FLAG / MULTI_GOT_ORB).
  */
@@ -560,11 +576,14 @@ void report_others_pickup(const playernum_t pnum, const powerup_type_t id)
 	auto &plrobj{*Objects.vmptr(plr.objnum)};
 	if ((id == powerup_type_t::POW_FLAG_BLUE || id == powerup_type_t::POW_FLAG_RED) && game_mode_capture_flag(Game_mode))
 	{
-		digi_start_sound_queued(multi_get_team_from_player(Netgame, pnum) == team_number::blue
-			? sound_effect::SOUND_HUD_BLUE_GOT_FLAG
-			: sound_effect::SOUND_HUD_RED_GOT_FLAG, F1_0 * 2);
+		const uint8_t flag_team{id == powerup_type_t::POW_FLAG_BLUE ? nv::CTF_TEAM_BLUE : nv::CTF_TEAM_RED};
+		/* The cue and the voice ("Blue team has the flag"). */
+		net_modes_ctf_event(::dcx::ctf_cues::event::flag_taken, flag_team, pnum);
 		plrobj.ctype.player_info.powerup_flags |= player_flag::has_team_flag;
-		HUD_init_message(HM_MULTI, "%s picked up a flag!", static_cast<const char *>(plr.callsign));
+		if (flag_team == underlying_value(multi_get_team_from_player(Netgame, Player_num)))
+			HUD_init_message(HM_MULTI, "%s has your flag!", static_cast<const char *>(plr.callsign));
+		else
+			HUD_init_message(HM_MULTI, "%s picked up the enemy flag!", static_cast<const char *>(plr.callsign));
 	}
 	else if (id == powerup_type_t::POW_HOARD_ORB && game_mode_hoard(Game_mode))
 	{
@@ -1116,6 +1135,8 @@ void receive_create(const std::span<const uint8_t> payload)
 #endif
 	if (m->has(nv::obj_create_flag::spat) && m->owner == Player_num)
 		obj.ctype.powerup_info.flags |= PF_SPAT_BY_PLAYER;
+	if (m->has(nv::obj_create_flag::spat))
+		report_flag_spat(m->owner, id);
 	A.table.bind(m->netid, objp.get_unchecked_index(), underlying_value(obj.signature));
 	if (m->has(nv::obj_create_flag::appear))
 		object_create_explosion_without_damage(Vclip, segnum, pos, i2f(5), vclip_index::powerup_disappearance);
@@ -1549,6 +1570,7 @@ void net_objects_announce(const vmobjptridx_t obj, const uint8_t owner, const bo
 	}
 	const auto objnum{obj.get_unchecked_index()};
 	A.table.bind(id, objnum, underlying_value(obj->signature));
+	report_flag_spat(owner, get_powerup_id(obj));
 	auto &m{A.meta[objnum]};
 	m.spat_owner = owner;
 	m.spat_until = owner != NO_OWNER ? GameTime64 + SPAT_DELAY : 0;

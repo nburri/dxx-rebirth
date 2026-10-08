@@ -171,6 +171,18 @@ enum sound_effect : uint8_t
 	SOUND_FRIEND_GOT_ORB = 85,
 	SOUND_OPPONENT_GOT_ORB = 86,
 	SOUND_OPPONENT_HAS_SCORED = 87,
+
+	/* Capture the flag: this fork's cues (ctf_cues.h SOUND_IDS, loaded
+	 * from data/sounds by net_modes_load_ctf_cues).
+	 */
+	SOUND_CTF_OWN_FLAG_TAKEN = 252,
+	SOUND_CTF_ENEMY_FLAG_TAKEN = 253,
+	SOUND_CTF_OWN_FLAG_DROPPED = 243,
+	SOUND_CTF_ENEMY_FLAG_DROPPED = 239,
+	SOUND_CTF_OWN_FLAG_RETURNED = 234,
+	SOUND_CTF_ENEMY_FLAG_RETURNED = 229,
+	SOUND_CTF_WE_SCORED = 228,
+	SOUND_CTF_THEY_SCORED = 218,
 	/* endif */
 	None = UINT8_MAX,
 };
